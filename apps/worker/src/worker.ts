@@ -128,6 +128,7 @@ export function startWorker({
 
   // Runs safe tool calls once the agent has the screen. A risky one becomes an
   // approval-request in the chat, and the session waits until the user answers.
+  // The human may take over while it waits, so an approved call waits for hand-back too.
   const onPermissionRequest: PermissionHandler = async (request) => {
     await agentHasScreen();
     const ask = approvalFor(request);
@@ -135,6 +136,7 @@ export function startWorker({
     const approved = await askUser(ask);
     if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside a turn." };
     if (!approved) return { kind: "reject", feedback: "The user declined this." };
+    await agentHasScreen();
     // Without a tool call id it counts as running until the turn ends.
     if (request.kind === "shell") approvedCommands.add(request.toolCallId ?? crypto.randomUUID());
     return { kind: "approve-once", approvedInteractively: true };
