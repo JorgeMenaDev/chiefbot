@@ -1,6 +1,6 @@
 // Builds the bot computer image. Run from the repo root: `bun run computer:build`.
-// 1. Bundles the worker into dist/worker.js and git's credential helper into
-//    dist/git-credential.js. The Copilot SDK stays out of the bundle: it finds
+// 1. Bundles the worker into dist/worker.js, git's credential helper into
+//    dist/git-credential.js and its pre-push hook into dist/pre-push.js. The Copilot SDK stays out of the bundle: it finds
 //    its bundled runtime in a platform package next to itself.
 // 2. Writes dist/package.json with the worker's exact SDK version, so the image
 //    installs that SDK with the Linux runtime for its own CPU.
@@ -25,6 +25,7 @@ mkdirSync(dist, { recursive: true });
 for (const [entry, naming] of [
   ["index.ts", "worker.js"],
   ["gitCredential.ts", "git-credential.js"],
+  ["prePush.ts", "pre-push.js"],
 ]) {
   const bundle = await Bun.build({
     entrypoints: [join(root, "apps/worker/src", entry)],

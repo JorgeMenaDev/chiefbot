@@ -67,6 +67,21 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
       expect((await exec(a, "test -e /var/run/docker.sock")).code).not.toBe(0);
       expect((await exec(a, "printenv CHIEFBOT_BOT_TOKEN")).out).toBe(`token-${a}`);
 
+      // Approvals: gh is absent and has no token, and every push runs the root-owned
+      // pre-push hook. With no turn running nobody can approve, so the push fails.
+      expect((await exec(a, "command -v gh")).code).not.toBe(0);
+      expect((await exec(a, "printenv GH_TOKEN GITHUB_TOKEN")).out).toBe("");
+      expect((await exec(a, "stat -c %U:%a /opt/chiefbot/hooks/pre-push && git config --system core.hooksPath")).out).toBe(
+        "root:755\n/opt/chiefbot/hooks",
+      );
+      const push = await exec(
+        a,
+        "cd /tmp && git init -q --bare remote.git && git init -q work && cd work && git commit -q --allow-empty -m x && git push -q /tmp/remote.git HEAD:main 2>&1",
+      );
+      expect(push.code).not.toBe(0);
+      expect(push.out).toContain("nobody can approve this push");
+      expect((await exec(a, "git -C /tmp/remote.git rev-parse --verify -q main")).code).not.toBe(0);
+
       // Network: B serves on 8080 and answers itself, but A reaches it neither by IP nor by name.
       const bIp = Object.values((await inspect(b)).NetworkSettings.Networks)[0]?.IPAddress ?? "";
       expect(bIp).not.toBe("");

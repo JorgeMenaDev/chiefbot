@@ -5,6 +5,7 @@ import {
   BrokeredGitHubToken,
   BrokerRefusal,
   ControlToWorker,
+  type ApprovalKind,
   type ScreenControl,
   type TurnEvent,
   type TurnId,
@@ -13,6 +14,7 @@ import {
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
+import { PrePushRequest } from "./gitSocket.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
@@ -30,9 +32,9 @@ export type WorkerOptions = {
   screen?: ScreenAddress;
   // api.github.com in a bot computer; a fake in tests. The pull request tool calls it.
   githubApiUrl?: string;
-  // Unix socket the git credential helper (gitCredential.ts) asks for the owner's
-  // token. No socket when unset.
-  gitCredentialSocket?: string;
+  // Unix socket where git's credential helper (gitCredential.ts) asks for the
+  // owner's token and its pre-push hook (prePush.ts) asks to push. No socket when unset.
+  gitSocket?: string;
   // Wait between reconnects after the connection drops.
   retryMs?: number;
   onBound?: (botId: BotId) => void;
@@ -54,7 +56,7 @@ export function startWorker({
   botToken,
   copilot,
   githubApiUrl = "https://api.github.com",
-  gitCredentialSocket,
+  gitSocket,
   screen = { hostname: "127.0.0.1", port: 5900 },
   retryMs = 2000,
   onBound,
@@ -77,6 +79,9 @@ export function startWorker({
   let active: { turnId: TurnId; deltaMessageIds: Set<string>; toolNames: Map<string, string> } | null = null;
   // Approvals the session waits on, each resolved by the user's answer.
   const waiting = new Map<ApprovalId, (approved: boolean) => void>();
+  // Shell commands the user approved that are still running, by tool call id. While
+  // one runs, its pushes pass the pre-push hook without asking a second time.
+  const approvedCommands = new Set<string>();
 
   function send(message: WorkerToControl) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -86,7 +91,10 @@ export function startWorker({
     if (latest?.turnId !== turnId) latest = { turnId, events: [] };
     latest.events.push(event);
     send({ type: "turn-event", turnId, index: latest.events.length - 1, event });
-    if (event.type === "done" && active?.turnId === turnId) active = null;
+    if (event.type === "done" && active?.turnId === turnId) {
+      active = null;
+      approvedCommands.clear();
+    }
   }
 
   // Short-lived GitHub access token for the SDK, from control's broker. The
@@ -103,19 +111,49 @@ export function startWorker({
     return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
   }
 
-  // Runs safe tool calls at once. A risky one becomes an approval-request in the
-  // chat, and the session waits, however long, until the user answers.
-  const onPermissionRequest: PermissionHandler = async (request) => {
-    const ask = approvalFor(request);
-    if (!ask) return { kind: "approve-once" };
-    if (!active) return { kind: "reject", feedback: "Nobody is here to approve this outside a turn." };
+  // Puts an approval-request in the active turn's chat and waits, however long,
+  // for the user's answer. Null outside a turn: nobody is there to answer.
+  async function askUser(ask: { kind: ApprovalKind; detail: string }): Promise<boolean | null> {
+    if (!active) return null;
     const approvalId = ApprovalId.parse(`approval_${crypto.randomUUID()}`);
     const answered = new Promise<boolean>((resolve) => waiting.set(approvalId, resolve));
     emit(active.turnId, { type: "approval-request", approvalId, ...ask });
-    return (await answered)
-      ? { kind: "approve-once", approvedInteractively: true }
-      : { kind: "reject", feedback: "The user declined this." };
+    return answered;
+  }
+
+  // Runs safe tool calls at once. A risky one becomes an approval-request in the
+  // chat, and the session waits until the user answers.
+  const onPermissionRequest: PermissionHandler = async (request) => {
+    const ask = approvalFor(request);
+    if (!ask) return { kind: "approve-once" };
+    const approved = await askUser(ask);
+    if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside a turn." };
+    if (!approved) return { kind: "reject", feedback: "The user declined this." };
+    // Without a tool call id it counts as running until the turn ends.
+    if (request.kind === "shell") approvedCommands.add(request.toolCallId ?? crypto.randomUUID());
+    return { kind: "approve-once", approvedInteractively: true };
   };
+
+  // The pre-push hook's question. Every push asks, unless a command the user
+  // approved (which showed the push) is running it. The answer's last line is
+  // "approved" or why not. The user may take hours, and Bun closes a unix-socket
+  // request that sends nothing for 10 seconds, so a newline goes out every 5.
+  function approvePush(push: PrePushRequest) {
+    const verdict = async () => {
+      if (approvedCommands.size > 0) return "approved";
+      const approved = await askUser({ kind: "command", detail: pushDetail(push) });
+      if (approved === null) return "No turn is running, so nobody can approve this push.";
+      return approved ? "approved" : "The user declined this push.";
+    };
+    const body = new ReadableStream<string>({
+      async start(controller) {
+        const heartbeat = setInterval(() => controller.enqueue("\n"), 5000);
+        controller.enqueue(await verdict().finally(() => clearInterval(heartbeat)));
+        controller.close();
+      },
+    });
+    return new Response(body);
+  }
 
   // The bot's one Copilot session, opened on its first turn. Its id is the bot
   // id, so after a restart the worker resumes the same conversation.
@@ -135,6 +173,7 @@ export function startWorker({
   // Maps the SDK's session events to TurnEvents for the active turn. Sub-agent
   // events (agentId set) are left out: the chat shows the main agent's work.
   function onSessionEvent(event: SessionEvent) {
+    if (event.type === "tool.execution_complete") approvedCommands.delete(event.data.toolCallId);
     if (!active || event.agentId) return;
     const { turnId, deltaMessageIds, toolNames } = active;
     switch (event.type) {
@@ -236,14 +275,16 @@ export function startWorker({
   }
   connect();
 
-  // Git's credential helper asks here, so the token is never written to disk.
-  // A stopped container keeps /tmp, so a stale socket file is removed first.
-  let credentials: Bun.Server<undefined> | null = null;
-  if (gitCredentialSocket) {
-    rmSync(gitCredentialSocket, { force: true });
-    credentials = Bun.serve({
-      unix: gitCredentialSocket,
-      fetch: async () => {
+  // Git's credential helper asks here, so the token is never written to disk, and
+  // so does its pre-push hook. A stopped container keeps /tmp, so a stale socket
+  // file is removed first.
+  let git: Bun.Server<undefined> | null = null;
+  if (gitSocket) {
+    rmSync(gitSocket, { force: true });
+    git = Bun.serve({
+      unix: gitSocket,
+      fetch: async (req) => {
+        if (new URL(req.url).pathname === "/pre-push") return approvePush(PrePushRequest.parse(await req.json()));
         try {
           return new Response(`username=x-access-token\npassword=${(await gitHubToken()).accessToken}\n`);
         } catch (error) {
@@ -260,8 +301,17 @@ export function startWorker({
       if (retry) clearTimeout(retry);
       socket?.close();
       for (const close of streams) close();
-      credentials?.stop(true);
-      if (gitCredentialSocket) rmSync(gitCredentialSocket, { force: true });
+      git?.stop(true);
+      if (gitSocket) rmSync(gitSocket, { force: true });
     },
   };
+}
+
+// The approval card's text for a push: where to (without any credentials in the
+// URL) and which branches.
+function pushDetail({ url, updates }: PrePushRequest) {
+  const refs = updates.map(
+    ({ localRef, remoteRef }) => remoteRef.replace(/^refs\/heads\//, "") + (localRef === "(delete)" ? " (delete)" : ""),
+  );
+  return `git push to ${url.replace(/\/\/[^/@]*@/, "//")}: ${refs.join(", ")}`;
 }

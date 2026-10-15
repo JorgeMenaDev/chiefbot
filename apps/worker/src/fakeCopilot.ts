@@ -5,7 +5,8 @@ import type { BotSession, Copilot, SdkModelList } from "./copilot.ts";
 // session events. The default script echoes the prompt with one tool call.
 // A script is an async generator, so a test can pause a turn halfway. Through
 // `runtime` it acts like the agent: shell commands and custom tools go through
-// the session's permission handler first, as in the real runtime.
+// the session's permission handler first, as in the real runtime. A shell command
+// streams tool.execution_start and tool.execution_complete events around it.
 export type FakeScript = (prompt: string, runtime: FakeRuntime) => AsyncGenerator<SessionEvent>;
 
 export type FakeRuntime = {
@@ -41,17 +42,17 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       const handlers = new Set<(event: SessionEvent) => void>();
       const allowed = async (request: PermissionRequest) =>
         (await onPermissionRequest(request, { sessionId })).kind === "approve-once";
+      const publish = (event: SessionEvent) => {
+        for (const handler of handlers) handler(event);
+      };
+      let shellCalls = 0;
       const runtime: FakeRuntime = {
         async shell(command) {
-          if (!(await allowed(fakeRequest.shell(command)))) return { approved: false, exitCode: -1, output: "" };
-          if (!shell) throw new Error("fakeCopilot needs `shell` to run commands");
-          const proc = Bun.spawn(["sh", "-c", command], { cwd: shell.cwd, env: shell.env, stdout: "pipe", stderr: "pipe" });
-          const [stdout, stderr, exitCode] = await Promise.all([
-            new Response(proc.stdout).text(),
-            new Response(proc.stderr).text(),
-            proc.exited,
-          ]);
-          return { approved: true, exitCode, output: stdout + stderr };
+          const toolCallId = `shell-${++shellCalls}`;
+          publish(sdk.toolStart(toolCallId, "bash", "Run a command"));
+          const result = await runShell(command, toolCallId);
+          publish(sdk.toolComplete(toolCallId, result.approved && result.exitCode === 0));
+          return result;
         },
         async tool(name, args) {
           const tool = tools.find((candidate) => candidate.name === name);
@@ -61,6 +62,17 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           return { approved: true, result };
         },
       };
+      async function runShell(command: string, toolCallId: string) {
+        if (!(await allowed(fakeRequest.shell(command, toolCallId)))) return { approved: false, exitCode: -1, output: "" };
+        if (!shell) throw new Error("fakeCopilot needs `shell` to run commands");
+        const proc = Bun.spawn(["sh", "-c", command], { cwd: shell.cwd, env: shell.env, stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        return { approved: true, exitCode, output: stdout + stderr };
+      }
       let model = "default";
       const session: BotSession = {
         on(handler) {
@@ -71,7 +83,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           sends.push({ sessionId, prompt, model });
           // Like the SDK: send returns once the message is admitted; events follow.
           void (async () => {
-            for await (const event of fake.script(prompt, runtime)) for (const handler of handlers) handler(event);
+            for await (const event of fake.script(prompt, runtime)) publish(event);
           })();
           return "user-msg";
         },
@@ -138,8 +150,9 @@ export const sdk = {
 
 // Permission requests shaped like the ones the Copilot runtime sends.
 export const fakeRequest = {
-  shell: (fullCommandText: string): PermissionRequest => ({
+  shell: (fullCommandText: string, toolCallId?: string): PermissionRequest => ({
     kind: "shell",
+    ...(toolCallId === undefined ? {} : { toolCallId }),
     fullCommandText,
     intention: "Run a command",
     commands: [],

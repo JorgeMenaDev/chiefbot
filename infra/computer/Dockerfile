@@ -26,12 +26,18 @@ RUN cd /opt/chiefbot \
   && bun install --production \
   && rm -rf node_modules/@github/copilot-sdk-linuxmusl-* /root/.bun/install/cache
 
-COPY dist/worker.js dist/git-credential.js /opt/chiefbot/
+COPY dist/worker.js dist/git-credential.js dist/pre-push.js /opt/chiefbot/
 COPY start.sh /opt/chiefbot/start.sh
+COPY hooks /opt/chiefbot/hooks
 
 # Git asks the worker for the owner's short-lived GitHub token on every
 # github.com request (apps/worker/src/gitCredential.ts); no token is stored.
-RUN git config --system credential.https://github.com.helper '!bun /opt/chiefbot/git-credential.js' \
+# Every push runs the root-owned pre-push hook, which asks the user through the
+# worker (apps/worker/src/prePush.ts), whatever repo it is in. gh is not
+# installed, and the agent's shell holds no GitHub token for it.
+RUN chmod 755 /opt/chiefbot/hooks/pre-push \
+  && git config --system credential.https://github.com.helper '!bun /opt/chiefbot/git-credential.js' \
+  && git config --system core.hooksPath /opt/chiefbot/hooks \
   && git config --system user.name "Chiefbot" \
   && git config --system user.email "chiefbot@users.noreply.github.com"
 

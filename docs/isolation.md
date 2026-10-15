@@ -27,6 +27,20 @@ Proof:
 - **No resource limits.** A bot can use all of the VM's CPU and memory and slow the other bots down. Add limits when this shows up.
 - **The root filesystem is writable.** Writes outside `/home/bot` stay in that bot's container and are lost when the container is removed.
 
+## Approvals are a guardrail against model mistakes, not an adversarial boundary
+
+A bot asks before it pushes or opens a pull request (README, "Repo work and approvals"). Three layers make that hold however the model spells the command:
+
+- **Every push asks at the git level.** The image's system gitconfig (root-owned) sets `core.hooksPath` to `/opt/chiefbot/hooks`, whose `pre-push` asks the worker, which asks the user in the chat (`apps/worker/src/prePush.ts`). A push the user already approved as a command passes without a second card.
+- **The shell matcher asks early** (`apps/worker/src/approvals.ts`). It reads the command with quotes and backslashes removed and also asks for `--no-verify`, `core.hooksPath` overrides, `GIT_CONFIG_*` variables and `gh api` writes to `/pulls`.
+- **gh has no token.** gh is not installed, and the agent's shell gets no `GH_TOKEN`, `GITHUB_TOKEN` or bot credential (`agentEnv` in `apps/worker/src/copilotSdk.ts`). A pull request needs the approval-gated `create_pull_request` tool.
+
+A model that tries to get around these still can. The git credential helper hands the owner's token to any process in the computer that asks (`git credential fill`), and the bot can write its own hooks path into a repo's config with a command the matcher does not recognise. So approvals stop mistakes, not a bot that works against its user.
+
+The real fix, for later: a git proxy in control. The bot computer would push and open pull requests only through control, which asks the user and then uses a separate repo credential that never enters the bot computer.
+
+Proof: `approvals.test.ts` (each spelling the review found), `repo.test.ts` "a push the shell matcher cannot see still asks the user, through git's pre-push hook", `copilotSdk.test.ts`, and `isolation.live` (the image's hook refuses a push when nobody can approve it, and gh and its tokens are absent).
+
 ## What changes on GCP (one VM per bot, ticket #10)
 
 | Boundary | Docker now | GCP |

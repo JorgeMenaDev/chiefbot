@@ -1,5 +1,5 @@
 import { copilotSdk } from "./copilotSdk.ts";
-import { defaultGitCredentialSocket } from "./gitCredentialSocket.ts";
+import { defaultGitSocket } from "./gitSocket.ts";
 import { startWorker } from "./worker.ts";
 
 // Entry point inside a bot computer. Env (set by the ComputerProvider at start):
@@ -19,7 +19,7 @@ startWorker({
   // The bot's workspace on its own disk (the image's WORKDIR).
   copilot: copilotSdk({ workingDirectory: "/home/bot/workspace" }),
   ...(process.env.CHIEFBOT_GITHUB_API_URL ? { githubApiUrl: process.env.CHIEFBOT_GITHUB_API_URL } : {}),
-  gitCredentialSocket: defaultGitCredentialSocket,
+  gitSocket: defaultGitSocket,
   onBound: (botId) => console.log(`worker connected to ${controlUrl} as ${botId}`),
   onModelsError: (error) => console.error("could not list Copilot models:", error),
 });

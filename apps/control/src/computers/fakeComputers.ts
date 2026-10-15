@@ -9,9 +9,9 @@ import type { ComputerProvider, ComputerSpec } from "./computer.ts";
 // whole loop (create → worker dials control → bot online) without Docker.
 // Every worker runs turns on the same fake Copilot. Its screen is a fake VNC
 // server on TCP: it greets like one and records what it receives. With
-// gitCredentialSocket, the workers serve git credentials there (one bot at a
-// time: they share the path).
-export function fakeComputers({ copilot = fakeCopilot(), gitCredentialSocket }: { copilot?: FakeCopilot; gitCredentialSocket?: string } = {}) {
+// gitSocket, the workers serve git's credential helper and pre-push hook there
+// (one bot at a time: they share the path).
+export function fakeComputers({ copilot = fakeCopilot(), gitSocket }: { copilot?: FakeCopilot; gitSocket?: string } = {}) {
   type FakeComputer = {
     spec: ComputerSpec;
     worker: ReturnType<typeof startWorker> | null;
@@ -67,7 +67,7 @@ export function fakeComputers({ copilot = fakeCopilot(), gitCredentialSocket }: 
         copilot: copilot.copilot,
         screen: { hostname: "127.0.0.1", port: computer.screen.port },
         ...(CHIEFBOT_GITHUB_API_URL === undefined ? {} : { githubApiUrl: CHIEFBOT_GITHUB_API_URL }),
-        ...(gitCredentialSocket === undefined ? {} : { gitCredentialSocket }),
+        ...(gitSocket === undefined ? {} : { gitSocket }),
         retryMs: 20,
       });
     },

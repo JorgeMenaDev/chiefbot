@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ApprovalId, Bot, ChatEvent, ClientEvent, SignInResponse, type BotId } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeRuntime } from "@chiefbot/worker/fake-copilot";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeComputers } from "./computers/fakeComputers.ts";
@@ -18,6 +18,7 @@ afterEach(() => {
 });
 
 const helper = join(import.meta.dir, "../../worker/src/gitCredential.ts");
+const prePush = join(import.meta.dir, "../../worker/src/prePush.ts");
 
 async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
   const github = startFakeGitHub();
@@ -25,6 +26,11 @@ async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
   const workspace = mkdtempSync(join(tmpdir(), "chiefbot-workspace-"));
   // Short: a unix socket path must fit in about 100 bytes.
   const socket = `/tmp/chiefbot-t06-${crypto.randomUUID().slice(0, 8)}.sock`;
+  // The image's hooks directory (infra/computer/hooks), running the hook from source.
+  const hooks = join(workspace, ".hooks");
+  mkdirSync(hooks);
+  writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\nexec "${process.execPath}" ${prePush} "$@"\n`);
+  chmodSync(join(hooks, "pre-push"), 0o755);
   // What the bot computer's image configures (infra/computer/Dockerfile), minus the
   // github.com scope: the fake remote is on 127.0.0.1.
   const env = {
@@ -33,17 +39,19 @@ async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_COUNT: "3",
+    GIT_CONFIG_COUNT: "4",
     GIT_CONFIG_KEY_0: "credential.helper",
     GIT_CONFIG_VALUE_0: `!"${process.execPath}" ${helper}`,
     GIT_CONFIG_KEY_1: "user.name",
     GIT_CONFIG_VALUE_1: "Chiefbot",
     GIT_CONFIG_KEY_2: "user.email",
     GIT_CONFIG_VALUE_2: "chiefbot@example.com",
-    CHIEFBOT_GIT_CREDENTIAL_SOCKET: socket,
+    GIT_CONFIG_KEY_3: "core.hooksPath",
+    GIT_CONFIG_VALUE_3: hooks,
+    CHIEFBOT_GIT_SOCKET: socket,
   };
   const copilot = fakeCopilot({ shell: { cwd: workspace, env } });
-  const computers = fakeComputers({ copilot, gitCredentialSocket: socket });
+  const computers = fakeComputers({ copilot, gitSocket: socket });
   const control = startControl({ port: 0, dbPath, githubApiUrl: github.url, computers: computers.provider });
   stops.push(github.stop, () => rmSync(workspace, { recursive: true, force: true }), computers.stopAll, control.stop);
 
@@ -172,6 +180,38 @@ test("a declined push never reaches GitHub, and an approval is answered once", a
   expect([again.status, await again.json()]).toEqual([409, { error: "not_pending" }]);
 });
 
+test("a push the shell matcher cannot see still asks the user, through git's pre-push hook", async () => {
+  const { github, copilot, control, auth, api, botId } = await setup();
+  const results: ShellResult[] = [];
+  copilot.script = async function* (_prompt, runtime) {
+    await runtime.shell(`git clone -q ${github.url}/octo/demo.git demo`);
+    await runtime.shell("cd demo && git checkout -q -b fix-typo && git commit -q --allow-empty -m 'Empty'");
+    // Asked once by the shell matcher; the hook lets the approved command's push through.
+    results.push(await runtime.shell("cd demo && git push -q origin HEAD:early"));
+    results.push(await runtime.shell("p=push; cd demo && git $p -q -u origin fix-typo"));
+    results.push(await runtime.shell("p=push; cd demo && git $p -q origin fix-typo:other"));
+    yield sdk.idle();
+  };
+  const chat = watchChat(control.url, auth, botId);
+  await api("POST", `/bots/${botId}/messages`, { text: "Push it" });
+
+  await api("POST", `/bots/${botId}/approvals/${await nthApproval(chat, 0)}`, { approved: true });
+  const hookApproval = await nthApproval(chat, 1);
+  expect(chat.events.at(-1)?.event).toMatchObject({
+    kind: "command",
+    detail: `git push to ${github.url}/octo/demo.git: fix-typo`,
+  });
+  expect(github.git("octo/demo", "branch", "--list", "fix-typo")).toBe("");
+  await api("POST", `/bots/${botId}/approvals/${hookApproval}`, { approved: true });
+  await api("POST", `/bots/${botId}/approvals/${await nthApproval(chat, 2)}`, { approved: false });
+  await chat.until(done);
+
+  expect(approvalIds(chat.events)).toHaveLength(3);
+  expect(results.map((r) => r.exitCode === 0)).toEqual([true, true, false]);
+  expect(results[2]?.output).toContain("The user declined this push.");
+  expect(github.git("octo/demo", "branch", "--list", "--format=%(refname:short)")).toBe("early\nfix-typo\nmain");
+});
+
 test("the bot opens a pull request only after the user approves it", async () => {
   const { github, copilot, control, auth, api, botId } = await setup();
   let pr: unknown = null;
@@ -227,7 +267,12 @@ test("a pending approval survives a desktop and a control restart, and the bot w
   await chat.until(done);
 
   expect(answer.status).toBe(204);
-  expect(chat.events.map((e) => e.event.type)).toEqual(["user-message", "approval-request", "approval-answer", "done"]);
+  expect(chat.events.map((e) => e.event.type).filter((type) => type !== "tool-call")).toEqual([
+    "user-message",
+    "approval-request",
+    "approval-answer",
+    "done",
+  ]);
   expect(github.git("octo/demo", "log", "-1", "--format=%s", "fix-typo")).toBe("Fix a typo");
 });
 
