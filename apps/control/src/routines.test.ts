@@ -1,20 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, Bot, ChatEvent, ClientEvent, Routine, SignInResponse, type BotId, type RoutineInput } from "@chiefbot/contracts";
-import { startFakeGitHub } from "@chiefbot/fake-github";
-import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { ApiError, Routine, type BotId, type RoutineInput } from "@chiefbot/contracts";
+import { sdk } from "@chiefbot/worker/fake-copilot";
 import { fakeClock } from "./clock.ts";
-import type { ComputerProvider } from "./computers/computer.ts";
-import { fakeComputers } from "./computers/fakeComputers.ts";
-import { startControl } from "./control.ts";
 import { TURN_TIMEOUT_MS, WORKER_TIMEOUT_MS } from "./routines.ts";
+import { cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
 
-const stops: Array<() => unknown> = [];
-afterEach(() => {
-  for (const stop of stops.splice(0).reverse()) stop();
-});
+afterEach(cleanUp);
 
 // 15 Oct 2026, 07:00 UTC: 08:00 in London (BST).
 const start = Date.parse("2026-10-15T07:00:00Z");
@@ -22,49 +13,15 @@ const nineLondon = Date.parse("2026-10-15T08:00:00Z");
 const daily: RoutineInput = { prompt: "Summarise my inbox", cron: "0 9 * * *", timezone: "Europe/London" };
 
 // Control on a fake clock, with bot computers whose workers run a fake Copilot.
-// The user signs in with GitHub tokens that have the given time left.
 // `down` stops control; `up` starts it again on the same port, database and clock.
-async function setup({
-  provider,
-  accessTokenLeftMs = 8 * 3600_000,
-  refreshTokenLeftMs = 180 * 86400_000,
-}: { provider?: (fake: ComputerProvider) => ComputerProvider; accessTokenLeftMs?: number; refreshTokenLeftMs?: number } = {}) {
-  const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-routines-")), "control.sqlite");
-  const github = startFakeGitHub();
+async function setup(options: Pick<TestControlOptions, "provider" | "accessTokenLeftMs" | "refreshTokenLeftMs"> = {}) {
   const time = fakeClock(start);
-  const computers = fakeComputers({ copilot: fakeCopilot() });
-  const options = {
-    port: 0,
-    dbPath,
-    githubApiUrl: github.url,
-    computers: provider ? provider(computers.provider) : computers.provider,
-    clock: time.clock,
-    // A day, so idle stop (idle.test.ts) stays out of these hour-long runs.
-    idleStopMinutes: 24 * 60,
-  };
-  let control = startControl(options);
-  stops.push(github.stop, computers.stopAll, () => control.stop());
-  const { accessToken, refreshToken } = github.issueTokens();
-  const signIn = await fetch(`${control.url}/sessions`, {
-    method: "POST",
-    body: JSON.stringify({
-      accessToken,
-      accessTokenExpiresAt: Date.now() + accessTokenLeftMs,
-      refreshToken,
-      refreshTokenExpiresAt: Date.now() + refreshTokenLeftMs,
-    }),
-  });
-  const { sessionToken } = SignInResponse.parse(await signIn.json());
-  const auth = { authorization: `Bearer ${sessionToken}` };
-  const api = (method: string, path: string, body?: unknown) =>
-    fetch(`${control.url}${path}`, { method, headers: auth, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-
-  const bots = () => botList(control.url, auth);
-  const statusOf = async (botId: BotId) => (await bots()).find((bot) => bot.id === botId)?.status;
+  // A day of idle stop, so it stays out of these hour-long runs (idle.test.ts covers it).
+  const control = await startTestControl({ ...options, persistent: true, clock: time.clock, idleStopMinutes: 24 * 60 });
+  const { api, statusOf, chat } = control.user;
   // A new bot, once its worker is connected, then stopped unless `running`.
   const bot = async ({ running = false } = {}) => {
-    const created = Bot.parse(await (await api("POST", "/bots", { name: "Ada" })).json());
-    await eventually(async () => (await statusOf(created.id)) === "online");
+    const created = await control.user.onlineBot("Ada");
     if (!running) await api("POST", `/bots/${created.id}/stop`);
     return created;
   };
@@ -74,49 +31,7 @@ async function setup({
     return Routine.parse(await res.json());
   };
   const routines = async (botId: BotId) => Routine.array().parse(await (await api("GET", `/bots/${botId}/routines`)).json());
-  const chat = async (botId: BotId) =>
-    (await allMessages(control.url, auth, `/bots/${botId}/chat`)).map((message) => ChatEvent.parse(message).event);
-  const port = Number(new URL(control.url).port);
-  const down = () => control.stop();
-  const up = () => void (control = startControl({ ...options, port }));
-
-  return { time, computers, api, bot, statusOf, addRoutine, routines, chat, down, up };
-}
-
-// The user's bots, from the first bots message on control's /events.
-function botList(controlUrl: string, headers: Record<string, string>) {
-  return new Promise<Bot[]>((resolve) => {
-    const socket = new WebSocket(`${controlUrl.replace("http", "ws")}/events`, { headers });
-    socket.onmessage = (message) => {
-      const event = ClientEvent.parse(JSON.parse(String(message.data)));
-      if (event.type !== "bots") return;
-      socket.close();
-      resolve(event.bots);
-    };
-  });
-}
-
-// Every message a WebSocket on control sends within 50 ms of opening.
-function allMessages(controlUrl: string, headers: Record<string, string>, path: string) {
-  return new Promise<unknown[]>((resolve) => {
-    const messages: unknown[] = [];
-    const socket = new WebSocket(`${controlUrl.replace("http", "ws")}${path}`, { headers });
-    socket.onmessage = (event) => messages.push(JSON.parse(String(event.data)));
-    socket.onopen = () =>
-      setTimeout(() => {
-        socket.close();
-        resolve(messages);
-      }, 50);
-  });
-}
-
-// Resolves once check passes, failing after two real seconds.
-async function eventually(check: () => Promise<boolean>) {
-  const deadline = Date.now() + 2000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error("condition never held");
-    await Bun.sleep(10);
-  }
+  return { time, computers: control.computers, api, bot, statusOf, addRoutine, routines, chat, down: control.stopControl, up: control.startControl };
 }
 
 test("at its due time a routine starts the stopped bot, runs the prompt as a turn, and stops the bot again", async () => {

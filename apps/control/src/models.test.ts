@@ -1,57 +1,20 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, Bot, ChatEvent, ClientEvent, ModelOption, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
-import { defaultFakeUser, startFakeGitHub, type FakeGitHubUser } from "@chiefbot/fake-github";
+import { ApiError, Bot, ModelOption, type BotId } from "@chiefbot/contracts";
+import { defaultFakeUser } from "@chiefbot/fake-github";
 import { fakeCopilot, type FakeModels } from "@chiefbot/worker/fake-copilot";
 import { z } from "zod";
-import { startControl } from "./control.ts";
-import { fakeComputers } from "./computers/fakeComputers.ts";
+import { cleanUp, startTestControl } from "./testControl.ts";
 
-const stops: Array<() => unknown> = [];
-afterEach(() => {
-  for (const stop of stops.splice(0).reverse()) stop();
-});
+afterEach(cleanUp);
 
 // Control with a fake GitHub user on `sku`, and bot computers whose workers run a
 // fake Copilot that lists `sdkModels` as the SDK would for that plan.
 async function setup({ sku, sdkModels }: { sku: string; sdkModels?: FakeModels }) {
-  const user: FakeGitHubUser = { ...defaultFakeUser, copilot: { plan: "individual", sku } };
-  const github = startFakeGitHub({ user });
-  const copilot = fakeCopilot(sdkModels ? { models: sdkModels } : {});
-  const computers = fakeComputers({ copilot });
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
-  stops.push(github.stop, computers.stopAll, control.stop);
-  const { accessToken, refreshToken } = github.issueTokens();
-  const signIn = await fetch(`${control.url}/sessions`, {
-    method: "POST",
-    body: JSON.stringify({ accessToken, accessTokenExpiresAt: Date.now() + 8 * 3600_000, refreshToken, refreshTokenExpiresAt: Date.now() + 180 * 86400_000 }),
+  const { copilot, user } = await startTestControl({
+    user: { ...defaultFakeUser, copilot: { plan: "individual", sku } },
+    copilot: fakeCopilot(sdkModels ? { models: sdkModels } : {}),
   });
-  const { sessionToken } = SignInResponse.parse(await signIn.json());
-  const headers = { authorization: `Bearer ${sessionToken}` };
-  const api = (method: string, path: string, body?: unknown) =>
-    fetch(`${control.url}${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  // Resolves with the bot list once it matches, failing after a second.
-  const bots = (matches: (bots: Bot[]) => boolean) =>
-    new Promise<Bot[]>((resolve, reject) => {
-      const socket = new WebSocket(`${control.url.replace("http", "ws")}/events`, { headers });
-      const timer = setTimeout(() => {
-        socket.close();
-        reject(new Error("bot list never matched"));
-      }, 1000);
-      socket.onmessage = (event) => {
-        const message = ClientEvent.parse(JSON.parse(String(event.data)));
-        if (message.type !== "bots") return;
-        const { bots } = message;
-        if (!matches(bots)) return;
-        clearTimeout(timer);
-        socket.close();
-        resolve(bots);
-      };
-    });
-  const onlineBot = async (name: string) => {
-    const bot = Bot.parse(await (await api("POST", "/bots", { name })).json());
-    await bots((list) => list.some(({ id, status }) => id === bot.id && status === "online"));
-    return bot;
-  };
+  const { api } = user;
   // The user's model list once a worker has reported it.
   const models = async () => {
     for (let tries = 0; tries < 50; tries++) {
@@ -63,22 +26,10 @@ async function setup({ sku, sdkModels }: { sku: string; sdkModels?: FakeModels }
   };
   // Sends a message and resolves once its turn is done.
   const turn = async (botId: BotId, text: string) => {
-    const res = await api("POST", `/bots/${botId}/messages`, { text });
-    if (res.status !== 202) throw new Error(`send failed: ${res.status} ${await res.text()}`);
-    const { turnId } = SendMessageResponse.parse(await res.json());
-    await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(`${control.url.replace("http", "ws")}/bots/${botId}/chat`, { headers });
-      const timer = setTimeout(() => reject(new Error("turn never finished")), 1000);
-      socket.onmessage = (message) => {
-        const { turnId: id, event } = ChatEvent.parse(JSON.parse(String(message.data)));
-        if (id !== turnId || event.type !== "done") return;
-        clearTimeout(timer);
-        socket.close();
-        resolve();
-      };
-    });
+    const turnId = await user.send(botId, text);
+    await user.watchChat(botId).until((events) => events.some((e) => e.turnId === turnId && e.event.type === "done"));
   };
-  return { copilot, api, bots, onlineBot, models, turn };
+  return { copilot, api, bots: (matches: (bots: Bot[]) => boolean) => user.watchBots().until(matches), onlineBot: user.onlineBot, models, turn };
 }
 
 test("on Copilot Free only Auto is selectable; the plan's other models show locked", async () => {

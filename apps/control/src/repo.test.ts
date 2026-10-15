@@ -1,29 +1,23 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, ApprovalId, Bot, ChatEvent, ClientEvent, SignInResponse, type BotId } from "@chiefbot/contracts";
-import { startFakeGitHub } from "@chiefbot/fake-github";
+import { ApiError, ApprovalId, type ChatEvent } from "@chiefbot/contracts";
 import { fakeCopilot, sdk, type FakeRuntime } from "@chiefbot/worker/fake-copilot";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fakeComputers } from "./computers/fakeComputers.ts";
-import { startControl } from "./control.ts";
+import { atCleanUp, cleanUp, startTestControl, type TestUser } from "./testControl.ts";
 
 // Repo work end to end: control, a fake GitHub with a private repo, and a bot
 // whose fake Copilot runs real git in a temp workspace. Git gets the owner's
 // token only through the worker's credential helper, as in the bot computer.
 
-const stops: Array<() => unknown> = [];
-afterEach(() => {
-  for (const stop of stops.splice(0).reverse()) stop();
-});
+afterEach(cleanUp);
 
 const helper = join(import.meta.dir, "../../worker/src/gitCredential.ts");
 const prePush = join(import.meta.dir, "../../worker/src/prePush.ts");
 
-async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
-  const github = startFakeGitHub();
-  github.createRepo("octo/demo", { "README.md": "# Demo\nTeh demo.\n" });
+async function setup({ persistent = false } = {}) {
   const workspace = mkdtempSync(join(tmpdir(), "chiefbot-workspace-"));
+  atCleanUp(() => rmSync(workspace, { recursive: true, force: true }));
   // Short: a unix socket path must fit in about 100 bytes.
   const socket = `/tmp/chiefbot-t06-${crypto.randomUUID().slice(0, 8)}.sock`;
   // The image's hooks directory (infra/computer/hooks), running the hook from source.
@@ -50,68 +44,16 @@ async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
     GIT_CONFIG_VALUE_3: hooks,
     CHIEFBOT_GIT_SOCKET: socket,
   };
-  const copilot = fakeCopilot({ shell: { cwd: workspace, env } });
-  const computers = fakeComputers({ copilot, gitSocket: socket });
-  const control = startControl({ port: 0, dbPath, githubApiUrl: github.url, computers: computers.provider });
-  stops.push(github.stop, () => rmSync(workspace, { recursive: true, force: true }), computers.stopAll, control.stop);
-
-  const { accessToken, refreshToken } = github.issueTokens();
-  const signIn = await fetch(`${control.url}/sessions`, {
-    method: "POST",
-    body: JSON.stringify({
-      accessToken,
-      accessTokenExpiresAt: Date.now() + 8 * 3600_000,
-      refreshToken,
-      refreshTokenExpiresAt: Date.now() + 180 * 86400_000,
-    }),
-  });
-  const { sessionToken } = SignInResponse.parse(await signIn.json());
-  const auth = { authorization: `Bearer ${sessionToken}` };
-  const api = (method: string, path: string, body?: unknown) =>
-    fetch(`${control.url}${path}`, { method, headers: auth, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-
-  const bot = Bot.parse(await (await api("POST", "/bots", { name: "Ada" })).json());
-  await new Promise<void>((resolve) => {
-    const socket = new WebSocket(`${control.url.replace("http", "ws")}/events`, { headers: auth });
-    socket.onmessage = (event) => {
-      const message = ClientEvent.parse(JSON.parse(String(event.data)));
-      if (message.type !== "bots" || !message.bots.some((b) => b.status === "online")) return;
-      socket.close();
-      resolve();
-    };
-  });
-  return { github, copilot, computers, control, auth, api, botId: bot.id };
-}
-
-// Every ChatEvent of the bot's chat socket; until() resolves once they match.
-function watchChat(controlUrl: string, headers: Record<string, string>, botId: BotId) {
-  const socket = new WebSocket(`${controlUrl.replace("http", "ws")}/bots/${botId}/chat`, { headers });
-  stops.push(() => socket.close());
-  const events: ChatEvent[] = [];
-  let wake = () => {};
-  socket.onmessage = (message) => {
-    events.push(ChatEvent.parse(JSON.parse(String(message.data))));
-    wake();
-  };
-  return {
-    events,
-    until: (matches: (events: ChatEvent[]) => boolean) =>
-      new Promise<ChatEvent[]>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`chat never matched: ${JSON.stringify(events.map((e) => e.event))}`)), 5000);
-        wake = () => {
-          if (!matches(events)) return;
-          clearTimeout(timer);
-          resolve(events);
-        };
-        wake();
-      }),
-  };
+  const control = await startTestControl({ persistent, copilot: fakeCopilot({ shell: { cwd: workspace, env } }), gitSocket: socket });
+  control.github.createRepo("octo/demo", { "README.md": "# Demo\nTeh demo.\n" });
+  const bot = await control.user.onlineBot("Ada");
+  return { ...control, ...control.user, botId: bot.id };
 }
 
 const approvalIds = (events: ChatEvent[]) =>
   events.flatMap(({ event }) => (event.type === "approval-request" ? [event.approvalId] : []));
 // Waits for the chat's nth approval-request (0 for the first) and returns its id.
-const nthApproval = async (chat: ReturnType<typeof watchChat>, n = 0) =>
+const nthApproval = async (chat: ReturnType<TestUser["watchChat"]>, n = 0) =>
   ApprovalId.parse(approvalIds(await chat.until((events) => approvalIds(events).length > n))[n]);
 const done = (events: ChatEvent[]) => events.some((e) => e.event.type === "done");
 
@@ -127,13 +69,13 @@ async function fixTypo(runtime: FakeRuntime, githubUrl: string, results: ShellRe
 }
 
 test("the bot clones, commits and pushes with the owner's token, and the push waits for the user's approval", async () => {
-  const { github, copilot, control, auth, api, botId } = await setup();
+  const { github, copilot, api, watchChat, botId } = await setup();
   const results: ShellResult[] = [];
   copilot.script = async function* (_prompt, runtime) {
     await fixTypo(runtime, github.url, results);
     yield sdk.idle();
   };
-  const chat = watchChat(control.url, auth, botId);
+  const chat = watchChat(botId);
 
   await api("POST", `/bots/${botId}/messages`, { text: "Fix the typo in octo/demo" });
   const approvalId = await nthApproval(chat);
@@ -161,13 +103,13 @@ test("the bot clones, commits and pushes with the owner's token, and the push wa
 });
 
 test("a declined push never reaches GitHub, and an approval is answered once", async () => {
-  const { github, copilot, control, auth, api, botId } = await setup();
+  const { github, copilot, api, watchChat, botId } = await setup();
   const results: ShellResult[] = [];
   copilot.script = async function* (_prompt, runtime) {
     await fixTypo(runtime, github.url, results);
     yield sdk.idle();
   };
-  const chat = watchChat(control.url, auth, botId);
+  const chat = watchChat(botId);
   await api("POST", `/bots/${botId}/messages`, { text: "Fix the typo in octo/demo" });
   const approvalId = await nthApproval(chat);
 
@@ -181,7 +123,7 @@ test("a declined push never reaches GitHub, and an approval is answered once", a
 });
 
 test("a push the shell matcher cannot see still asks the user, through git's pre-push hook", async () => {
-  const { github, copilot, control, auth, api, botId } = await setup();
+  const { github, copilot, api, watchChat, botId } = await setup();
   const results: ShellResult[] = [];
   copilot.script = async function* (_prompt, runtime) {
     await runtime.shell(`git clone -q ${github.url}/octo/demo.git demo`);
@@ -192,7 +134,7 @@ test("a push the shell matcher cannot see still asks the user, through git's pre
     results.push(await runtime.shell("p=push; cd demo && git $p -q origin fix-typo:other"));
     yield sdk.idle();
   };
-  const chat = watchChat(control.url, auth, botId);
+  const chat = watchChat(botId);
   await api("POST", `/bots/${botId}/messages`, { text: "Push it" });
 
   await api("POST", `/bots/${botId}/approvals/${await nthApproval(chat, 0)}`, { approved: true });
@@ -213,7 +155,7 @@ test("a push the shell matcher cannot see still asks the user, through git's pre
 });
 
 test("the bot opens a pull request only after the user approves it", async () => {
-  const { github, copilot, control, auth, api, botId } = await setup();
+  const { github, copilot, api, watchChat, botId } = await setup();
   let pr: unknown = null;
   copilot.script = async function* (_prompt, runtime) {
     await fixTypo(runtime, github.url, []);
@@ -226,7 +168,7 @@ test("the bot opens a pull request only after the user approves it", async () =>
     });
     yield sdk.idle();
   };
-  const chat = watchChat(control.url, auth, botId);
+  const chat = watchChat(botId);
   await api("POST", `/bots/${botId}/messages`, { text: "Fix the typo and open a PR" });
   await api("POST", `/bots/${botId}/approvals/${await nthApproval(chat, 0)}`, { approved: true });
 
@@ -244,26 +186,19 @@ test("the bot opens a pull request only after the user approves it", async () =>
 });
 
 test("a pending approval survives a desktop and a control restart, and the bot waits until the user answers", async () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite");
-  const { github, copilot, computers, control, auth, botId } = await setup({ dbPath });
+  const { github, copilot, restart, api, watchChat, botId } = await setup({ persistent: true });
   const results: ShellResult[] = [];
   copilot.script = async function* (_prompt, runtime) {
     await fixTypo(runtime, github.url, results);
     yield sdk.idle();
   };
-  await fetch(`${control.url}/bots/${botId}/messages`, { method: "POST", headers: auth, body: '{"text":"Fix the typo"}' });
-  const approvalId = await nthApproval(watchChat(control.url, auth, botId));
+  await api("POST", `/bots/${botId}/messages`, { text: "Fix the typo" });
+  const approvalId = await nthApproval(watchChat(botId));
 
   // The desktop quits, control restarts, and the user comes back later.
-  control.stop();
-  const restarted = startControl({ port: Number(new URL(control.url).port), dbPath, githubApiUrl: github.url, computers: computers.provider });
-  stops.push(restarted.stop);
-  const answer = await fetch(`${restarted.url}/bots/${botId}/approvals/${approvalId}`, {
-    method: "POST",
-    headers: auth,
-    body: '{"approved":true}',
-  });
-  const chat = watchChat(restarted.url, auth, botId);
+  restart();
+  const answer = await api("POST", `/bots/${botId}/approvals/${approvalId}`, { approved: true });
+  const chat = watchChat(botId);
   await chat.until(done);
 
   expect(answer.status).toBe(204);
@@ -277,13 +212,13 @@ test("a pending approval survives a desktop and a control restart, and the bot w
 });
 
 test("an approval whose turn ended because the bot restarted can no longer be answered", async () => {
-  const { github, copilot, computers, control, auth, api, botId } = await setup();
+  const { github, copilot, computers, api, watchChat, botId } = await setup();
   copilot.script = async function* (_prompt, runtime) {
     await fixTypo(runtime, github.url, []);
     yield sdk.idle();
   };
   await api("POST", `/bots/${botId}/messages`, { text: "Fix the typo" });
-  const chat = watchChat(control.url, auth, botId);
+  const chat = watchChat(botId);
   const approvalId = await nthApproval(chat);
 
   await computers.provider.stop(botId);
@@ -296,7 +231,7 @@ test("an approval whose turn ended because the bot restarted can no longer be an
 });
 
 test("after the owner disconnects GitHub, git in the bot computer gets no token and says to sign in again", async () => {
-  const { github, copilot, control, auth, api, botId } = await setup();
+  const { github, copilot, api, watchChat, botId } = await setup();
   let release = () => {};
   const disconnected = new Promise<void>((resolve) => (release = resolve));
   const results: ShellResult[] = [];
@@ -305,7 +240,7 @@ test("after the owner disconnects GitHub, git in the bot computer gets no token 
     results.push(await runtime.shell(`git clone -q ${github.url}/octo/demo.git demo`));
     yield sdk.idle();
   };
-  const chat = watchChat(control.url, auth, botId);
+  const chat = watchChat(botId);
   await api("POST", `/bots/${botId}/messages`, { text: "Clone octo/demo" });
 
   await api("DELETE", "/me/github");

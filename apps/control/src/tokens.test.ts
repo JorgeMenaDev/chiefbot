@@ -1,68 +1,26 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, BrokeredGitHubToken, BrokerRefusal, ChatEvent, ClientEvent, SignInResponse, User, type BotId } from "@chiefbot/contracts";
-import { startFakeGitHub } from "@chiefbot/fake-github";
-import { startControl } from "./control.ts";
-import { fakeComputers } from "./computers/fakeComputers.ts";
+import { BrokeredGitHubToken, BrokerRefusal, User, type BotId } from "@chiefbot/contracts";
+import { cleanUp, hour, startTestControl } from "./testControl.ts";
 
-const stops: Array<() => unknown> = [];
-afterEach(() => {
-  for (const stop of stops.splice(0).reverse()) stop();
-});
-
-const hour = 3600_000;
+afterEach(cleanUp);
 
 // Control with a fake GitHub, signed in with a token pair whose access token has
 // `accessTokenLeftMs` to live, and helpers to act as the user and as a bot's worker.
-async function setup({ accessTokenLeftMs = 8 * hour, refreshTokenLeftMs = 180 * 24 * hour } = {}) {
-  const github = startFakeGitHub();
-  const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
-  stops.push(github.stop, computers.stopAll, control.stop);
-  const tokens = github.issueTokens();
-  const signIn = await fetch(`${control.url}/sessions`, {
-    method: "POST",
-    body: JSON.stringify({
-      ...tokens,
-      accessTokenExpiresAt: Date.now() + accessTokenLeftMs,
-      refreshTokenExpiresAt: Date.now() + refreshTokenLeftMs,
-    }),
-  });
-  const { sessionToken } = SignInResponse.parse(await signIn.json());
-  const auth = { authorization: `Bearer ${sessionToken}` };
-  const api = (method: string, path: string, body?: unknown) =>
-    fetch(`${control.url}${path}`, { method, headers: auth, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const createBot = async (name: string) => Bot.parse(await (await api("POST", "/bots", { name })).json()).id;
+async function setup(lifetimes: { accessTokenLeftMs?: number; refreshTokenLeftMs?: number } = {}) {
+  const control = await startTestControl(lifetimes);
+  const { url, botToken, user } = control;
+  const createBot = async (name: string) => (await user.createBot(name)).id;
   // What the bot's worker gets from the broker, as its worker would ask.
-  const tokenFor = (botId: BotId) =>
-    fetch(`${control.url}/worker/${botId}/github-token`, {
-      headers: { authorization: `Bearer ${computers.computers.get(botId)?.spec.env.CHIEFBOT_BOT_TOKEN}` },
-    });
-  // Resolves with the first message on a control WebSocket that `matches` accepts.
-  const firstOn = <T>(path: string, matches: (message: unknown) => T | undefined) =>
-    new Promise<T>((resolve) => {
-      const socket = new WebSocket(`${control.url.replace("http", "ws")}${path}`, { headers: auth });
-      stops.push(() => socket.close());
-      socket.onmessage = (event) => {
-        const found = matches(JSON.parse(String(event.data)));
-        if (found !== undefined) resolve(found);
-      };
-    });
+  const tokenFor = (botId: BotId) => fetch(`${url}/worker/${botId}/github-token`, { headers: { authorization: `Bearer ${botToken(botId)}` } });
   // Sends one message to a bot once it is online, and resolves with the turn's error, if any, once it is done.
   const runTurn = async (botId: BotId) => {
-    await firstOn("/events", (message) => {
-      const event = ClientEvent.parse(message);
-      return event.type === "bots" && event.bots.some((bot) => bot.id === botId && bot.status === "online") ? true : undefined;
-    });
-    const errors: string[] = [];
-    const done = firstOn(`/bots/${botId}/chat`, (message) => {
-      const { event } = ChatEvent.parse(message);
-      if (event.type === "error") errors.push(event.message);
-      return event.type === "done" ? errors : undefined;
-    });
-    await api("POST", `/bots/${botId}/messages`, { text: "hello" });
-    return done;
+    await user.watchBots().until((bots) => bots.some((bot) => bot.id === botId && bot.status === "online"));
+    const chat = user.watchChat(botId);
+    await user.send(botId, "hello");
+    const events = await chat.until((events) => events.some(({ event }) => event.type === "done"));
+    return events.flatMap(({ event }) => (event.type === "error" ? [event.message] : []));
   };
-  return { github, computers, control, tokens, api, createBot, tokenFor, runTurn };
+  return { ...control, ...user, createBot, tokenFor, runTurn };
 }
 
 test("concurrent token requests for one user trigger exactly one refresh, then the new token is served", async () => {
@@ -109,13 +67,13 @@ test("an expired refresh token needs sign-in without asking GitHub", async () =>
 });
 
 test("disconnecting GitHub stops the user's bots getting tokens until they sign in again", async () => {
-  const { github, control, api, createBot, tokenFor } = await setup();
+  const { github, url, api, createBot, tokenFor } = await setup();
   const ada = await createBot("Ada");
 
   expect((await api("DELETE", "/me/github")).status).toBe(204);
   const whileDisconnected = await tokenFor(ada);
   const fresh = github.issueTokens();
-  await fetch(`${control.url}/sessions`, {
+  await fetch(`${url}/sessions`, {
     method: "POST",
     body: JSON.stringify({ ...fresh, accessTokenExpiresAt: Date.now() + 8 * hour, refreshTokenExpiresAt: Date.now() + 180 * 24 * hour }),
   });

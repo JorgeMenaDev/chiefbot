@@ -1,87 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, ClientEvent, SignInResponse, type BotId } from "@chiefbot/contracts";
-import { startFakeGitHub, type FakeGitHubUser } from "@chiefbot/fake-github";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { startControl } from "./control.ts";
-import type { ComputerProvider } from "./computers/computer.ts";
-import { fakeComputers } from "./computers/fakeComputers.ts";
+import { Bot, type BotId } from "@chiefbot/contracts";
+import { atCleanUp, cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
 
-const stops: Array<() => unknown> = [];
-afterEach(() => {
-  for (const stop of stops.splice(0).reverse()) stop();
-});
+afterEach(cleanUp);
 
-async function setup({ dbPath = ":memory:", provider }: { dbPath?: string; provider?: ComputerProvider } = {}) {
-  const github = startFakeGitHub();
-  const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath, githubApiUrl: github.url, computers: provider ?? computers.provider });
-  stops.push(github.stop, computers.stopAll, control.stop);
-  // Signs `as` (default: the fake's user) in to control; returns their session.
-  const signIn = async (as?: FakeGitHubUser) => {
-    const { accessToken } = github.issueTokens(as);
-    const res = await fetch(`${control.url}/sessions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ accessToken, accessTokenExpiresAt: 0, refreshToken: "ghr_x", refreshTokenExpiresAt: 0 }),
-    });
-    return { accessToken, sessionToken: SignInResponse.parse(await res.json()).sessionToken };
-  };
-  const { accessToken, sessionToken } = await signIn();
-  const auth = { authorization: `Bearer ${sessionToken}` };
-  const api = (method: string, path: string, body?: unknown) =>
-    fetch(`${control.url}${path}`, {
-      method,
-      headers: { ...auth, "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-  const createBot = async (name: string) => Bot.parse(await (await api("POST", "/bots", { name })).json());
-  return {
-    github,
-    control,
-    computers,
-    accessToken,
-    sessionToken,
-    auth,
-    api,
-    signIn,
-    createBot,
-    events: watchBots(control.url, auth),
-  };
-}
-
-// The desktop's view: the /events WebSocket's latest bot list.
-function watchBots(controlUrl: string, headers: Record<string, string>) {
-  const socket = new WebSocket(`${controlUrl.replace("http", "ws")}/events`, { headers });
-  stops.push(() => socket.close());
-  let latest: Bot[] = [];
-  const waiters = new Set<() => void>();
-  socket.onmessage = (event) => {
-    const message = ClientEvent.parse(JSON.parse(String(event.data)));
-    if (message.type !== "bots") return;
-    latest = message.bots;
-    for (const wake of waiters) wake();
-  };
-  return {
-    // Resolves once the list matches, failing after a second.
-    until(matches: (bots: Bot[]) => boolean) {
-      return new Promise<Bot[]>((resolve, reject) => {
-        const check = () => {
-          if (!matches(latest)) return;
-          waiters.delete(check);
-          clearTimeout(timer);
-          resolve(latest);
-        };
-        const timer = setTimeout(() => {
-          waiters.delete(check);
-          reject(new Error(`bots never matched; last: ${JSON.stringify(latest)}`));
-        }, 1000);
-        waiters.add(check);
-        check();
-      });
-    },
-  };
+async function setup(options: TestControlOptions = {}) {
+  const control = await startTestControl(options);
+  return { ...control, ...control.user, accessToken: control.user.tokens.accessToken, events: control.user.watchBots() };
 }
 
 const statusOf = (botId: BotId) => (bots: Bot[]) => bots.find((bot) => bot.id === botId)?.status;
@@ -100,11 +25,11 @@ test("a new bot gets its own computer, and its worker comes online with a bot cr
 });
 
 test("the worker endpoint refuses the user's session and GitHub tokens", async () => {
-  const { control, accessToken, sessionToken, createBot } = await setup();
+  const { url, accessToken, sessionToken, createBot } = await setup();
   const bot = await createBot("Ada");
 
   for (const token of [sessionToken, accessToken, ""]) {
-    const res = await fetch(`${control.url}/worker/${bot.id}`, { headers: { authorization: `Bearer ${token}` } });
+    const res = await fetch(`${url}/worker/${bot.id}`, { headers: { authorization: `Bearer ${token}` } });
     expect(res.status).toBe(401);
   }
 });
@@ -139,59 +64,46 @@ test("delete removes the bot and its computer, keeping its data unless asked to 
 });
 
 test("a running bot comes back online after control restarts", async () => {
-  const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite");
-  const { github, control, computers, auth, createBot, events } = await setup({ dbPath });
+  const { restart, watchBots, createBot, events } = await setup({ persistent: true });
   const bot = await createBot("Ada");
   await events.until((bots) => statusOf(bot.id)(bots) === "online");
 
-  control.stop();
-  const port = Number(new URL(control.url).port);
-  const restarted = startControl({ port, dbPath, githubApiUrl: github.url, computers: computers.provider });
-  stops.push(restarted.stop);
+  restart();
 
-  await watchBots(restarted.url, auth).until((bots) => statusOf(bot.id)(bots) === "online");
+  await watchBots().until((bots) => statusOf(bot.id)(bots) === "online");
 });
 
 test("a bot whose computer fails to start is not kept", async () => {
-  const broken = fakeComputers();
-  const { api } = await setup({
-    provider: { ...broken.provider, start: () => Promise.reject(new Error("no such image")) },
+  const { api, computers } = await setup({
+    provider: (fake) => ({ ...fake, start: () => Promise.reject(new Error("no such image")) }),
   });
 
   const res = await api("POST", "/bots", { name: "Ada" });
 
   expect(res.status).toBe(502);
   expect(Bot.array().parse(await (await api("GET", "/bots")).json())).toEqual([]);
-  expect(broken.destroyed).toHaveLength(1);
+  expect(computers.destroyed).toHaveLength(1);
 });
 
 test("a worker credential works only for its own bot", async () => {
-  const { control, computers, createBot } = await setup();
+  const { url, botToken, createBot } = await setup();
   const ada = await createBot("Ada");
   const grace = await createBot("Grace");
-  const adaToken = computers.computers.get(ada.id)?.spec.env.CHIEFBOT_BOT_TOKEN;
+  const adaToken = botToken(ada.id);
 
   const asWorker = (botId: BotId) =>
-    fetch(`${control.url}/worker/${botId}`, { headers: { authorization: `Bearer ${adaToken}` } });
+    fetch(`${url}/worker/${botId}`, { headers: { authorization: `Bearer ${adaToken}` } });
 
   expect((await asWorker(grace.id)).status).toBe(403);
   // Its own bot gets past the credential check to the WebSocket upgrade.
   expect((await asWorker(ada.id)).status).toBe(400);
 });
 
-// Resolves once check() is true, failing after a second.
-async function eventually(check: () => boolean) {
-  for (let waited = 0; !check(); waited += 10) {
-    if (waited > 1000) throw new Error("condition never became true");
-    await Bun.sleep(10);
-  }
-}
-
 // A viewer on a bot's screen through control, as the desktop's noVNC opens it.
 function openScreen(controlUrl: string, botId: BotId, headers: Record<string, string>) {
   const socket = new WebSocket(`${controlUrl.replace("http", "ws")}/bots/${botId}/screen`, { headers });
   socket.binaryType = "arraybuffer";
-  stops.push(() => socket.close());
+  atCleanUp(() => socket.close());
   const received: string[] = [];
   socket.onmessage = (event) => {
     received.push(event.data instanceof ArrayBuffer ? new TextDecoder().decode(event.data) : String(event.data));
@@ -200,11 +112,11 @@ function openScreen(controlUrl: string, botId: BotId, headers: Record<string, st
 }
 
 test("the owner watches the bot's screen through control, with bytes flowing both ways", async () => {
-  const { control, computers, auth, createBot, events } = await setup();
+  const { url, computers, auth, createBot, events } = await setup();
   const bot = await createBot("Ada");
   await events.until((bots) => statusOf(bot.id)(bots) === "online");
 
-  const viewer = openScreen(control.url, bot.id, auth);
+  const viewer = openScreen(url, bot.id, auth);
 
   // The fake screen greets like a VNC server; the viewer's reply reaches it.
   await eventually(() => viewer.received.join("") === "RFB 003.008\n");
@@ -213,14 +125,14 @@ test("the owner watches the bot's screen through control, with bytes flowing bot
 });
 
 test("another user's bot screen and take-over are refused", async () => {
-  const { control, signIn, createBot, api } = await setup();
+  const { url, signIn, createBot, api } = await setup();
   const bot = await createBot("Ada");
   const mallory = await signIn({ id: 666, login: "mallory", copilot: null });
   const malloryAuth = { authorization: `Bearer ${mallory.sessionToken}` };
 
-  const screen = await fetch(`${control.url}/bots/${bot.id}/screen`, { headers: malloryAuth });
-  const takeOver = await fetch(`${control.url}/bots/${bot.id}/take-over`, { method: "POST", headers: malloryAuth });
-  const anonymous = await fetch(`${control.url}/bots/${bot.id}/screen`);
+  const screen = await fetch(`${url}/bots/${bot.id}/screen`, { headers: malloryAuth });
+  const takeOver = await fetch(`${url}/bots/${bot.id}/take-over`, { method: "POST", headers: malloryAuth });
+  const anonymous = await fetch(`${url}/bots/${bot.id}/screen`);
 
   expect(screen.status).toBe(404);
   expect(takeOver.status).toBe(404);
@@ -229,24 +141,24 @@ test("another user's bot screen and take-over are refused", async () => {
 });
 
 test("a worker can join only a screen stream control opened for its own bot", async () => {
-  const { control, computers, createBot } = await setup();
+  const { url, botToken, createBot } = await setup();
   const ada = await createBot("Ada");
   const grace = await createBot("Grace");
-  const adaToken = computers.computers.get(ada.id)?.spec.env.CHIEFBOT_BOT_TOKEN;
+  const adaToken = botToken(ada.id);
 
   const join = (botId: BotId, streamId: string) =>
-    fetch(`${control.url}/worker/${botId}/screen/${streamId}`, { headers: { authorization: `Bearer ${adaToken}` } });
+    fetch(`${url}/worker/${botId}/screen/${streamId}`, { headers: { authorization: `Bearer ${adaToken}` } });
 
   expect((await join(grace.id, "any")).status).toBe(403);
   expect((await join(ada.id, "never-opened")).status).toBe(404);
 });
 
 test("a stopped bot has no screen to watch", async () => {
-  const { control, auth, api, createBot } = await setup();
+  const { url, auth, api, createBot } = await setup();
   const bot = await createBot("Ada");
   await api("POST", `/bots/${bot.id}/stop`);
 
-  const res = await fetch(`${control.url}/bots/${bot.id}/screen`, { headers: auth });
+  const res = await fetch(`${url}/bots/${bot.id}/screen`, { headers: auth });
 
   expect(res.status).toBe(409);
 });

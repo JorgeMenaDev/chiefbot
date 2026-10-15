@@ -1,23 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { startFakeGitHub } from "@chiefbot/fake-github";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import type { startFakeGitHub } from "@chiefbot/fake-github";
 import { SignInResponse, User } from "@chiefbot/contracts";
-import { startControl } from "./control.ts";
-import { fakeComputers } from "./computers/fakeComputers.ts";
+import { cleanUp, startTestControl } from "./testControl.ts";
 
-const stops: Array<() => unknown> = [];
-afterEach(() => {
-  for (const stop of stops.splice(0)) stop();
-});
-
-function setup() {
-  const github = startFakeGitHub();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: fakeComputers().provider });
-  stops.push(github.stop, control.stop);
-  return { github, control };
-}
+afterEach(cleanUp);
 
 function tokensFrom(github: ReturnType<typeof startFakeGitHub>) {
   const { accessToken, refreshToken } = github.issueTokens();
@@ -39,10 +25,10 @@ function signIn(controlUrl: string, body: unknown) {
 }
 
 test("sign-in answers with the GitHub login and Copilot plan, never the refresh token", async () => {
-  const { github, control } = setup();
+  const { github, url } = await startTestControl();
   const tokens = tokensFrom(github);
 
-  const res = await signIn(control.url, tokens);
+  const res = await signIn(url, tokens);
   const text = await res.text();
 
   expect(res.status).toBe(200);
@@ -55,24 +41,24 @@ test("sign-in answers with the GitHub login and Copilot plan, never the refresh 
 });
 
 test("a session reads its user until it signs out", async () => {
-  const { github, control } = setup();
-  const { sessionToken } = SignInResponse.parse(await (await signIn(control.url, tokensFrom(github))).json());
+  const { github, url } = await startTestControl();
+  const { sessionToken } = SignInResponse.parse(await (await signIn(url, tokensFrom(github))).json());
   const auth = { authorization: `Bearer ${sessionToken}` };
 
-  const me = await fetch(`${control.url}/me`, { headers: auth });
+  const me = await fetch(`${url}/me`, { headers: auth });
   expect(me.status).toBe(200);
   expect(User.parse(await me.json()).login).toBe("octo-jorge");
 
-  const signOut = await fetch(`${control.url}/sessions/current`, { method: "DELETE", headers: auth });
+  const signOut = await fetch(`${url}/sessions/current`, { method: "DELETE", headers: auth });
   expect(signOut.status).toBe(204);
-  expect((await fetch(`${control.url}/me`, { headers: auth })).status).toBe(401);
+  expect((await fetch(`${url}/me`, { headers: auth })).status).toBe(401);
 });
 
 test("sign-in with a token GitHub rejects opens no session", async () => {
-  const { control } = setup();
+  const { url } = await startTestControl();
   const now = Date.now();
 
-  const res = await signIn(control.url, {
+  const res = await signIn(url, {
     accessToken: "gho_not_real",
     accessTokenExpiresAt: now,
     refreshToken: "ghr_not_real",
@@ -83,18 +69,12 @@ test("sign-in with a token GitHub rejects opens no session", async () => {
 });
 
 test("one GitHub account stays one user across sign-ins and a control restart", async () => {
-  const github = startFakeGitHub();
-  stops.push(github.stop);
-  const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite");
+  const { github, url, restart } = await startTestControl({ persistent: true });
 
-  const first = startControl({ port: 0, dbPath, githubApiUrl: github.url, computers: fakeComputers().provider });
-  const a = SignInResponse.parse(await (await signIn(first.url, tokensFrom(github))).json());
-  first.stop();
-
-  const second = startControl({ port: 0, dbPath, githubApiUrl: github.url, computers: fakeComputers().provider });
-  stops.push(second.stop);
-  const me = await fetch(`${second.url}/me`, { headers: { authorization: `Bearer ${a.sessionToken}` } });
-  const b = SignInResponse.parse(await (await signIn(second.url, tokensFrom(github))).json());
+  const a = SignInResponse.parse(await (await signIn(url, tokensFrom(github))).json());
+  restart();
+  const me = await fetch(`${url}/me`, { headers: { authorization: `Bearer ${a.sessionToken}` } });
+  const b = SignInResponse.parse(await (await signIn(url, tokensFrom(github))).json());
 
   expect(User.parse(await me.json()).id).toBe(a.user.id);
   expect(b.user.id).toBe(a.user.id);
