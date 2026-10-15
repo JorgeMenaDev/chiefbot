@@ -1,5 +1,5 @@
 import { ChatEvent, SendMessageResponse, type ApprovalId, type BotId, type ChatItem, type ChatView } from "@chiefbot/contracts";
-import { refusal } from "./controlApi.ts";
+import { controlCaller } from "./controlApi.ts";
 
 export type ChatsOptions = {
   controlUrl: string;
@@ -16,6 +16,7 @@ export type ChatsOptions = {
 export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: ChatsOptions) {
   type Chat = { view: ChatView; lastSeq: number; socket: WebSocket | null; retry: Timer | null };
   const chats = new Map<BotId, Chat>();
+  const call = controlCaller({ controlUrl, session });
 
   function connect(botId: BotId, chat: Chat) {
     const token = session();
@@ -48,24 +49,14 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
 
     // Throws with control's reason when it refuses (bot offline, still on a turn).
     async send(botId: BotId, text: string) {
-      const res = await fetch(`${controlUrl}/bots/${botId}/messages`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (!res.ok) throw await refusal(res);
+      const res = await call("POST", `/bots/${botId}/messages`, { text });
       return SendMessageResponse.parse(await res.json()).turnId;
     },
 
     // Approves or declines one of the bot's pending approvals. The card updates
     // when control's approval-answer comes back on the chat socket.
     async answer(botId: BotId, approvalId: ApprovalId, approved: boolean) {
-      const res = await fetch(`${controlUrl}/bots/${botId}/approvals/${approvalId}`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
-        body: JSON.stringify({ approved }),
-      });
-      if (!res.ok) throw await refusal(res);
+      await call("POST", `/bots/${botId}/approvals/${approvalId}`, { approved });
     },
 
     // Call on sign-out.

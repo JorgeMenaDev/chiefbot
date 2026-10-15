@@ -1,6 +1,6 @@
 import { Bot, ClientEvent, ModelOption, type BotId, type User } from "@chiefbot/contracts";
 import { z } from "zod";
-import { refusal } from "./controlApi.ts";
+import { controlCaller } from "./controlApi.ts";
 
 export type BotsOptions = {
   controlUrl: string;
@@ -42,16 +42,7 @@ export function createBots({ controlUrl, session, onChange, onUser, retryMs = 20
     };
   }
 
-  // One control call; throws with control's error code when it refuses.
-  async function call(method: string, path: string, body?: unknown) {
-    const res = await fetch(`${controlUrl}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    if (!res.ok) throw await refusal(res);
-    return res;
-  }
+  const call = controlCaller({ controlUrl, session });
 
   return {
     list: () => bots,
