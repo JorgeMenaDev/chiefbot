@@ -5,12 +5,14 @@ import {
   GitHubTokens,
   SendMessageRequest,
   SessionToken,
+  SetBotModelRequest,
   WorkerToControl,
   type Bot,
   type BotId,
   type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
+  type ModelOption,
   type SendMessageResponse,
   type SignInResponse,
   type User,
@@ -18,6 +20,7 @@ import {
 } from "@chiefbot/contracts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fetchIdentity, GitHubAuthError } from "./github.ts";
+import { modelOptions } from "./models.ts";
 import { openStore } from "./store.ts";
 
 export type ControlOptions = {
@@ -49,8 +52,11 @@ type SocketData =
 //   POST   /bots/:id/start    bearer session    → Bot
 //   POST   /bots/:id/stop     bearer session    → Bot
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
+//   PUT    /bots/:id/model    bearer session, body SetBotModelRequest → Bot; the bot's next turn runs on it
+//                             (400 model_unavailable when the user's plan does not offer it or it is locked)
 //   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
 //                             (409 when the bot is not online or is still on a turn)
+//   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
 //   WS     /bots/:id/chat     bearer session, ?after=<seq> → each ChatEvent after seq, then live ones
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
@@ -62,12 +68,14 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
 
   const botsOf = (userId: UserId): Bot[] =>
-    store.botsFor(userId).map(({ id, name, running }) => ({
+    store.botsFor(userId).map(({ id, name, running, model }) => ({
       id,
       name,
       status: !running ? "stopped" : workers.has(id) ? "online" : "starting",
+      model,
     }));
   const botOf = (userId: UserId, botId: BotId) => botsOf(userId).find((bot) => bot.id === botId);
+  const modelOptionsOf = (user: User): ModelOption[] => modelOptions(store.modelReport(user.id), user.copilotPlan);
   const topic = (userId: UserId) => `bots:${userId}`;
   const botsEvent = (userId: UserId) => JSON.stringify({ type: "bots", bots: botsOf(userId) } satisfies ClientEvent);
   const publish = (userId: UserId) => server.publish(topic(userId), botsEvent(userId));
@@ -89,7 +97,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
     (
       handle: (
         user: User,
-        botId: BotId,
+        bot: { id: BotId; model: string },
         req: Request,
         server: Bun.Server<SocketData>,
       ) => Promise<Response> | Response | undefined,
@@ -99,6 +107,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         | Bun.BunRequest<"/bots/:id">
         | Bun.BunRequest<"/bots/:id/start">
         | Bun.BunRequest<"/bots/:id/stop">
+        | Bun.BunRequest<"/bots/:id/model">
         | Bun.BunRequest<"/bots/:id/messages">
         | Bun.BunRequest<"/bots/:id/chat">,
       server: Bun.Server<SocketData>,
@@ -107,7 +116,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
       if (!user) return unauthorized();
       const bot = store.botFor(user.id, req.params.id);
       if (!bot) return Response.json({ error: "not_found" }, { status: 404 });
-      return handle(user, bot.id, req, server);
+      return handle(user, bot, req, server);
     };
 
   const server = Bun.serve({
@@ -173,7 +182,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         },
       },
       "/bots/:id/start": {
-        POST: ownBot(async (user, botId) => {
+        POST: ownBot(async (user, { id: botId }) => {
           await computers.start(botId);
           store.setRunning(botId, true);
           publish(user.id);
@@ -181,7 +190,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         }),
       },
       "/bots/:id/stop": {
-        POST: ownBot(async (user, botId) => {
+        POST: ownBot(async (user, { id: botId }) => {
           await computers.stop(botId);
           store.setRunning(botId, false);
           publish(user.id);
@@ -189,7 +198,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         }),
       },
       "/bots/:id": {
-        DELETE: ownBot(async (user, botId, req) => {
+        DELETE: ownBot(async (user, { id: botId }, req) => {
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
           await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
@@ -198,8 +207,18 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
           return new Response(null, { status: 204 });
         }),
       },
+      "/bots/:id/model": {
+        PUT: ownBot(async (user, { id: botId }, req) => {
+          const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
+          const offered = modelOptionsOf(user).some(({ id, lockedReason }) => id === body.data?.model && lockedReason === null);
+          if (!body.success || !offered) return Response.json({ error: "model_unavailable" }, { status: 400 });
+          store.setBotModel(botId, body.data.model);
+          publish(user.id);
+          return Response.json(botOf(user.id, botId));
+        }),
+      },
       "/bots/:id/messages": {
-        POST: ownBot(async (_user, botId, req) => {
+        POST: ownBot(async (_user, { id: botId, model }, req) => {
           const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return Response.json({ error: "invalid_message" }, { status: 400 });
           const worker = workers.get(botId);
@@ -208,17 +227,23 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
           const started = store.startTurn(botId, body.data.text);
           publishChat(botId, started);
           worker.send(
-            JSON.stringify({ type: "run-turn", turnId: started.turnId, text: body.data.text } satisfies ControlToWorker),
+            JSON.stringify({ type: "run-turn", turnId: started.turnId, text: body.data.text, model } satisfies ControlToWorker),
           );
           return Response.json({ turnId: started.turnId } satisfies SendMessageResponse, { status: 202 });
         }),
       },
       "/bots/:id/chat": {
-        GET: ownBot((_user, botId, req, server) => {
+        GET: ownBot((_user, { id: botId }, req, server) => {
           const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
           if (!Number.isInteger(after) || after < 0) return Response.json({ error: "invalid_after" }, { status: 400 });
           return upgrade(server, req, { kind: "chat", botId, after });
         }),
+      },
+      "/models": {
+        GET: (req) => {
+          const user = store.userForSession(bearer(req));
+          return user ? Response.json(modelOptionsOf(user)) : unauthorized();
+        },
       },
       "/events": {
         GET: (req, server) => {
@@ -277,6 +302,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         if (message.type === "turn-event") {
           return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
         }
+        if (message.type === "models") return store.setModelReport(ws.data.userId, message.report);
         // The worker lost every unfinished turn but the one it says it is still running.
         for (const turnId of store.unfinishedTurns(botId)) {
           if (turnId === message.activeTurnId) continue;

@@ -1,8 +1,10 @@
 import { Database } from "bun:sqlite";
 import {
   BotId,
+  AUTO_MODEL,
   ChatEvent,
   CopilotPlan,
+  ModelReport,
   TurnId,
   UserId,
   type BotToken,
@@ -68,8 +70,23 @@ export function openStore(path: string) {
   )`);
   db.run("CREATE INDEX IF NOT EXISTS chat_events_by_bot ON chat_events (bot_id, seq)");
 
-  type BotRow = { id: string; name: string; running: number };
-  const toBotRecord = (row: BotRow) => ({ id: BotId.parse(row.id), name: row.name, running: row.running === 1 });
+  // Columns added after the tables first shipped, added in place so existing databases keep working.
+  const addColumn = (table: string, column: string, definition: string) => {
+    const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
+    if (!columns.some(({ name }) => name === column)) db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  };
+  // The bot's Copilot model id.
+  addColumn("bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
+  // The latest ModelReport (JSON) a worker of the user's bots sent: control's cache of their plan's models.
+  addColumn("users", "copilot_models", "TEXT");
+
+  type BotRow = { id: string; name: string; running: number; model: string };
+  const toBotRecord = (row: BotRow) => ({
+    id: BotId.parse(row.id),
+    name: row.name,
+    running: row.running === 1,
+    model: row.model,
+  });
 
   const toUser = (row: { id: string; login: string; copilot_plan: string | null }): User => ({
     id: UserId.parse(row.id),
@@ -134,7 +151,7 @@ export function openStore(path: string) {
       const row = db
         .query<BotRow, [string, string, string, string, number]>(
           `INSERT INTO bots (id, user_id, name, token_hash, running, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)
-           RETURNING id, name, running`,
+           RETURNING id, name, running, model`,
         )
         .get(`bot_${crypto.randomUUID()}`, userId, name, hash(botToken), Date.now());
       if (!row) throw new Error("bot insert returned no row");
@@ -143,7 +160,7 @@ export function openStore(path: string) {
 
     botsFor(userId: UserId) {
       return db
-        .query<BotRow, [string]>("SELECT id, name, running FROM bots WHERE user_id = ?1 ORDER BY created_at, id")
+        .query<BotRow, [string]>("SELECT id, name, running, model FROM bots WHERE user_id = ?1 ORDER BY created_at, id")
         .all(userId)
         .map(toBotRecord);
     },
@@ -151,7 +168,7 @@ export function openStore(path: string) {
     // Only the owner's bot: another user's bot id reads as missing.
     botFor(userId: UserId, botId: string) {
       const row = db
-        .query<BotRow, [string, string]>("SELECT id, name, running FROM bots WHERE user_id = ?1 AND id = ?2")
+        .query<BotRow, [string, string]>("SELECT id, name, running, model FROM bots WHERE user_id = ?1 AND id = ?2")
         .get(userId, botId);
       return row ? toBotRecord(row) : null;
     },
@@ -166,6 +183,20 @@ export function openStore(path: string) {
 
     setRunning(botId: BotId, running: boolean) {
       db.query("UPDATE bots SET running = ?2 WHERE id = ?1").run(botId, running ? 1 : 0);
+    },
+
+    setBotModel(botId: BotId, model: string) {
+      db.query("UPDATE bots SET model = ?2 WHERE id = ?1").run(botId, model);
+    },
+
+    setModelReport(userId: UserId, report: ModelReport) {
+      db.query("UPDATE users SET copilot_models = ?2 WHERE id = ?1").run(userId, JSON.stringify(report));
+    },
+
+    // Null until a worker of the user's bots has listed their plan's models.
+    modelReport(userId: UserId): ModelReport | null {
+      const row = db.query<{ copilot_models: string | null }, [string]>("SELECT copilot_models FROM users WHERE id = ?1").get(userId);
+      return row?.copilot_models ? ModelReport.parse(JSON.parse(row.copilot_models)) : null;
     },
 
     deleteBot(botId: BotId) {

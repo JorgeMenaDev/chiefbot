@@ -8,6 +8,7 @@ import {
   type WorkerToControl,
 } from "@chiefbot/contracts";
 import type { BotSession, Copilot } from "./copilot.ts";
+import { modelReport } from "./models.ts";
 
 export type WorkerOptions = {
   // Control's base URL as seen from the computer, e.g. http://host.docker.internal:7410.
@@ -21,14 +22,17 @@ export type WorkerOptions = {
   // Wait between reconnects after the connection drops.
   retryMs?: number;
   onBound?: (botId: BotId) => void;
+  // Listing the plan's models failed; control keeps its last report.
+  onModelsError?: (error: unknown) => void;
 };
 
 // Dials out to control's /worker/:botId WebSocket with the bot's credential and keeps
 // the connection up: control restarts and network drops end in a reconnect.
 // Runs the turns control sends on the bot's Copilot session, one at a time, and
-// streams their events back. The latest turn's events are kept and resent on
+// streams their events back. After each bind it reports the models the owner's
+// Copilot plan offers. The latest turn's events are kept and resent on
 // every reconnect (control stores each once), so a turn survives a control restart.
-export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 2000, onBound }: WorkerOptions) {
+export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 2000, onBound, onModelsError }: WorkerOptions) {
   const url = `${controlUrl.replace(/^http/, "ws")}/worker/${botId}`;
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
@@ -36,6 +40,8 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
   // Every event of the latest turn, numbered by position.
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
   let session: Promise<BotSession> | null = null;
+  // The model set on the open session, or null before the first turn sets one.
+  let sessionModel: string | null = null;
   // The turn the session is running, and what it has streamed so far.
   let active: { turnId: TurnId; deltaMessageIds: Set<string>; toolNames: Map<string, string> } | null = null;
 
@@ -65,7 +71,10 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
       opened.on(onSessionEvent);
       return opened;
     });
-    session.catch(() => (session = null));
+    session.catch(() => {
+      session = null;
+      sessionModel = null;
+    });
     return session;
   }
 
@@ -104,11 +113,28 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
     }
   }
 
-  // Control sends a turn only once the previous one is done.
-  async function runTurn(turnId: TurnId, text: string) {
+  // Lists the plan's models on the bot's session (it opens it, so the first turn
+  // starts faster).
+  async function reportModels() {
+    try {
+      const list = await (await openSession()).rpc.model.list();
+      send({ type: "models", report: modelReport(list) });
+    } catch (error) {
+      onModelsError?.(error);
+    }
+  }
+
+  // Control sends a turn only once the previous one is done. A changed model is
+  // set on the session first, so switching mid-conversation keeps the history.
+  async function runTurn(turnId: TurnId, text: string, model: string) {
     active = { turnId, deltaMessageIds: new Set(), toolNames: new Map() };
     try {
-      await (await openSession()).send(text);
+      const opened = await openSession();
+      if (sessionModel !== model) {
+        await opened.setModel(model);
+        sessionModel = model;
+      }
+      await opened.send(text);
     } catch (error) {
       emit(turnId, { type: "error", message: error instanceof Error ? error.message : String(error) });
       emit(turnId, { type: "done" });
@@ -126,8 +152,10 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
     };
     socket.onmessage = (event) => {
       const message = ControlToWorker.parse(JSON.parse(String(event.data)));
-      if (message.type === "bound") onBound?.(message.botId);
-      else void runTurn(message.turnId, message.text);
+      if (message.type === "bound") {
+        onBound?.(message.botId);
+        void reportModels();
+      } else void runTurn(message.turnId, message.text, message.model);
     };
     socket.onclose = () => {
       if (!stopped) retry = setTimeout(connect, retryMs);
