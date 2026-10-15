@@ -69,5 +69,8 @@ export function createBots({ controlUrl, session, onChange, retryMs = 2000 }: Bo
     stop: async (botId: BotId) => void (await call("POST", `/bots/${botId}/stop`)),
     remove: async (botId: BotId, { deleteData }: { deleteData: boolean }) =>
       void (await call("DELETE", `/bots/${botId}${deleteData ? "?deleteData=true" : ""}`)),
+    // The human drives the bot's screen until handBack; the agent's input waits meanwhile.
+    takeOver: async (botId: BotId) => void (await call("POST", `/bots/${botId}/take-over`)),
+    handBack: async (botId: BotId) => void (await call("POST", `/bots/${botId}/hand-back`)),
   };
 }

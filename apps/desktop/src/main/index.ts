@@ -1,5 +1,5 @@
 import { BotId, CreateBotRequest } from "@chiefbot/contracts";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
@@ -57,6 +57,11 @@ ipcMain.handle("bots:get", () => bots.list());
 ipcMain.handle("bots:create", (_event, name: unknown) => bots.create(CreateBotRequest.parse({ name }).name));
 ipcMain.handle("bots:start", (_event, id: unknown) => bots.start(BotId.parse(id)));
 ipcMain.handle("bots:stop", (_event, id: unknown) => bots.stop(BotId.parse(id)));
+ipcMain.handle("bots:take-over", (_event, id: unknown) => bots.takeOver(BotId.parse(id)));
+ipcMain.handle("bots:hand-back", (_event, id: unknown) => bots.handBack(BotId.parse(id)));
+// noVNC in the renderer opens this WebSocket; main signs it below.
+const controlSockets = controlUrl.replace(/^http/, "ws");
+ipcMain.handle("bots:screen-url", (_event, id: unknown) => `${controlSockets}/bots/${BotId.parse(id)}/screen`);
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {
   const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));
@@ -75,6 +80,15 @@ ipcMain.handle("bots:delete", async (_event, id: unknown) => {
 });
 
 app.whenReady().then(async () => {
+  // Adds the control session to the screen WebSocket's handshake, so the
+  // renderer never holds it. Control checks that the session owns the bot.
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: [`${controlSockets}/bots/*/screen`] },
+    ({ requestHeaders }, callback) => {
+      const token = sessionStore.load();
+      callback({ requestHeaders: token ? { ...requestHeaders, Authorization: `Bearer ${token}` } : requestHeaders });
+    },
+  );
   window = new BrowserWindow({
     width: 1100,
     height: 760,
