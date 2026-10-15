@@ -98,10 +98,11 @@ test("a new bot gets its own computer, and its worker comes online with a bot cr
 });
 
 test("the worker endpoint refuses the user's session and GitHub tokens", async () => {
-  const { control, accessToken, sessionToken } = await setup();
+  const { control, accessToken, sessionToken, createBot } = await setup();
+  const bot = await createBot("Ada");
 
   for (const token of [sessionToken, accessToken, ""]) {
-    const res = await fetch(`${control.url}/worker`, { headers: { authorization: `Bearer ${token}` } });
+    const res = await fetch(`${control.url}/worker/${bot.id}`, { headers: { authorization: `Bearer ${token}` } });
     expect(res.status).toBe(401);
   }
 });
@@ -162,6 +163,20 @@ test("a bot whose computer fails to start is not kept", async () => {
   expect(broken.destroyed).toHaveLength(1);
 });
 
+test("a worker credential works only for its own bot", async () => {
+  const { control, computers, createBot } = await setup();
+  const ada = await createBot("Ada");
+  const grace = await createBot("Grace");
+  const adaToken = computers.computers.get(ada.id)?.spec.env.CHIEFBOT_BOT_TOKEN;
+
+  const asWorker = (botId: BotId) =>
+    fetch(`${control.url}/worker/${botId}`, { headers: { authorization: `Bearer ${adaToken}` } });
+
+  expect((await asWorker(grace.id)).status).toBe(403);
+  // Its own bot gets past the credential check to the WebSocket upgrade.
+  expect((await asWorker(ada.id)).status).toBe(400);
+});
+
 // Resolves once check() is true, failing after a second.
 async function eventually(check: () => boolean) {
   for (let waited = 0; !check(); waited += 10) {
@@ -209,6 +224,19 @@ test("another user's bot screen and take-over are refused", async () => {
   expect(takeOver.status).toBe(404);
   expect(anonymous.status).toBe(401);
   expect(Bot.parse(await (await api("POST", `/bots/${bot.id}/hand-back`)).json()).screenControl).toBe("agent");
+});
+
+test("a worker can join only a screen stream control opened for its own bot", async () => {
+  const { control, computers, createBot } = await setup();
+  const ada = await createBot("Ada");
+  const grace = await createBot("Grace");
+  const adaToken = computers.computers.get(ada.id)?.spec.env.CHIEFBOT_BOT_TOKEN;
+
+  const join = (botId: BotId, streamId: string) =>
+    fetch(`${control.url}/worker/${botId}/screen/${streamId}`, { headers: { authorization: `Bearer ${adaToken}` } });
+
+  expect((await join(grace.id, "any")).status).toBe(403);
+  expect((await join(ada.id, "never-opened")).status).toBe(404);
 });
 
 test("a stopped bot has no screen to watch", async () => {

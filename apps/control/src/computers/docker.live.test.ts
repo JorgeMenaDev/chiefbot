@@ -9,12 +9,13 @@ import { dockerProvider } from "./docker.ts";
 // Opt-in: the whole loop on real Docker (Colima). Needs the image from
 // `bun run computer:build`. Run with CHIEFBOT_DOCKER_TESTS=1 bun test docker.live
 const socketPath = process.env.CHIEFBOT_DOCKER_SOCKET ?? join(homedir(), ".colima/default/docker.sock");
+const image = process.env.CHIEFBOT_COMPUTER_IMAGE ?? "chiefbot-computer:dev";
 
 test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
   "a bot's container starts, its worker comes online, and stop and delete clean up",
   async () => {
     const github = startFakeGitHub();
-    const computers = dockerProvider({ socketPath, image: "chiefbot-computer:dev" });
+    const computers = dockerProvider({ socketPath, image });
     const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers });
     const port = new URL(control.url).port;
     // Restart control with the URL containers reach it on, now that the port is known.

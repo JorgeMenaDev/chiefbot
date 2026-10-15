@@ -29,11 +29,22 @@ export type ControlOptions = {
 };
 
 // What a WebSocket connection is bound to: a desktop client of one user, the
-// worker of exactly one bot, or a viewer of one bot's screen (piped to screenUrl).
+// worker of exactly one bot, or one end of a screen stream: the owner's viewer,
+// or the bot's worker piping its VNC server.
 type SocketData =
   | { kind: "client"; userId: UserId }
   | { kind: "worker"; userId: UserId; botId: BotId }
-  | { kind: "screen"; screenUrl: string };
+  | { kind: "viewer"; botId: BotId; streamId: string }
+  | { kind: "screen"; streamId: string };
+
+// One viewer watching one bot's screen. Viewer frames sent before the worker
+// joins wait in `queued`.
+type ScreenStream = {
+  botId: BotId;
+  viewer: ServerWebSocket<SocketData>;
+  screen: ServerWebSocket<SocketData> | null;
+  queued: Array<string | Buffer>;
+};
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -45,10 +56,14 @@ type SocketData =
 //   POST   /bots/:id/stop     bearer session    → Bot
 //   POST   /bots/:id/take-over bearer session   → Bot (the human drives the screen; agent input waits)
 //   POST   /bots/:id/hand-back bearer session   → Bot (the agent drives the screen again)
-//   WS     /bots/:id/screen   bearer session    ↔ RFB bytes piped to the bot's websockify (noVNC speaks it)
+//   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
-//   WS     /worker            bearer bot token  → ControlToWorker
+//   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker (403 for another bot's)
+//   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//
+// The screen never listens beyond the computer's loopback: for each viewer,
+// control asks the worker to dial back and pipe x11vnc, and joins the two sockets.
 export function startControl({ port, dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
   const store = openStore(dbPath);
   // The connected worker of each bot. A bot is online while it has one.
@@ -56,8 +71,23 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
   // Who drives each bot's screen; absent means the agent. Kept in memory, so a
   // control restart hands every screen back to the agent.
   const screenControl = new Map<BotId, ScreenControl>();
-  // The websockify connection behind each screen viewer.
-  const screenPipes = new Map<ServerWebSocket<SocketData>, ReturnType<typeof pipeTo>>();
+  const screenStreams = new Map<string, ScreenStream>();
+
+  // Closes both ends of a screen stream.
+  function endStream(streamId: string) {
+    const stream = screenStreams.get(streamId);
+    screenStreams.delete(streamId);
+    stream?.viewer.close();
+    stream?.screen?.close();
+  }
+
+  // The bot a worker's credential belongs to when that is :botId; the refusal otherwise.
+  function workerFor(req: Request, botId: string) {
+    const bot = store.botForToken(bearer(req));
+    if (!bot) return unauthorized();
+    if (bot.botId !== botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
+    return bot;
+  }
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running }) => ({
@@ -154,7 +184,11 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
           try {
             await computers.create({
               botId: id,
-              env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_TOKEN: botToken },
+              env: {
+                CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin,
+                CHIEFBOT_BOT_ID: id,
+                CHIEFBOT_BOT_TOKEN: botToken,
+              },
             });
             await computers.start(id);
           } catch (error) {
@@ -189,10 +223,9 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
         POST: ownBot((user, botId) => setScreenControl(user, botId, "agent")),
       },
       "/bots/:id/screen": {
-        GET: ownBot(async (_user, botId, req, server) => {
-          const screenUrl = await computers.screenUrl(botId);
-          if (!screenUrl) return Response.json({ error: "computer_not_running" }, { status: 409 });
-          return upgrade(server, req, { kind: "screen", screenUrl });
+        GET: ownBot((_user, botId, req, server) => {
+          if (!workers.has(botId)) return Response.json({ error: "bot_offline" }, { status: 409 });
+          return upgrade(server, req, { kind: "viewer", botId, streamId: crypto.randomUUID() });
         }),
       },
       "/bots/:id": {
@@ -213,11 +246,24 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
           return upgrade(server, req, { kind: "client", userId: user.id });
         },
       },
-      "/worker": {
+      // A worker credential is scoped to the one bot it was made for.
+      "/worker/:botId": {
         GET: (req, server) => {
-          const bot = store.botForToken(bearer(req));
-          if (!bot) return unauthorized();
+          const bot = workerFor(req, req.params.botId);
+          if (bot instanceof Response) return bot;
           return upgrade(server, req, { kind: "worker", ...bot });
+        },
+      },
+      // Only a stream control opened for this bot, and only once.
+      "/worker/:botId/screen/:streamId": {
+        GET: (req, server) => {
+          const bot = workerFor(req, req.params.botId);
+          if (bot instanceof Response) return bot;
+          const stream = screenStreams.get(req.params.streamId);
+          if (!stream || stream.botId !== bot.botId || stream.screen) {
+            return Response.json({ error: "not_found" }, { status: 404 });
+          }
+          return upgrade(server, req, { kind: "screen", streamId: req.params.streamId });
         },
       },
     },
@@ -225,8 +271,18 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
       // Bun's documented way to type ws.data.
       data: {} as SocketData,
       open(ws) {
+        if (ws.data.kind === "viewer") {
+          const worker = workers.get(ws.data.botId);
+          if (!worker) return ws.close();
+          screenStreams.set(ws.data.streamId, { botId: ws.data.botId, viewer: ws, screen: null, queued: [] });
+          worker.send(JSON.stringify({ type: "screen-open", streamId: ws.data.streamId } satisfies ControlToWorker));
+          return;
+        }
         if (ws.data.kind === "screen") {
-          screenPipes.set(ws, pipeTo(ws.data.screenUrl, ws));
+          const stream = screenStreams.get(ws.data.streamId);
+          if (!stream) return ws.close();
+          stream.screen = ws;
+          for (const frame of stream.queued.splice(0)) ws.send(frame);
           return;
         }
         if (ws.data.kind === "client") {
@@ -242,17 +298,18 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
         publish(ws.data.userId);
       },
       close(ws) {
-        if (ws.data.kind === "screen") {
-          screenPipes.get(ws)?.close();
-          screenPipes.delete(ws);
-          return;
-        }
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") return endStream(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
         publish(ws.data.userId);
       },
       message(ws, message) {
-        if (ws.data.kind === "screen") screenPipes.get(ws)?.send(message);
+        if (ws.data.kind !== "viewer" && ws.data.kind !== "screen") return;
+        const stream = screenStreams.get(ws.data.streamId);
+        if (!stream) return;
+        if (ws.data.kind === "screen") stream.viewer.send(message);
+        else if (stream.screen) stream.screen.send(message);
+        else stream.queued.push(message);
       },
     },
   });
@@ -263,28 +320,6 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
       server.stop(true);
       store.close();
     },
-  };
-}
-
-// Pipes a screen viewer to the bot's websockify, frame for frame. Viewer frames
-// sent before websockify answers wait in a queue. Either side closing closes both.
-function pipeTo(screenUrl: string, viewer: ServerWebSocket<SocketData>) {
-  const upstream = new WebSocket(screenUrl);
-  upstream.binaryType = "arraybuffer";
-  const queued: Array<string | Buffer> = [];
-  upstream.onopen = () => {
-    for (const frame of queued.splice(0)) upstream.send(frame);
-  };
-  upstream.onmessage = (event) => {
-    viewer.send(event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : String(event.data));
-  };
-  upstream.onclose = () => viewer.close();
-  return {
-    send(frame: string | Buffer) {
-      if (upstream.readyState === WebSocket.OPEN) upstream.send(frame);
-      else queued.push(frame);
-    },
-    close: () => upstream.close(),
   };
 }
 

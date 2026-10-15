@@ -33,8 +33,11 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 // Control → worker on the /worker WebSocket. `bound` names the one bot this
 // connection belongs to; control sends it right after it accepts the credential.
 // `screen-control` follows it, and comes again on every take-over and hand-back.
+// `screen-open`: a viewer is waiting; the worker joins it by dialing
+// /worker/:botId/screen/:streamId and piping the screen's VNC bytes through it.
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), botId: BotId }),
   z.object({ type: z.literal("screen-control"), control: ScreenControl }),
+  z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),
 ]);
 export type ControlToWorker = z.infer<typeof ControlToWorker>;
