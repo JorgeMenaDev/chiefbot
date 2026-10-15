@@ -80,7 +80,7 @@ You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (
 
    ```bash
    gcloud auth configure-docker "$(terraform -chdir=infra/gcp output -raw registry)"
-   bun build apps/worker/src/index.ts --target=bun --outfile infra/computer/dist/worker.js
+   bun run computer:dist
    docker buildx build --platform linux/amd64 --push -t "$(terraform -chdir=infra/gcp output -raw computer_image)" infra/computer
    bun build apps/control/src/index.ts --target=bun --outfile infra/control/dist/control.js
    docker buildx build --platform linux/amd64 --push -t "$(terraform -chdir=infra/gcp output -raw control_image)" infra/control

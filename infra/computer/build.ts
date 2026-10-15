@@ -4,6 +4,8 @@
 // 2. Writes dist/package.json with the worker's exact SDK version, so the image
 //    installs that SDK with the Linux runtime for its own CPU.
 // 3. docker build, tagged CHIEFBOT_COMPUTER_IMAGE (default chiefbot-computer:dev).
+//    With --dist-only (`bun run computer:dist`) it stops before this step, for a
+//    docker buildx build of another platform (docs/deploy-gcp.md).
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
@@ -28,6 +30,7 @@ const bundle = await Bun.build({
 });
 if (!bundle.success) throw new AggregateError(bundle.logs, "worker bundle failed");
 await Bun.write(join(dist, "package.json"), JSON.stringify({ private: true, dependencies: { [sdk]: version } }, null, 2));
+if (process.argv.includes("--dist-only")) process.exit(0);
 
 const build = Bun.spawnSync(["docker", "build", "-t", image, import.meta.dir], { stdout: "inherit", stderr: "inherit" });
 if (build.exitCode !== 0) process.exit(build.exitCode ?? 1);
