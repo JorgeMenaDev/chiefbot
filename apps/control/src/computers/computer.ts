@@ -4,6 +4,8 @@ import type { BotId } from "@chiefbot/contracts";
 // local container; GceProvider (ticket #10) will run it as a Compute Engine VM.
 // Every computer has a durable disk for the bot's home and workspace that
 // survives stop/start, and is removed only by destroy({ deleteData: true }).
+// Every computer has a screen (Xvfb + Chromium) served by websockify; only
+// control reaches it, and viewers go through control's /bots/:id/screen.
 
 export type ComputerStatus = "absent" | "stopped" | "running";
 
@@ -21,4 +23,6 @@ export type ComputerProvider = {
   // Removes the computer. Its disk is kept unless deleteData is true. Absent is fine.
   destroy(botId: BotId, options: { deleteData: boolean }): Promise<void>;
   status(botId: BotId): Promise<ComputerStatus>;
+  // The screen's websockify URL as control reaches it (RFB over WebSocket), or null when not running.
+  screenUrl(botId: BotId): Promise<string | null>;
 };

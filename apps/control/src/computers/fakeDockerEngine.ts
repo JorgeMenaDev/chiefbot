@@ -51,7 +51,11 @@ export function startFakeDockerEngine() {
         GET: (req) => {
           const container = containers.get(req.params.name);
           if (!container) return notFound("container");
-          return Response.json({ Name: `/${container.name}`, State: { Running: container.running } });
+          return Response.json({
+            Name: `/${container.name}`,
+            State: { Running: container.running },
+            NetworkSettings: { Ports: container.running ? publishedPorts(container) : {} },
+          });
         },
       },
       "/containers/:name": {
@@ -67,6 +71,20 @@ export function startFakeDockerEngine() {
     },
     fetch: () => Response.json({ message: "page not found" }, { status: 404 }),
   });
+
+  // A running container's published ports, as the real engine reports them once
+  // it has picked a free host port for each binding.
+  function publishedPorts(container: FakeContainer) {
+    const { HostConfig } = z
+      .object({ HostConfig: z.object({ PortBindings: z.record(z.string(), z.array(z.object({ HostIp: z.string() }))).optional() }) })
+      .parse(container.config);
+    return Object.fromEntries(
+      Object.entries(HostConfig.PortBindings ?? {}).map(([port, bindings], index) => [
+        port,
+        bindings.map(({ HostIp }) => ({ HostIp, HostPort: String(49153 + index) })),
+      ]),
+    );
+  }
 
   // 304 when the container is already in that state, as the real engine answers.
   function setRunning(name: string, running: boolean) {

@@ -1,15 +1,42 @@
-import type { BotId } from "@chiefbot/contracts";
+import { BotId } from "@chiefbot/contracts";
 import { startWorker } from "@chiefbot/worker";
 import type { ComputerProvider, ComputerSpec } from "./computer.ts";
 
 // An in-memory ComputerProvider for tests. A running computer is the real worker,
 // started in this process with the env control handed over, so tests see the
 // whole loop (create → worker dials control → bot online) without Docker.
+// Its screen is a fake websockify that greets like a VNC server and records what it receives.
 export function fakeComputers() {
   type FakeComputer = { spec: ComputerSpec; worker: ReturnType<typeof startWorker> | null };
   const computers = new Map<BotId, FakeComputer>();
   // Every destroy call, so tests can check whether data was kept.
   const destroyed: Array<{ botId: BotId; deleteData: boolean }> = [];
+  // What each bot's screen received from viewers, decoded as text.
+  const screenInput = new Map<BotId, string[]>();
+  let screens: Bun.Server<{ botId: BotId }> | null = null;
+
+  // One server for every fake screen, started on first use; the path names the bot.
+  function screenServer() {
+    screens ??= Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        const computer = computers.get(BotId.parse(new URL(req.url).pathname.slice(1)));
+        if (!computer?.worker) return new Response(null, { status: 404 });
+        return server.upgrade(req, { data: { botId: computer.spec.botId } }) ? undefined : new Response(null, { status: 400 });
+      },
+      websocket: {
+        data: {} as { botId: BotId },
+        open: (ws) => void ws.send(new TextEncoder().encode("RFB 003.008\n")),
+        message(ws, message) {
+          const input = screenInput.get(ws.data.botId) ?? [];
+          input.push(typeof message === "string" ? message : new TextDecoder().decode(message));
+          screenInput.set(ws.data.botId, input);
+        },
+      },
+    });
+    return screens;
+  }
 
   const get = (botId: BotId) => {
     const computer = computers.get(botId);
@@ -42,14 +69,20 @@ export function fakeComputers() {
       if (!computer) return "absent";
       return computer.worker ? "running" : "stopped";
     },
+    async screenUrl(botId) {
+      if (!computers.get(botId)?.worker) return null;
+      return `ws://127.0.0.1:${screenServer().port}/${botId}`;
+    },
   };
 
   return {
     provider,
     computers,
     destroyed,
+    screenInput,
     stopAll: () => {
       for (const computer of computers.values()) computer.worker?.stop();
+      screens?.stop(true);
     },
   };
 }

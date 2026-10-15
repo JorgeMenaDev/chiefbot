@@ -26,7 +26,8 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
   const userCode = "ABCD-1234";
   const pending = [...pollErrors];
   let issued = 0;
-  const validAccessTokens = new Set<string>();
+  // Each valid access token and the user it belongs to.
+  const validAccessTokens = new Map<string, FakeGitHubUser>();
   // Body of every POST to the token endpoint, so tests can check what was sent.
   const tokenRequests: Record<string, string>[] = [];
 
@@ -64,13 +65,15 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
       },
       "/user": {
         GET: (req) => {
-          if (!authorized(req)) return Response.json({ message: "Bad credentials" }, { status: 401 });
+          const user = authorized(req);
+          if (!user) return Response.json({ message: "Bad credentials" }, { status: 401 });
           return Response.json({ id: user.id, login: user.login });
         },
       },
       "/copilot_internal/user": {
         GET: (req) => {
-          if (!authorized(req)) return Response.json({ message: "Bad credentials" }, { status: 401 });
+          const user = authorized(req);
+          if (!user) return Response.json({ message: "Bad credentials" }, { status: 401 });
           if (!user.copilot) return Response.json({ message: "Not Found" }, { status: 404 });
           return Response.json({ login: user.login, copilot_plan: user.copilot.plan, access_type_sku: user.copilot.sku });
         },
@@ -78,17 +81,19 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
     },
   });
 
-  // Mints a token pair GitHub accepts, as if the user finished the device flow.
-  function issueTokens() {
+  // Mints a token pair GitHub accepts, as if `as` (default: the fake's user)
+  // finished the device flow.
+  function issueTokens(as: FakeGitHubUser = user) {
     issued += 1;
     const accessToken = `gho_fake_${issued}`;
-    validAccessTokens.add(accessToken);
+    validAccessTokens.set(accessToken, as);
     return { accessToken, refreshToken: `ghr_fake_${issued}` };
   }
 
+  // The user a request's token belongs to, or undefined.
   function authorized(req: Request) {
     const token = req.headers.get("authorization")?.replace(/^(Bearer|token) /, "");
-    return token !== undefined && validAccessTokens.has(token);
+    return token === undefined ? undefined : validAccessTokens.get(token);
   }
 
   return {

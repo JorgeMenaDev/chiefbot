@@ -12,7 +12,12 @@ export type BotToken = z.infer<typeof BotToken>;
 export const BotStatus = z.enum(["starting", "online", "stopped"]);
 export type BotStatus = z.infer<typeof BotStatus>;
 
-export const Bot = z.object({ id: BotId, name: z.string(), status: BotStatus });
+// Who drives the bot's screen. agent: the bot; a viewer only watches.
+// human: the user took over; agent input to the screen must wait until hand-back.
+export const ScreenControl = z.enum(["agent", "human"]);
+export type ScreenControl = z.infer<typeof ScreenControl>;
+
+export const Bot = z.object({ id: BotId, name: z.string(), status: BotStatus, screenControl: ScreenControl });
 export type Bot = z.infer<typeof Bot>;
 
 // Body of POST /bots.
@@ -27,7 +32,9 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 
 // Control → worker on the /worker WebSocket. `bound` names the one bot this
 // connection belongs to; control sends it right after it accepts the credential.
+// `screen-control` follows it, and comes again on every take-over and hand-back.
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), botId: BotId }),
+  z.object({ type: z.literal("screen-control"), control: ScreenControl }),
 ]);
 export type ControlToWorker = z.infer<typeof ControlToWorker>;

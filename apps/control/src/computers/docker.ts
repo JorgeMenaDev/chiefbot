@@ -4,7 +4,9 @@ import type { ComputerProvider } from "./computer.ts";
 
 // ComputerProvider on a local Docker Engine (Colima on the Mac). One container per
 // bot plus one named volume mounted as the bot's home (/home/bot, with the
-// workspace inside it). Talks to the Engine API over its unix socket.
+// workspace inside it). Talks to the Engine API over its unix socket. The
+// screen's websockify port is published on the host's loopback only, on a port
+// Docker picks; control is its one client.
 
 export type DockerProviderOptions = {
   // e.g. ~/.colima/default/docker.sock
@@ -13,7 +15,15 @@ export type DockerProviderOptions = {
   image: string;
 };
 
-const ContainerInspect = z.object({ State: z.object({ Running: z.boolean() }) });
+// websockify's port inside the computer (infra/computer/start.sh).
+const screenPort = "6080/tcp";
+
+const ContainerInspect = z.object({
+  State: z.object({ Running: z.boolean() }),
+  NetworkSettings: z.object({
+    Ports: z.record(z.string(), z.array(z.object({ HostIp: z.string(), HostPort: z.string() })).nullable()).nullable(),
+  }),
+});
 
 export function dockerProvider({ socketPath, image }: DockerProviderOptions): ComputerProvider {
   const container = (botId: BotId) => `chiefbot-${botId}`;
@@ -32,6 +42,11 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
     return res;
   }
 
+  async function inspect(botId: BotId) {
+    const res = await engine("GET", `/containers/${container(botId)}/json`, undefined, [404]);
+    return res.status === 404 ? null : ContainerInspect.parse(await res.json());
+  }
+
   return {
     async create({ botId, env }) {
       const labels = { "chiefbot.bot-id": botId };
@@ -40,7 +55,10 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
         Image: image,
         Env: Object.entries(env).map(([key, value]) => `${key}=${value}`),
         Labels: labels,
+        ExposedPorts: { [screenPort]: {} },
         HostConfig: {
+          // Empty HostPort: Docker picks a free one at each start.
+          PortBindings: { [screenPort]: [{ HostIp: "127.0.0.1", HostPort: "" }] },
           Mounts: [{ Type: "volume", Source: volume(botId), Target: "/home/bot" }],
           // tini as PID 1, so the worker gets SIGTERM and stop is quick.
           Init: true,
@@ -66,9 +84,15 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
     },
 
     async status(botId) {
-      const res = await engine("GET", `/containers/${container(botId)}/json`, undefined, [404]);
-      if (res.status === 404) return "absent";
-      return ContainerInspect.parse(await res.json()).State.Running ? "running" : "stopped";
+      const info = await inspect(botId);
+      if (!info) return "absent";
+      return info.State.Running ? "running" : "stopped";
+    },
+
+    async screenUrl(botId) {
+      const info = await inspect(botId);
+      const binding = info?.State.Running ? info.NetworkSettings.Ports?.[screenPort]?.[0] : undefined;
+      return binding ? `ws://127.0.0.1:${binding.HostPort}` : null;
     },
   };
 }

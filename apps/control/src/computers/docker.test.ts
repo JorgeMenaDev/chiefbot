@@ -57,3 +57,20 @@ test("destroy removes a running computer and keeps its volume unless asked to de
   await computers.destroy(botId, { deleteData: true });
   expect(engine.volumes.size).toBe(0);
 });
+
+test("the screen's websockify port is published on loopback only, and its URL exists while running", async () => {
+  const { engine, computers } = setup();
+  await computers.create(spec);
+
+  expect(engine.containers.get("chiefbot-bot_1")?.config).toMatchObject({
+    ExposedPorts: { "6080/tcp": {} },
+    HostConfig: { PortBindings: { "6080/tcp": [{ HostIp: "127.0.0.1", HostPort: "" }] } },
+  });
+  expect(await computers.screenUrl(botId)).toBeNull();
+
+  await computers.start(botId);
+  expect(await computers.screenUrl(botId)).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
+
+  await computers.stop(botId);
+  expect(await computers.screenUrl(botId)).toBeNull();
+});
