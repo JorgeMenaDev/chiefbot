@@ -21,6 +21,8 @@ Creating a bot needs Docker (Colima: `colima start`) and the `chiefbot-computer:
 
 **Tokens.** The broker hands a bot only its owner's access token, with more than two hours left, never the refresh token. When less is left it refreshes with GitHub's refresh grant (device-flow tokens need no client secret), one refresh at a time per user: a refresh invalidates the old pair, so concurrent requests share it. The refresh token sits in a `SecretStore`: locally encrypted (AES-256-GCM) in control's SQLite under the key in `CHIEFBOT_SECRET_KEY_FILE`; on GCP in Secret Manager. When GitHub refuses the refresh token (expired after 6 months unused, or the app was revoked on github.com), or the user clicks **Disconnect GitHub**, control forgets the sign-in: bots get a typed `reauth_needed` refusal, their turns end with "Sign in again", and the desktop shows a **Sign in again** notice. Disconnect does not revoke the app at GitHub (that needs a client secret): an access token already handed out works until it expires, at most 8 hours, unless you revoke the app at github.com/settings/applications.
 
+**Model per bot.** Each bot has its own Copilot model, chosen in the composer's model picker. Once a bot's worker connects, it lists the models the owner's Copilot plan offers on the bot's SDK session and reports them to control. Control keeps the latest list per user in SQLite (`GET /models`). Picking a model saves it on the bot (`PUT /bots/:id/model`). Every turn carries the bot's model, and the worker switches the session before the turn, so the conversation is kept. On Copilot Free only Auto can be picked: the SDK accepts a switch but every turn still runs on Auto, so the other models in Copilot's catalog show as locked rows with "Needs a paid Copilot plan". On a paid plan, models a Copilot policy turns off show locked too.
+
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
 `bun run dev` starts both apps. To run them apart: `bun run --cwd apps/control dev` and `bun run --cwd apps/desktop dev`.
@@ -94,6 +96,18 @@ Needs Colima running. Makes no Copilot calls.
 6. Click **Delete**, tick **Also delete its files** and confirm. The bot leaves the sidebar, and `docker ps -a`, `docker volume ls` and `docker network ls` show nothing for it. Without the tick, the volume `chiefbot-<bot id>-home` stays: remove it with `docker volume rm`.
 7. Clean up: `docker rmi chiefbot-computer:dev`.
 
+## Manual check: watch and take over a bot's screen
+
+Needs Colima running. Makes no Copilot calls.
+
+1. Run `bun run computer:build`, then `bun run dev`, sign in and create a bot.
+2. When the bot is **online**, the side pane shows its screen: Chromium on a 1280×800 desktop. The pane says **Watching. The bot drives.** Clicks and keys in the pane do nothing.
+3. `docker ps` shows no published port for the bot's container.
+4. Click **Take over**. The pane turns green and says **You have control. The bot waits.** Click Chromium's address bar in the pane and type. The text appears. The chat box says **Hand the screen back to message …** and will not send.
+5. Click **Hand back**. Typing in the pane does nothing again, and the chat sends.
+
+Take-over lives in control's memory, so restarting control hands the screen back to the agent. A chat turn already running when you take over is not paused.
+
 ## Manual check: one live Copilot reply
 
 Tests use a fake Copilot. This check makes **one** real Copilot chat on your plan (Copilot Free allows 200 a month) with the plan's default model (Auto on Free).
@@ -104,3 +118,15 @@ Tests use a fake Copilot. This check makes **one** real Copilot chat on your pla
 4. The chat shows your message, a status line while the bot works, possibly a tool row (for example a shell call), then a reply that streams in and names `/home/bot/workspace`. The status line goes away when the reply is done.
 5. Restart control (save a file in `apps/control`) and quit and start the desktop app. The conversation is still there.
 6. If the reply is an error instead: "Sign in again" means control lost your GitHub sign-in (click **Sign in again**); a `quota` or `rate_limit` error means the month's Free chats are used up.
+
+## Manual check: the model picker on a real plan
+
+Tests use a fake Copilot. Listing models makes no Copilot chat calls. Step 5 makes **one** chat.
+
+1. Run `bun run computer:build`, then `bun run dev`. Sign in with the GitHub account that has Copilot.
+2. Create a bot and wait until it is **online**.
+3. Click the model name under the message box (it says **Auto**). The list shows Auto first.
+   - On Copilot Free: every other row is greyed with a lock and says "Needs a paid Copilot plan". Clicking one does nothing.
+   - On a paid plan: the plan's models are selectable.
+4. If no other rows show, the SDK listed nothing. Run `docker logs chiefbot-<bot id>`: a `could not list Copilot models` line says why.
+5. On a paid plan only: pick a model, then send `Reply with one short sentence: which model are you?`. The reply should name the picked model's family (Claude, GPT…). Create a second bot and leave it on Auto: the first bot keeps its model.

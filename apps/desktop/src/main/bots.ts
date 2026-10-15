@@ -1,4 +1,5 @@
-import { Bot, ClientEvent, type BotId, type User } from "@chiefbot/contracts";
+import { Bot, ClientEvent, ModelOption, type BotId, type User } from "@chiefbot/contracts";
+import { z } from "zod";
 
 export type BotsOptions = {
   controlUrl: string;
@@ -75,5 +76,14 @@ export function createBots({ controlUrl, session, onChange, onUser, retryMs = 20
     stop: async (botId: BotId) => void (await call("POST", `/bots/${botId}/stop`)),
     remove: async (botId: BotId, { deleteData }: { deleteData: boolean }) =>
       void (await call("DELETE", `/bots/${botId}${deleteData ? "?deleteData=true" : ""}`)),
+    // The human drives the bot's screen until handBack; the agent's input waits meanwhile.
+    takeOver: async (botId: BotId) => void (await call("POST", `/bots/${botId}/take-over`)),
+    handBack: async (botId: BotId) => void (await call("POST", `/bots/${botId}/hand-back`)),
+
+    // The model picker's rows for the user's Copilot plan.
+    models: async () => z.array(ModelOption).parse(await (await call("GET", "/models")).json()),
+    // The bot's next turn runs on `model`.
+    setModel: async (botId: BotId, model: string) =>
+      Bot.parse(await (await call("PUT", `/bots/${botId}/model`, { model })).json()),
   };
 }

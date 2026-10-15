@@ -4,7 +4,7 @@ This runbook puts control and the bot computers on Google Cloud in London (`euro
 
 ## What gets created
 
-- **Network:** one VPC and subnet (`10.10.0.0/24`) with no public IPs. Cloud NAT gives outbound internet (GitHub, Copilot). The firewall lets in only IAP (SSH and control's port 7410) and bot VMs dialling control.
+- **Network:** one VPC and subnet (`10.10.0.0/24`) with no public IPs. Cloud NAT gives outbound internet (GitHub, Copilot). The firewall lets in only IAP (SSH and control's port 7410) and bot VMs dialling control. The bot screen needs no rule of its own: x11vnc listens only inside the bot container, and the worker carries it to control over that same outbound connection.
 - **Artifact Registry** repository `chiefbot` with two images: `control` and `computer`.
 - **Service accounts:** `chiefbot-control` (manages bot VMs and disks, and keeps users' GitHub refresh tokens in Secret Manager) and `chiefbot-computer` (pulls its image and writes logs, nothing else).
 - **Control VM** `chiefbot-control` (e2-medium, Container-Optimized OS) running the control image, with SQLite on its own 10 GB disk.
@@ -126,5 +126,4 @@ Makes no Copilot calls. Each bot costs about $0.09 per running hour.
 - GitHub refresh tokens are in Secret Manager, one secret `github-refresh-token-<user id>` each, with only the latest version enabled. Access tokens (8 hours) and expiry times stay in control's SQLite on the data disk.
 - The bot's credential (`CHIEFBOT_BOT_TOKEN`) stays in its VM's metadata (decided in ticket #8). Project members who can read VMs can read it. It gets only that one bot's owner's access token (8 hours at most, never a refresh token), and it stops working when the bot is deleted. Anyone with SSH to the VM (Owner, Editor, Compute Admin) could read it from the VM anyway. Moving it to Secret Manager needs a host-side fetch on Container-Optimized OS (no `gcloud` or `jq`), a secret per bot, and an IAM grant to the shared `chiefbot-computer` account that lets every bot VM read every bot's secret unless each bot gets its own service account. Revisit when the project gets members with read-only roles such as Compute Viewer.
 - Nothing stops idle bots automatically yet. **Stop** in the app is the only way.
-- The noVNC screen (ticket #5) needs port 6080 added to the `chiefbot-allow-iap` firewall rule.
 - No snapshot schedule backs up the control data disk.

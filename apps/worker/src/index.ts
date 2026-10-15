@@ -17,4 +17,5 @@ startWorker({
   // The bot's workspace on its own disk (the image's WORKDIR).
   copilot: copilotSdk({ workingDirectory: "/home/bot/workspace" }),
   onBound: (botId) => console.log(`worker connected to ${controlUrl} as ${botId}`),
+  onModelsError: (error) => console.error("could not list Copilot models:", error),
 });

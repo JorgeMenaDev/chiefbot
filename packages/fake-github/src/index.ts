@@ -26,9 +26,10 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
   const userCode = "ABCD-1234";
   const pending = [...pollErrors];
   let issued = 0;
-  const validAccessTokens = new Set<string>();
-  // Each unused refresh token and the access token issued with it.
-  const validRefreshTokens = new Map<string, string>();
+  // Each valid access token and the user it belongs to.
+  const validAccessTokens = new Map<string, FakeGitHubUser>();
+  // Each unused refresh token, with the access token issued with it and its user.
+  const validRefreshTokens = new Map<string, { accessToken: string; user: FakeGitHubUser }>();
   // Body of every POST to the token endpoint, so tests can check what was sent.
   const tokenRequests: Record<string, string>[] = [];
 
@@ -51,10 +52,10 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
           tokenRequests.push(body);
           // Like GitHub: a refresh issues a new pair and invalidates the old one.
           if (body.grant_type === "refresh_token") {
-            const oldAccessToken = validRefreshTokens.get(body.refresh_token ?? "");
-            if (oldAccessToken === undefined || !body.client_id) return Response.json({ error: "bad_refresh_token" });
+            const issuedWith = validRefreshTokens.get(body.refresh_token ?? "");
+            if (!issuedWith || !body.client_id) return Response.json({ error: "bad_refresh_token" });
             revoke(body.refresh_token ?? "");
-            return tokenResponse();
+            return tokenResponse(issuedWith.user);
           }
           if (body.device_code !== deviceCode) return Response.json({ error: "incorrect_device_code" });
           const error = pending.shift();
@@ -65,13 +66,15 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
       },
       "/user": {
         GET: (req) => {
-          if (!authorized(req)) return Response.json({ message: "Bad credentials" }, { status: 401 });
+          const user = authorized(req);
+          if (!user) return Response.json({ message: "Bad credentials" }, { status: 401 });
           return Response.json({ id: user.id, login: user.login });
         },
       },
       "/copilot_internal/user": {
         GET: (req) => {
-          if (!authorized(req)) return Response.json({ message: "Bad credentials" }, { status: 401 });
+          const user = authorized(req);
+          if (!user) return Response.json({ message: "Bad credentials" }, { status: 401 });
           if (!user.copilot) return Response.json({ message: "Not Found" }, { status: 404 });
           return Response.json({ login: user.login, copilot_plan: user.copilot.plan, access_type_sku: user.copilot.sku });
         },
@@ -79,18 +82,19 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
     },
   });
 
-  // Mints a token pair GitHub accepts, as if the user finished the device flow.
-  function issueTokens() {
+  // Mints a token pair GitHub accepts, as if `as` (default: the fake's user)
+  // finished the device flow.
+  function issueTokens(as: FakeGitHubUser = user) {
     issued += 1;
     const accessToken = `gho_fake_${issued}`;
     const refreshToken = `ghr_fake_${issued}`;
-    validAccessTokens.add(accessToken);
-    validRefreshTokens.set(refreshToken, accessToken);
+    validAccessTokens.set(accessToken, as);
+    validRefreshTokens.set(refreshToken, { accessToken, user: as });
     return { accessToken, refreshToken };
   }
 
-  function tokenResponse() {
-    const { accessToken, refreshToken } = issueTokens();
+  function tokenResponse(as: FakeGitHubUser = user) {
+    const { accessToken, refreshToken } = issueTokens(as);
     return Response.json({
       access_token: accessToken,
       expires_in: 28800,
@@ -104,13 +108,14 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
   // Invalidates a refresh token and its access token, as a refresh or the user
   // revoking the app on github.com does.
   function revoke(refreshToken: string) {
-    validAccessTokens.delete(validRefreshTokens.get(refreshToken) ?? "");
+    validAccessTokens.delete(validRefreshTokens.get(refreshToken)?.accessToken ?? "");
     validRefreshTokens.delete(refreshToken);
   }
 
+  // The user a request's token belongs to, or undefined.
   function authorized(req: Request) {
     const token = req.headers.get("authorization")?.replace(/^(Bearer|token) /, "");
-    return token !== undefined && validAccessTokens.has(token);
+    return token === undefined ? undefined : validAccessTokens.get(token);
   }
 
   return {

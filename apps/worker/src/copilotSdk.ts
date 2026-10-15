@@ -10,7 +10,7 @@ export function copilotSdk({ workingDirectory }: { workingDirectory: string }): 
   const client = new CopilotClient({ mode: "copilot-cli", workingDirectory, useLoggedInUser: false });
   return {
     async openSession({ sessionId, gitHubTokenProvider }) {
-      // No model: the plan's default (Auto on Copilot Free). Ticket #4 adds a model per bot.
+      // No model here: the worker sets the bot's model before each turn that needs it.
       // Every tool call is approved; ticket #6 asks the user before a push.
       const config = { gitHubTokenProvider, workingDirectory, streaming: true, onPermissionRequest: approveAll };
       await client.start();
