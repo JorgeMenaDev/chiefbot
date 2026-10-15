@@ -15,6 +15,8 @@ export type RoutineHost = {
   setRunning(userId: UserId, botId: BotId, running: boolean): Promise<void>;
   // Resolves once the bot's worker is connected.
   online(botId: BotId): Promise<void>;
+  // Whether the human has taken over the bot's screen: its running turn waits for hand-back.
+  humanHasScreen(botId: BotId): boolean;
   // Sends text as a chat turn, the way a user's message goes. `done` resolves
   // when the turn ends, with its error message if it failed.
   runTurn(userId: UserId, botId: BotId, text: string): { turnId: TurnId; done: Promise<string | null> } | { error: TurnRefusal };
@@ -32,8 +34,8 @@ const refused: Record<TurnRefusal, { status: Exclude<RoutineRun["status"], "runn
 // A run starts the bot's computer if it is stopped, waits for its worker, sends
 // the prompt as a chat turn (its result lands in the bot's chat history) and
 // stops the computer again if the run started it. Runs of one bot go one at a
-// time. A run that times out while its turn waits on an approval keeps the
-// computer running until that turn ends. Runs that a previous control left unfinished are marked failed, and
+// time. A run that times out while its turn waits on an approval, or is paused
+// by take-over, keeps the computer running until that turn ends. Runs that a previous control left unfinished are marked failed, and
 // their computers stopped again if they started them; they are not run again.
 export function startScheduler({
   store,
@@ -98,10 +100,12 @@ export function startScheduler({
       // After stop() the store is closed; the next control finishes the run.
       if (!stopped) store.finishRun(run, "failed", error instanceof Error ? error.message : String(error));
     } finally {
-      // A turn waiting on the user's approval keeps its computer, so the approval
-      // stays answerable after the run timed out. The computer stops once that turn ends.
+      // A turn waiting on the user's approval, or paused while the human has the
+      // screen, keeps its computer, so the approval stays answerable and hand-back
+      // finds the turn after the run timed out. The computer stops once that turn ends.
       if (startedComputer && !stopped) {
-        if (!store.waitingOnApproval(run.botId)) await stopComputer(run.userId, run.botId);
+        const paused = store.waitingOnApproval(run.botId) || (turnDone !== null && host.humanHasScreen(run.botId));
+        if (!paused) await stopComputer(run.userId, run.botId);
         else void turnDone?.then(() => (stopped ? undefined : stopComputer(run.userId, run.botId)));
       }
     }

@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { ApiError, Routine, type BotId, type RoutineInput } from "@chiefbot/contracts";
-import { sdk } from "@chiefbot/worker/fake-copilot";
+import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
+import { tmpdir } from "node:os";
 import { fakeClock } from "./clock.ts";
 import { TURN_TIMEOUT_MS, WORKER_TIMEOUT_MS } from "./routines.ts";
 import { cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
@@ -14,7 +15,7 @@ const daily: RoutineInput = { prompt: "Summarise my inbox", cron: "0 9 * * *", t
 
 // Control on a fake clock, with bot computers whose workers run a fake Copilot.
 // `down` stops control; `up` starts it again on the same port, database and clock.
-async function setup(options: Pick<TestControlOptions, "provider" | "accessTokenLeftMs" | "refreshTokenLeftMs"> = {}) {
+async function setup(options: Pick<TestControlOptions, "provider" | "copilot" | "accessTokenLeftMs" | "refreshTokenLeftMs"> = {}) {
   const time = fakeClock(start);
   // A day of idle stop, so it stays out of these hour-long runs (idle.test.ts covers it).
   const control = await startTestControl({ ...options, persistent: true, clock: time.clock, idleStopMinutes: 24 * 60 });
@@ -191,6 +192,37 @@ test("a routine turn waiting on an approval keeps its computer after the timeout
   });
 
   expect(answer.status).toBe(204);
+  await eventually(async () => (await chat(ada.id)).at(-1)?.type === "done");
+  await eventually(async () => (await statusOf(ada.id)) === "stopped");
+  expect(await computers.provider.status(ada.id)).toBe("stopped");
+});
+
+test("a routine turn paused by take-over keeps its computer after the timeout until hand-back, then stops it", async () => {
+  const { time, computers, api, bot, statusOf, addRoutine, routines, chat } = await setup({
+    copilot: fakeCopilot({ shell: { cwd: tmpdir(), env: { PATH: process.env.PATH ?? "" } } }),
+  });
+  let release = () => {};
+  const paused = new Promise<void>((resolve) => (release = resolve));
+  computers.copilot.script = async function* (_prompt, runtime) {
+    yield sdk.delta("msg-1", "Opening the browser");
+    await paused;
+    await runtime.shell("echo clicked");
+    yield sdk.idle();
+  };
+  const ada = await bot();
+  await addRoutine(ada.id);
+  time.advance(nineLondon - start);
+  await eventually(async () => (await chat(ada.id)).some((event) => event.type === "text-delta"));
+  await api("POST", `/bots/${ada.id}/take-over`);
+  await eventually(() => computers.computers.get(ada.id)?.worker?.screenControl() === "human");
+  release();
+
+  time.advance(TURN_TIMEOUT_MS);
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "failed");
+  await Bun.sleep(50);
+  expect(await computers.provider.status(ada.id)).toBe("running");
+
+  await api("POST", `/bots/${ada.id}/hand-back`);
   await eventually(async () => (await chat(ada.id)).at(-1)?.type === "done");
   await eventually(async () => (await statusOf(ada.id)) === "stopped");
   expect(await computers.provider.status(ada.id)).toBe("stopped");

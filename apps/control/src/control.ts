@@ -498,7 +498,12 @@ export function startControl({
   const scheduler = startScheduler({
     store,
     clock,
-    host: { setRunning, online: turns.online, runTurn: turns.runTurn },
+    host: {
+      setRunning,
+      online: turns.online,
+      humanHasScreen: (botId) => screens.controlOf(botId) === "human",
+      runTurn: turns.runTurn,
+    },
   });
 
   // Pending approvals belong to unfinished turns, so those count as busy too.
