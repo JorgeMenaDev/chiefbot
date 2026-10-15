@@ -1,5 +1,5 @@
 import type { PermissionRequest, SessionEvent } from "@github/copilot-sdk";
-import type { BotSession, Copilot } from "./copilot.ts";
+import type { BotSession, Copilot, SdkModelList } from "./copilot.ts";
 
 // A fake Copilot SDK for tests. Each send() plays a script of real-shaped SDK
 // session events. The default script echoes the prompt with one tool call.
@@ -15,17 +15,23 @@ export type FakeRuntime = {
   tool(name: string, args: unknown): Promise<{ approved: boolean; result: unknown }>;
 };
 
+// What every session's model listing returns. The default is Copilot Free with an empty catalog.
+export type FakeModels = SdkModelList;
+
 export type FakeCopilotOptions = {
   script?: FakeScript;
+  models?: FakeModels;
   // Where runtime.shell runs commands, and with which environment.
   shell?: { cwd: string; env: Record<string, string> };
 };
 
-export function fakeCopilot({ script = echo, shell }: FakeCopilotOptions = {}) {
+export function fakeCopilot({ script = echo, models = { list: [] }, shell }: FakeCopilotOptions = {}) {
   // The access token each opened session got from its gitHubTokenProvider.
   const tokens: string[] = [];
   // Ids of every session opened, in order (a resume counts again).
   const sessionIds: string[] = [];
+  // Every turn started, with the model its session was on ("default" before any setModel).
+  const sends: Array<{ sessionId: string; prompt: string; model: string }> = [];
 
   const copilot: Copilot = {
     async openSession({ sessionId, gitHubTokenProvider, onPermissionRequest, tools }) {
@@ -55,24 +61,30 @@ export function fakeCopilot({ script = echo, shell }: FakeCopilotOptions = {}) {
           return { approved: true, result };
         },
       };
+      let model = "default";
       const session: BotSession = {
         on(handler) {
           handlers.add(handler);
           return () => void handlers.delete(handler);
         },
         async send(prompt) {
+          sends.push({ sessionId, prompt, model });
           // Like the SDK: send returns once the message is admitted; events follow.
           void (async () => {
             for await (const event of fake.script(prompt, runtime)) for (const handler of handlers) handler(event);
           })();
           return "user-msg";
         },
+        async setModel(next) {
+          model = next;
+        },
+        rpc: { model: { list: async () => models } },
       };
       return session;
     },
   };
 
-  const fake = { copilot, tokens, sessionIds, script, shell };
+  const fake = { copilot, tokens, sessionIds, sends, script, shell };
   return fake;
 }
 

@@ -21,4 +21,5 @@ startWorker({
   ...(process.env.CHIEFBOT_GITHUB_API_URL ? { githubApiUrl: process.env.CHIEFBOT_GITHUB_API_URL } : {}),
   gitCredentialSocket: defaultGitCredentialSocket,
   onBound: (botId) => console.log(`worker connected to ${controlUrl} as ${botId}`),
+  onModelsError: (error) => console.error("could not list Copilot models:", error),
 });

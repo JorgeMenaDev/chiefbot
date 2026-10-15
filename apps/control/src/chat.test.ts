@@ -41,9 +41,10 @@ async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
   // A new bot, once its worker is connected.
   const onlineBot = async (name: string) => {
     const bot = Bot.parse(await (await api("POST", "/bots", { name })).json());
-    await until(control.url, auth, "/events", (event) =>
-      ClientEvent.parse(event).bots.some(({ id, status }) => id === bot.id && status === "online"),
-    );
+    await until(control.url, auth, "/events", (event) => {
+      const message = ClientEvent.parse(event);
+      return message.type === "bots" && message.bots.some(({ id, status }) => id === bot.id && status === "online");
+    });
     return bot;
   };
   const send = async (botId: BotId, text: string) => {
@@ -205,6 +206,19 @@ test("a message is refused while the bot is offline or still on a turn", async (
 
   expect([busy.status, await busy.json()]).toEqual([409, { error: "turn_running" }]);
   expect([offline.status, await offline.json()]).toEqual([409, { error: "bot_offline" }]);
+});
+
+test("the agent waits while the human has the screen: a message is refused until hand-back", async () => {
+  const { api, onlineBot } = await setup();
+  const bot = await onlineBot("Ada");
+
+  await api("POST", `/bots/${bot.id}/take-over`);
+  const waiting = await api("POST", `/bots/${bot.id}/messages`, { text: "go on" });
+  await api("POST", `/bots/${bot.id}/hand-back`);
+  const resumed = await api("POST", `/bots/${bot.id}/messages`, { text: "go on" });
+
+  expect([waiting.status, await waiting.json()]).toEqual([409, { error: "human_has_screen" }]);
+  expect(resumed.status).toBe(202);
 });
 
 test("the token broker gives a bot's worker its owner's access token only, and nobody else anything", async () => {

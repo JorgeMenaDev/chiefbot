@@ -50,7 +50,12 @@ async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {
     method: "POST",
-    body: JSON.stringify({ accessToken, accessTokenExpiresAt: Date.now() + 8 * 3600_000, refreshToken, refreshTokenExpiresAt: 0 }),
+    body: JSON.stringify({
+      accessToken,
+      accessTokenExpiresAt: Date.now() + 8 * 3600_000,
+      refreshToken,
+      refreshTokenExpiresAt: Date.now() + 180 * 86400_000,
+    }),
   });
   const { sessionToken } = SignInResponse.parse(await signIn.json());
   const auth = { authorization: `Bearer ${sessionToken}` };
@@ -61,7 +66,8 @@ async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
   await new Promise<void>((resolve) => {
     const socket = new WebSocket(`${control.url.replace("http", "ws")}/events`, { headers: auth });
     socket.onmessage = (event) => {
-      if (!ClientEvent.parse(JSON.parse(String(event.data))).bots.some((b) => b.status === "online")) return;
+      const message = ClientEvent.parse(JSON.parse(String(event.data)));
+      if (message.type !== "bots" || !message.bots.some((b) => b.status === "online")) return;
       socket.close();
       resolve();
     };
@@ -242,4 +248,25 @@ test("an approval whose turn ended because the bot restarted can no longer be an
 
   expect(late.status).toBe(409);
   expect(github.git("octo/demo", "branch", "--list", "fix-typo")).toBe("");
+});
+
+test("after the owner disconnects GitHub, git in the bot computer gets no token and says to sign in again", async () => {
+  const { github, copilot, control, auth, api, botId } = await setup();
+  let release = () => {};
+  const disconnected = new Promise<void>((resolve) => (release = resolve));
+  const results: ShellResult[] = [];
+  copilot.script = async function* (_prompt, runtime) {
+    await disconnected;
+    results.push(await runtime.shell(`git clone -q ${github.url}/octo/demo.git demo`));
+    yield sdk.idle();
+  };
+  const chat = watchChat(control.url, auth, botId);
+  await api("POST", `/bots/${botId}/messages`, { text: "Clone octo/demo" });
+
+  await api("DELETE", "/me/github");
+  release();
+  await chat.until(done);
+
+  expect(results[0]?.exitCode).not.toBe(0);
+  expect(results[0]?.output).toContain("Sign in again in the Chiefbot app");
 });

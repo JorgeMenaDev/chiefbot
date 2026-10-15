@@ -4,7 +4,11 @@
 
 https://github.com/pingdotgg/t3code
 
-Used in: the bot status dot in `apps/desktop/src/renderer` (colour per status and the ping while starting) is adapted from `apps/web/src/components/ConnectionStatusDot.tsx`. The approval card in `apps/desktop/src/renderer/src/App.tsx` (label per request kind, the exact command in monospace, Decline and Approve) is adapted from `apps/web/src/components/chat/ComposerPendingApprovalPanel.tsx` and `ComposerPendingApprovalActions.tsx`.
+Used in:
+
+- the bot status dot in `apps/desktop/src/renderer` (colour per status and the ping while starting) is adapted from `apps/web/src/components/ConnectionStatusDot.tsx`.
+- the model picker in `apps/desktop/src/renderer` (`ModelPicker`, `ModelRow`) is adapted from `apps/web/src/components/chat/ProviderModelPicker.tsx` and `ModelListRow.tsx`, through Chartpilot's port (https://github.com/JorgeMenaDev/chartpilot, `components/composer-controls.tsx`). Its Copilot mark is GitHub's Octicon (MIT).
+- the approval card in `apps/desktop/src/renderer/src/App.tsx` (`ApprovalCard`: label per request kind, the exact command in monospace, Decline and Approve) is adapted from `apps/web/src/components/chat/ComposerPendingApprovalPanel.tsx` and `ComposerPendingApprovalActions.tsx`.
 
 ```
 MIT License
@@ -29,3 +33,9 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## noVNC
+
+https://github.com/novnc/noVNC
+
+Used in: the bot screen in `apps/desktop/src/renderer` runs the `@novnc/novnc` npm package (1.7, unmodified) as its VNC client. noVNC is licensed under the Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/). Its source is at the link above and in `node_modules/@novnc/novnc`.

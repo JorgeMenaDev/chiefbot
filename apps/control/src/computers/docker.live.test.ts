@@ -12,7 +12,7 @@ const socketPath = process.env.CHIEFBOT_DOCKER_SOCKET ?? join(homedir(), ".colim
 const image = process.env.CHIEFBOT_COMPUTER_IMAGE ?? "chiefbot-computer:dev";
 
 test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
-  "a bot's container starts, its worker comes online, and stop and delete clean up",
+  "a bot's container starts, its worker comes online, its screen greets through control, and stop and delete clean up",
   async () => {
     const github = startFakeGitHub();
     const computers = dockerProvider({ socketPath, image });
@@ -31,7 +31,12 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
       const { accessToken, refreshToken } = github.issueTokens();
       const signIn = await fetch(`${live.url}/sessions`, {
         method: "POST",
-        body: JSON.stringify({ accessToken, accessTokenExpiresAt: 0, refreshToken, refreshTokenExpiresAt: 0 }),
+        body: JSON.stringify({
+          accessToken,
+          accessTokenExpiresAt: Date.now() + 8 * 3600_000,
+          refreshToken,
+          refreshTokenExpiresAt: Date.now() + 180 * 86400_000,
+        }),
       });
       const auth = { authorization: `Bearer ${SignInResponse.parse(await signIn.json()).sessionToken}` };
       const listBots = async () => Bot.array().parse(await (await fetch(`${live.url}/bots`, { headers: auth })).json());
@@ -41,6 +46,18 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
       expect(await computers.status(bot.id)).toBe("running");
       for (let i = 0; i < 100 && (await listBots())[0]?.status !== "online"; i++) await Bun.sleep(200);
       expect((await listBots())[0]?.status).toBe("online");
+
+      // Its screen's VNC server greets a viewer through control (Xvfb and x11vnc are up).
+      const viewer = new WebSocket(`${live.url.replace("http", "ws")}/bots/${bot.id}/screen`, { headers: auth });
+      viewer.binaryType = "arraybuffer";
+      const greeting = await new Promise<string>((resolve, reject) => {
+        viewer.onmessage = (event) =>
+          resolve(event.data instanceof ArrayBuffer ? new TextDecoder().decode(event.data) : String(event.data));
+        viewer.onclose = () => reject(new Error("screen closed before the VNC greeting"));
+      });
+      viewer.onclose = null;
+      viewer.close();
+      expect(greeting).toBe("RFB 003.008\n");
 
       await fetch(`${live.url}/bots/${bot.id}/stop`, { method: "POST", headers: auth });
       expect(await computers.status(bot.id)).toBe("stopped");

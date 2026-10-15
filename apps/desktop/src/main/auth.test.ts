@@ -49,6 +49,7 @@ test("sign-in shows the code, then the login and Copilot plan; sign-out clears t
         id: expect.any(String),
         login: "octo-jorge",
         copilotPlan: { plan: "individual", sku: "free_limited_copilot" },
+        needsGitHubSignIn: false,
       },
     },
     { status: "signed-out" },
@@ -66,4 +67,17 @@ test("the next launch restores the signed-in user from the saved session", async
   await auth.restore();
 
   expect(auth.state()).toMatchObject({ status: "signed-in", user: { login: "octo-jorge" } });
+});
+
+test("disconnecting GitHub keeps the session and asks for sign-in; signing in again restores GitHub", async () => {
+  const { launch } = setup();
+  const { auth, states } = launch();
+  await auth.signIn();
+
+  await auth.disconnectGitHub();
+  const disconnected = auth.state();
+  await auth.signIn();
+
+  expect(disconnected).toMatchObject({ status: "signed-in", user: { needsGitHubSignIn: true } });
+  expect(states.at(-1)).toMatchObject({ status: "signed-in", user: { needsGitHubSignIn: false } });
 });

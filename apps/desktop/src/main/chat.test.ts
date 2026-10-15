@@ -32,7 +32,8 @@ async function setup() {
   await new Promise<void>((resolve) => {
     const socket = new WebSocket(`${control.url.replace("http", "ws")}/events`, { headers });
     socket.onmessage = (event) => {
-      if (!ClientEvent.parse(JSON.parse(String(event.data))).bots.some((b) => b.status === "online")) return;
+      const message = ClientEvent.parse(JSON.parse(String(event.data)));
+      if (message.type !== "bots" || !message.bots.some((b) => b.status === "online")) return;
       socket.close();
       resolve();
     };
