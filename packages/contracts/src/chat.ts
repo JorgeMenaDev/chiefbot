@@ -39,10 +39,17 @@ export type SendMessageRequest = z.infer<typeof SendMessageRequest>;
 export const SendMessageResponse = z.object({ turnId: TurnId });
 export type SendMessageResponse = z.infer<typeof SendMessageResponse>;
 
-// Response of GET /worker/github-token: the bot owner's GitHub access token for
-// the Copilot SDK. Never a refresh token. expiresAt is epoch milliseconds.
+// Response of GET /worker/:botId/github-token: the bot owner's GitHub access token
+// for the Copilot SDK, with more than two hours left. Never a refresh token.
+// expiresAt is epoch milliseconds.
 export const BrokeredGitHubToken = z.object({ accessToken: z.string().min(1), expiresAt: z.number().int() });
 export type BrokeredGitHubToken = z.infer<typeof BrokeredGitHubToken>;
+
+// The broker's 403 when control holds no usable GitHub sign-in for the bot's
+// owner (it expired, GitHub revoked it, or the owner disconnected GitHub). Bots
+// get no token until the owner signs in again in the desktop app.
+export const BrokerRefusal = z.object({ error: z.literal("reauth_needed") });
+export type BrokerRefusal = z.infer<typeof BrokerRefusal>;
 
 // A bot's chat as the desktop window shows it, folded from ChatEvents.
 // Sent from Electron main to the renderer.

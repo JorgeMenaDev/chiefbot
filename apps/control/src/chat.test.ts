@@ -41,9 +41,10 @@ async function setup({ dbPath = ":memory:" }: { dbPath?: string } = {}) {
   // A new bot, once its worker is connected.
   const onlineBot = async (name: string) => {
     const bot = Bot.parse(await (await api("POST", "/bots", { name })).json());
-    await until(control.url, auth, "/events", (event) =>
-      ClientEvent.parse(event).bots.some(({ id, status }) => id === bot.id && status === "online"),
-    );
+    await until(control.url, auth, "/events", (event) => {
+      const message = ClientEvent.parse(event);
+      return message.type === "bots" && message.bots.some(({ id, status }) => id === bot.id && status === "online");
+    });
     return bot;
   };
   const send = async (botId: BotId, text: string) => {

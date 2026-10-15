@@ -1,4 +1,12 @@
-import { BotId, CreateBotRequest, RoutineId, RoutineInput, SendMessageRequest } from "@chiefbot/contracts";
+import {
+  BotId,
+  CreateBotRequest,
+  defaultGitHubClientId,
+  RoutineId,
+  RoutineInput,
+  SendMessageRequest,
+  SetBotModelRequest,
+} from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,7 +21,7 @@ import { createRoutines } from "./routines.ts";
 //   CHIEFBOT_GITHUB_CLIENT_ID default Chartpilot's public OAuth App (device flow, no secret)
 const controlUrl = process.env.CHIEFBOT_CONTROL_URL ?? "http://127.0.0.1:7410";
 const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
-const clientId = process.env.CHIEFBOT_GITHUB_CLIENT_ID ?? "Ov23liONZsgOtJmCUaGB";
+const clientId = process.env.CHIEFBOT_GITHUB_CLIENT_ID ?? defaultGitHubClientId;
 
 // The control session token, kept in the app's user-data folder.
 function fileSessionStore(path: string): SessionStore {
@@ -37,6 +45,7 @@ const bots = createBots({
   controlUrl,
   session: sessionStore.load,
   onChange: (list) => window?.webContents.send("bots:state", list),
+  onUser: (user) => auth.userChanged(user),
 });
 
 const chats = createChats({
@@ -64,12 +73,17 @@ const auth = createAuth({
 ipcMain.handle("auth:get", () => auth.state());
 ipcMain.handle("auth:sign-in", () => auth.signIn());
 ipcMain.handle("auth:sign-out", () => auth.signOut());
+ipcMain.handle("auth:disconnect-github", () => auth.disconnectGitHub());
 
 // Renderer arguments are untrusted, so each is parsed before it reaches control.
 ipcMain.handle("bots:get", () => bots.list());
 ipcMain.handle("bots:create", (_event, name: unknown) => bots.create(CreateBotRequest.parse({ name }).name));
 ipcMain.handle("bots:start", (_event, id: unknown) => bots.start(BotId.parse(id)));
 ipcMain.handle("bots:stop", (_event, id: unknown) => bots.stop(BotId.parse(id)));
+ipcMain.handle("bots:models", () => bots.models());
+ipcMain.handle("bots:set-model", (_event, id: unknown, model: unknown) =>
+  bots.setModel(BotId.parse(id), SetBotModelRequest.parse({ model }).model),
+);
 ipcMain.handle("bots:take-over", (_event, id: unknown) => bots.takeOver(BotId.parse(id)));
 ipcMain.handle("bots:hand-back", (_event, id: unknown) => bots.handBack(BotId.parse(id)));
 // noVNC in the renderer opens this WebSocket; main signs it below.

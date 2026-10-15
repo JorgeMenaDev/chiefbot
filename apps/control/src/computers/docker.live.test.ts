@@ -31,7 +31,12 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
       const { accessToken, refreshToken } = github.issueTokens();
       const signIn = await fetch(`${live.url}/sessions`, {
         method: "POST",
-        body: JSON.stringify({ accessToken, accessTokenExpiresAt: 0, refreshToken, refreshTokenExpiresAt: 0 }),
+        body: JSON.stringify({
+          accessToken,
+          accessTokenExpiresAt: Date.now() + 8 * 3600_000,
+          refreshToken,
+          refreshTokenExpiresAt: Date.now() + 180 * 86400_000,
+        }),
       });
       const auth = { authorization: `Bearer ${SignInResponse.parse(await signIn.json()).sessionToken}` };
       const listBots = async () => Bot.array().parse(await (await fetch(`${live.url}/bots`, { headers: auth })).json());

@@ -1,6 +1,10 @@
 import { z } from "zod";
 import { UserId } from "./ids.ts";
 
+// Chartpilot's public OAuth App: device flow, no client secret, expiring tokens.
+// The desktop signs in with it and control refreshes with it, so both must agree.
+export const defaultGitHubClientId = "Ov23liONZsgOtJmCUaGB";
+
 // Opaque bearer token the control plane issues to a signed-in desktop.
 export const SessionToken = z.string().min(1).brand<"SessionToken">();
 export type SessionToken = z.infer<typeof SessionToken>;
@@ -22,10 +26,14 @@ export const CopilotPlan = z.object({ plan: z.string(), sku: z.string() }).nulla
 export type CopilotPlan = z.infer<typeof CopilotPlan>;
 
 // A user as control shows it to clients. Never carries GitHub tokens.
+// needsGitHubSignIn: control has no usable GitHub sign-in for them (it expired,
+// GitHub revoked it, or they disconnected GitHub), so their bots get no token
+// until they sign in again.
 export const User = z.object({
   id: UserId,
   login: z.string(),
   copilotPlan: CopilotPlan,
+  needsGitHubSignIn: z.boolean(),
 });
 export type User = z.infer<typeof User>;
 

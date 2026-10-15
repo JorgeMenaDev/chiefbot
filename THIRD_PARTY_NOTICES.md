@@ -4,7 +4,10 @@
 
 https://github.com/pingdotgg/t3code
 
-Used in: the bot status dot in `apps/desktop/src/renderer` (colour per status and the ping while starting) is adapted from `apps/web/src/components/ConnectionStatusDot.tsx`.
+Used in:
+
+- the bot status dot in `apps/desktop/src/renderer` (colour per status and the ping while starting) is adapted from `apps/web/src/components/ConnectionStatusDot.tsx`.
+- the model picker in `apps/desktop/src/renderer` (`ModelPicker`, `ModelRow`) is adapted from `apps/web/src/components/chat/ProviderModelPicker.tsx` and `ModelListRow.tsx`, through Chartpilot's port (https://github.com/JorgeMenaDev/chartpilot, `components/composer-controls.tsx`). Its Copilot mark is GitHub's Octicon (MIT).
 
 ```
 MIT License

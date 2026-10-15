@@ -7,9 +7,18 @@ export type Copilot = {
   openSession(options: { sessionId: string; gitHubTokenProvider: GitHubTokenProvider }): Promise<BotSession>;
 };
 
+// What the session's model listing returns (the SDK's SessionModelList, the parts the
+// worker reads). `list` entries are untyped JSON in the SDK. On Copilot Free `list` is
+// empty and only `modelPriceCategories` names the catalog.
+export type SdkModelList = { list: unknown[]; modelPriceCategories?: ReadonlyArray<{ id: string }> };
+
 export type BotSession = {
   // Every event of the session, for as long as it is open. Returns the unsubscribe.
   on(handler: (event: SessionEvent) => void): () => void;
   // Starts a turn. Its events follow through on(), ending with session.idle.
   send(prompt: string): Promise<unknown>;
+  // Runs the next turns on `model`. The conversation is kept.
+  setModel(model: string): Promise<void>;
+  // Lists models with the session's own auth, so for the bot owner's plan.
+  rpc: { model: { list(): Promise<SdkModelList> } };
 };

@@ -1,7 +1,8 @@
 import { z } from "zod";
-import type { CopilotPlan } from "@chiefbot/contracts";
+import type { CopilotPlan, GitHubTokens } from "@chiefbot/contracts";
 
-// The two GitHub reads control makes with a user's access token at sign-in.
+// Control's GitHub calls: the two reads it makes with a user's access token at
+// sign-in, and the refresh grant.
 
 const GitHubUserResponse = z.object({ id: z.number().int(), login: z.string() });
 const CopilotUserResponse = z.object({ copilot_plan: z.string(), access_type_sku: z.string() });
@@ -30,4 +31,38 @@ export async function fetchIdentity(apiUrl: string, accessToken: string): Promis
     throw new Error(`GitHub /copilot_internal/user failed: ${copilotRes.status}`);
   }
   return { githubId: user.id, login: user.login, copilotPlan };
+}
+
+const RefreshResponse = z.union([
+  z.object({
+    access_token: z.string().min(1),
+    expires_in: z.number(),
+    refresh_token: z.string().min(1),
+    refresh_token_expires_in: z.number(),
+  }),
+  z.object({ error: z.string() }),
+]);
+
+// Trades a refresh token for a new pair; the old pair stops working. Tokens from
+// the device flow need no client secret. Null when GitHub refuses the refresh
+// token (expired, already used, or the user revoked the app); throws on any other failure.
+export async function refreshGitHubTokens(githubUrl: string, clientId: string, refreshToken: string): Promise<GitHubTokens | null> {
+  const res = await fetch(`${githubUrl}/login/oauth/access_token`, {
+    method: "POST",
+    headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ client_id: clientId, grant_type: "refresh_token", refresh_token: refreshToken }),
+  });
+  if (!res.ok) throw new Error(`GitHub refresh failed: ${res.status}`);
+  const body = RefreshResponse.parse(await res.json());
+  if ("error" in body) {
+    if (body.error === "bad_refresh_token") return null;
+    throw new Error(`GitHub refresh failed: ${body.error}`);
+  }
+  const issuedAt = Date.now();
+  return {
+    accessToken: body.access_token,
+    accessTokenExpiresAt: issuedAt + body.expires_in * 1000,
+    refreshToken: body.refresh_token,
+    refreshTokenExpiresAt: issuedAt + body.refresh_token_expires_in * 1000,
+  };
 }

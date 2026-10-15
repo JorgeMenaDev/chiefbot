@@ -17,7 +17,7 @@ export type RoutineHost = {
   online(botId: BotId): Promise<void>;
   // Sends text as a chat turn, the way a user's message goes. `done` resolves
   // when the turn ends, with its error message if it failed.
-  runTurn(botId: BotId, text: string): { turnId: TurnId; done: Promise<string | null> } | { error: TurnRefusal };
+  runTurn(userId: UserId, botId: BotId, text: string): { turnId: TurnId; done: Promise<string | null> } | { error: TurnRefusal };
 };
 
 type TurnRefusal = "bot_offline" | "turn_running" | "human_has_screen";
@@ -83,7 +83,7 @@ export function startScheduler({
         await host.setRunning(run.userId, run.botId, true);
       }
       await within(host.online(run.botId), WORKER_TIMEOUT_MS, "The bot's computer did not come online in time.");
-      const turn = host.runTurn(run.botId, run.prompt);
+      const turn = host.runTurn(run.userId, run.botId, run.prompt);
       if ("error" in turn) {
         const { status, error } = refused[turn.error];
         return store.finishRun(run, status, error);

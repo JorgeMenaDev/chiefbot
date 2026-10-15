@@ -1,5 +1,5 @@
-// A fake github.com + api.github.com for tests: the OAuth device flow and the two
-// API reads control makes. One origin serves both hosts' paths.
+// A fake github.com + api.github.com for tests: the OAuth device flow, the
+// refresh grant and the two API reads control makes. One origin serves both hosts' paths.
 
 export type FakeGitHubUser = {
   id: number;
@@ -28,6 +28,8 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
   let issued = 0;
   // Each valid access token and the user it belongs to.
   const validAccessTokens = new Map<string, FakeGitHubUser>();
+  // Each unused refresh token, with the access token issued with it and its user.
+  const validRefreshTokens = new Map<string, { accessToken: string; user: FakeGitHubUser }>();
   // Body of every POST to the token endpoint, so tests can check what was sent.
   const tokenRequests: Record<string, string>[] = [];
 
@@ -48,19 +50,18 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
         POST: async (req) => {
           const body = Object.fromEntries(new URLSearchParams(await req.text()));
           tokenRequests.push(body);
+          // Like GitHub: a refresh issues a new pair and invalidates the old one.
+          if (body.grant_type === "refresh_token") {
+            const issuedWith = validRefreshTokens.get(body.refresh_token ?? "");
+            if (!issuedWith || !body.client_id) return Response.json({ error: "bad_refresh_token" });
+            revoke(body.refresh_token ?? "");
+            return tokenResponse(issuedWith.user);
+          }
           if (body.device_code !== deviceCode) return Response.json({ error: "incorrect_device_code" });
           const error = pending.shift();
           if (error === "slow_down") return Response.json({ error, interval: 10 });
           if (error) return Response.json({ error });
-          const { accessToken, refreshToken } = issueTokens();
-          return Response.json({
-            access_token: accessToken,
-            expires_in: 28800,
-            refresh_token: refreshToken,
-            refresh_token_expires_in: 15897600,
-            token_type: "bearer",
-            scope: "",
-          });
+          return tokenResponse();
         },
       },
       "/user": {
@@ -86,8 +87,29 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
   function issueTokens(as: FakeGitHubUser = user) {
     issued += 1;
     const accessToken = `gho_fake_${issued}`;
+    const refreshToken = `ghr_fake_${issued}`;
     validAccessTokens.set(accessToken, as);
-    return { accessToken, refreshToken: `ghr_fake_${issued}` };
+    validRefreshTokens.set(refreshToken, { accessToken, user: as });
+    return { accessToken, refreshToken };
+  }
+
+  function tokenResponse(as: FakeGitHubUser = user) {
+    const { accessToken, refreshToken } = issueTokens(as);
+    return Response.json({
+      access_token: accessToken,
+      expires_in: 28800,
+      refresh_token: refreshToken,
+      refresh_token_expires_in: 15897600,
+      token_type: "bearer",
+      scope: "",
+    });
+  }
+
+  // Invalidates a refresh token and its access token, as a refresh or the user
+  // revoking the app on github.com does.
+  function revoke(refreshToken: string) {
+    validAccessTokens.delete(validRefreshTokens.get(refreshToken)?.accessToken ?? "");
+    validRefreshTokens.delete(refreshToken);
   }
 
   // The user a request's token belongs to, or undefined.
@@ -100,7 +122,10 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
     url: server.url.origin,
     userCode,
     tokenRequests,
+    // Refresh-grant requests only.
+    refreshRequests: () => tokenRequests.filter((body) => body.grant_type === "refresh_token"),
     issueTokens,
+    revoke,
     stop: () => server.stop(true),
   };
 }

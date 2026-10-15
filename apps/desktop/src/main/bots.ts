@@ -1,17 +1,20 @@
-import { Bot, ClientEvent, type BotId } from "@chiefbot/contracts";
+import { Bot, ClientEvent, ModelOption, type BotId, type User } from "@chiefbot/contracts";
+import { z } from "zod";
 
 export type BotsOptions = {
   controlUrl: string;
   // The saved control session, or null when signed out.
   session: () => string | null;
   onChange: (bots: Bot[]) => void;
+  // The signed-in user changed on control, e.g. their GitHub sign-in was lost.
+  onUser?: (user: User) => void;
   // Wait between reconnects after the events socket drops.
   retryMs?: number;
 };
 
 // The signed-in user's bots, owned by Electron main. A WebSocket to control's
 // /events keeps the list live; actions are plain HTTP calls to control.
-export function createBots({ controlUrl, session, onChange, retryMs = 2000 }: BotsOptions) {
+export function createBots({ controlUrl, session, onChange, onUser, retryMs = 2000 }: BotsOptions) {
   let bots: Bot[] = [];
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
@@ -28,7 +31,11 @@ export function createBots({ controlUrl, session, onChange, retryMs = 2000 }: Bo
     socket = new WebSocket(`${controlUrl.replace(/^http/, "ws")}/events`, {
       headers: { authorization: `Bearer ${token}` },
     });
-    socket.onmessage = (event) => set(ClientEvent.parse(JSON.parse(String(event.data))).bots);
+    socket.onmessage = (event) => {
+      const message = ClientEvent.parse(JSON.parse(String(event.data)));
+      if (message.type === "bots") set(message.bots);
+      else onUser?.(message.user);
+    };
     socket.onclose = () => {
       if (connected) retry = setTimeout(open, retryMs);
     };
@@ -72,5 +79,11 @@ export function createBots({ controlUrl, session, onChange, retryMs = 2000 }: Bo
     // The human drives the bot's screen until handBack; the agent's input waits meanwhile.
     takeOver: async (botId: BotId) => void (await call("POST", `/bots/${botId}/take-over`)),
     handBack: async (botId: BotId) => void (await call("POST", `/bots/${botId}/hand-back`)),
+
+    // The model picker's rows for the user's Copilot plan.
+    models: async () => z.array(ModelOption).parse(await (await call("GET", "/models")).json()),
+    // The bot's next turn runs on `model`.
+    setModel: async (botId: BotId, model: string) =>
+      Bot.parse(await (await call("PUT", `/bots/${botId}/model`, { model })).json()),
   };
 }

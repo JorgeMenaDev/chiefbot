@@ -22,8 +22,13 @@ const nineLondon = Date.parse("2026-10-15T08:00:00Z");
 const daily: RoutineInput = { prompt: "Summarise my inbox", cron: "0 9 * * *", timezone: "Europe/London" };
 
 // Control on a fake clock, with bot computers whose workers run a fake Copilot.
+// The user signs in with GitHub tokens that have the given time left.
 // `down` stops control; `up` starts it again on the same port, database and clock.
-async function setup({ provider }: { provider?: (fake: ComputerProvider) => ComputerProvider } = {}) {
+async function setup({
+  provider,
+  accessTokenLeftMs = 8 * 3600_000,
+  refreshTokenLeftMs = 180 * 86400_000,
+}: { provider?: (fake: ComputerProvider) => ComputerProvider; accessTokenLeftMs?: number; refreshTokenLeftMs?: number } = {}) {
   const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-routines-")), "control.sqlite");
   const github = startFakeGitHub();
   const time = fakeClock(start);
@@ -40,14 +45,19 @@ async function setup({ provider }: { provider?: (fake: ComputerProvider) => Comp
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {
     method: "POST",
-    body: JSON.stringify({ accessToken, accessTokenExpiresAt: start + 8 * 3600_000, refreshToken, refreshTokenExpiresAt: 0 }),
+    body: JSON.stringify({
+      accessToken,
+      accessTokenExpiresAt: Date.now() + accessTokenLeftMs,
+      refreshToken,
+      refreshTokenExpiresAt: Date.now() + refreshTokenLeftMs,
+    }),
   });
   const { sessionToken } = SignInResponse.parse(await signIn.json());
   const auth = { authorization: `Bearer ${sessionToken}` };
   const api = (method: string, path: string, body?: unknown) =>
     fetch(`${control.url}${path}`, { method, headers: auth, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
 
-  const bots = async () => ClientEvent.parse(await nextMessage(control.url, auth, "/events")).bots;
+  const bots = () => botList(control.url, auth);
   const statusOf = async (botId: BotId) => (await bots()).find((bot) => bot.id === botId)?.status;
   // A new bot, once its worker is connected, then stopped unless `running`.
   const bot = async ({ running = false } = {}) => {
@@ -71,13 +81,15 @@ async function setup({ provider }: { provider?: (fake: ComputerProvider) => Comp
   return { time, computers, api, bot, statusOf, addRoutine, routines, chat, down, up };
 }
 
-// Opens a WebSocket on control and resolves with its first message.
-function nextMessage(controlUrl: string, headers: Record<string, string>, path: string) {
-  return new Promise<unknown>((resolve) => {
-    const socket = new WebSocket(`${controlUrl.replace("http", "ws")}${path}`, { headers });
-    socket.onmessage = (event) => {
+// The user's bots, from the first bots message on control's /events.
+function botList(controlUrl: string, headers: Record<string, string>) {
+  return new Promise<Bot[]>((resolve) => {
+    const socket = new WebSocket(`${controlUrl.replace("http", "ws")}/events`, { headers });
+    socket.onmessage = (message) => {
+      const event = ClientEvent.parse(JSON.parse(String(message.data)));
+      if (event.type !== "bots") return;
       socket.close();
-      resolve(JSON.parse(String(event.data)));
+      resolve(event.bots);
     };
   });
 }
@@ -208,6 +220,18 @@ test("a routine is skipped, not retried, while someone has taken over the bot's 
   time.advance(60_000);
   await Bun.sleep(50);
   expect(await chat(ada.id)).toEqual([]);
+});
+
+test("a routine whose owner must sign in to GitHub again fails with that reason and stops the bot again", async () => {
+  const { time, bot, statusOf, addRoutine, routines } = await setup({ accessTokenLeftMs: 0, refreshTokenLeftMs: -1000 });
+  const ada = await bot();
+  await addRoutine(ada.id);
+
+  time.advance(nineLondon - start);
+
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "failed");
+  expect((await routines(ada.id))[0]?.lastRun?.error).toContain("lost your GitHub sign-in");
+  await eventually(async () => (await statusOf(ada.id)) === "stopped");
 });
 
 test("routines are created, edited and deleted per bot, and a schedule control cannot run is refused", async () => {

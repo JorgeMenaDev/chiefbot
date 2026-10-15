@@ -1,17 +1,22 @@
 import type { ServerWebSocket } from "bun";
 import {
+  AUTO_MODEL,
   BotToken,
   CreateBotRequest,
+  defaultGitHubClientId,
   GitHubTokens,
   RoutineInput,
   SendMessageRequest,
   SessionToken,
+  SetBotModelRequest,
   WorkerToControl,
   type Bot,
   type BotId,
+  type BrokerRefusal,
   type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
+  type ModelOption,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
@@ -21,10 +26,13 @@ import {
 } from "@chiefbot/contracts";
 import { systemClock, type Clock } from "./clock.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
-import { fetchIdentity, GitHubAuthError } from "./github.ts";
+import { fetchIdentity, GitHubAuthError, refreshGitHubTokens } from "./github.ts";
+import { modelOptions } from "./models.ts";
 import { startScheduler } from "./routines.ts";
 import { nextDueAt } from "./schedule.ts";
+import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
+import { tokenBroker } from "./tokens.ts";
 
 export type ControlOptions = {
   port: number;
@@ -33,6 +41,13 @@ export type ControlOptions = {
   dbPath: string;
   // api.github.com in production; a fake in tests.
   githubApiUrl: string;
+  // github.com, for the refresh grant. Defaults to githubApiUrl: the fake serves both.
+  githubUrl?: string;
+  // The OAuth App the desktop signs in with. Refreshes must use the same one.
+  githubClientId?: string;
+  // Where users' refresh tokens live. Defaults to an encrypted store in dbPath
+  // whose key lasts only this process: fine for tests; index.ts passes a lasting one.
+  secrets?: SecretStore;
   // Where bot computers run: Docker locally, a fake in tests.
   computers: ComputerProvider;
   // Control's URL as a bot computer reaches it. Defaults to the URL control listens on.
@@ -64,6 +79,8 @@ type ScreenStream = {
 //   POST   /sessions          body GitHubTokens → SignInResponse
 //   GET    /me                bearer session    → User
 //   DELETE /sessions/current  bearer session    → 204
+//   DELETE /me/github         bearer session    → 204; forgets the user's GitHub sign-in, so their
+//                             bots get no token until they sign in again
 //   GET    /bots              bearer session    → Bot[]
 //   POST   /bots              bearer session, body CreateBotRequest → 201 Bot (its computer is starting)
 //   POST   /bots/:id/start    bearer session    → Bot
@@ -72,8 +89,11 @@ type ScreenStream = {
 //   POST   /bots/:id/hand-back bearer session   → Bot (the agent drives the screen again)
 //   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
+//   PUT    /bots/:id/model    bearer session, body SetBotModelRequest → Bot; the bot's next turn runs on it
+//                             (400 model_unavailable when the user's plan does not offer it or it is locked)
 //   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
 //                             (409 when the bot is not online, is still on a turn or the human has its screen)
+//   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   GET    /bots/:id/routines bearer session    → Routine[]
 //   POST   /bots/:id/routines bearer session, body RoutineInput → 201 Routine (400 invalid_schedule)
 //   PUT    /bots/:id/routines/:routineId  bearer session, body RoutineInput → Routine
@@ -83,6 +103,7 @@ type ScreenStream = {
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
 //                             (403 for another bot's)
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
+//                             (403 BrokerRefusal when the owner must sign in again)
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
 //
 // The screen never listens beyond the computer's loopback: for each viewer,
@@ -92,11 +113,21 @@ export function startControl({
   hostname = "127.0.0.1",
   dbPath,
   githubApiUrl,
+  githubUrl = githubApiUrl,
+  githubClientId = defaultGitHubClientId,
+  secrets = localSecretStore({ dbPath, key: crypto.getRandomValues(new Uint8Array(32)) }),
   computers,
   workerControlUrl,
   clock = systemClock,
 }: ControlOptions) {
   const store = openStore(dbPath);
+  const broker = tokenBroker({
+    store,
+    secrets,
+    refresh: (refreshToken) => refreshGitHubTokens(githubUrl, githubClientId, refreshToken),
+    onChange: (userId) =>
+      server.publish(topic(userId), JSON.stringify({ type: "user", user: store.user(userId) } satisfies ClientEvent)),
+  });
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
   // Bots whose connected worker has said hello, so it may be sent a turn. Who
@@ -118,13 +149,15 @@ export function startControl({
   }
 
   const botsOf = (userId: UserId): Bot[] =>
-    store.botsFor(userId).map(({ id, name, running }) => ({
+    store.botsFor(userId).map(({ id, name, running, model }) => ({
       id,
       name,
       status: !running ? "stopped" : workers.has(id) ? "online" : "starting",
+      model,
       screenControl: screenControl.get(id) ?? "agent",
     }));
   const botOf = (userId: UserId, botId: BotId) => botsOf(userId).find((bot) => bot.id === botId);
+  const modelOptionsOf = (user: User): ModelOption[] => modelOptions(store.modelReport(user.id), user.copilotPlan);
   const topic = (userId: UserId) => `bots:${userId}`;
   const botsEvent = (userId: UserId) => JSON.stringify({ type: "bots", bots: botsOf(userId) } satisfies ClientEvent);
   const publish = (userId: UserId) => server.publish(topic(userId), botsEvent(userId));
@@ -159,6 +192,7 @@ export function startControl({
 
   // Starts a chat turn with `text` on the bot's worker: a user's message or a routine's prompt.
   const sendTurn = (
+    userId: UserId,
     botId: BotId,
     text: string,
   ): { turnId: TurnId } | { error: "bot_offline" | "turn_running" | "human_has_screen" } => {
@@ -167,9 +201,10 @@ export function startControl({
     if (store.unfinishedTurns(botId).length > 0) return { error: "turn_running" };
     // The agent waits while the human drives the screen. A turn already running is not paused.
     if (screenControl.get(botId) === "human") return { error: "human_has_screen" };
+    const model = store.botFor(userId, botId)?.model ?? AUTO_MODEL;
     const started = store.startTurn(botId, text);
     publishChat(botId, started);
-    worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, text } satisfies ControlToWorker));
+    worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, text, model } satisfies ControlToWorker));
     return { turnId: started.turnId };
   };
 
@@ -226,8 +261,10 @@ export function startControl({
           try {
             const identity = await fetchIdentity(githubApiUrl, tokens.data.accessToken);
             const sessionToken = SessionToken.parse(randomToken());
-            const user = store.signIn(identity, tokens.data, sessionToken);
-            return Response.json({ sessionToken, user } satisfies SignInResponse);
+            const userId = store.upsertUser(identity);
+            await broker.signIn(userId, tokens.data);
+            store.openSession(userId, sessionToken);
+            return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
             if (error instanceof GitHubAuthError) return Response.json({ error: "github_rejected_token" }, { status: 401 });
             throw error;
@@ -238,6 +275,14 @@ export function startControl({
         GET: (req) => {
           const user = store.userForSession(bearer(req));
           return user ? Response.json(user satisfies User) : unauthorized();
+        },
+      },
+      "/me/github": {
+        DELETE: async (req) => {
+          const user = store.userForSession(bearer(req));
+          if (!user) return unauthorized();
+          await broker.revoke(user.id);
+          return new Response(null, { status: 204 });
         },
       },
       "/sessions/current": {
@@ -312,11 +357,21 @@ export function startControl({
           return new Response(null, { status: 204 });
         }),
       },
+      "/bots/:id/model": {
+        PUT: ownBot(async (user, botId, req) => {
+          const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
+          const offered = modelOptionsOf(user).some(({ id, lockedReason }) => id === body.data?.model && lockedReason === null);
+          if (!body.success || !offered) return Response.json({ error: "model_unavailable" }, { status: 400 });
+          store.setBotModel(botId, body.data.model);
+          publish(user.id);
+          return Response.json(botOf(user.id, botId));
+        }),
+      },
       "/bots/:id/messages": {
-        POST: ownBot(async (_user, botId, req) => {
+        POST: ownBot(async (user, botId, req) => {
           const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return Response.json({ error: "invalid_message" }, { status: 400 });
-          const sent = sendTurn(botId, body.data.text);
+          const sent = sendTurn(user.id, botId, body.data.text);
           if ("error" in sent) return Response.json(sent, { status: 409 });
           return Response.json(sent satisfies SendMessageResponse, { status: 202 });
         }),
@@ -349,6 +404,12 @@ export function startControl({
           return upgrade(server, req, { kind: "chat", botId, after });
         }),
       },
+      "/models": {
+        GET: (req) => {
+          const user = store.userForSession(bearer(req));
+          return user ? Response.json(modelOptionsOf(user)) : unauthorized();
+        },
+      },
       "/events": {
         GET: (req, server) => {
           const user = store.userForSession(bearer(req));
@@ -363,13 +424,14 @@ export function startControl({
           return bot instanceof Response ? bot : upgrade(server, req, { kind: "worker", ...bot });
         },
       },
-      // The token broker. Ticket #8 adds refresh and revoke.
+      // The token broker: the owner's access token, never a refresh token.
       "/worker/:botId/github-token": {
-        GET: (req) => {
+        GET: async (req) => {
           const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          const token = store.githubTokenForBot(bot.botId);
-          return token ? Response.json(token) : Response.json({ error: "no_github_token" }, { status: 404 });
+          const token = await broker.accessToken(bot.userId);
+          if (token) return Response.json(token);
+          return Response.json({ error: "reauth_needed" } satisfies BrokerRefusal, { status: 403 });
         },
       },
       // Only a stream control opened for this bot, and only once.
@@ -444,6 +506,7 @@ export function startControl({
         if (message.type === "turn-event") {
           return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
         }
+        if (message.type === "models") return store.setModelReport(ws.data.userId, message.report);
         // The worker lost every unfinished turn but the one it says it is still running.
         for (const turnId of store.unfinishedTurns(botId)) {
           if (turnId === message.activeTurnId) continue;
@@ -469,8 +532,8 @@ export function startControl({
         greeted.has(botId)
           ? Promise.resolve()
           : new Promise((resolve) => onlineWaiters.set(botId, (onlineWaiters.get(botId) ?? new Set()).add(resolve))),
-      runTurn(botId, text) {
-        const sent = sendTurn(botId, text);
+      runTurn(userId, botId, text) {
+        const sent = sendTurn(userId, botId, text);
         if ("error" in sent) return sent;
         const done = new Promise<string | null>((resolve) => turnWatchers.set(sent.turnId, { error: null, done: resolve }));
         return { turnId: sent.turnId, done };

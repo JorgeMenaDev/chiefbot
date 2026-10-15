@@ -58,7 +58,9 @@ function watchBots(controlUrl: string, headers: Record<string, string>) {
   let latest: Bot[] = [];
   const waiters = new Set<() => void>();
   socket.onmessage = (event) => {
-    latest = ClientEvent.parse(JSON.parse(String(event.data))).bots;
+    const message = ClientEvent.parse(JSON.parse(String(event.data)));
+    if (message.type !== "bots") return;
+    latest = message.bots;
     for (const wake of waiters) wake();
   };
   return {

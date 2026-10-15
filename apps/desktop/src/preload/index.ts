@@ -15,6 +15,7 @@ const api = {
     get: (): Promise<unknown> => ipcRenderer.invoke("auth:get"),
     signIn: (): Promise<void> => ipcRenderer.invoke("auth:sign-in"),
     signOut: (): Promise<void> => ipcRenderer.invoke("auth:sign-out"),
+    disconnectGitHub: (): Promise<void> => ipcRenderer.invoke("auth:disconnect-github"),
     onChange: (listener: (state: unknown) => void) => subscribe("auth:state", listener),
   },
   bots: {
@@ -23,6 +24,8 @@ const api = {
     start: (id: string): Promise<void> => ipcRenderer.invoke("bots:start", id),
     stop: (id: string): Promise<void> => ipcRenderer.invoke("bots:stop", id),
     remove: (id: string): Promise<void> => ipcRenderer.invoke("bots:delete", id),
+    models: (): Promise<unknown> => ipcRenderer.invoke("bots:models"),
+    setModel: (id: string, model: string): Promise<unknown> => ipcRenderer.invoke("bots:set-model", id, model),
     takeOver: (id: string): Promise<void> => ipcRenderer.invoke("bots:take-over", id),
     handBack: (id: string): Promise<void> => ipcRenderer.invoke("bots:hand-back", id),
     // The bot's screen WebSocket on control, for noVNC. Main adds the session to it.

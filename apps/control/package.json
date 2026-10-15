@@ -13,6 +13,7 @@
   "dependencies": {
     "@chiefbot/contracts": "workspace:*",
     "@google-cloud/compute": "^7.8.0",
+    "@google-cloud/secret-manager": "^7.2.0",
     "croner": "10.0.1",
     "zod": "^4.6.7"
   },
