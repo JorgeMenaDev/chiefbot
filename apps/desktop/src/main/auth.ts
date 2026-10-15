@@ -57,6 +57,21 @@ export function createAuth({ controlUrl, deviceFlow, store, onChange }: AuthOpti
       }
     },
 
+    // The user as control now sees them; ignored unless signed in.
+    userChanged(user: User) {
+      if (state.status === "signed-in") set({ status: "signed-in", user });
+    },
+
+    // Makes control forget the user's GitHub sign-in, so their bots stop getting
+    // tokens. The session stays, and the window asks to sign in again.
+    async disconnectGitHub() {
+      const headers = { authorization: `Bearer ${store.load() ?? ""}` };
+      const res = await fetch(`${controlUrl}/me/github`, { method: "DELETE", headers });
+      if (!res.ok) throw new Error(`Control refused (${res.status})`);
+      const me = await fetch(`${controlUrl}/me`, { headers });
+      if (me.ok) set({ status: "signed-in", user: User.parse(await me.json()) });
+    },
+
     async signOut() {
       const token = store.load();
       store.clear();

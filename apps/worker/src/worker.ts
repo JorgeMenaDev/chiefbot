@@ -2,6 +2,7 @@ import type { SessionEvent } from "@github/copilot-sdk";
 import {
   BotId,
   BrokeredGitHubToken,
+  BrokerRefusal,
   ControlToWorker,
   type TurnEvent,
   type TurnId,
@@ -50,10 +51,16 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
     if (event.type === "done" && active?.turnId === turnId) active = null;
   }
 
-  // Short-lived GitHub access token for the SDK, from control's broker.
+  // Short-lived GitHub access token for the SDK, from control's broker. The
+  // worker keeps no token: the SDK asks again when one has an hour or less left.
   async function gitHubToken() {
     const res = await fetch(`${controlUrl}/worker/${botId}/github-token`, { headers: { authorization: `Bearer ${botToken}` } });
-    if (!res.ok) throw new Error(`Control's token broker answered ${res.status}`);
+    if (!res.ok) {
+      if (BrokerRefusal.safeParse(await res.json().catch(() => null)).success) {
+        throw new Error("Chiefbot has lost your GitHub sign-in. Sign in again in the Chiefbot app, then resend.");
+      }
+      throw new Error(`Control's token broker answered ${res.status}`);
+    }
     const { accessToken, expiresAt } = BrokeredGitHubToken.parse(await res.json());
     return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
   }

@@ -1,4 +1,4 @@
-import { BotId, CreateBotRequest, SendMessageRequest } from "@chiefbot/contracts";
+import { BotId, CreateBotRequest, defaultGitHubClientId, SendMessageRequest } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -12,7 +12,7 @@ import { createChats } from "./chat.ts";
 //   CHIEFBOT_GITHUB_CLIENT_ID default Chartpilot's public OAuth App (device flow, no secret)
 const controlUrl = process.env.CHIEFBOT_CONTROL_URL ?? "http://127.0.0.1:7410";
 const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
-const clientId = process.env.CHIEFBOT_GITHUB_CLIENT_ID ?? "Ov23liONZsgOtJmCUaGB";
+const clientId = process.env.CHIEFBOT_GITHUB_CLIENT_ID ?? defaultGitHubClientId;
 
 // The control session token, kept in the app's user-data folder.
 function fileSessionStore(path: string): SessionStore {
@@ -36,6 +36,7 @@ const bots = createBots({
   controlUrl,
   session: sessionStore.load,
   onChange: (list) => window?.webContents.send("bots:state", list),
+  onUser: (user) => auth.userChanged(user),
 });
 
 const chats = createChats({
@@ -61,6 +62,7 @@ const auth = createAuth({
 ipcMain.handle("auth:get", () => auth.state());
 ipcMain.handle("auth:sign-in", () => auth.signIn());
 ipcMain.handle("auth:sign-out", () => auth.signOut());
+ipcMain.handle("auth:disconnect-github", () => auth.disconnectGitHub());
 
 // Renderer arguments are untrusted, so each is parsed before it reaches control.
 ipcMain.handle("bots:get", () => bots.list());

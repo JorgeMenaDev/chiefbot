@@ -14,6 +14,7 @@ const api = {
     get: (): Promise<unknown> => ipcRenderer.invoke("auth:get"),
     signIn: (): Promise<void> => ipcRenderer.invoke("auth:sign-in"),
     signOut: (): Promise<void> => ipcRenderer.invoke("auth:sign-out"),
+    disconnectGitHub: (): Promise<void> => ipcRenderer.invoke("auth:disconnect-github"),
     onChange: (listener: (state: unknown) => void) => subscribe("auth:state", listener),
   },
   bots: {

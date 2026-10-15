@@ -6,7 +6,6 @@ import {
   TurnId,
   UserId,
   type BotToken,
-  type BrokeredGitHubToken,
   type TurnEvent,
   type GitHubTokens,
   type SessionToken,
@@ -19,18 +18,27 @@ export function openStore(path: string) {
   const db = new Database(path, { strict: true });
   db.run("PRAGMA journal_mode = WAL");
   db.run("PRAGMA foreign_keys = ON");
+  // Deleted rows are overwritten, so a dropped or deleted token leaves no plain text behind.
+  db.run("PRAGMA secure_delete = ON");
   db.run(`CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     github_id INTEGER NOT NULL UNIQUE,
     login TEXT NOT NULL,
     copilot_plan TEXT
   )`);
-  // The refresh token lives only here; no endpoint returns it.
-  db.run(`CREATE TABLE IF NOT EXISTS github_tokens (
+  // github_tokens held refresh tokens in plain text before ticket #8. Dropping it
+  // signs everyone out of GitHub once; the checkpoint writes the zeroed pages to the file.
+  if (db.query("SELECT 1 FROM sqlite_master WHERE name = 'github_tokens'").get()) {
+    db.run("DROP TABLE github_tokens");
+    db.run("PRAGMA wal_checkpoint(TRUNCATE)");
+  }
+  // A user's GitHub sign-in as the token broker (tokens.ts) keeps it: the
+  // short-lived access token and both expiry times. The refresh token is in the
+  // SecretStore. No row means the user must sign in again.
+  db.run(`CREATE TABLE IF NOT EXISTS github_access (
     user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     access_token TEXT NOT NULL,
     access_token_expires_at INTEGER NOT NULL,
-    refresh_token TEXT NOT NULL,
     refresh_token_expires_at INTEGER NOT NULL
   )`);
   // Sessions are stored as a SHA-256 of the bearer token.
@@ -71,11 +79,20 @@ export function openStore(path: string) {
   type BotRow = { id: string; name: string; running: number };
   const toBotRecord = (row: BotRow) => ({ id: BotId.parse(row.id), name: row.name, running: row.running === 1 });
 
-  const toUser = (row: { id: string; login: string; copilot_plan: string | null }): User => ({
+  type UserRow = { id: string; login: string; copilot_plan: string | null; needs_sign_in: number };
+  const toUser = (row: UserRow): User => ({
     id: UserId.parse(row.id),
     login: row.login,
     copilotPlan: CopilotPlan.parse(row.copilot_plan === null ? null : JSON.parse(row.copilot_plan)),
+    needsGitHubSignIn: row.needs_sign_in === 1,
   });
+  const userColumns = `users.id, users.login, users.copilot_plan, github_access.user_id IS NULL AS needs_sign_in
+    FROM users LEFT JOIN github_access ON github_access.user_id = users.id`;
+  const userById = (userId: UserId) => {
+    const row = db.query<UserRow, [string]>(`SELECT ${userColumns} WHERE users.id = ?1`).get(userId);
+    if (!row) throw new Error(`no user ${userId}`);
+    return toUser(row);
+  };
 
   type ChatEventRow = { seq: number; turn_id: string; event: string };
   const toChatEvent = (row: ChatEventRow) =>
@@ -91,35 +108,58 @@ export function openStore(path: string) {
   };
 
   return {
-    // Creates or updates the user GitHub identified, replaces their GitHub tokens
-    // and opens a session. One transaction, so a sign-in lands whole or not at all.
-    signIn: db.transaction((identity: GitHubIdentity, tokens: GitHubTokens, sessionToken: SessionToken): User => {
+    // Creates or updates the user GitHub identified.
+    upsertUser(identity: GitHubIdentity): UserId {
       const row = db
-        .query<{ id: string; login: string; copilot_plan: string | null }, [string, number, string, string]>(
+        .query<{ id: string }, [string, number, string, string]>(
           `INSERT INTO users (id, github_id, login, copilot_plan) VALUES (?1, ?2, ?3, ?4)
            ON CONFLICT (github_id) DO UPDATE SET login = excluded.login, copilot_plan = excluded.copilot_plan
-           RETURNING id, login, copilot_plan`,
+           RETURNING id`,
         )
         .get(`user_${crypto.randomUUID()}`, identity.githubId, identity.login, JSON.stringify(identity.copilotPlan));
       if (!row) throw new Error("user upsert returned no row");
-      db.query(
-        `INSERT OR REPLACE INTO github_tokens
-         (user_id, access_token, access_token_expires_at, refresh_token, refresh_token_expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)`,
-      ).run(row.id, tokens.accessToken, tokens.accessTokenExpiresAt, tokens.refreshToken, tokens.refreshTokenExpiresAt);
+      return UserId.parse(row.id);
+    },
+
+    user: userById,
+
+    openSession(userId: UserId, sessionToken: SessionToken) {
       db.query("INSERT INTO sessions (token_hash, user_id, created_at) VALUES (?1, ?2, ?3)").run(
         hash(sessionToken),
-        row.id,
+        userId,
         Date.now(),
       );
-      return toUser(row);
-    }),
+    },
+
+    // The token broker's rows. Only tokens.ts calls these.
+    githubAccess(userId: UserId) {
+      const row = db
+        .query<{ access_token: string; access_token_expires_at: number; refresh_token_expires_at: number }, [string]>(
+          "SELECT access_token, access_token_expires_at, refresh_token_expires_at FROM github_access WHERE user_id = ?1",
+        )
+        .get(userId);
+      return row
+        ? {
+            accessToken: row.access_token,
+            accessTokenExpiresAt: row.access_token_expires_at,
+            refreshTokenExpiresAt: row.refresh_token_expires_at,
+          }
+        : null;
+    },
+    setGitHubAccess(userId: UserId, tokens: Omit<GitHubTokens, "refreshToken">) {
+      db.query(
+        `INSERT OR REPLACE INTO github_access (user_id, access_token, access_token_expires_at, refresh_token_expires_at)
+         VALUES (?1, ?2, ?3, ?4)`,
+      ).run(userId, tokens.accessToken, tokens.accessTokenExpiresAt, tokens.refreshTokenExpiresAt);
+    },
+    deleteGitHubAccess(userId: UserId) {
+      db.query("DELETE FROM github_access WHERE user_id = ?1").run(userId);
+    },
 
     userForSession(sessionToken: string): User | null {
       const row = db
-        .query<{ id: string; login: string; copilot_plan: string | null }, [string]>(
-          `SELECT users.id, users.login, users.copilot_plan FROM sessions
-           JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ?1`,
+        .query<UserRow, [string]>(
+          `SELECT ${userColumns} JOIN sessions ON sessions.user_id = users.id WHERE sessions.token_hash = ?1`,
         )
         .get(hash(sessionToken));
       return row ? toUser(row) : null;
@@ -170,17 +210,6 @@ export function openStore(path: string) {
 
     deleteBot(botId: BotId) {
       db.query("DELETE FROM bots WHERE id = ?1").run(botId);
-    },
-
-    // The bot owner's GitHub access token, for the bot's worker. Never the refresh token.
-    githubTokenForBot(botId: BotId): BrokeredGitHubToken | null {
-      const row = db
-        .query<{ access_token: string; access_token_expires_at: number }, [string]>(
-          `SELECT access_token, access_token_expires_at FROM github_tokens
-           JOIN bots ON bots.user_id = github_tokens.user_id WHERE bots.id = ?1`,
-        )
-        .get(botId);
-      return row ? { accessToken: row.access_token, expiresAt: row.access_token_expires_at } : null;
     },
 
     // Opens a turn with the user's message.

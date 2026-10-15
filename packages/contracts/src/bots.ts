@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { User } from "./auth.ts";
 import { TurnEvent } from "./chat.ts";
 import { BotId, TurnId } from "./ids.ts";
 
@@ -20,9 +21,12 @@ export type Bot = z.infer<typeof Bot>;
 export const CreateBotRequest = z.object({ name: z.string().trim().min(1).max(60) });
 export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 
-// Control → desktop on the /events WebSocket. Sent on connect and on every change.
+// Control → desktop on the /events WebSocket.
+//   bots  the user's bots; sent on connect and on every change
+//   user  the user changed: their GitHub sign-in was lost or restored
 export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bots"), bots: z.array(Bot) }),
+  z.object({ type: z.literal("user"), user: User }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 

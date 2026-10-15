@@ -81,6 +81,12 @@ function Workspace({ user }: { user: User }) {
             </button>
           ))}
         </nav>
+        {user.needsGitHubSignIn && (
+          <div className="github-notice">
+            <p>GitHub sign-in needed. Your bots can't work until you sign in again.</p>
+            <button onClick={() => void window.chiefbot.auth.signIn()}>Sign in again</button>
+          </div>
+        )}
         <footer className="sidebar-footer">
           <div className="account">
             <strong>{user.login}</strong>
@@ -88,9 +94,16 @@ function Workspace({ user }: { user: User }) {
               Copilot: {user.copilotPlan ? `${user.copilotPlan.plan} (${user.copilotPlan.sku})` : "none"}
             </span>
           </div>
-          <button className="link-button" onClick={() => void window.chiefbot.auth.signOut()}>
-            Sign out
-          </button>
+          <div className="account-actions">
+            {!user.needsGitHubSignIn && (
+              <button className="link-button" onClick={() => void window.chiefbot.auth.disconnectGitHub()}>
+                Disconnect GitHub
+              </button>
+            )}
+            <button className="link-button" onClick={() => void window.chiefbot.auth.signOut()}>
+              Sign out
+            </button>
+          </div>
         </footer>
       </aside>
       <main className="pane">

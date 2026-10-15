@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { SignInResponse, type Bot } from "@chiefbot/contracts";
+import { SignInResponse, type Bot, type User } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
@@ -60,4 +60,33 @@ test("create fails with control's reason when control refuses it", async () => {
   const bots = createBots({ controlUrl: control.url, session: () => "not-a-session", onChange: () => {} });
 
   await expect(bots.create("Ada")).rejects.toThrow("unauthorized");
+});
+
+test("a lost GitHub sign-in reaches the desktop live", async () => {
+  const github = startFakeGitHub();
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: fakeComputers().provider });
+  stops.push(github.stop, control.stop);
+  const signIn = await fetch(`${control.url}/sessions`, {
+    method: "POST",
+    body: JSON.stringify({ ...github.issueTokens(), accessTokenExpiresAt: 0, refreshTokenExpiresAt: 0 }),
+  });
+  const { sessionToken } = SignInResponse.parse(await signIn.json());
+  let userChanged = (_user: User) => {};
+  let connected = () => {};
+  const bots = createBots({
+    controlUrl: control.url,
+    session: () => sessionToken,
+    onChange: () => connected(),
+    onUser: (user) => userChanged(user),
+  });
+  stops.push(bots.disconnect);
+  await new Promise<void>((resolve) => {
+    connected = resolve;
+    bots.connect();
+  });
+
+  const changed = new Promise<User>((resolve) => (userChanged = resolve));
+  await fetch(`${control.url}/me/github`, { method: "DELETE", headers: { authorization: `Bearer ${sessionToken}` } });
+
+  expect(await changed).toMatchObject({ login: "octo-jorge", needsGitHubSignIn: true });
 });

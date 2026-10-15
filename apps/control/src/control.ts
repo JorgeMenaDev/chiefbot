@@ -2,12 +2,14 @@ import type { ServerWebSocket } from "bun";
 import {
   BotToken,
   CreateBotRequest,
+  defaultGitHubClientId,
   GitHubTokens,
   SendMessageRequest,
   SessionToken,
   WorkerToControl,
   type Bot,
   type BotId,
+  type BrokerRefusal,
   type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
@@ -17,8 +19,10 @@ import {
   type UserId,
 } from "@chiefbot/contracts";
 import type { ComputerProvider } from "./computers/computer.ts";
-import { fetchIdentity, GitHubAuthError } from "./github.ts";
+import { fetchIdentity, GitHubAuthError, refreshGitHubTokens } from "./github.ts";
+import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
+import { tokenBroker } from "./tokens.ts";
 
 export type ControlOptions = {
   port: number;
@@ -27,6 +31,13 @@ export type ControlOptions = {
   dbPath: string;
   // api.github.com in production; a fake in tests.
   githubApiUrl: string;
+  // github.com, for the refresh grant. Defaults to githubApiUrl: the fake serves both.
+  githubUrl?: string;
+  // The OAuth App the desktop signs in with. Refreshes must use the same one.
+  githubClientId?: string;
+  // Where users' refresh tokens live. Defaults to an encrypted store in dbPath
+  // whose key lasts only this process: fine for tests; index.ts passes a lasting one.
+  secrets?: SecretStore;
   // Where bot computers run: Docker locally, a fake in tests.
   computers: ComputerProvider;
   // Control's URL as a bot computer reaches it. Defaults to the URL control listens on.
@@ -44,6 +55,8 @@ type SocketData =
 //   POST   /sessions          body GitHubTokens → SignInResponse
 //   GET    /me                bearer session    → User
 //   DELETE /sessions/current  bearer session    → 204
+//   DELETE /me/github         bearer session    → 204; forgets the user's GitHub sign-in, so their
+//                             bots get no token until they sign in again
 //   GET    /bots              bearer session    → Bot[]
 //   POST   /bots              bearer session, body CreateBotRequest → 201 Bot (its computer is starting)
 //   POST   /bots/:id/start    bearer session    → Bot
@@ -56,8 +69,26 @@ type SocketData =
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
 //                             (403 for another bot's)
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
-export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
+//                             (403 BrokerRefusal when the owner must sign in again)
+export function startControl({
+  port,
+  hostname = "127.0.0.1",
+  dbPath,
+  githubApiUrl,
+  githubUrl = githubApiUrl,
+  githubClientId = defaultGitHubClientId,
+  secrets = localSecretStore({ dbPath, key: crypto.getRandomValues(new Uint8Array(32)) }),
+  computers,
+  workerControlUrl,
+}: ControlOptions) {
   const store = openStore(dbPath);
+  const broker = tokenBroker({
+    store,
+    secrets,
+    refresh: (refreshToken) => refreshGitHubTokens(githubUrl, githubClientId, refreshToken),
+    onChange: (userId) =>
+      server.publish(topic(userId), JSON.stringify({ type: "user", user: store.user(userId) } satisfies ClientEvent)),
+  });
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
 
@@ -121,8 +152,10 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
           try {
             const identity = await fetchIdentity(githubApiUrl, tokens.data.accessToken);
             const sessionToken = SessionToken.parse(randomToken());
-            const user = store.signIn(identity, tokens.data, sessionToken);
-            return Response.json({ sessionToken, user } satisfies SignInResponse);
+            const userId = store.upsertUser(identity);
+            await broker.signIn(userId, tokens.data);
+            store.openSession(userId, sessionToken);
+            return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
             if (error instanceof GitHubAuthError) return Response.json({ error: "github_rejected_token" }, { status: 401 });
             throw error;
@@ -133,6 +166,14 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         GET: (req) => {
           const user = store.userForSession(bearer(req));
           return user ? Response.json(user satisfies User) : unauthorized();
+        },
+      },
+      "/me/github": {
+        DELETE: async (req) => {
+          const user = store.userForSession(bearer(req));
+          if (!user) return unauthorized();
+          await broker.revoke(user.id);
+          return new Response(null, { status: 204 });
         },
       },
       "/sessions/current": {
@@ -234,13 +275,14 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
           return bot instanceof Response ? bot : upgrade(server, req, { kind: "worker", ...bot });
         },
       },
-      // The token broker. Ticket #8 adds refresh and revoke.
+      // The token broker: the owner's access token, never a refresh token.
       "/worker/:botId/github-token": {
-        GET: (req) => {
+        GET: async (req) => {
           const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          const token = store.githubTokenForBot(bot.botId);
-          return token ? Response.json(token) : Response.json({ error: "no_github_token" }, { status: 404 });
+          const token = await broker.accessToken(bot.userId);
+          if (token) return Response.json(token);
+          return Response.json({ error: "reauth_needed" } satisfies BrokerRefusal, { status: 403 });
         },
       },
     },
