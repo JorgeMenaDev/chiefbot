@@ -1,5 +1,6 @@
-import type { SessionEvent } from "@github/copilot-sdk";
+import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
 import {
+  ApprovalId,
   BotId,
   BrokeredGitHubToken,
   ControlToWorker,
@@ -7,7 +8,10 @@ import {
   type TurnId,
   type WorkerToControl,
 } from "@chiefbot/contracts";
+import { rmSync } from "node:fs";
+import { approvalFor } from "./approvals.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
+import { pullRequestTool } from "./pullRequest.ts";
 
 export type WorkerOptions = {
   // Control's base URL as seen from the computer, e.g. http://host.docker.internal:7410.
@@ -18,6 +22,11 @@ export type WorkerOptions = {
   botToken: string;
   // The agent engine: the Copilot SDK in a bot computer, a fake in tests.
   copilot: Copilot;
+  // api.github.com in a bot computer; a fake in tests. The pull request tool calls it.
+  githubApiUrl?: string;
+  // Unix socket the git credential helper (gitCredential.ts) asks for the owner's
+  // token. No socket when unset.
+  gitCredentialSocket?: string;
   // Wait between reconnects after the connection drops.
   retryMs?: number;
   onBound?: (botId: BotId) => void;
@@ -28,7 +37,17 @@ export type WorkerOptions = {
 // Runs the turns control sends on the bot's Copilot session, one at a time, and
 // streams their events back. The latest turn's events are kept and resent on
 // every reconnect (control stores each once), so a turn survives a control restart.
-export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 2000, onBound }: WorkerOptions) {
+// Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
+export function startWorker({
+  controlUrl,
+  botId,
+  botToken,
+  copilot,
+  githubApiUrl = "https://api.github.com",
+  gitCredentialSocket,
+  retryMs = 2000,
+  onBound,
+}: WorkerOptions) {
   const url = `${controlUrl.replace(/^http/, "ws")}/worker/${botId}`;
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
@@ -38,6 +57,8 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
   let session: Promise<BotSession> | null = null;
   // The turn the session is running, and what it has streamed so far.
   let active: { turnId: TurnId; deltaMessageIds: Set<string>; toolNames: Map<string, string> } | null = null;
+  // Approvals the session waits on, each resolved by the user's answer.
+  const waiting = new Map<ApprovalId, (approved: boolean) => void>();
 
   function send(message: WorkerToControl) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -58,10 +79,25 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
     return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
   }
 
+  // Runs safe tool calls at once. A risky one becomes an approval-request in the
+  // chat, and the session waits, however long, until the user answers.
+  const onPermissionRequest: PermissionHandler = async (request) => {
+    const ask = approvalFor(request);
+    if (!ask) return { kind: "approve-once" };
+    if (!active) return { kind: "reject", feedback: "Nobody is here to approve this outside a turn." };
+    const approvalId = ApprovalId.parse(`approval_${crypto.randomUUID()}`);
+    const answered = new Promise<boolean>((resolve) => waiting.set(approvalId, resolve));
+    emit(active.turnId, { type: "approval-request", approvalId, ...ask });
+    return (await answered)
+      ? { kind: "approve-once", approvedInteractively: true }
+      : { kind: "reject", feedback: "The user declined this." };
+  };
+
   // The bot's one Copilot session, opened on its first turn. Its id is the bot
   // id, so after a restart the worker resumes the same conversation.
   function openSession() {
-    session ??= copilot.openSession({ sessionId: BotId.parse(botId), gitHubTokenProvider: gitHubToken }).then((opened) => {
+    const tools = [pullRequestTool({ githubApiUrl, token: async () => (await gitHubToken()).accessToken })];
+    session ??= copilot.openSession({ sessionId: BotId.parse(botId), gitHubTokenProvider: gitHubToken, onPermissionRequest, tools }).then((opened) => {
       opened.on(onSessionEvent);
       return opened;
     });
@@ -127,7 +163,11 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
     socket.onmessage = (event) => {
       const message = ControlToWorker.parse(JSON.parse(String(event.data)));
       if (message.type === "bound") onBound?.(message.botId);
-      else void runTurn(message.turnId, message.text);
+      else if (message.type === "run-turn") void runTurn(message.turnId, message.text);
+      else {
+        waiting.get(message.approvalId)?.(message.approved);
+        waiting.delete(message.approvalId);
+      }
     };
     socket.onclose = () => {
       if (!stopped) retry = setTimeout(connect, retryMs);
@@ -135,11 +175,30 @@ export function startWorker({ controlUrl, botId, botToken, copilot, retryMs = 20
   }
   connect();
 
+  // Git's credential helper asks here, so the token is never written to disk.
+  // A stopped container keeps /tmp, so a stale socket file is removed first.
+  let credentials: Bun.Server<undefined> | null = null;
+  if (gitCredentialSocket) {
+    rmSync(gitCredentialSocket, { force: true });
+    credentials = Bun.serve({
+      unix: gitCredentialSocket,
+      fetch: async () => {
+        try {
+          return new Response(`username=x-access-token\npassword=${(await gitHubToken()).accessToken}\n`);
+        } catch (error) {
+          return new Response(String(error), { status: 502 });
+        }
+      },
+    });
+  }
+
   return {
     stop() {
       stopped = true;
       if (retry) clearTimeout(retry);
       socket?.close();
+      credentials?.stop(true);
+      if (gitCredentialSocket) rmSync(gitCredentialSocket, { force: true });
     },
   };
 }

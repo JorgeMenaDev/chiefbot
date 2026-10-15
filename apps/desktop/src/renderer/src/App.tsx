@@ -228,7 +228,7 @@ function Chat({ bot }: { bot: Bot }) {
         <div className="lane">
           {view.items.length === 0 && <p className="muted empty">Send {bot.name} a message to start.</p>}
           {view.items.map((item) => (
-            <Message key={item.id} item={item} />
+            <Message key={item.id} botId={bot.id} item={item} />
           ))}
           {working && <p className="working">{view.working || "Working"}…</p>}
           <div ref={end} />
@@ -253,7 +253,7 @@ function Chat({ bot }: { bot: Bot }) {
   );
 }
 
-function Message({ item }: { item: ChatItem }) {
+function Message({ botId, item }: { botId: BotId; item: ChatItem }) {
   switch (item.kind) {
     case "user":
       return <div className="message user">{item.text}</div>;
@@ -267,7 +267,67 @@ function Message({ item }: { item: ChatItem }) {
       );
     case "error":
       return <div className="message error">{item.message}</div>;
+    case "approval":
+      return <ApprovalCard botId={botId} item={item} />;
   }
+}
+
+type ApprovalItem = Extract<ChatItem, { kind: "approval" }>;
+
+const approvalLabel: Record<ApprovalItem["request"], string> = {
+  command: "Command approval",
+  "pull-request": "Pull request approval",
+  tool: "GitHub tool approval",
+};
+
+const approvalOutcome: Record<Exclude<ApprovalItem["state"], "pending">, string> = {
+  approved: "Approved",
+  declined: "Declined",
+  expired: "Expired: the bot restarted before you answered",
+};
+
+// What the bot waits on, after T3 Code's ComposerPendingApprovalPanel and
+// ComposerPendingApprovalActions: a label, the exact command or pull request,
+// and Decline / Approve. It stays answerable until the bot's turn ends, also
+// after the app restarts. Answered, it shrinks to one line.
+function ApprovalCard({ botId, item }: { botId: BotId; item: ApprovalItem }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function answer(approved: boolean) {
+    setBusy(true);
+    setError(null);
+    try {
+      await window.chiefbot.chat.answer(botId, item.approvalId, approved);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (item.state !== "pending") {
+    return (
+      <div className={`approval-row ${item.state}`}>
+        {approvalLabel[item.request]}: {approvalOutcome[item.state]} <code>{item.detail.split("\n")[0]}</code>
+      </div>
+    );
+  }
+  return (
+    <div className="approval-card" role="group" aria-label={approvalLabel[item.request]}>
+      <span className="approval-label">{approvalLabel[item.request]}</span>
+      <code className="approval-detail">{item.detail}</code>
+      <div className="approval-actions">
+        {error && <span className="error">{error}</span>}
+        <button className="outline" disabled={busy} onClick={() => void answer(false)}>
+          Decline
+        </button>
+        <button disabled={busy} onClick={() => void answer(true)}>
+          Approve
+        </button>
+      </div>
+    </div>
+  );
 }
 
 const toolMark: Record<Extract<ChatItem, { kind: "tool" }>["status"], string> = {

@@ -1,4 +1,4 @@
-import { BotId, CreateBotRequest, SendMessageRequest } from "@chiefbot/contracts";
+import { AnswerApprovalRequest, ApprovalId, BotId, CreateBotRequest, SendMessageRequest } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -75,6 +75,9 @@ ipcMain.handle("chat:open", (_event, id: unknown) => {
 });
 ipcMain.handle("chat:send", (_event, id: unknown, text: unknown) =>
   chats.send(BotId.parse(id), SendMessageRequest.parse({ text }).text),
+);
+ipcMain.handle("chat:answer", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
+  chats.answer(BotId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
 );
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {

@@ -1,5 +1,7 @@
 import type { ServerWebSocket } from "bun";
 import {
+  AnswerApprovalRequest,
+  ApprovalId,
   BotToken,
   CreateBotRequest,
   GitHubTokens,
@@ -51,6 +53,8 @@ type SocketData =
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
 //   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
 //                             (409 when the bot is not online or is still on a turn)
+//   POST   /bots/:id/approvals/:approvalId  bearer session, body AnswerApprovalRequest → 204
+//                             (409 when it is not pending: answered, unknown, or its turn ended)
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
 //   WS     /bots/:id/chat     bearer session, ?after=<seq> → each ChatEvent after seq, then live ones
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
@@ -90,7 +94,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
       handle: (
         user: User,
         botId: BotId,
-        req: Request,
+        req: Request & { params: Record<string, string> },
         server: Bun.Server<SocketData>,
       ) => Promise<Response> | Response | undefined,
     ) =>
@@ -100,6 +104,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         | Bun.BunRequest<"/bots/:id/start">
         | Bun.BunRequest<"/bots/:id/stop">
         | Bun.BunRequest<"/bots/:id/messages">
+        | Bun.BunRequest<"/bots/:id/approvals/:approvalId">
         | Bun.BunRequest<"/bots/:id/chat">,
       server: Bun.Server<SocketData>,
     ) => {
@@ -160,6 +165,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
                 CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin,
                 CHIEFBOT_BOT_ID: id,
                 CHIEFBOT_BOT_TOKEN: botToken,
+                CHIEFBOT_GITHUB_API_URL: githubApiUrl,
               },
             });
             await computers.start(id);
@@ -211,6 +217,25 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
             JSON.stringify({ type: "run-turn", turnId: started.turnId, text: body.data.text } satisfies ControlToWorker),
           );
           return Response.json({ turnId: started.turnId } satisfies SendMessageResponse, { status: 202 });
+        }),
+      },
+      // The answer is stored first, so it reaches the worker even if it is offline now.
+      "/bots/:id/approvals/:approvalId": {
+        POST: ownBot(async (_user, botId, req) => {
+          const body = AnswerApprovalRequest.safeParse(await req.json().catch(() => null));
+          if (!body.success) return Response.json({ error: "invalid_answer" }, { status: 400 });
+          const approvalId = ApprovalId.safeParse(req.params.approvalId);
+          const answer = approvalId.success ? store.answerApproval(botId, approvalId.data, body.data.approved) : null;
+          if (!answer || !approvalId.success) return Response.json({ error: "not_pending" }, { status: 409 });
+          publishChat(botId, answer);
+          workers.get(botId)?.send(
+            JSON.stringify({
+              type: "approval-answer",
+              approvalId: approvalId.data,
+              approved: body.data.approved,
+            } satisfies ControlToWorker),
+          );
+          return new Response(null, { status: 204 });
         }),
       },
       "/bots/:id/chat": {
@@ -276,6 +301,12 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         const message = WorkerToControl.parse(JSON.parse(String(raw)));
         if (message.type === "turn-event") {
           return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
+        }
+        // Answers the worker may have missed while it was away.
+        if (message.activeTurnId) {
+          for (const answer of store.answeredApprovals(message.activeTurnId)) {
+            ws.send(JSON.stringify({ type: "approval-answer", ...answer } satisfies ControlToWorker));
+          }
         }
         // The worker lost every unfinished turn but the one it says it is still running.
         for (const turnId of store.unfinishedTurns(botId)) {

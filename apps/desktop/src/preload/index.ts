@@ -27,6 +27,8 @@ const api = {
   chat: {
     open: (botId: string): Promise<unknown> => ipcRenderer.invoke("chat:open", botId),
     send: (botId: string, text: string): Promise<unknown> => ipcRenderer.invoke("chat:send", botId, text),
+    answer: (botId: string, approvalId: string, approved: boolean): Promise<void> =>
+      ipcRenderer.invoke("chat:answer", botId, approvalId, approved),
     onChange: (listener: (view: unknown) => void) => subscribe("chat:state", listener),
   },
 };

@@ -1,5 +1,12 @@
 import { z } from "zod";
-import { BotId, TurnId } from "./ids.ts";
+import { ApprovalId, BotId, TurnId } from "./ids.ts";
+
+// What a bot asks the user to approve, as the desktop labels it (after T3 Code):
+//   command       a shell command on the risky list, such as git push
+//   pull-request  opening a pull request with the bot's create_pull_request tool
+//   tool          a GitHub tool that writes
+export const ApprovalKind = z.enum(["command", "pull-request", "tool"]);
+export type ApprovalKind = z.infer<typeof ApprovalKind>;
 
 // What happens during one turn, as the worker reports it. The worker turns
 // Copilot SDK session events into these; a turn always ends with `done`.
@@ -7,6 +14,8 @@ import { BotId, TurnId } from "./ids.ts";
 //   tool-call   a tool started (running) or finished; updates share toolCallId
 //   status      what the bot says it is doing now ("Reading the repo")
 //   error       the turn failed; `done` follows
+//   approval-request  the bot waits until the user approves or declines this
+//               (POST /bots/:id/approvals/:approvalId). Control records it.
 export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text-delta"), messageId: z.string(), text: z.string() }),
   z.object({
@@ -17,6 +26,7 @@ export const TurnEvent = z.discriminatedUnion("type", [
   }),
   z.object({ type: z.literal("status"), text: z.string() }),
   z.object({ type: z.literal("error"), message: z.string() }),
+  z.object({ type: z.literal("approval-request"), approvalId: ApprovalId, kind: ApprovalKind, detail: z.string() }),
   z.object({ type: z.literal("done") }),
 ]);
 export type TurnEvent = z.infer<typeof TurnEvent>;
@@ -24,12 +34,20 @@ export type TurnEvent = z.infer<typeof TurnEvent>;
 // The message that starts a turn.
 export const UserMessage = z.object({ type: z.literal("user-message"), text: z.string() });
 
+// The user's answer to an approval-request of the same turn. Control adds it.
+export const ApprovalAnswer = z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() });
+export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>;
+
+// Body of POST /bots/:id/approvals/:approvalId (204; 409 when it is not pending).
+export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
+export type AnswerApprovalRequest = z.infer<typeof AnswerApprovalRequest>;
+
 // One entry of a bot's chat history as control stores it. `seq` grows across all
 // of control's chat history, so a client resumes with "everything after seq N".
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
@@ -51,6 +69,15 @@ export const ChatItem = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("assistant"), id: z.string(), text: z.string() }),
   z.object({ kind: z.literal("tool"), id: z.string(), name: z.string(), status: z.enum(["running", "succeeded", "failed"]) }),
   z.object({ kind: z.literal("error"), id: z.string(), message: z.string() }),
+  // expired: the turn ended before anyone answered (its worker restarted).
+  z.object({
+    kind: z.literal("approval"),
+    id: z.string(),
+    approvalId: ApprovalId,
+    request: ApprovalKind,
+    detail: z.string(),
+    state: z.enum(["pending", "approved", "declined", "expired"]),
+  }),
 ]);
 export type ChatItem = z.infer<typeof ChatItem>;
 

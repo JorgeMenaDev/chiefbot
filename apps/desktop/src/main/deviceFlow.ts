@@ -40,8 +40,9 @@ export async function runDeviceFlow({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = Date.now,
 }: DeviceFlowOptions): Promise<GitHubTokens> {
+  // repo: bots clone private repos, push and open pull requests with this token.
   const device = DeviceCodeResponse.parse(
-    await postForm(`${githubUrl}/login/device/code`, { client_id: clientId, scope: "read:user" }),
+    await postForm(`${githubUrl}/login/device/code`, { client_id: clientId, scope: "read:user repo" }),
   );
   onCode({ userCode: device.user_code, verificationUri: device.verification_uri });
 

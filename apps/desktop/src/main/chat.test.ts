@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, ClientEvent, SignInResponse, type BotId, type ChatView } from "@chiefbot/contracts";
+import { ApprovalId, Bot, BotId, ClientEvent, SignInResponse, TurnId, type ChatView } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
@@ -7,7 +7,7 @@ import { sdk } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createChats } from "./chat.ts";
+import { createChats, foldChat } from "./chat.ts";
 
 const stops: Array<() => unknown> = [];
 afterEach(() => {
@@ -108,4 +108,51 @@ test("after control restarts mid-reply, the desktop reconnects and the reply fin
     "greet",
     "Hello world",
   ]);
+});
+
+test("a risky command shows as a pending approval card, still pending after a relaunch, and answering it lets the bot go on", async () => {
+  const { control, computers, sessionToken, botId } = await setup();
+  computers.copilot.script = async function* (_prompt, runtime) {
+    await runtime.shell("git push origin main");
+    yield sdk.idle();
+  };
+  const desktop = launch(control.url, sessionToken);
+  desktop.chats.open(botId);
+  await desktop.chats.send(botId, "push it");
+  await desktop.until(botId, (view) => view.items.some((item) => item.kind === "approval"));
+  desktop.chats.disconnect();
+
+  const relaunched = launch(control.url, sessionToken);
+  relaunched.chats.open(botId);
+  const pending = await relaunched.until(botId, (view) => view.items.some((item) => item.kind === "approval"));
+  const card = pending.items.find((item) => item.kind === "approval");
+  expect(card).toEqual({
+    kind: "approval",
+    id: expect.any(String),
+    approvalId: expect.any(String),
+    request: "command",
+    detail: "git push origin main",
+    state: "pending",
+  });
+  expect(pending.working).toBe("Waiting for your approval");
+
+  await relaunched.chats.answer(botId, ApprovalId.parse(card?.kind === "approval" ? card.approvalId : ""), false);
+  const view = await relaunched.until(botId, (view) => view.working === null);
+  expect(view.items.find((item) => item.kind === "approval")).toMatchObject({ state: "declined" });
+});
+
+test("an approval nobody answered before its turn ended shows as expired", () => {
+  const turnId = TurnId.parse("turn-1");
+  const approvalId = ApprovalId.parse("approval-1");
+  const events = [
+    { type: "user-message", text: "push it" },
+    { type: "approval-request", approvalId, kind: "command", detail: "git push" },
+    { type: "error", message: "The bot restarted before it finished this message." },
+    { type: "done" },
+  ] as const;
+
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+  const view = events.reduce<ChatView>((view, event, seq) => foldChat(view, { seq, turnId, event }), empty);
+
+  expect(view.items.find((item) => item.kind === "approval")).toMatchObject({ state: "expired" });
 });

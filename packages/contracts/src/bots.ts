@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { TurnEvent } from "./chat.ts";
-import { BotId, TurnId } from "./ids.ts";
+import { ApprovalId, BotId, TurnId } from "./ids.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
 // hands it to the computer at start and keeps only its hash. It is not a GitHub token.
@@ -29,9 +29,13 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 // Control → worker on the /worker WebSocket.
 //   bound     names the one bot this connection belongs to; sent right after control accepts the credential
 //   run-turn  run one turn on the bot's Copilot session; control sends one at a time
+//   approval-answer  the user's answer to one of the worker's approval-requests.
+//             Sent when the user answers and again after every hello for the
+//             active turn's answered approvals; the worker ignores repeats.
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), botId: BotId }),
   z.object({ type: z.literal("run-turn"), turnId: TurnId, text: z.string() }),
+  z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() }),
 ]);
 export type ControlToWorker = z.infer<typeof ControlToWorker>;
 

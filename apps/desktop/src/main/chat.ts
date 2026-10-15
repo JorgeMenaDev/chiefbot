@@ -1,4 +1,4 @@
-import { ChatEvent, SendMessageResponse, type BotId, type ChatItem, type ChatView } from "@chiefbot/contracts";
+import { ChatEvent, SendMessageResponse, type ApprovalId, type BotId, type ChatItem, type ChatView } from "@chiefbot/contracts";
 
 export type ChatsOptions = {
   controlUrl: string;
@@ -56,6 +56,17 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
       return SendMessageResponse.parse(await res.json()).turnId;
     },
 
+    // Approves or declines one of the bot's pending approvals. The card updates
+    // when control's approval-answer comes back on the chat socket.
+    async answer(botId: BotId, approvalId: ApprovalId, approved: boolean) {
+      const res = await fetch(`${controlUrl}/bots/${botId}/approvals/${approvalId}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
+        body: JSON.stringify({ approved }),
+      });
+      if (!res.ok) throw new Error(`Control refused (${res.status}): ${await res.text()}`);
+    },
+
     // Call on sign-out.
     disconnect() {
       const open = [...chats.values()];
@@ -68,8 +79,11 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
   };
 }
 
+const waitingForApproval = "Waiting for your approval";
+
 // Folds one stored chat event into what the window shows. Item ids are scoped
 // to their turn, since the SDK's message and tool ids are only unique per turn.
+// While an approval is pending, the bot's status says it waits for the user.
 export function foldChat(view: ChatView, { turnId, event }: ChatEvent): ChatView {
   const upsert = (id: string, make: (existing: ChatItem | undefined) => ChatItem) => {
     const index = view.items.findIndex((item) => item.id === id);
@@ -96,7 +110,25 @@ export function foldChat(view: ChatView, { turnId, event }: ChatEvent): ChatView
       return { ...view, working: event.text };
     case "error":
       return { ...view, items: [...view.items, { kind: "error", id: `${turnId}:error`, message: event.message }] };
-    case "done":
-      return { ...view, working: null };
+    case "approval-request": {
+      const { approvalId, kind, detail } = event;
+      const card: ChatItem = { kind: "approval", id: `${turnId}:${approvalId}`, approvalId, request: kind, detail, state: "pending" };
+      return { ...view, working: waitingForApproval, items: [...view.items, card] };
+    }
+    case "approval-answer": {
+      const state = event.approved ? "approved" : "declined";
+      const items = view.items.map(
+        (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state } : item),
+      );
+      return { ...view, working: "", items };
+    }
+    // Approvals left pending when a turn ends can no longer be answered.
+    case "done": {
+      const items = view.items.map(
+        (item): ChatItem =>
+          item.kind === "approval" && item.state === "pending" && item.id.startsWith(`${turnId}:`) ? { ...item, state: "expired" } : item,
+      );
+      return { ...view, working: null, items };
+    }
   }
 }

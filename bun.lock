@@ -46,6 +46,7 @@
       "dependencies": {
         "@chiefbot/contracts": "workspace:*",
         "@github/copilot-sdk": "1.0.22",
+        "zod": "^4.6.7",
       },
     },
     "packages/contracts": {
@@ -56,6 +57,9 @@
     },
     "packages/fake-github": {
       "name": "@chiefbot/fake-github",
+      "dependencies": {
+        "zod": "^4.6.7",
+      },
     },
   },
   "trustedDependencies": [

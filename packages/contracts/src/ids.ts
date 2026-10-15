@@ -10,3 +10,7 @@ export type BotId = z.infer<typeof BotId>;
 // One user message and the bot's work on it.
 export const TurnId = z.string().min(1).brand<"TurnId">();
 export type TurnId = z.infer<typeof TurnId>;
+
+// One thing the bot asked the user to approve (a push, a pull request).
+export const ApprovalId = z.string().min(1).brand<"ApprovalId">();
+export type ApprovalId = z.infer<typeof ApprovalId>;

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import {
+  ApprovalId,
   BotId,
   ChatEvent,
   CopilotPlan,
@@ -67,6 +68,14 @@ export function openStore(path: string) {
     event TEXT NOT NULL
   )`);
   db.run("CREATE INDEX IF NOT EXISTS chat_events_by_bot ON chat_events (bot_id, seq)");
+  // What a bot asked the user to approve, and the answer (NULL while pending).
+  // The request itself is in chat_events; this is what an answer is checked against.
+  db.run(`CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    approved INTEGER
+  )`);
 
   type BotRow = { id: string; name: string; running: number };
   const toBotRecord = (row: BotRow) => ({ id: BotId.parse(row.id), name: row.name, running: row.running === 1 });
@@ -191,7 +200,8 @@ export function openStore(path: string) {
     }),
 
     // Adds the worker's event number `index` to the bot's unfinished turn; `done`
-    // finishes it. Null, storing nothing, for a repeat or another bot's or a done turn.
+    // finishes it and an approval-request records a pending approval. Null,
+    // storing nothing, for a repeat or another bot's or a done turn.
     appendTurnEvent: db.transaction((botId: BotId, turnId: TurnId, index: number, event: TurnEvent): ChatEvent | null => {
       const updated = db
         .query(
@@ -199,8 +209,33 @@ export function openStore(path: string) {
            WHERE id = ?1 AND bot_id = ?2 AND done = 0 AND next_index = ?3 RETURNING id`,
         )
         .get(turnId, botId, index, event.type === "done" ? 1 : 0);
-      return updated ? append(botId, turnId, event) : null;
+      if (!updated) return null;
+      if (event.type === "approval-request") {
+        db.query("INSERT INTO approvals (id, bot_id, turn_id) VALUES (?1, ?2, ?3)").run(event.approvalId, botId, turnId);
+      }
+      return append(botId, turnId, event);
     }),
+
+    // Records the user's answer to a pending approval of the bot's unfinished
+    // turn. Null, storing nothing, when there is no such pending approval.
+    answerApproval: db.transaction((botId: BotId, approvalId: ApprovalId, approved: boolean): ChatEvent | null => {
+      const row = db
+        .query<{ turn_id: string }, [string, string, number]>(
+          `UPDATE approvals SET approved = ?3 WHERE id = ?1 AND bot_id = ?2 AND approved IS NULL
+           AND turn_id IN (SELECT id FROM turns WHERE done = 0) RETURNING turn_id`,
+        )
+        .get(approvalId, botId, approved ? 1 : 0);
+      if (!row) return null;
+      return append(botId, TurnId.parse(row.turn_id), { type: "approval-answer", approvalId, approved });
+    }),
+
+    // The answered approvals of a turn, for a worker that may have missed the answers.
+    answeredApprovals(turnId: TurnId) {
+      return db
+        .query<{ id: string; approved: number }, [string]>("SELECT id, approved FROM approvals WHERE turn_id = ?1 AND approved IS NOT NULL")
+        .all(turnId)
+        .map((row) => ({ approvalId: ApprovalId.parse(row.id), approved: row.approved === 1 }));
+    },
 
     // Ends an unfinished turn from control's side (its worker lost it).
     abandonTurn: db.transaction((botId: BotId, turnId: TurnId, message: string): ChatEvent[] => {

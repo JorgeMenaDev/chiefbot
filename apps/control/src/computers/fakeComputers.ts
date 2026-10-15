@@ -6,8 +6,9 @@ import type { ComputerProvider, ComputerSpec } from "./computer.ts";
 // An in-memory ComputerProvider for tests. A running computer is the real worker,
 // started in this process with the env control handed over, so tests see the
 // whole loop (create → worker dials control → bot online) without Docker.
-// Every worker runs turns on the same fake Copilot.
-export function fakeComputers({ copilot = fakeCopilot() }: { copilot?: FakeCopilot } = {}) {
+// Every worker runs turns on the same fake Copilot. With gitCredentialSocket, the
+// workers serve git credentials there (one bot at a time: they share the path).
+export function fakeComputers({ copilot = fakeCopilot(), gitCredentialSocket }: { copilot?: FakeCopilot; gitCredentialSocket?: string } = {}) {
   type FakeComputer = { spec: ComputerSpec; worker: ReturnType<typeof startWorker> | null };
   const computers = new Map<BotId, FakeComputer>();
   // Every destroy call, so tests can check whether data was kept.
@@ -25,13 +26,15 @@ export function fakeComputers({ copilot = fakeCopilot() }: { copilot?: FakeCopil
     },
     async start(botId) {
       const computer = get(botId);
-      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN } = computer.spec.env;
+      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN, CHIEFBOT_GITHUB_API_URL } = computer.spec.env;
       if (!CHIEFBOT_CONTROL_URL || !CHIEFBOT_BOT_ID || !CHIEFBOT_BOT_TOKEN) throw new Error("worker env missing");
       computer.worker ??= startWorker({
         controlUrl: CHIEFBOT_CONTROL_URL,
         botId: CHIEFBOT_BOT_ID,
         botToken: CHIEFBOT_BOT_TOKEN,
         copilot: copilot.copilot,
+        ...(CHIEFBOT_GITHUB_API_URL === undefined ? {} : { githubApiUrl: CHIEFBOT_GITHUB_API_URL }),
+        ...(gitCredentialSocket === undefined ? {} : { gitCredentialSocket }),
         retryMs: 20,
       });
     },
