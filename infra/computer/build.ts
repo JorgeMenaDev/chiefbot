@@ -1,6 +1,7 @@
 // Builds the bot computer image. Run from the repo root: `bun run computer:build`.
-// 1. Bundles the worker into dist/worker.js. The Copilot SDK stays out of the
-//    bundle: it finds its bundled runtime in a platform package next to itself.
+// 1. Bundles the worker into dist/worker.js and git's credential helper into
+//    dist/git-credential.js. The Copilot SDK stays out of the bundle: it finds
+//    its bundled runtime in a platform package next to itself.
 // 2. Writes dist/package.json with the worker's exact SDK version, so the image
 //    installs that SDK with the Linux runtime for its own CPU.
 // 3. docker build, tagged CHIEFBOT_COMPUTER_IMAGE (default chiefbot-computer:dev).
@@ -21,14 +22,19 @@ if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
 }
 
 mkdirSync(dist, { recursive: true });
-const bundle = await Bun.build({
-  entrypoints: [join(root, "apps/worker/src/index.ts")],
-  target: "bun",
-  external: [sdk],
-  outdir: dist,
-  naming: "worker.js",
-});
-if (!bundle.success) throw new AggregateError(bundle.logs, "worker bundle failed");
+for (const [entry, naming] of [
+  ["index.ts", "worker.js"],
+  ["gitCredential.ts", "git-credential.js"],
+]) {
+  const bundle = await Bun.build({
+    entrypoints: [join(root, "apps/worker/src", entry)],
+    target: "bun",
+    external: [sdk],
+    outdir: dist,
+    naming,
+  });
+  if (!bundle.success) throw new AggregateError(bundle.logs, `${naming} bundle failed`);
+}
 await Bun.write(join(dist, "package.json"), JSON.stringify({ private: true, dependencies: { [sdk]: version } }, null, 2));
 if (process.argv.includes("--dist-only")) process.exit(0);
 

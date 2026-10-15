@@ -22,7 +22,13 @@ RUN cd /opt/chiefbot \
   && bun install --production \
   && rm -rf node_modules/@github/copilot-sdk-linuxmusl-* /root/.bun/install/cache
 
-COPY dist/worker.js /opt/chiefbot/worker.js
+COPY dist/worker.js dist/git-credential.js /opt/chiefbot/
+
+# Git asks the worker for the owner's short-lived GitHub token on every
+# github.com request (apps/worker/src/gitCredential.ts); no token is stored.
+RUN git config --system credential.https://github.com.helper '!bun /opt/chiefbot/git-credential.js' \
+  && git config --system user.name "Chiefbot" \
+  && git config --system user.email "chiefbot@users.noreply.github.com"
 
 USER bot
 WORKDIR /home/bot/workspace
