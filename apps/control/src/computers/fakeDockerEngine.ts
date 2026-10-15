@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { z } from "zod";
 
 // A fake Docker Engine API on a unix socket, for DockerProvider tests. It keeps
-// containers and volumes in memory and answers the handful of endpoints the
+// containers, volumes and networks in memory and answers the handful of endpoints the
 // provider calls with the status codes the real engine uses.
 
 type FakeContainer = {
@@ -18,6 +18,7 @@ export function startFakeDockerEngine() {
   const socketPath = join(mkdtempSync(join(tmpdir(), "chiefbot-docker-")), "docker.sock");
   const containers = new Map<string, FakeContainer>();
   const volumes = new Set<string>();
+  const networks = new Set<string>();
   const notFound = (what: string) => Response.json({ message: `No such ${what}` }, { status: 404 });
 
   const server = Bun.serve({
@@ -32,6 +33,17 @@ export function startFakeDockerEngine() {
       },
       "/volumes/:name": {
         DELETE: (req) => (volumes.delete(req.params.name) ? new Response(null, { status: 204 }) : notFound("volume")),
+      },
+      "/networks/create": {
+        POST: async (req) => {
+          const { Name } = z.object({ Name: z.string() }).parse(await req.json());
+          if (networks.has(Name)) return Response.json({ message: "network exists" }, { status: 409 });
+          networks.add(Name);
+          return Response.json({ Id: Name, Warning: "" }, { status: 201 });
+        },
+      },
+      "/networks/:name": {
+        DELETE: (req) => (networks.delete(req.params.name) ? new Response(null, { status: 204 }) : notFound("network")),
       },
       "/containers/create": {
         POST: async (req) => {
@@ -77,5 +89,5 @@ export function startFakeDockerEngine() {
     return new Response(null, { status: 204 });
   }
 
-  return { socketPath, containers, volumes, stop: () => server.stop(true) };
+  return { socketPath, containers, volumes, networks, stop: () => server.stop(true) };
 }

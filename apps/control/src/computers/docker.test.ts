@@ -32,6 +32,26 @@ test("create makes a stopped container from the image, with the env and the bot'
   });
 });
 
+test("each bot is locked down: its own network, a non-root user, no capabilities and no Docker socket", async () => {
+  const { engine, computers } = setup();
+  const other = BotId.parse("bot_2");
+
+  await computers.create(spec);
+  await computers.create({ botId: other, env: {} });
+
+  expect([...engine.networks]).toEqual(["chiefbot-bot_1-net", "chiefbot-bot_2-net"]);
+  expect(engine.containers.get("chiefbot-bot_1")?.config).toMatchObject({
+    User: "bot",
+    HostConfig: {
+      NetworkMode: "chiefbot-bot_1-net",
+      CapDrop: ["ALL"],
+      SecurityOpt: ["no-new-privileges"],
+      // The bot's own volume is its only mount: no Docker socket, no host paths.
+      Mounts: [{ Type: "volume", Source: "chiefbot-bot_1-home", Target: "/home/bot" }],
+    },
+  });
+});
+
 test("start runs the computer and stop stops it; repeating either is harmless", async () => {
   const { computers } = setup();
   await computers.create(spec);
@@ -45,7 +65,7 @@ test("start runs the computer and stop stops it; repeating either is harmless", 
   expect(await computers.status(botId)).toBe("stopped");
 });
 
-test("destroy removes a running computer and keeps its volume unless asked to delete the data", async () => {
+test("destroy removes a running computer and its network, and keeps its volume unless asked to delete the data", async () => {
   const { engine, computers } = setup();
   await computers.create(spec);
   await computers.start(botId);
@@ -53,6 +73,7 @@ test("destroy removes a running computer and keeps its volume unless asked to de
   await computers.destroy(botId, { deleteData: false });
   expect(await computers.status(botId)).toBe("absent");
   expect(engine.volumes.has("chiefbot-bot_1-home")).toBe(true);
+  expect(engine.networks.size).toBe(0);
 
   await computers.destroy(botId, { deleteData: true });
   expect(engine.volumes.size).toBe(0);
