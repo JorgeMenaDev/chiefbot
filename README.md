@@ -13,9 +13,9 @@ bun run computer:build  # bundle the worker and build the bot computer image (ch
 bun run dev             # control on http://127.0.0.1:7410 and the desktop app
 ```
 
-Creating a bot needs Docker (Colima: `colima start`) and the `chiefbot-computer:dev` image. Each bot is a container `chiefbot-<bot id>` with a volume `chiefbot-<bot id>-home` mounted at `/home/bot` (its home and workspace). Its worker dials control's `/worker` WebSocket with a per-bot credential and the bot shows **online**.
+Creating a bot needs Docker (Colima: `colima start`) and the `chiefbot-computer:dev` image. Each bot is a container `chiefbot-<bot id>` on its own network `chiefbot-<bot id>-net`, with a volume `chiefbot-<bot id>-home` mounted at `/home/bot` (its home and workspace). Its worker dials control's `/worker/<bot id>` WebSocket with a per-bot credential and the bot shows **online**. Bots cannot see each other: `docs/isolation.md`.
 
-`CHIEFBOT_DOCKER_TESTS=1 bun test docker.live` runs the whole loop on real Docker (needs the image). It removes what it creates.
+`CHIEFBOT_DOCKER_TESTS=1 bun test docker.live` runs the whole loop on real Docker (needs the image). `CHIEFBOT_DOCKER_TESTS=1 bun test isolation.live` shows two bots cannot read each other's volume or reach each other over the network. Both use `CHIEFBOT_COMPUTER_IMAGE` if set and remove what they create.
 
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
@@ -63,5 +63,5 @@ Needs Colima running. Makes no Copilot calls.
 3. `docker ps` shows `chiefbot-bot_…` running. `docker logs <name>` says `worker connected to http://host.docker.internal:7410 as bot_…`.
 4. Click **Stop**. The bot shows **stopped** and the container has exited. Click **Start**. It comes back **online**.
 5. Restart control (save a file in `apps/control`). The bot goes back **online** without a click.
-6. Click **Delete**, tick **Also delete its files** and confirm. The bot leaves the sidebar, and `docker ps -a` and `docker volume ls` show nothing for it. Without the tick, the volume `chiefbot-<bot id>-home` stays: remove it with `docker volume rm`.
+6. Click **Delete**, tick **Also delete its files** and confirm. The bot leaves the sidebar, and `docker ps -a`, `docker volume ls` and `docker network ls` show nothing for it. Without the tick, the volume `chiefbot-<bot id>-home` stays: remove it with `docker volume rm`.
 7. Clean up: `docker rmi chiefbot-computer:dev`.

@@ -43,7 +43,7 @@ type SocketData = { kind: "client"; userId: UserId } | { kind: "worker"; userId:
 //   POST   /bots/:id/stop     bearer session    → Bot
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
-//   WS     /worker            bearer bot token  → ControlToWorker
+//   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker (403 for another bot's)
 export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
   const store = openStore(dbPath);
   // The connected worker of each bot. A bot is online while it has one.
@@ -117,7 +117,11 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
           try {
             await computers.create({
               botId: id,
-              env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_TOKEN: botToken },
+              env: {
+                CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin,
+                CHIEFBOT_BOT_ID: id,
+                CHIEFBOT_BOT_TOKEN: botToken,
+              },
             });
             await computers.start(id);
           } catch (error) {
@@ -162,10 +166,12 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
           return upgrade(server, req, { kind: "client", userId: user.id });
         },
       },
-      "/worker": {
+      // A worker credential is scoped to the one bot it was made for.
+      "/worker/:botId": {
         GET: (req, server) => {
           const bot = store.botForToken(bearer(req));
           if (!bot) return unauthorized();
+          if (bot.botId !== req.params.botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
           return upgrade(server, req, { kind: "worker", ...bot });
         },
       },

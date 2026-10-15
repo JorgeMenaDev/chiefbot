@@ -4,7 +4,9 @@ import type { ComputerProvider } from "./computer.ts";
 
 // ComputerProvider on a local Docker Engine (Colima on the Mac). One container per
 // bot plus one named volume mounted as the bot's home (/home/bot, with the
-// workspace inside it). Talks to the Engine API over its unix socket.
+// workspace inside it) and one bridge network of its own, so bots cannot reach
+// each other. Talks to the Engine API over its unix socket. docs/isolation.md
+// lists the boundaries.
 
 export type DockerProviderOptions = {
   // e.g. ~/.colima/default/docker.sock
@@ -18,6 +20,7 @@ const ContainerInspect = z.object({ State: z.object({ Running: z.boolean() }) })
 export function dockerProvider({ socketPath, image }: DockerProviderOptions): ComputerProvider {
   const container = (botId: BotId) => `chiefbot-${botId}`;
   const volume = (botId: BotId) => `chiefbot-${botId}-home`;
+  const network = (botId: BotId) => `chiefbot-${botId}-net`;
 
   // One Engine API call. Statuses in `ok` count as success besides 2xx.
   async function engine(method: string, path: string, body?: unknown, ok: number[] = []) {
@@ -36,12 +39,20 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
     async create({ botId, env }) {
       const labels = { "chiefbot.bot-id": botId };
       await engine("POST", "/volumes/create", { Name: volume(botId), Labels: labels });
+      await engine("POST", "/networks/create", { Name: network(botId), Driver: "bridge", Labels: labels });
       await engine("POST", `/containers/create?name=${container(botId)}`, {
         Image: image,
         Env: Object.entries(env).map(([key, value]) => `${key}=${value}`),
         Labels: labels,
+        // Non-root even if the image forgets USER.
+        User: "bot",
         HostConfig: {
+          // The bot's volume is its only mount: never the Docker socket or a host path.
           Mounts: [{ Type: "volume", Source: volume(botId), Target: "/home/bot" }],
+          NetworkMode: network(botId),
+          // The bot runs as a plain user: it needs no Linux capabilities, and nothing may gain them.
+          CapDrop: ["ALL"],
+          SecurityOpt: ["no-new-privileges"],
           // tini as PID 1, so the worker gets SIGTERM and stop is quick.
           Init: true,
           // Back after a crash or a Colima restart, but not after stop().
@@ -59,9 +70,10 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
       await engine("POST", `/containers/${container(botId)}/stop`, undefined, [304]);
     },
 
-    // 404 means it is already gone.
+    // 404 means it is already gone. The network holds no data, so it always goes.
     async destroy(botId, { deleteData }) {
       await engine("DELETE", `/containers/${container(botId)}?force=true`, undefined, [404]);
+      await engine("DELETE", `/networks/${network(botId)}`, undefined, [404]);
       if (deleteData) await engine("DELETE", `/volumes/${volume(botId)}`, undefined, [404]);
     },
 
