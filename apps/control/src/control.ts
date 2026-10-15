@@ -3,11 +3,15 @@ import {
   BotToken,
   CreateBotRequest,
   GitHubTokens,
+  SendMessageRequest,
   SessionToken,
+  WorkerToControl,
   type Bot,
   type BotId,
+  type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
+  type SendMessageResponse,
   type SignInResponse,
   type User,
   type UserId,
@@ -27,9 +31,12 @@ export type ControlOptions = {
   workerControlUrl?: string;
 };
 
-// What a WebSocket connection is bound to: a desktop client of one user, or the
-// worker of exactly one bot.
-type SocketData = { kind: "client"; userId: UserId } | { kind: "worker"; userId: UserId; botId: BotId };
+// What a WebSocket connection is bound to: a desktop client of one user, one
+// bot's chat from `after` on, or the worker of exactly one bot.
+type SocketData =
+  | { kind: "client"; userId: UserId }
+  | { kind: "chat"; botId: BotId; after: number }
+  | { kind: "worker"; userId: UserId; botId: BotId };
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -40,8 +47,13 @@ type SocketData = { kind: "client"; userId: UserId } | { kind: "worker"; userId:
 //   POST   /bots/:id/start    bearer session    → Bot
 //   POST   /bots/:id/stop     bearer session    → Bot
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
+//   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
+//                             (409 when the bot is not online or is still on a turn)
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
-//   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker (403 for another bot's)
+//   WS     /bots/:id/chat     bearer session, ?after=<seq> → each ChatEvent after seq, then live ones
+//   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
+//                             (403 for another bot's)
+//   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
 export function startControl({ port, dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
   const store = openStore(dbPath);
   // The connected worker of each bot. A bot is online while it has one.
@@ -57,16 +69,43 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
   const topic = (userId: UserId) => `bots:${userId}`;
   const botsEvent = (userId: UserId) => JSON.stringify({ type: "bots", bots: botsOf(userId) } satisfies ClientEvent);
   const publish = (userId: UserId) => server.publish(topic(userId), botsEvent(userId));
+  const chatTopic = (botId: BotId) => `chat:${botId}`;
+  const publishChat = (botId: BotId, event: ChatEvent | null) => {
+    if (event) server.publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
+  };
+
+  // Runs a worker route for the bot whose credential it carries; 401 or 403 otherwise.
+  const ownWorker = (req: Bun.BunRequest<"/worker/:botId"> | Bun.BunRequest<"/worker/:botId/github-token">) => {
+    const bot = store.botForToken(bearer(req));
+    if (!bot) return unauthorized();
+    if (bot.botId !== req.params.botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
+    return bot;
+  };
 
   // Runs a bot route for the signed-in owner of :id; 401 or 404 otherwise.
   const ownBot =
-    (handle: (user: User, botId: BotId, req: Request) => Promise<Response>) =>
-    (req: Bun.BunRequest<"/bots/:id"> | Bun.BunRequest<"/bots/:id/start"> | Bun.BunRequest<"/bots/:id/stop">) => {
+    (
+      handle: (
+        user: User,
+        botId: BotId,
+        req: Request,
+        server: Bun.Server<SocketData>,
+      ) => Promise<Response> | Response | undefined,
+    ) =>
+    (
+      req:
+        | Bun.BunRequest<"/bots/:id">
+        | Bun.BunRequest<"/bots/:id/start">
+        | Bun.BunRequest<"/bots/:id/stop">
+        | Bun.BunRequest<"/bots/:id/messages">
+        | Bun.BunRequest<"/bots/:id/chat">,
+      server: Bun.Server<SocketData>,
+    ) => {
       const user = store.userForSession(bearer(req));
       if (!user) return unauthorized();
       const bot = store.botFor(user.id, req.params.id);
       if (!bot) return Response.json({ error: "not_found" }, { status: 404 });
-      return handle(user, bot.id, req);
+      return handle(user, bot.id, req, server);
     };
 
   const server = Bun.serve({
@@ -157,6 +196,28 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
           return new Response(null, { status: 204 });
         }),
       },
+      "/bots/:id/messages": {
+        POST: ownBot(async (_user, botId, req) => {
+          const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
+          if (!body.success) return Response.json({ error: "invalid_message" }, { status: 400 });
+          const worker = workers.get(botId);
+          if (!worker) return Response.json({ error: "bot_offline" }, { status: 409 });
+          if (store.unfinishedTurns(botId).length > 0) return Response.json({ error: "turn_running" }, { status: 409 });
+          const started = store.startTurn(botId, body.data.text);
+          publishChat(botId, started);
+          worker.send(
+            JSON.stringify({ type: "run-turn", turnId: started.turnId, text: body.data.text } satisfies ControlToWorker),
+          );
+          return Response.json({ turnId: started.turnId } satisfies SendMessageResponse, { status: 202 });
+        }),
+      },
+      "/bots/:id/chat": {
+        GET: ownBot((_user, botId, req, server) => {
+          const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
+          if (!Number.isInteger(after) || after < 0) return Response.json({ error: "invalid_after" }, { status: 400 });
+          return upgrade(server, req, { kind: "chat", botId, after });
+        }),
+      },
       "/events": {
         GET: (req, server) => {
           const user = store.userForSession(bearer(req));
@@ -167,10 +228,17 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
       // A worker credential is scoped to the one bot it was made for.
       "/worker/:botId": {
         GET: (req, server) => {
-          const bot = store.botForToken(bearer(req));
-          if (!bot) return unauthorized();
-          if (bot.botId !== req.params.botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
-          return upgrade(server, req, { kind: "worker", ...bot });
+          const bot = ownWorker(req);
+          return bot instanceof Response ? bot : upgrade(server, req, { kind: "worker", ...bot });
+        },
+      },
+      // The token broker. Ticket #8 adds refresh and revoke.
+      "/worker/:botId/github-token": {
+        GET: (req) => {
+          const bot = ownWorker(req);
+          if (bot instanceof Response) return bot;
+          const token = store.githubTokenForBot(bot.botId);
+          return token ? Response.json(token) : Response.json({ error: "no_github_token" }, { status: 404 });
         },
       },
     },
@@ -181,6 +249,12 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
         if (ws.data.kind === "client") {
           ws.subscribe(topic(ws.data.userId));
           ws.send(botsEvent(ws.data.userId));
+          return;
+        }
+        if (ws.data.kind === "chat") {
+          // Subscribe first: nothing can be published between these two lines.
+          ws.subscribe(chatTopic(ws.data.botId));
+          for (const event of store.chatAfter(ws.data.botId, ws.data.after)) ws.send(JSON.stringify(event));
           return;
         }
         // One connection per bot: a reconnecting worker replaces its stale socket.
@@ -194,7 +268,21 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
         workers.delete(ws.data.botId);
         publish(ws.data.userId);
       },
-      message() {},
+      message(ws, raw) {
+        if (ws.data.kind !== "worker") return;
+        const { botId } = ws.data;
+        const message = WorkerToControl.parse(JSON.parse(String(raw)));
+        if (message.type === "turn-event") {
+          return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
+        }
+        // The worker lost every unfinished turn but the one it says it is still running.
+        for (const turnId of store.unfinishedTurns(botId)) {
+          if (turnId === message.activeTurnId) continue;
+          for (const event of store.abandonTurn(botId, turnId, "The bot restarted before it finished this message.")) {
+            publishChat(botId, event);
+          }
+        }
+      },
     },
   });
 

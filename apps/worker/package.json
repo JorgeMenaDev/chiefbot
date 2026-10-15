@@ -2,7 +2,15 @@
   "name": "@chiefbot/worker",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/worker.ts" },
-  "scripts": { "typecheck": "tsc -p ." },
-  "dependencies": { "@chiefbot/contracts": "workspace:*" }
+  "exports": {
+    ".": "./src/worker.ts",
+    "./fake-copilot": "./src/fakeCopilot.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@chiefbot/contracts": "workspace:*",
+    "@github/copilot-sdk": "1.0.22"
+  }
 }

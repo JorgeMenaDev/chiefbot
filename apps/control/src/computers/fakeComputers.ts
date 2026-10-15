@@ -1,11 +1,13 @@
 import type { BotId } from "@chiefbot/contracts";
 import { startWorker } from "@chiefbot/worker";
+import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import type { ComputerProvider, ComputerSpec } from "./computer.ts";
 
 // An in-memory ComputerProvider for tests. A running computer is the real worker,
 // started in this process with the env control handed over, so tests see the
 // whole loop (create → worker dials control → bot online) without Docker.
-export function fakeComputers() {
+// Every worker runs turns on the same fake Copilot.
+export function fakeComputers({ copilot = fakeCopilot() }: { copilot?: FakeCopilot } = {}) {
   type FakeComputer = { spec: ComputerSpec; worker: ReturnType<typeof startWorker> | null };
   const computers = new Map<BotId, FakeComputer>();
   // Every destroy call, so tests can check whether data was kept.
@@ -29,6 +31,7 @@ export function fakeComputers() {
         controlUrl: CHIEFBOT_CONTROL_URL,
         botId: CHIEFBOT_BOT_ID,
         botToken: CHIEFBOT_BOT_TOKEN,
+        copilot: copilot.copilot,
         retryMs: 20,
       });
     },
@@ -51,6 +54,7 @@ export function fakeComputers() {
 
   return {
     provider,
+    copilot,
     computers,
     destroyed,
     stopAll: () => {

@@ -6,3 +6,7 @@ export type UserId = z.infer<typeof UserId>;
 
 export const BotId = z.string().min(1).brand<"BotId">();
 export type BotId = z.infer<typeof BotId>;
+
+// One user message and the bot's work on it.
+export const TurnId = z.string().min(1).brand<"TurnId">();
+export type TurnId = z.infer<typeof TurnId>;
