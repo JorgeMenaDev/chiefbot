@@ -254,8 +254,8 @@ test("routines are created, edited and deleted per bot, and a schedule control c
   expect((await api("DELETE", `/bots/${ada.id}/routines/${routine.id}`)).status).toBe(404);
 });
 
-test("a routine turn waiting on an approval keeps its computer after the timeout, and the user can still answer", async () => {
-  const { time, computers, api, bot, addRoutine, routines, chat } = await setup();
+test("a routine turn waiting on an approval keeps its computer after the timeout until the user answers, then stops it", async () => {
+  const { time, computers, api, bot, statusOf, addRoutine, routines, chat } = await setup();
   computers.copilot.script = async function* (_prompt, runtime) {
     await runtime.shell("git push origin main");
     yield sdk.idle();
@@ -268,11 +268,13 @@ test("a routine turn waiting on an approval keeps its computer after the timeout
   time.advance(TURN_TIMEOUT_MS);
   await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "failed");
   const request = (await chat(ada.id)).find((event) => event.type === "approval-request");
+  expect(await computers.provider.status(ada.id)).toBe("running");
   const answer = await api("POST", `/bots/${ada.id}/approvals/${request?.type === "approval-request" ? request.approvalId : ""}`, {
     approved: false,
   });
 
-  expect(await computers.provider.status(ada.id)).toBe("running");
   expect(answer.status).toBe(204);
   await eventually(async () => (await chat(ada.id)).at(-1)?.type === "done");
+  await eventually(async () => (await statusOf(ada.id)) === "stopped");
+  expect(await computers.provider.status(ada.id)).toBe("stopped");
 });

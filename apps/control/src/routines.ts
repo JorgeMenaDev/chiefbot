@@ -33,8 +33,8 @@ const refused: Record<TurnRefusal, { status: Exclude<RoutineRun["status"], "runn
 // A run starts the bot's computer if it is stopped, waits for its worker, sends
 // the prompt as a chat turn (its result lands in the bot's chat history) and
 // stops the computer again if the run started it. Runs of one bot go one at a
-// time. A run that times out while its turn waits on an approval leaves the
-// computer running. Runs that a previous control left unfinished are marked failed, and
+// time. A run that times out while its turn waits on an approval keeps the
+// computer running until that turn ends. Runs that a previous control left unfinished are marked failed, and
 // their computers stopped again if they started them; they are not run again.
 export function startScheduler({
   store,
@@ -75,6 +75,8 @@ export function startScheduler({
 
   async function execute(run: Run) {
     let startedComputer = false;
+    // The run's turn: resolves when it ends, even after the run timed out.
+    let turnDone: Promise<unknown> | null = null;
     try {
       const running = store.botRunning(run.botId);
       if (running === null) return;
@@ -90,6 +92,7 @@ export function startScheduler({
         return store.finishRun(run, status, error);
       }
       store.setRunTurn(run, turn.turnId);
+      turnDone = turn.done;
       const error = await within(turn.done, TURN_TIMEOUT_MS, "The bot did not finish in time.");
       store.finishRun(run, error === null ? "succeeded" : "failed", error);
     } catch (error) {
@@ -97,8 +100,11 @@ export function startScheduler({
       if (!stopped) store.finishRun(run, "failed", error instanceof Error ? error.message : String(error));
     } finally {
       // A turn waiting on the user's approval keeps its computer, so the approval
-      // stays answerable after the run timed out. The computer then stays running.
-      if (startedComputer && !stopped && !store.waitingOnApproval(run.botId)) await stopComputer(run.userId, run.botId);
+      // stays answerable after the run timed out. The computer stops once that turn ends.
+      if (startedComputer && !stopped) {
+        if (!store.waitingOnApproval(run.botId)) await stopComputer(run.userId, run.botId);
+        else void turnDone?.then(() => (stopped ? undefined : stopComputer(run.userId, run.botId)));
+      }
     }
   }
 
