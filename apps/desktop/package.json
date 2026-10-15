@@ -1,0 +1,7 @@
+{
+  "name": "@chiefbot/desktop",
+  "private": true,
+  "type": "module",
+  "scripts": { "typecheck": "tsc -p ." },
+  "dependencies": { "@chiefbot/contracts": "workspace:*" }
+}

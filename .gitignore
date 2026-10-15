@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+.env*
+!.env.example
+*.sqlite
+*.sqlite-*
+.data/
+.terraform/
+*.tfstate*
