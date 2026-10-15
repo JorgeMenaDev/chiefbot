@@ -440,4 +440,53 @@ body {
 }
 .composer-error {
   flex: 1;
+
+/* Below the bot header: the chat, with the bot's live screen (noVNC) in a side
+   pane. 16:10 like the 1280×800 Xvfb screen. */
+.bot-body {
+  display: flex;
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+}
+.screen-pane {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  width: 42%;
+  min-width: 360px;
+  padding-top: 16px;
+}
+.screen-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.screen-view {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  background: #000;
+  border: 1px solid #2c2c31;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.screen-view.interactive {
+  border-color: #3fb950;
+}
+.screen-canvas {
+  width: 100%;
+  height: 100%;
+}
+.screen-empty,
+.screen-overlay {
+  display: grid;
+  place-items: center;
+  margin: 0;
+  font-size: 13px;
+}
+.screen-overlay {
+  position: absolute;
+  inset: 0;
 }

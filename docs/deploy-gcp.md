@@ -4,7 +4,7 @@ This runbook puts control and the bot computers on Google Cloud in London (`euro
 
 ## What gets created
 
-- **Network:** one VPC and subnet (`10.10.0.0/24`) with no public IPs. Cloud NAT gives outbound internet (GitHub, Copilot). The firewall lets in only IAP (SSH and control's port 7410) and bot VMs dialling control.
+- **Network:** one VPC and subnet (`10.10.0.0/24`) with no public IPs. Cloud NAT gives outbound internet (GitHub, Copilot). The firewall lets in only IAP (SSH and control's port 7410) and bot VMs dialling control. The bot screen needs no rule of its own: x11vnc listens only inside the bot container, and the worker carries it to control over that same outbound connection.
 - **Artifact Registry** repository `chiefbot` with two images: `control` and `computer`.
 - **Service accounts:** `chiefbot-control` (manages bot VMs and disks, Secret Manager for ticket #8) and `chiefbot-computer` (pulls its image and writes logs, nothing else).
 - **Control VM** `chiefbot-control` (e2-medium, Container-Optimized OS) running the control image, with SQLite on its own 10 GB disk.
@@ -126,5 +126,4 @@ Makes no Copilot calls. Each bot costs about $0.09 per running hour.
 - The bot's credential (`CHIEFBOT_BOT_TOKEN`) is in its VM's metadata. Project members who can read VMs can read it. Ticket #8 can move it to Secret Manager.
 - No `SecretStore` exists yet, so there is no Secret Manager store for GitHub refresh tokens. They stay in control's SQLite on the data disk. Ticket #8 adds the store. Terraform already enables Secret Manager and gives the control service account `roles/secretmanager.admin` for it.
 - Nothing stops idle bots automatically yet. **Stop** in the app is the only way.
-- The noVNC screen (ticket #5) needs port 6080 added to the `chiefbot-allow-iap` firewall rule.
 - No snapshot schedule backs up the control data disk.

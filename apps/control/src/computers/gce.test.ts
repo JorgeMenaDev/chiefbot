@@ -102,7 +102,7 @@ test("the VM runs the bot computer image on Container-Optimized OS, with control
   expect(userData).toContain(":/home/bot");
 });
 
-test("the bot container runs as bot with no capabilities and cannot reach the VM's metadata server", async () => {
+test("the bot container runs as bot with no capabilities, publishes no port and cannot reach the VM's metadata server", async () => {
   const { compute, computers } = setup();
 
   await computers.create(spec);
@@ -113,5 +113,7 @@ test("the bot container runs as bot with no capabilities and cannot reach the VM
   expect(run).toContain("--cap-drop=ALL");
   expect(run).toContain("--security-opt=no-new-privileges");
   expect(run).not.toContain("--network=host");
+  // Its screen reaches viewers only through the worker's connection to control.
+  expect(run).not.toMatch(/ (-p|--publish)[ =]/);
   expect(userData).toContain("DOCKER-USER -d 169.254.169.254 -j DROP");
 });

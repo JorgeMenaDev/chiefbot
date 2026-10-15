@@ -1,5 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import {
+  AUTO_MODEL,
   BotToken,
   CreateBotRequest,
   GitHubTokens,
@@ -13,6 +14,7 @@ import {
   type ClientEvent,
   type ControlToWorker,
   type ModelOption,
+  type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
   type User,
@@ -37,11 +39,23 @@ export type ControlOptions = {
 };
 
 // What a WebSocket connection is bound to: a desktop client of one user, one
-// bot's chat from `after` on, or the worker of exactly one bot.
+// bot's chat from `after` on, the worker of exactly one bot, or one end of a
+// screen stream: the owner's viewer, or the bot's worker piping its VNC server.
 type SocketData =
   | { kind: "client"; userId: UserId }
   | { kind: "chat"; botId: BotId; after: number }
-  | { kind: "worker"; userId: UserId; botId: BotId };
+  | { kind: "worker"; userId: UserId; botId: BotId }
+  | { kind: "viewer"; botId: BotId; streamId: string }
+  | { kind: "screen"; streamId: string };
+
+// One viewer watching one bot's screen. Viewer frames sent before the worker
+// joins wait in `queued`.
+type ScreenStream = {
+  botId: BotId;
+  viewer: ServerWebSocket<SocketData>;
+  screen: ServerWebSocket<SocketData> | null;
+  queued: Array<string | Buffer>;
+};
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -51,21 +65,40 @@ type SocketData =
 //   POST   /bots              bearer session, body CreateBotRequest → 201 Bot (its computer is starting)
 //   POST   /bots/:id/start    bearer session    → Bot
 //   POST   /bots/:id/stop     bearer session    → Bot
+//   POST   /bots/:id/take-over bearer session   → Bot (the human drives the screen; agent input waits)
+//   POST   /bots/:id/hand-back bearer session   → Bot (the agent drives the screen again)
+//   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
 //   PUT    /bots/:id/model    bearer session, body SetBotModelRequest → Bot; the bot's next turn runs on it
 //                             (400 model_unavailable when the user's plan does not offer it or it is locked)
 //   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
-//                             (409 when the bot is not online or is still on a turn)
+//                             (409 when the bot is not online, is still on a turn or the human has its screen)
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
 //   WS     /bots/:id/chat     bearer session, ?after=<seq> → each ChatEvent after seq, then live ones
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
 //                             (403 for another bot's)
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
+//   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//
+// The screen never listens beyond the computer's loopback: for each viewer,
+// control asks the worker to dial back and pipe x11vnc, and joins the two sockets.
 export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
   const store = openStore(dbPath);
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
+  // Who drives each bot's screen; absent means the agent. Kept in memory, so a
+  // control restart hands every screen back to the agent.
+  const screenControl = new Map<BotId, ScreenControl>();
+  const screenStreams = new Map<string, ScreenStream>();
+
+  // Closes both ends of a screen stream.
+  function endStream(streamId: string) {
+    const stream = screenStreams.get(streamId);
+    screenStreams.delete(streamId);
+    stream?.viewer.close();
+    stream?.screen?.close();
+  }
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running, model }) => ({
@@ -73,19 +106,35 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
       name,
       status: !running ? "stopped" : workers.has(id) ? "online" : "starting",
       model,
+      screenControl: screenControl.get(id) ?? "agent",
     }));
   const botOf = (userId: UserId, botId: BotId) => botsOf(userId).find((bot) => bot.id === botId);
   const modelOptionsOf = (user: User): ModelOption[] => modelOptions(store.modelReport(user.id), user.copilotPlan);
   const topic = (userId: UserId) => `bots:${userId}`;
   const botsEvent = (userId: UserId) => JSON.stringify({ type: "bots", bots: botsOf(userId) } satisfies ClientEvent);
   const publish = (userId: UserId) => server.publish(topic(userId), botsEvent(userId));
+  const screenControlMessage = (botId: BotId) =>
+    JSON.stringify({ type: "screen-control", control: screenControl.get(botId) ?? "agent" } satisfies ControlToWorker);
+
+  // Take-over and hand-back: tell the bot's worker and the owner's clients.
+  function setScreenControl(user: User, botId: BotId, control: ScreenControl) {
+    screenControl.set(botId, control);
+    workers.get(botId)?.send(screenControlMessage(botId));
+    publish(user.id);
+    return Response.json(botOf(user.id, botId));
+  }
   const chatTopic = (botId: BotId) => `chat:${botId}`;
   const publishChat = (botId: BotId, event: ChatEvent | null) => {
     if (event) server.publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
   };
 
   // Runs a worker route for the bot whose credential it carries; 401 or 403 otherwise.
-  const ownWorker = (req: Bun.BunRequest<"/worker/:botId"> | Bun.BunRequest<"/worker/:botId/github-token">) => {
+  const ownWorker = (
+    req:
+      | Bun.BunRequest<"/worker/:botId">
+      | Bun.BunRequest<"/worker/:botId/github-token">
+      | Bun.BunRequest<"/worker/:botId/screen/:streamId">,
+  ) => {
     const bot = store.botForToken(bearer(req));
     if (!bot) return unauthorized();
     if (bot.botId !== req.params.botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
@@ -97,10 +146,10 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
     (
       handle: (
         user: User,
-        bot: { id: BotId; model: string },
+        botId: BotId,
         req: Request,
         server: Bun.Server<SocketData>,
-      ) => Promise<Response> | Response | undefined,
+      ) => Response | undefined | Promise<Response | undefined>,
     ) =>
     (
       req:
@@ -108,6 +157,9 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         | Bun.BunRequest<"/bots/:id/start">
         | Bun.BunRequest<"/bots/:id/stop">
         | Bun.BunRequest<"/bots/:id/model">
+        | Bun.BunRequest<"/bots/:id/take-over">
+        | Bun.BunRequest<"/bots/:id/hand-back">
+        | Bun.BunRequest<"/bots/:id/screen">
         | Bun.BunRequest<"/bots/:id/messages">
         | Bun.BunRequest<"/bots/:id/chat">,
       server: Bun.Server<SocketData>,
@@ -116,7 +168,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
       if (!user) return unauthorized();
       const bot = store.botFor(user.id, req.params.id);
       if (!bot) return Response.json({ error: "not_found" }, { status: 404 });
-      return handle(user, bot, req, server);
+      return handle(user, bot.id, req, server);
     };
 
   const server = Bun.serve({
@@ -182,7 +234,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         },
       },
       "/bots/:id/start": {
-        POST: ownBot(async (user, { id: botId }) => {
+        POST: ownBot(async (user, botId) => {
           await computers.start(botId);
           store.setRunning(botId, true);
           publish(user.id);
@@ -190,25 +242,38 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         }),
       },
       "/bots/:id/stop": {
-        POST: ownBot(async (user, { id: botId }) => {
+        POST: ownBot(async (user, botId) => {
           await computers.stop(botId);
           store.setRunning(botId, false);
           publish(user.id);
           return Response.json(botOf(user.id, botId));
         }),
       },
+      "/bots/:id/take-over": {
+        POST: ownBot((user, botId) => setScreenControl(user, botId, "human")),
+      },
+      "/bots/:id/hand-back": {
+        POST: ownBot((user, botId) => setScreenControl(user, botId, "agent")),
+      },
+      "/bots/:id/screen": {
+        GET: ownBot((_user, botId, req, server) => {
+          if (!workers.has(botId)) return Response.json({ error: "bot_offline" }, { status: 409 });
+          return upgrade(server, req, { kind: "viewer", botId, streamId: crypto.randomUUID() });
+        }),
+      },
       "/bots/:id": {
-        DELETE: ownBot(async (user, { id: botId }, req) => {
+        DELETE: ownBot(async (user, botId, req) => {
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
           await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
+          screenControl.delete(botId);
           workers.get(botId)?.close();
           publish(user.id);
           return new Response(null, { status: 204 });
         }),
       },
       "/bots/:id/model": {
-        PUT: ownBot(async (user, { id: botId }, req) => {
+        PUT: ownBot(async (user, botId, req) => {
           const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
           const offered = modelOptionsOf(user).some(({ id, lockedReason }) => id === body.data?.model && lockedReason === null);
           if (!body.success || !offered) return Response.json({ error: "model_unavailable" }, { status: 400 });
@@ -218,12 +283,15 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         }),
       },
       "/bots/:id/messages": {
-        POST: ownBot(async (_user, { id: botId, model }, req) => {
+        POST: ownBot(async (user, botId, req) => {
           const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return Response.json({ error: "invalid_message" }, { status: 400 });
           const worker = workers.get(botId);
           if (!worker) return Response.json({ error: "bot_offline" }, { status: 409 });
           if (store.unfinishedTurns(botId).length > 0) return Response.json({ error: "turn_running" }, { status: 409 });
+          // The agent waits while the human drives the screen. A turn already running is not paused.
+          if (screenControl.get(botId) === "human") return Response.json({ error: "human_has_screen" }, { status: 409 });
+          const model = store.botFor(user.id, botId)?.model ?? AUTO_MODEL;
           const started = store.startTurn(botId, body.data.text);
           publishChat(botId, started);
           worker.send(
@@ -233,7 +301,7 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         }),
       },
       "/bots/:id/chat": {
-        GET: ownBot((_user, { id: botId }, req, server) => {
+        GET: ownBot((_user, botId, req, server) => {
           const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
           if (!Number.isInteger(after) || after < 0) return Response.json({ error: "invalid_after" }, { status: 400 });
           return upgrade(server, req, { kind: "chat", botId, after });
@@ -268,11 +336,37 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
           return token ? Response.json(token) : Response.json({ error: "no_github_token" }, { status: 404 });
         },
       },
+      // Only a stream control opened for this bot, and only once.
+      "/worker/:botId/screen/:streamId": {
+        GET: (req, server) => {
+          const bot = ownWorker(req);
+          if (bot instanceof Response) return bot;
+          const stream = screenStreams.get(req.params.streamId);
+          if (!stream || stream.botId !== bot.botId || stream.screen) {
+            return Response.json({ error: "not_found" }, { status: 404 });
+          }
+          return upgrade(server, req, { kind: "screen", streamId: req.params.streamId });
+        },
+      },
     },
     websocket: {
       // Bun's documented way to type ws.data.
       data: {} as SocketData,
       open(ws) {
+        if (ws.data.kind === "viewer") {
+          const worker = workers.get(ws.data.botId);
+          if (!worker) return ws.close();
+          screenStreams.set(ws.data.streamId, { botId: ws.data.botId, viewer: ws, screen: null, queued: [] });
+          worker.send(JSON.stringify({ type: "screen-open", streamId: ws.data.streamId } satisfies ControlToWorker));
+          return;
+        }
+        if (ws.data.kind === "screen") {
+          const stream = screenStreams.get(ws.data.streamId);
+          if (!stream) return ws.close();
+          stream.screen = ws;
+          for (const frame of stream.queued.splice(0)) ws.send(frame);
+          return;
+        }
         if (ws.data.kind === "client") {
           ws.subscribe(topic(ws.data.userId));
           ws.send(botsEvent(ws.data.userId));
@@ -288,14 +382,24 @@ export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUr
         workers.get(ws.data.botId)?.close(4000, "replaced");
         workers.set(ws.data.botId, ws);
         ws.send(JSON.stringify({ type: "bound", botId: ws.data.botId } satisfies ControlToWorker));
+        ws.send(screenControlMessage(ws.data.botId));
         publish(ws.data.userId);
       },
       close(ws) {
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") return endStream(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
         publish(ws.data.userId);
       },
       message(ws, raw) {
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") {
+          const stream = screenStreams.get(ws.data.streamId);
+          if (!stream) return;
+          if (ws.data.kind === "screen") stream.viewer.send(raw);
+          else if (stream.screen) stream.screen.send(raw);
+          else stream.queued.push(raw);
+          return;
+        }
         if (ws.data.kind !== "worker") return;
         const { botId } = ws.data;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));

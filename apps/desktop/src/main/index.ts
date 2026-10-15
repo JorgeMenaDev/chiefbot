@@ -1,5 +1,5 @@
 import { BotId, CreateBotRequest, SendMessageRequest, SetBotModelRequest } from "@chiefbot/contracts";
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
@@ -71,6 +71,11 @@ ipcMain.handle("bots:models", () => bots.models());
 ipcMain.handle("bots:set-model", (_event, id: unknown, model: unknown) =>
   bots.setModel(BotId.parse(id), SetBotModelRequest.parse({ model }).model),
 );
+ipcMain.handle("bots:take-over", (_event, id: unknown) => bots.takeOver(BotId.parse(id)));
+ipcMain.handle("bots:hand-back", (_event, id: unknown) => bots.handBack(BotId.parse(id)));
+// noVNC in the renderer opens this WebSocket; main signs it below.
+const controlSockets = controlUrl.replace(/^http/, "ws");
+ipcMain.handle("bots:screen-url", (_event, id: unknown) => `${controlSockets}/bots/${BotId.parse(id)}/screen`);
 // Opening a chat answers with what main has so far; the rest follows on chat:state.
 ipcMain.handle("chat:open", (_event, id: unknown) => {
   const botId = BotId.parse(id);
@@ -98,6 +103,15 @@ ipcMain.handle("bots:delete", async (_event, id: unknown) => {
 });
 
 app.whenReady().then(async () => {
+  // Adds the control session to the screen WebSocket's handshake, so the
+  // renderer never holds it. Control checks that the session owns the bot.
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: [`${controlSockets}/bots/*/screen`] },
+    ({ requestHeaders }, callback) => {
+      const token = sessionStore.load();
+      callback({ requestHeaders: token ? { ...requestHeaders, Authorization: `Bearer ${token}` } : requestHeaders });
+    },
+  );
   window = new BrowserWindow({
     width: 1100,
     height: 760,
