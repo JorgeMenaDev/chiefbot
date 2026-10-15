@@ -1,13 +1,15 @@
 import type { BotId } from "@chiefbot/contracts";
 import type { TCPSocketListener } from "bun";
 import { startWorker } from "@chiefbot/worker";
+import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import type { ComputerProvider, ComputerSpec } from "./computer.ts";
 
 // An in-memory ComputerProvider for tests. A running computer is the real worker,
 // started in this process with the env control handed over, so tests see the
 // whole loop (create → worker dials control → bot online) without Docker.
-// Its screen is a fake VNC server on TCP: it greets like one and records what it receives.
-export function fakeComputers() {
+// Every worker runs turns on the same fake Copilot. Its screen is a fake VNC
+// server on TCP: it greets like one and records what it receives.
+export function fakeComputers({ copilot = fakeCopilot() }: { copilot?: FakeCopilot } = {}) {
   type FakeComputer = {
     spec: ComputerSpec;
     worker: ReturnType<typeof startWorker> | null;
@@ -60,6 +62,7 @@ export function fakeComputers() {
         controlUrl: CHIEFBOT_CONTROL_URL,
         botId: CHIEFBOT_BOT_ID,
         botToken: CHIEFBOT_BOT_TOKEN,
+        copilot: copilot.copilot,
         screen: { hostname: "127.0.0.1", port: computer.screen.port },
         retryMs: 20,
       });
@@ -82,6 +85,7 @@ export function fakeComputers() {
 
   return {
     provider,
+    copilot,
     computers,
     destroyed,
     screenInput,

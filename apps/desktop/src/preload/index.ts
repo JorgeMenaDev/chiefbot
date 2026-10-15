@@ -28,6 +28,11 @@ const api = {
     screenUrl: (id: string): Promise<string> => ipcRenderer.invoke("bots:screen-url", id),
     onChange: (listener: (bots: unknown) => void) => subscribe("bots:state", listener),
   },
+  chat: {
+    open: (botId: string): Promise<unknown> => ipcRenderer.invoke("chat:open", botId),
+    send: (botId: string, text: string): Promise<unknown> => ipcRenderer.invoke("chat:send", botId, text),
+    onChange: (listener: (view: unknown) => void) => subscribe("chat:state", listener),
+  },
 };
 
 export type ChiefbotApi = typeof api;

@@ -13,3 +13,11 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
       - run: bun run check
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: hashicorp/setup-terraform@v3
+      - run: terraform -chdir=infra/gcp init -backend=false -input=false
+      - run: terraform -chdir=infra/gcp fmt -check
+      - run: terraform -chdir=infra/gcp validate

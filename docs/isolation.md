@@ -23,7 +23,7 @@ Proof:
 ### Known limits
 
 - **One kernel.** All bots share the Colima VM's Linux kernel. A kernel exploit inside one container could reach the others. This is acceptable for a local proof of concept with one user's own bots.
-- **The Mac is reachable.** Every bot reaches the Mac through `host.docker.internal`, because the worker dials control there. So a bot can also reach any other port the Mac listens on. Control's routes all need a token. Do not publish a bot port (for example VNC, ticket #5) on the Mac: proxy it through control, which checks ownership.
+- **The Mac is reachable.** Every bot reaches the Mac through `host.docker.internal`, because the worker dials control there. So a bot can also reach any other port the Mac listens on. Control's routes all need a token. Never publish a bot port on the Mac. The screen shows how: x11vnc listens only on the container's loopback, the worker dials control for each viewer, and control checks that the viewer owns the bot.
 - **No resource limits.** A bot can use all of the VM's CPU and memory and slow the other bots down. Add limits when this shows up.
 - **The root filesystem is writable.** Writes outside `/home/bot` stay in that bot's container and are lost when the container is removed.
 
@@ -33,9 +33,9 @@ Proof:
 | --- | --- | --- |
 | Compute | Container on a shared kernel | One Compute Engine VM per bot, with its own kernel. The shared-kernel limit goes away. |
 | Disk | Named volume | One persistent disk per bot, attached only to that bot's VM. |
-| Network | One bridge network per bot | VPC firewall rules: deny ingress between bot VMs, allow ingress only from control (and IAP for admin), egress through Cloud NAT, no external IP. The "Mac is reachable" limit becomes "control is reachable", and only control. |
-| Credential | Bot token in the container env | The same bot token, delivered to the VM by instance metadata or Secret Manager. Control's checks do not change. |
-| Cloud identity | None | The VM's service account must have no roles (or the VM has no service account), so the metadata server gives a bot no access to GCP or to other bots' secrets. |
+| Network | One bridge network per bot | VPC firewall rules (`infra/gcp`): ingress only from IAP (SSH), so bot VMs cannot reach each other; egress through Cloud NAT, no external IP. Bot VMs may open only control's port. The "Mac is reachable" limit becomes "control is reachable", and only control. |
+| Credential | Bot token in the container env | The same bot token, delivered in the VM's instance metadata (cloud-init) and handed to the container as env. Project members who can read VMs can read it; Secret Manager is a later step. Control's checks do not change. |
+| Cloud identity | None | The VM's service account `chiefbot-computer` can only pull the image and write logs. The bot container cannot use it: a firewall rule on the VM drops the container's traffic to the metadata server. |
 | Resource limits | None | The machine type sets them per bot. |
 
 The worker, the bot token and control's checks are the same in both places. Only the `ComputerProvider` changes.

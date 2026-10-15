@@ -1,9 +1,10 @@
-import { BotId, CreateBotRequest } from "@chiefbot/contracts";
+import { BotId, CreateBotRequest, SendMessageRequest } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
+import { createChats } from "./chat.ts";
 
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
@@ -37,6 +38,12 @@ const bots = createBots({
   onChange: (list) => window?.webContents.send("bots:state", list),
 });
 
+const chats = createChats({
+  controlUrl,
+  session: sessionStore.load,
+  onChange: (view) => window?.webContents.send("chat:state", view),
+});
+
 const auth = createAuth({
   controlUrl,
   deviceFlow: { githubUrl, clientId },
@@ -44,7 +51,10 @@ const auth = createAuth({
   onChange: (state) => {
     window?.webContents.send("auth:state", state);
     if (state.status === "signed-in") bots.connect();
-    else bots.disconnect();
+    else {
+      bots.disconnect();
+      chats.disconnect();
+    }
   },
 });
 
@@ -62,6 +72,15 @@ ipcMain.handle("bots:hand-back", (_event, id: unknown) => bots.handBack(BotId.pa
 // noVNC in the renderer opens this WebSocket; main signs it below.
 const controlSockets = controlUrl.replace(/^http/, "ws");
 ipcMain.handle("bots:screen-url", (_event, id: unknown) => `${controlSockets}/bots/${BotId.parse(id)}/screen`);
+// Opening a chat answers with what main has so far; the rest follows on chat:state.
+ipcMain.handle("chat:open", (_event, id: unknown) => {
+  const botId = BotId.parse(id);
+  chats.open(botId);
+  return chats.view(botId);
+});
+ipcMain.handle("chat:send", (_event, id: unknown, text: unknown) =>
+  chats.send(BotId.parse(id), SendMessageRequest.parse({ text }).text),
+);
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {
   const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));

@@ -3,12 +3,16 @@ import {
   BotToken,
   CreateBotRequest,
   GitHubTokens,
+  SendMessageRequest,
   SessionToken,
+  WorkerToControl,
   type Bot,
   type BotId,
+  type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
   type ScreenControl,
+  type SendMessageResponse,
   type SignInResponse,
   type User,
   type UserId,
@@ -19,6 +23,8 @@ import { openStore } from "./store.ts";
 
 export type ControlOptions = {
   port: number;
+  // Interface to listen on. Default 127.0.0.1.
+  hostname?: string;
   dbPath: string;
   // api.github.com in production; a fake in tests.
   githubApiUrl: string;
@@ -28,11 +34,12 @@ export type ControlOptions = {
   workerControlUrl?: string;
 };
 
-// What a WebSocket connection is bound to: a desktop client of one user, the
-// worker of exactly one bot, or one end of a screen stream: the owner's viewer,
-// or the bot's worker piping its VNC server.
+// What a WebSocket connection is bound to: a desktop client of one user, one
+// bot's chat from `after` on, the worker of exactly one bot, or one end of a
+// screen stream: the owner's viewer, or the bot's worker piping its VNC server.
 type SocketData =
   | { kind: "client"; userId: UserId }
+  | { kind: "chat"; botId: BotId; after: number }
   | { kind: "worker"; userId: UserId; botId: BotId }
   | { kind: "viewer"; botId: BotId; streamId: string }
   | { kind: "screen"; streamId: string };
@@ -58,13 +65,18 @@ type ScreenStream = {
 //   POST   /bots/:id/hand-back bearer session   → Bot (the agent drives the screen again)
 //   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
+//   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
+//                             (409 when the bot is not online, is still on a turn or the human has its screen)
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
-//   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker (403 for another bot's)
+//   WS     /bots/:id/chat     bearer session, ?after=<seq> → each ChatEvent after seq, then live ones
+//   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
+//                             (403 for another bot's)
+//   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
 //
 // The screen never listens beyond the computer's loopback: for each viewer,
 // control asks the worker to dial back and pipe x11vnc, and joins the two sockets.
-export function startControl({ port, dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
+export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
   const store = openStore(dbPath);
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
@@ -79,14 +91,6 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
     screenStreams.delete(streamId);
     stream?.viewer.close();
     stream?.screen?.close();
-  }
-
-  // The bot a worker's credential belongs to when that is :botId; the refusal otherwise.
-  function workerFor(req: Request, botId: string) {
-    const bot = store.botForToken(bearer(req));
-    if (!bot) return unauthorized();
-    if (bot.botId !== botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
-    return bot;
   }
 
   const botsOf = (userId: UserId): Bot[] =>
@@ -110,6 +114,23 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
     publish(user.id);
     return Response.json(botOf(user.id, botId));
   }
+  const chatTopic = (botId: BotId) => `chat:${botId}`;
+  const publishChat = (botId: BotId, event: ChatEvent | null) => {
+    if (event) server.publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
+  };
+
+  // Runs a worker route for the bot whose credential it carries; 401 or 403 otherwise.
+  const ownWorker = (
+    req:
+      | Bun.BunRequest<"/worker/:botId">
+      | Bun.BunRequest<"/worker/:botId/github-token">
+      | Bun.BunRequest<"/worker/:botId/screen/:streamId">,
+  ) => {
+    const bot = store.botForToken(bearer(req));
+    if (!bot) return unauthorized();
+    if (bot.botId !== req.params.botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
+    return bot;
+  };
 
   // Runs a bot route for the signed-in owner of :id; 401 or 404 otherwise.
   const ownBot =
@@ -128,7 +149,9 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
         | Bun.BunRequest<"/bots/:id/stop">
         | Bun.BunRequest<"/bots/:id/take-over">
         | Bun.BunRequest<"/bots/:id/hand-back">
-        | Bun.BunRequest<"/bots/:id/screen">,
+        | Bun.BunRequest<"/bots/:id/screen">
+        | Bun.BunRequest<"/bots/:id/messages">
+        | Bun.BunRequest<"/bots/:id/chat">,
       server: Bun.Server<SocketData>,
     ) => {
       const user = store.userForSession(bearer(req));
@@ -140,7 +163,7 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
 
   const server = Bun.serve({
     port,
-    hostname: "127.0.0.1",
+    hostname,
     routes: {
       "/sessions": {
         POST: async (req) => {
@@ -239,6 +262,30 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
           return new Response(null, { status: 204 });
         }),
       },
+      "/bots/:id/messages": {
+        POST: ownBot(async (_user, botId, req) => {
+          const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
+          if (!body.success) return Response.json({ error: "invalid_message" }, { status: 400 });
+          const worker = workers.get(botId);
+          if (!worker) return Response.json({ error: "bot_offline" }, { status: 409 });
+          if (store.unfinishedTurns(botId).length > 0) return Response.json({ error: "turn_running" }, { status: 409 });
+          // The agent waits while the human drives the screen. A turn already running is not paused.
+          if (screenControl.get(botId) === "human") return Response.json({ error: "human_has_screen" }, { status: 409 });
+          const started = store.startTurn(botId, body.data.text);
+          publishChat(botId, started);
+          worker.send(
+            JSON.stringify({ type: "run-turn", turnId: started.turnId, text: body.data.text } satisfies ControlToWorker),
+          );
+          return Response.json({ turnId: started.turnId } satisfies SendMessageResponse, { status: 202 });
+        }),
+      },
+      "/bots/:id/chat": {
+        GET: ownBot((_user, botId, req, server) => {
+          const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
+          if (!Number.isInteger(after) || after < 0) return Response.json({ error: "invalid_after" }, { status: 400 });
+          return upgrade(server, req, { kind: "chat", botId, after });
+        }),
+      },
       "/events": {
         GET: (req, server) => {
           const user = store.userForSession(bearer(req));
@@ -249,15 +296,23 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
       // A worker credential is scoped to the one bot it was made for.
       "/worker/:botId": {
         GET: (req, server) => {
-          const bot = workerFor(req, req.params.botId);
+          const bot = ownWorker(req);
+          return bot instanceof Response ? bot : upgrade(server, req, { kind: "worker", ...bot });
+        },
+      },
+      // The token broker. Ticket #8 adds refresh and revoke.
+      "/worker/:botId/github-token": {
+        GET: (req) => {
+          const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          return upgrade(server, req, { kind: "worker", ...bot });
+          const token = store.githubTokenForBot(bot.botId);
+          return token ? Response.json(token) : Response.json({ error: "no_github_token" }, { status: 404 });
         },
       },
       // Only a stream control opened for this bot, and only once.
       "/worker/:botId/screen/:streamId": {
         GET: (req, server) => {
-          const bot = workerFor(req, req.params.botId);
+          const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
           const stream = screenStreams.get(req.params.streamId);
           if (!stream || stream.botId !== bot.botId || stream.screen) {
@@ -290,6 +345,12 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
           ws.send(botsEvent(ws.data.userId));
           return;
         }
+        if (ws.data.kind === "chat") {
+          // Subscribe first: nothing can be published between these two lines.
+          ws.subscribe(chatTopic(ws.data.botId));
+          for (const event of store.chatAfter(ws.data.botId, ws.data.after)) ws.send(JSON.stringify(event));
+          return;
+        }
         // One connection per bot: a reconnecting worker replaces its stale socket.
         workers.get(ws.data.botId)?.close(4000, "replaced");
         workers.set(ws.data.botId, ws);
@@ -303,13 +364,28 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
         workers.delete(ws.data.botId);
         publish(ws.data.userId);
       },
-      message(ws, message) {
-        if (ws.data.kind !== "viewer" && ws.data.kind !== "screen") return;
-        const stream = screenStreams.get(ws.data.streamId);
-        if (!stream) return;
-        if (ws.data.kind === "screen") stream.viewer.send(message);
-        else if (stream.screen) stream.screen.send(message);
-        else stream.queued.push(message);
+      message(ws, raw) {
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") {
+          const stream = screenStreams.get(ws.data.streamId);
+          if (!stream) return;
+          if (ws.data.kind === "screen") stream.viewer.send(raw);
+          else if (stream.screen) stream.screen.send(raw);
+          else stream.queued.push(raw);
+          return;
+        }
+        if (ws.data.kind !== "worker") return;
+        const { botId } = ws.data;
+        const message = WorkerToControl.parse(JSON.parse(String(raw)));
+        if (message.type === "turn-event") {
+          return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
+        }
+        // The worker lost every unfinished turn but the one it says it is still running.
+        for (const turnId of store.unfinishedTurns(botId)) {
+          if (turnId === message.activeTurnId) continue;
+          for (const event of store.abandonTurn(botId, turnId, "The bot restarted before it finished this message.")) {
+            publishChat(botId, event);
+          }
+        }
       },
     },
   });

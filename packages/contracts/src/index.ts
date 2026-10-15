@@ -3,3 +3,4 @@
 export * from "./ids.ts";
 export * from "./auth.ts";
 export * from "./bots.ts";
+export * from "./chat.ts";
