@@ -7,8 +7,8 @@ https://github.com/pingdotgg/t3code
 Used in:
 
 - the bot status dot in `apps/desktop/src/renderer` (colour per status and the ping while starting) is adapted from `apps/web/src/components/ConnectionStatusDot.tsx`.
-- the model picker in `apps/desktop/src/renderer` (`ModelPicker`, `ModelRow`) is adapted from `apps/web/src/components/chat/ProviderModelPicker.tsx` and `ModelListRow.tsx`, through Chartpilot's port (https://github.com/JorgeMenaDev/chartpilot, `components/composer-controls.tsx`). Its Copilot mark is GitHub's Octicon (MIT).
-- the approval card in `apps/desktop/src/renderer/src/App.tsx` (`ApprovalCard`: label per request kind, the exact command in monospace, Decline and Approve) is adapted from `apps/web/src/components/chat/ComposerPendingApprovalPanel.tsx` and `ComposerPendingApprovalActions.tsx`.
+- the model picker in `apps/desktop/src/renderer/src/ModelPicker.tsx` (`ModelPicker`, `ModelRow`) is adapted from `apps/web/src/components/chat/ProviderModelPicker.tsx` and `ModelListRow.tsx`, through Chartpilot's port (https://github.com/JorgeMenaDev/chartpilot, `components/composer-controls.tsx`). Its Copilot mark is GitHub's Octicon (MIT).
+- the approval card in `apps/desktop/src/renderer/src/ApprovalCard.tsx` (label per request kind, the exact command in monospace, Decline and Approve) is adapted from `apps/web/src/components/chat/ComposerPendingApprovalPanel.tsx` and `ComposerPendingApprovalActions.tsx`.
 
 ```
 MIT License
