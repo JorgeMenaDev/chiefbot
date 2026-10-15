@@ -4,6 +4,8 @@ import {
   BotId,
   CreateBotRequest,
   defaultGitHubClientId,
+  RoutineId,
+  RoutineInput,
   SendMessageRequest,
   SetBotModelRequest,
 } from "@chiefbot/contracts";
@@ -13,6 +15,7 @@ import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
 import { createChats } from "./chat.ts";
+import { createRoutines } from "./routines.ts";
 
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
@@ -52,6 +55,8 @@ const chats = createChats({
   session: sessionStore.load,
   onChange: (view) => window?.webContents.send("chat:state", view),
 });
+
+const routines = createRoutines({ controlUrl, session: sessionStore.load });
 
 const auth = createAuth({
   controlUrl,
@@ -97,6 +102,16 @@ ipcMain.handle("chat:send", (_event, id: unknown, text: unknown) =>
 );
 ipcMain.handle("chat:answer", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   chats.answer(BotId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
+);
+ipcMain.handle("routines:list", (_event, botId: unknown) => routines.list(BotId.parse(botId)));
+ipcMain.handle("routines:create", (_event, botId: unknown, input: unknown) =>
+  routines.create(BotId.parse(botId), RoutineInput.parse(input)),
+);
+ipcMain.handle("routines:update", (_event, botId: unknown, routineId: unknown, input: unknown) =>
+  routines.update(BotId.parse(botId), RoutineId.parse(routineId), RoutineInput.parse(input)),
+);
+ipcMain.handle("routines:delete", (_event, botId: unknown, routineId: unknown) =>
+  routines.remove(BotId.parse(botId), RoutineId.parse(routineId)),
 );
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {

@@ -7,6 +7,7 @@ import {
   CreateBotRequest,
   defaultGitHubClientId,
   GitHubTokens,
+  RoutineInput,
   SendMessageRequest,
   SessionToken,
   SetBotModelRequest,
@@ -21,12 +22,16 @@ import {
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
+  type TurnId,
   type User,
   type UserId,
 } from "@chiefbot/contracts";
+import { systemClock, type Clock } from "./clock.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fetchIdentity, GitHubAuthError, refreshGitHubTokens } from "./github.ts";
 import { modelOptions } from "./models.ts";
+import { startScheduler } from "./routines.ts";
+import { nextDueAt } from "./schedule.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
@@ -49,6 +54,8 @@ export type ControlOptions = {
   computers: ComputerProvider;
   // Control's URL as a bot computer reaches it. Defaults to the URL control listens on.
   workerControlUrl?: string;
+  // When routines are due. A fake in tests.
+  clock?: Clock;
 };
 
 // What a WebSocket connection is bound to: a desktop client of one user, one
@@ -91,6 +98,10 @@ type ScreenStream = {
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   POST   /bots/:id/approvals/:approvalId  bearer session, body AnswerApprovalRequest → 204
 //                             (409 when it is not pending: answered, unknown, or its turn ended)
+//   GET    /bots/:id/routines bearer session    → Routine[]
+//   POST   /bots/:id/routines bearer session, body RoutineInput → 201 Routine (400 invalid_schedule)
+//   PUT    /bots/:id/routines/:routineId  bearer session, body RoutineInput → Routine
+//   DELETE /bots/:id/routines/:routineId  bearer session → 204
 //   WS     /events            bearer session    → ClientEvent on connect and on every change
 //   WS     /bots/:id/chat     bearer session, ?after=<seq> → each ChatEvent after seq, then live ones
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
@@ -111,6 +122,7 @@ export function startControl({
   secrets = localSecretStore({ dbPath, key: crypto.getRandomValues(new Uint8Array(32)) }),
   computers,
   workerControlUrl,
+  clock = systemClock,
 }: ControlOptions) {
   const store = openStore(dbPath);
   const broker = tokenBroker({
@@ -122,6 +134,11 @@ export function startControl({
   });
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
+  // Bots whose connected worker has said hello, so it may be sent a turn. Who
+  // waits for that, and who waits for a turn to end (with its error, if any).
+  const greeted = new Set<BotId>();
+  const onlineWaiters = new Map<BotId, Set<() => void>>();
+  const turnWatchers = new Map<TurnId, { error: string | null; done: (error: string | null) => void }>();
   // Who drives each bot's screen; absent means the agent. Kept in memory, so a
   // control restart hands every screen back to the agent.
   const screenControl = new Map<BotId, ScreenControl>();
@@ -159,8 +176,51 @@ export function startControl({
     return Response.json(botOf(user.id, botId));
   }
   const chatTopic = (botId: BotId) => `chat:${botId}`;
+  // Every stored chat event passes here.
   const publishChat = (botId: BotId, event: ChatEvent | null) => {
-    if (event) server.publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
+    if (!event) return;
+    server.publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
+    const watcher = turnWatchers.get(event.turnId);
+    if (watcher && event.event.type === "error") watcher.error = event.event.message;
+    if (watcher && event.event.type === "done") {
+      turnWatchers.delete(event.turnId);
+      watcher.done(watcher.error);
+    }
+  };
+
+  const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
+    await (running ? computers.start(botId) : computers.stop(botId));
+    store.setRunning(botId, running);
+    publish(userId);
+  };
+
+  // Starts a chat turn with `text` on the bot's worker: a user's message or a routine's prompt.
+  const sendTurn = (
+    userId: UserId,
+    botId: BotId,
+    text: string,
+  ): { turnId: TurnId } | { error: "bot_offline" | "turn_running" | "human_has_screen" } => {
+    const worker = workers.get(botId);
+    if (!worker) return { error: "bot_offline" };
+    if (store.unfinishedTurns(botId).length > 0) return { error: "turn_running" };
+    // The agent waits while the human drives the screen. A turn already running is not paused.
+    if (screenControl.get(botId) === "human") return { error: "human_has_screen" };
+    const model = store.botFor(userId, botId)?.model ?? AUTO_MODEL;
+    const started = store.startTurn(botId, text);
+    publishChat(botId, started);
+    worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, text, model } satisfies ControlToWorker));
+    return { turnId: started.turnId };
+  };
+
+  // The bot's routine with a schedule control can run, or a 400.
+  const scheduled = async (req: Request) => {
+    const body = RoutineInput.safeParse(await req.json().catch(() => null));
+    if (!body.success) return Response.json({ error: "invalid_routine" }, { status: 400 });
+    try {
+      const next = nextDueAt(body.data.cron, body.data.timezone, clock.now());
+      if (next !== null) return { input: body.data, nextDueAt: next };
+    } catch {}
+    return Response.json({ error: "invalid_schedule" }, { status: 400 });
   };
 
   // Runs a worker route for the bot whose credential it carries; 401 or 403 otherwise.
@@ -178,28 +238,15 @@ export function startControl({
 
   // Runs a bot route for the signed-in owner of :id; 401 or 404 otherwise.
   const ownBot =
-    (
+    <Req extends Request & { params: { id: string } }>(
       handle: (
         user: User,
         botId: BotId,
-        req: Request & { params: Record<string, string> },
+        req: Req,
         server: Bun.Server<SocketData>,
       ) => Response | undefined | Promise<Response | undefined>,
     ) =>
-    (
-      req:
-        | Bun.BunRequest<"/bots/:id">
-        | Bun.BunRequest<"/bots/:id/start">
-        | Bun.BunRequest<"/bots/:id/stop">
-        | Bun.BunRequest<"/bots/:id/model">
-        | Bun.BunRequest<"/bots/:id/take-over">
-        | Bun.BunRequest<"/bots/:id/hand-back">
-        | Bun.BunRequest<"/bots/:id/screen">
-        | Bun.BunRequest<"/bots/:id/messages">
-        | Bun.BunRequest<"/bots/:id/approvals/:approvalId">
-        | Bun.BunRequest<"/bots/:id/chat">,
-      server: Bun.Server<SocketData>,
-    ) => {
+    (req: Req, server: Bun.Server<SocketData>) => {
       const user = store.userForSession(bearer(req));
       if (!user) return unauthorized();
       const bot = store.botFor(user.id, req.params.id);
@@ -282,17 +329,13 @@ export function startControl({
       },
       "/bots/:id/start": {
         POST: ownBot(async (user, botId) => {
-          await computers.start(botId);
-          store.setRunning(botId, true);
-          publish(user.id);
+          await setRunning(user.id, botId, true);
           return Response.json(botOf(user.id, botId));
         }),
       },
       "/bots/:id/stop": {
         POST: ownBot(async (user, botId) => {
-          await computers.stop(botId);
-          store.setRunning(botId, false);
-          publish(user.id);
+          await setRunning(user.id, botId, false);
           return Response.json(botOf(user.id, botId));
         }),
       },
@@ -333,18 +376,9 @@ export function startControl({
         POST: ownBot(async (user, botId, req) => {
           const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return Response.json({ error: "invalid_message" }, { status: 400 });
-          const worker = workers.get(botId);
-          if (!worker) return Response.json({ error: "bot_offline" }, { status: 409 });
-          if (store.unfinishedTurns(botId).length > 0) return Response.json({ error: "turn_running" }, { status: 409 });
-          // The agent waits while the human drives the screen. A turn already running is not paused.
-          if (screenControl.get(botId) === "human") return Response.json({ error: "human_has_screen" }, { status: 409 });
-          const model = store.botFor(user.id, botId)?.model ?? AUTO_MODEL;
-          const started = store.startTurn(botId, body.data.text);
-          publishChat(botId, started);
-          worker.send(
-            JSON.stringify({ type: "run-turn", turnId: started.turnId, text: body.data.text, model } satisfies ControlToWorker),
-          );
-          return Response.json({ turnId: started.turnId } satisfies SendMessageResponse, { status: 202 });
+          const sent = sendTurn(user.id, botId, body.data.text);
+          if ("error" in sent) return Response.json(sent, { status: 409 });
+          return Response.json(sent satisfies SendMessageResponse, { status: 202 });
         }),
       },
       // The answer is stored first, so it reaches the worker even if it is offline now.
@@ -365,6 +399,27 @@ export function startControl({
           );
           return new Response(null, { status: 204 });
         }),
+      },
+      "/bots/:id/routines": {
+        GET: ownBot((_user, botId) => Response.json(store.routinesFor(botId))),
+        POST: ownBot(async (_user, botId, req) => {
+          const routine = await scheduled(req);
+          if (routine instanceof Response) return routine;
+          return Response.json(store.createRoutine(botId, routine.input, routine.nextDueAt), { status: 201 });
+        }),
+      },
+      "/bots/:id/routines/:routineId": {
+        PUT: ownBot(async (_user, botId, req) => {
+          const routine = await scheduled(req);
+          if (routine instanceof Response) return routine;
+          const updated = store.updateRoutine(botId, req.params.routineId, routine.input, routine.nextDueAt);
+          return updated ? Response.json(updated) : Response.json({ error: "not_found" }, { status: 404 });
+        }),
+        DELETE: ownBot((_user, botId, req) =>
+          store.deleteRoutine(botId, req.params.routineId)
+            ? new Response(null, { status: 204 })
+            : Response.json({ error: "not_found" }, { status: 404 }),
+        ),
       },
       "/bots/:id/chat": {
         GET: ownBot((_user, botId, req, server) => {
@@ -448,6 +503,7 @@ export function startControl({
         // One connection per bot: a reconnecting worker replaces its stale socket.
         workers.get(ws.data.botId)?.close(4000, "replaced");
         workers.set(ws.data.botId, ws);
+        greeted.delete(ws.data.botId);
         ws.send(JSON.stringify({ type: "bound", botId: ws.data.botId } satisfies ControlToWorker));
         ws.send(screenControlMessage(ws.data.botId));
         publish(ws.data.userId);
@@ -456,6 +512,7 @@ export function startControl({
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return endStream(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
+        greeted.delete(ws.data.botId);
         publish(ws.data.userId);
       },
       message(ws, raw) {
@@ -487,6 +544,29 @@ export function startControl({
             publishChat(botId, event);
           }
         }
+        // Only now may a routine send its turn: a turn sent before the hello
+        // would be ended as lost by it.
+        greeted.add(botId);
+        for (const wake of onlineWaiters.get(botId) ?? []) wake();
+        onlineWaiters.delete(botId);
+      },
+    },
+  });
+
+  const scheduler = startScheduler({
+    store,
+    clock,
+    host: {
+      setRunning,
+      online: (botId) =>
+        greeted.has(botId)
+          ? Promise.resolve()
+          : new Promise((resolve) => onlineWaiters.set(botId, (onlineWaiters.get(botId) ?? new Set()).add(resolve))),
+      runTurn(userId, botId, text) {
+        const sent = sendTurn(userId, botId, text);
+        if ("error" in sent) return sent;
+        const done = new Promise<string | null>((resolve) => turnWatchers.set(sent.turnId, { error: null, done: resolve }));
+        return { turnId: sent.turnId, done };
       },
     },
   });
@@ -494,6 +574,7 @@ export function startControl({
   return {
     url: server.url.origin,
     stop: () => {
+      scheduler.stop();
       server.stop(true);
       store.close();
     },

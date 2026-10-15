@@ -14,3 +14,7 @@ export type TurnId = z.infer<typeof TurnId>;
 // One thing the bot asked the user to approve (a push, a pull request).
 export const ApprovalId = z.string().min(1).brand<"ApprovalId">();
 export type ApprovalId = z.infer<typeof ApprovalId>;
+
+// A prompt a bot runs on a schedule.
+export const RoutineId = z.string().min(1).brand<"RoutineId">();
+export type RoutineId = z.infer<typeof RoutineId>;

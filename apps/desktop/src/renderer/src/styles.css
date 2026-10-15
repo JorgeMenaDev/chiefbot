@@ -560,3 +560,45 @@ body {
 .approval-row.expired {
   color: #ff7b72;
 }
+
+/* A bot's routines, shown above its chat when opened. */
+.routines {
+  display: grid;
+  gap: 8px;
+  padding: 12px 24px;
+  border-bottom: 1px solid #1f1f23;
+}
+.routine-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.routine-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.routine-text strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.routine-form {
+  display: grid;
+  gap: 8px;
+}
+.routine-form textarea,
+.routine-form input {
+  font: inherit;
+  padding: 6px 8px;
+}
+.routine-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.routines .link-button {
+  justify-self: start;
+}
