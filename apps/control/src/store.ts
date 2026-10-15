@@ -3,16 +3,21 @@ import {
   BotId,
   ChatEvent,
   CopilotPlan,
+  Routine,
+  RoutineId,
   TurnId,
   UserId,
   type BotToken,
   type BrokeredGitHubToken,
   type TurnEvent,
   type GitHubTokens,
+  type RoutineInput,
+  type RoutineRun,
   type SessionToken,
   type User,
 } from "@chiefbot/contracts";
 import type { GitHubIdentity } from "./github.ts";
+import { nextDueAt } from "./schedule.ts";
 
 // Control's durable state in SQLite. Every row hangs off a user.
 export function openStore(path: string) {
@@ -68,6 +73,30 @@ export function openStore(path: string) {
   )`);
   db.run("CREATE INDEX IF NOT EXISTS chat_events_by_bot ON chat_events (bot_id, seq)");
 
+  // A bot's routines: a prompt run on a cron schedule. next_due_at is the next
+  // time it runs, epoch milliseconds.
+  db.run(`CREATE TABLE IF NOT EXISTS routines (
+    id TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    prompt TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    next_due_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  )`);
+  // One row per (routine, due time), inserted when the scheduler claims that due
+  // time. The primary key is what makes a run happen at most once, across restarts.
+  // started_computer: the run started a stopped computer and must stop it again.
+  db.run(`CREATE TABLE IF NOT EXISTS routine_runs (
+    routine_id TEXT NOT NULL REFERENCES routines(id) ON DELETE CASCADE,
+    due_at INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    turn_id TEXT,
+    error TEXT,
+    started_computer INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (routine_id, due_at)
+  )`);
+
   type BotRow = { id: string; name: string; running: number };
   const toBotRecord = (row: BotRow) => ({ id: BotId.parse(row.id), name: row.name, running: row.running === 1 });
 
@@ -89,6 +118,36 @@ export function openStore(path: string) {
     if (!row) throw new Error("chat event insert returned no row");
     return toChatEvent(row);
   };
+
+  type RoutineRow = { id: string; bot_id: string; prompt: string; cron: string; timezone: string; next_due_at: number };
+  type RunRow = { due_at: number; status: string; turn_id: string | null; error: string | null };
+  const lastRun = (routineId: string) =>
+    db
+      .query<RunRow, [string]>(
+        "SELECT due_at, status, turn_id, error FROM routine_runs WHERE routine_id = ?1 ORDER BY due_at DESC LIMIT 1",
+      )
+      .get(routineId);
+  const toRoutine = (row: RoutineRow): Routine => {
+    const run = lastRun(row.id);
+    return Routine.parse({
+      id: row.id,
+      botId: row.bot_id,
+      prompt: row.prompt,
+      cron: row.cron,
+      timezone: row.timezone,
+      nextDueAt: row.next_due_at,
+      lastRun: run && { dueAt: run.due_at, status: run.status, turnId: run.turn_id, error: run.error },
+    });
+  };
+  const routineColumns = "id, bot_id, prompt, cron, timezone, next_due_at";
+  // A claimed run: what the scheduler needs to carry it out.
+  type RunRef = { routineId: RoutineId; dueAt: number; botId: BotId; userId: UserId };
+  const toRunRef = (row: { routine_id: string; due_at: number; bot_id: string; user_id: string }): RunRef => ({
+    routineId: RoutineId.parse(row.routine_id),
+    dueAt: row.due_at,
+    botId: BotId.parse(row.bot_id),
+    userId: UserId.parse(row.user_id),
+  });
 
   return {
     // Creates or updates the user GitHub identified, replaces their GitHub tokens
@@ -224,6 +283,104 @@ export function openStore(path: string) {
         )
         .all(botId, seq)
         .map(toChatEvent);
+    },
+
+    // Whether control wants the bot's computer running; null for a deleted bot.
+    botRunning(botId: BotId): boolean | null {
+      const row = db.query<{ running: number }, [string]>("SELECT running FROM bots WHERE id = ?1").get(botId);
+      return row ? row.running === 1 : null;
+    },
+
+    // nextDueAt is the routine's first due time, from the schedule.
+    createRoutine(botId: BotId, { prompt, cron, timezone }: RoutineInput, nextDueAt: number): Routine {
+      const row = db
+        .query<RoutineRow, [string, string, string, string, string, number, number]>(
+          `INSERT INTO routines (id, bot_id, prompt, cron, timezone, next_due_at, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) RETURNING ${routineColumns}`,
+        )
+        .get(`routine_${crypto.randomUUID()}`, botId, prompt, cron, timezone, nextDueAt, Date.now());
+      if (!row) throw new Error("routine insert returned no row");
+      return toRoutine(row);
+    },
+
+    // Null when the bot has no such routine.
+    updateRoutine(botId: BotId, routineId: string, { prompt, cron, timezone }: RoutineInput, nextDueAt: number): Routine | null {
+      const row = db
+        .query<RoutineRow, [string, string, string, string, string, number]>(
+          `UPDATE routines SET prompt = ?3, cron = ?4, timezone = ?5, next_due_at = ?6
+           WHERE id = ?1 AND bot_id = ?2 RETURNING ${routineColumns}`,
+        )
+        .get(routineId, botId, prompt, cron, timezone, nextDueAt);
+      return row ? toRoutine(row) : null;
+    },
+
+    // False when the bot has no such routine.
+    deleteRoutine(botId: BotId, routineId: string) {
+      return db.query("DELETE FROM routines WHERE id = ?1 AND bot_id = ?2").run(routineId, botId).changes > 0;
+    },
+
+    routinesFor(botId: BotId): Routine[] {
+      return db
+        .query<RoutineRow, [string]>(`SELECT ${routineColumns} FROM routines WHERE bot_id = ?1 ORDER BY created_at, id`)
+        .all(botId)
+        .map(toRoutine);
+    },
+
+    // Claims every routine due by `now`: records a running run for its due time
+    // and moves the routine to its next due time after now. Due times missed
+    // while control was down collapse into one run. A due time claimed before
+    // (by a control that then restarted) is not claimed again.
+    claimDueRuns: db.transaction((now: number): Array<RunRef & { prompt: string }> => {
+      const due = db
+        .query<RoutineRow & { user_id: string }, [number]>(
+          `SELECT routines.id, routines.bot_id, prompt, cron, timezone, next_due_at, bots.user_id FROM routines
+           JOIN bots ON bots.id = routines.bot_id WHERE next_due_at <= ?1`,
+        )
+        .all(now);
+      const claimed: Array<RunRef & { prompt: string }> = [];
+      for (const row of due) {
+        const next = nextDueAt(row.cron, row.timezone, now);
+        if (next === null) throw new Error(`routine ${row.id} has no next due time`);
+        db.query("UPDATE routines SET next_due_at = ?2 WHERE id = ?1").run(row.id, next);
+        const inserted = db
+          .query("INSERT OR IGNORE INTO routine_runs (routine_id, due_at, status) VALUES (?1, ?2, 'running')")
+          .run(row.id, row.next_due_at);
+        if (inserted.changes > 0) {
+          const ref = toRunRef({ routine_id: row.id, due_at: row.next_due_at, bot_id: row.bot_id, user_id: row.user_id });
+          claimed.push({ ...ref, prompt: row.prompt });
+        }
+      }
+      return claimed;
+    }),
+
+    // The run started its bot's stopped computer, so it must stop it again.
+    markRunStartedComputer(run: RunRef) {
+      db.query("UPDATE routine_runs SET started_computer = 1 WHERE routine_id = ?1 AND due_at = ?2").run(run.routineId, run.dueAt);
+    },
+    // The chat turn the run sent.
+    setRunTurn(run: RunRef, turnId: TurnId) {
+      db.query("UPDATE routine_runs SET turn_id = ?3 WHERE routine_id = ?1 AND due_at = ?2").run(run.routineId, run.dueAt, turnId);
+    },
+
+    finishRun(run: RunRef, status: Exclude<RoutineRun["status"], "running">, error: string | null) {
+      db.query("UPDATE routine_runs SET status = ?3, error = ?4 WHERE routine_id = ?1 AND due_at = ?2").run(
+        run.routineId,
+        run.dueAt,
+        status,
+        error,
+      );
+    },
+
+    // Runs still marked running: their control stopped before they finished.
+    unfinishedRuns(): Array<RunRef & { startedComputer: boolean }> {
+      return db
+        .query<{ routine_id: string; due_at: number; bot_id: string; user_id: string; started_computer: number }, []>(
+          `SELECT routine_id, due_at, routines.bot_id, bots.user_id, started_computer FROM routine_runs
+           JOIN routines ON routines.id = routine_runs.routine_id JOIN bots ON bots.id = routines.bot_id
+           WHERE status = 'running'`,
+        )
+        .all()
+        .map((row) => ({ ...toRunRef(row), startedComputer: row.started_computer === 1 }));
     },
 
     close: () => db.close(),
