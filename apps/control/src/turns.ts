@@ -20,6 +20,7 @@ export function chatTurns({
   publish,
   workerOf,
   humanHasScreen,
+  stopping,
   onActivity,
 }: {
   store: ReturnType<typeof openStore>;
@@ -28,6 +29,8 @@ export function chatTurns({
   // The bot's connected worker, if any.
   workerOf: (botId: BotId) => { send(message: string): unknown } | undefined;
   humanHasScreen: (botId: BotId) => boolean;
+  // Whether control is stopping the bot's computer: a turn sent now would die with it.
+  stopping: (botId: BotId) => boolean;
   // A chat event was stored for the bot.
   onActivity: (botId: BotId) => void;
 }) {
@@ -56,6 +59,7 @@ export function chatTurns({
   const sendTurn = (userId: UserId, botId: BotId, text: string): { turnId: TurnId } | { error: TurnRefusal } => {
     const worker = workerOf(botId);
     if (!worker) return { error: "bot_offline" };
+    if (stopping(botId)) return { error: "bot_stopping" };
     if (store.unfinishedTurns(botId).length > 0) return { error: "turn_running" };
     // The agent waits while the human drives the screen. A turn already running
     // pauses at its next tool call (the worker holds it until hand-back).

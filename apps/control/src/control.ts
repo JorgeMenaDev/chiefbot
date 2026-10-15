@@ -84,12 +84,12 @@ type SocketData =
 //   POST   /bots/:id/stop     bearer session    → Bot
 //   POST   /bots/:id/take-over bearer session   → Bot (the human drives the screen; agent input waits)
 //   POST   /bots/:id/hand-back bearer session   → Bot (the agent drives the screen again)
-//   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline
+//   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline or stopping
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
 //   PUT    /bots/:id/model    bearer session, body SetBotModelRequest → Bot; the bot's next turn runs on it
 //                             (400 model_unavailable when the user's plan does not offer it or it is locked)
 //   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
-//                             (409 when the bot is not online, is still on a turn or the human has its screen)
+//                             (409 when the bot is not online, is stopping, is still on a turn or the human has its screen)
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   POST   /bots/:id/approvals/:approvalId  bearer session, body AnswerApprovalRequest → 204
 //                             (409 when it is not pending: answered, unknown, or its turn ended)
@@ -132,6 +132,9 @@ export function startControl({
   });
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
+  // Bots whose computer control is stopping. They take no new turn, routine run
+  // or screen viewer: it would die with the computer.
+  const stopping = new Set<BotId>();
   // Who drives each screen and the viewers' streams (screens.ts).
   const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
   // Starting turns, the chat topics and worker hellos (turns.ts).
@@ -140,6 +143,7 @@ export function startControl({
     publish: (topic, message) => server.publish(topic, message),
     workerOf: (botId) => workers.get(botId),
     humanHasScreen: (botId) => screens.controlOf(botId) === "human",
+    stopping: (botId) => stopping.has(botId),
     onActivity: (botId) => idle.touch(botId),
   });
 
@@ -147,7 +151,7 @@ export function startControl({
     store.botsFor(userId).map(({ id, name, running, model }) => ({
       id,
       name,
-      status: !running ? "stopped" : workers.has(id) ? "online" : "starting",
+      status: !running ? "stopped" : stopping.has(id) ? "stopping" : workers.has(id) ? "online" : "starting",
       model,
       screenControl: screens.controlOf(id),
     }));
@@ -167,10 +171,19 @@ export function startControl({
     return Response.json(botOf(user.id, botId));
   }
 
+  // A stop marks the bot stopping first, so no new work lands on a computer about to go.
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
-    await (running ? computers.start(botId) : computers.stop(botId));
-    store.setRunning(botId, running);
-    publish(userId);
+    if (!running) {
+      stopping.add(botId);
+      publish(userId);
+    }
+    try {
+      await (running ? computers.start(botId) : computers.stop(botId));
+      store.setRunning(botId, running);
+    } finally {
+      stopping.delete(botId);
+      publish(userId);
+    }
   };
 
   // The bot's routine with a schedule control can run, or a 400.
@@ -309,6 +322,7 @@ export function startControl({
       "/bots/:id/screen": {
         GET: ownBot((_user, botId, req, server) => {
           if (!workers.has(botId)) return apiError(409, "bot_offline");
+          if (stopping.has(botId)) return apiError(409, "bot_stopping");
           return upgrade(server, req, { kind: "viewer", botId, streamId: crypto.randomUUID() });
         }),
       },

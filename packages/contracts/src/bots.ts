@@ -11,8 +11,9 @@ export type BotToken = z.infer<typeof BotToken>;
 
 // starting: the computer should run but its worker is not connected yet.
 // online:   the worker is connected to control.
+// stopping: control is stopping the computer; it takes no new work (409 bot_stopping).
 // stopped:  the computer is stopped; its disk is kept.
-export const BotStatus = z.enum(["starting", "online", "stopped"]);
+export const BotStatus = z.enum(["starting", "online", "stopping", "stopped"]);
 export type BotStatus = z.infer<typeof BotStatus>;
 
 // Who drives the bot's screen. agent: the bot; a viewer only watches.

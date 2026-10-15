@@ -179,7 +179,9 @@ function BotPane({ bot }: { bot: Bot }) {
           {bot.status === "stopped" ? (
             <button onClick={() => void start(bot.id)}>Start</button>
           ) : (
-            <button onClick={() => void stop(bot.id)}>Stop</button>
+            <button onClick={() => void stop(bot.id)} disabled={bot.status === "stopping"}>
+              Stop
+            </button>
           )}
           <button onClick={() => setShowRoutines(!showRoutines)}>{showRoutines ? "Hide routines" : "Routines"}</button>
           <button className="danger" onClick={() => void remove(bot.id)}>
@@ -200,14 +202,15 @@ function BotPane({ bot }: { bot: Bot }) {
 const statusText: Record<BotStatus, string> = {
   starting: "Its computer is starting. The bot comes online when its worker connects.",
   online: "Online. Its worker is connected.",
+  stopping: "Its computer is stopping. It takes no new messages, routine runs or screen viewers.",
   stopped: "Stopped. Its files are kept.",
 };
 
-// Colour per status, with a ping while starting (after T3 Code's ConnectionStatusDot).
+// Colour per status, with a ping while starting or stopping (after T3 Code's ConnectionStatusDot).
 function StatusDot({ status }: { status: BotStatus }) {
   return (
     <span className={`status-dot ${status}`} aria-label={status}>
-      {status === "starting" && <span className="ping" />}
+      {(status === "starting" || status === "stopping") && <span className="ping" />}
       <span className="dot" />
     </span>
   );

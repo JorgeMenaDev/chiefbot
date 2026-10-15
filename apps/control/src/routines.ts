@@ -23,6 +23,7 @@ export type RoutineHost = {
 // How a run ends when control refuses its turn. No retry: the next due time runs as usual.
 const refused: Record<TurnRefusal, { status: Exclude<RoutineRun["status"], "running">; error: string }> = {
   bot_offline: { status: "failed", error: "The bot went offline." },
+  bot_stopping: { status: "skipped", error: "The bot was stopping." },
   turn_running: { status: "skipped", error: "The bot was busy with another message." },
   human_has_screen: { status: "skipped", error: "Someone had taken over the bot's screen." },
 };
