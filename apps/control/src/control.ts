@@ -2,7 +2,6 @@ import type { ServerWebSocket } from "bun";
 import {
   AnswerApprovalRequest,
   ApprovalId,
-  AUTO_MODEL,
   BotToken,
   CreateBotRequest,
   defaultGitHubClientId,
@@ -16,15 +15,12 @@ import {
   type ApiError,
   type ApiErrorCode,
   type BotId,
-  type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
   type ModelOption,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
-  type TurnId,
-  type TurnRefusal,
   type User,
   type UserId,
 } from "@chiefbot/contracts";
@@ -34,10 +30,12 @@ import { fetchIdentity, GitHubAuthError, refreshGitHubTokens } from "./github.ts
 import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
 import { startScheduler } from "./routines.ts";
+import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
+import { chatTurns } from "./turns.ts";
 
 export type ControlOptions = {
   port: number;
@@ -73,15 +71,6 @@ type SocketData =
   | { kind: "worker"; userId: UserId; botId: BotId }
   | { kind: "viewer"; botId: BotId; streamId: string }
   | { kind: "screen"; streamId: string };
-
-// One viewer watching one bot's screen. Viewer frames sent before the worker
-// joins wait in `queued`.
-type ScreenStream = {
-  botId: BotId;
-  viewer: ServerWebSocket<SocketData>;
-  screen: ServerWebSocket<SocketData> | null;
-  queued: Array<string | Buffer>;
-};
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -143,24 +132,16 @@ export function startControl({
   });
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
-  // Bots whose connected worker has said hello, so it may be sent a turn. Who
-  // waits for that, and who waits for a turn to end (with its error, if any).
-  const greeted = new Set<BotId>();
-  const onlineWaiters = new Map<BotId, Set<() => void>>();
-  const turnWatchers = new Map<TurnId, { error: string | null; done: (error: string | null) => void }>();
-  // Who drives each bot's screen; absent means the agent. Kept in memory, so a
-  // control restart hands every screen back to the agent.
-  const screenControl = new Map<BotId, ScreenControl>();
-  const screenStreams = new Map<string, ScreenStream>();
-
-  // Closes both ends of a screen stream.
-  function endStream(streamId: string) {
-    const stream = screenStreams.get(streamId);
-    if (stream) idle.touch(stream.botId);
-    screenStreams.delete(streamId);
-    stream?.viewer.close();
-    stream?.screen?.close();
-  }
+  // Who drives each screen and the viewers' streams (screens.ts).
+  const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
+  // Starting turns, the chat topics and worker hellos (turns.ts).
+  const turns = chatTurns({
+    store,
+    publish: (topic, message) => server.publish(topic, message),
+    workerOf: (botId) => workers.get(botId),
+    humanHasScreen: (botId) => screens.controlOf(botId) === "human",
+    onActivity: (botId) => idle.touch(botId),
+  });
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running, model }) => ({
@@ -168,7 +149,7 @@ export function startControl({
       name,
       status: !running ? "stopped" : workers.has(id) ? "online" : "starting",
       model,
-      screenControl: screenControl.get(id) ?? "agent",
+      screenControl: screens.controlOf(id),
     }));
   const botOf = (userId: UserId, botId: BotId) => botsOf(userId).find((bot) => bot.id === botId);
   const modelOptionsOf = (user: User): ModelOption[] => modelOptions(store.modelReport(user.id), user.copilotPlan);
@@ -176,52 +157,20 @@ export function startControl({
   const botsEvent = (userId: UserId) => JSON.stringify({ type: "bots", bots: botsOf(userId) } satisfies ClientEvent);
   const publish = (userId: UserId) => server.publish(topic(userId), botsEvent(userId));
   const screenControlMessage = (botId: BotId) =>
-    JSON.stringify({ type: "screen-control", control: screenControl.get(botId) ?? "agent" } satisfies ControlToWorker);
+    JSON.stringify({ type: "screen-control", control: screens.controlOf(botId) } satisfies ControlToWorker);
 
   // Take-over and hand-back: tell the bot's worker and the owner's clients.
   function setScreenControl(user: User, botId: BotId, control: ScreenControl) {
-    screenControl.set(botId, control);
+    screens.setControl(botId, control);
     workers.get(botId)?.send(screenControlMessage(botId));
     publish(user.id);
     return Response.json(botOf(user.id, botId));
   }
-  const chatTopic = (botId: BotId) => `chat:${botId}`;
-  // Every stored chat event passes here.
-  const publishChat = (botId: BotId, event: ChatEvent | null) => {
-    if (!event) return;
-    idle.touch(botId);
-    server.publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
-    const watcher = turnWatchers.get(event.turnId);
-    if (watcher && event.event.type === "error") watcher.error = event.event.message;
-    if (watcher && event.event.type === "done") {
-      turnWatchers.delete(event.turnId);
-      watcher.done(watcher.error);
-    }
-  };
 
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
     await (running ? computers.start(botId) : computers.stop(botId));
     store.setRunning(botId, running);
     publish(userId);
-  };
-
-  // Starts a chat turn with `text` on the bot's worker: a user's message or a routine's prompt.
-  const sendTurn = (
-    userId: UserId,
-    botId: BotId,
-    text: string,
-  ): { turnId: TurnId } | { error: TurnRefusal } => {
-    const worker = workers.get(botId);
-    if (!worker) return { error: "bot_offline" };
-    if (store.unfinishedTurns(botId).length > 0) return { error: "turn_running" };
-    // The agent waits while the human drives the screen. A turn already running
-    // pauses at its next tool call (the worker holds it until hand-back).
-    if (screenControl.get(botId) === "human") return { error: "human_has_screen" };
-    const model = store.botFor(userId, botId)?.model ?? AUTO_MODEL;
-    const started = store.startTurn(botId, text);
-    publishChat(botId, started);
-    worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, text, model } satisfies ControlToWorker));
-    return { turnId: started.turnId };
   };
 
   // The bot's routine with a schedule control can run, or a 400.
@@ -368,7 +317,7 @@ export function startControl({
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
           await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
-          screenControl.delete(botId);
+          screens.forget(botId);
           workers.get(botId)?.close();
           publish(user.id);
           return new Response(null, { status: 204 });
@@ -388,7 +337,7 @@ export function startControl({
         POST: ownBot(async (user, botId, req) => {
           const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return apiError(400, "invalid_message");
-          const sent = sendTurn(user.id, botId, body.data.text);
+          const sent = turns.sendTurn(user.id, botId, body.data.text);
           if ("error" in sent) return apiError(409, sent.error);
           return Response.json(sent satisfies SendMessageResponse, { status: 202 });
         }),
@@ -401,7 +350,7 @@ export function startControl({
           const approvalId = ApprovalId.safeParse(req.params.approvalId);
           const answer = approvalId.success ? store.answerApproval(botId, approvalId.data, body.data.approved) : null;
           if (!answer || !approvalId.success) return apiError(409, "not_pending");
-          publishChat(botId, answer);
+          turns.publishChat(botId, answer);
           workers.get(botId)?.send(
             JSON.stringify({
               type: "approval-answer",
@@ -475,10 +424,7 @@ export function startControl({
         GET: (req, server) => {
           const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          const stream = screenStreams.get(req.params.streamId);
-          if (!stream || stream.botId !== bot.botId || stream.screen) {
-            return apiError(404, "not_found");
-          }
+          if (!screens.joinable(bot.botId, req.params.streamId)) return apiError(404, "not_found");
           return upgrade(server, req, { kind: "screen", streamId: req.params.streamId });
         },
       },
@@ -490,15 +436,12 @@ export function startControl({
         if (ws.data.kind === "viewer") {
           const worker = workers.get(ws.data.botId);
           if (!worker) return ws.close();
-          screenStreams.set(ws.data.streamId, { botId: ws.data.botId, viewer: ws, screen: null, queued: [] });
+          screens.openViewer(ws.data.botId, ws.data.streamId, ws);
           worker.send(JSON.stringify({ type: "screen-open", streamId: ws.data.streamId } satisfies ControlToWorker));
           return;
         }
         if (ws.data.kind === "screen") {
-          const stream = screenStreams.get(ws.data.streamId);
-          if (!stream) return ws.close();
-          stream.screen = ws;
-          for (const frame of stream.queued.splice(0)) ws.send(frame);
+          if (!screens.joinScreen(ws.data.streamId, ws)) ws.close();
           return;
         }
         if (ws.data.kind === "client") {
@@ -508,7 +451,7 @@ export function startControl({
         }
         if (ws.data.kind === "chat") {
           // Subscribe first: nothing can be published between these two lines.
-          ws.subscribe(chatTopic(ws.data.botId));
+          ws.subscribe(turns.chatTopic(ws.data.botId));
           for (const event of store.chatAfter(ws.data.botId, ws.data.after)) ws.send(JSON.stringify(event));
           return;
         }
@@ -516,52 +459,24 @@ export function startControl({
         idle.touch(ws.data.botId);
         workers.get(ws.data.botId)?.close(4000, "replaced");
         workers.set(ws.data.botId, ws);
-        greeted.delete(ws.data.botId);
+        turns.workerChanged(ws.data.botId);
         ws.send(JSON.stringify({ type: "bound", botId: ws.data.botId } satisfies ControlToWorker));
         ws.send(screenControlMessage(ws.data.botId));
         publish(ws.data.userId);
       },
       close(ws) {
-        if (ws.data.kind === "viewer" || ws.data.kind === "screen") return endStream(ws.data.streamId);
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.end(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
-        greeted.delete(ws.data.botId);
+        turns.workerChanged(ws.data.botId);
         publish(ws.data.userId);
       },
       message(ws, raw) {
-        if (ws.data.kind === "viewer" || ws.data.kind === "screen") {
-          const stream = screenStreams.get(ws.data.streamId);
-          if (!stream) return;
-          if (ws.data.kind === "screen") stream.viewer.send(raw);
-          else if (stream.screen) stream.screen.send(raw);
-          else stream.queued.push(raw);
-          return;
-        }
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.relay(ws.data.streamId, ws.data.kind, raw);
         if (ws.data.kind !== "worker") return;
-        const { botId } = ws.data;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));
-        if (message.type === "turn-event") {
-          return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
-        }
         if (message.type === "models") return store.setModelReport(ws.data.userId, message.report);
-        // Answers the worker may have missed while it was away.
-        if (message.activeTurnId) {
-          for (const answer of store.answeredApprovals(botId, message.activeTurnId)) {
-            ws.send(JSON.stringify({ type: "approval-answer", ...answer } satisfies ControlToWorker));
-          }
-        }
-        // The worker lost every unfinished turn but the one it says it is still running.
-        for (const turnId of store.unfinishedTurns(botId)) {
-          if (turnId === message.activeTurnId) continue;
-          for (const event of store.abandonTurn(botId, turnId, "The bot restarted before it finished this message.")) {
-            publishChat(botId, event);
-          }
-        }
-        // Only now may a routine send its turn: a turn sent before the hello
-        // would be ended as lost by it.
-        greeted.add(botId);
-        for (const wake of onlineWaiters.get(botId) ?? []) wake();
-        onlineWaiters.delete(botId);
+        turns.fromWorker(ws.data.botId, message, (reply) => ws.send(JSON.stringify(reply)));
       },
     },
   });
@@ -569,19 +484,7 @@ export function startControl({
   const scheduler = startScheduler({
     store,
     clock,
-    host: {
-      setRunning,
-      online: (botId) =>
-        greeted.has(botId)
-          ? Promise.resolve()
-          : new Promise((resolve) => onlineWaiters.set(botId, (onlineWaiters.get(botId) ?? new Set()).add(resolve))),
-      runTurn(userId, botId, text) {
-        const sent = sendTurn(userId, botId, text);
-        if ("error" in sent) return sent;
-        const done = new Promise<string | null>((resolve) => turnWatchers.set(sent.turnId, { error: null, done: resolve }));
-        return { turnId: sent.turnId, done };
-      },
-    },
+    host: { setRunning, online: turns.online, runTurn: turns.runTurn },
   });
 
   // Pending approvals belong to unfinished turns, so those count as busy too.
@@ -592,7 +495,7 @@ export function startControl({
     busy: (botId) =>
       store.unfinishedTurns(botId).length > 0 ||
       store.routineRunning(botId) ||
-      [...screenStreams.values()].some((stream) => stream.botId === botId),
+      screens.watched(botId),
     stop: (userId, botId) => setRunning(userId, botId, false),
   });
 
