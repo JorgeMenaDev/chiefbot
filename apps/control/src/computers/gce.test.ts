@@ -101,3 +101,17 @@ test("the VM runs the bot computer image on Container-Optimized OS, with control
   expect(userData).toContain("/dev/disk/by-id/google-home");
   expect(userData).toContain(":/home/bot");
 });
+
+test("the bot container runs as bot with no capabilities and cannot reach the VM's metadata server", async () => {
+  const { compute, computers } = setup();
+
+  await computers.create(spec);
+
+  const userData = compute.instances.get(vmName)?.request.metadata?.items?.[0]?.value ?? "";
+  const run = userData.split("\n").find((line) => line.includes("ExecStart=/usr/bin/docker run")) ?? "";
+  expect(run).toContain("--user=bot");
+  expect(run).toContain("--cap-drop=ALL");
+  expect(run).toContain("--security-opt=no-new-privileges");
+  expect(run).not.toContain("--network=host");
+  expect(userData).toContain("DOCKER-USER -d 169.254.169.254 -j DROP");
+});

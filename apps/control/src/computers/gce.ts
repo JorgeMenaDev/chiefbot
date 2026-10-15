@@ -96,8 +96,11 @@ export function gceProvider({ client, project, zone, instanceTemplate, image }: 
 
 // The cloud-init that Container-Optimized OS runs on every boot. A systemd unit
 // mounts the home disk (formatting it on first boot), then runs the bot computer
-// image with control's env. On first boot it copies the image's /home/bot onto
-// the empty disk, owner included, as Docker does for a new volume.
+// image with control's env, locked down as DockerProvider does (docs/isolation.md).
+// The container is on Docker's bridge, and a firewall rule drops its traffic to
+// the metadata server, so the bot gets no token for the VM's service account.
+// On first boot it copies the image's /home/bot onto the empty disk, owner
+// included, as Docker does for a new volume.
 // The env (with the bot's credential) sits in the VM's metadata, readable by
 // project members who can read the VM. Ticket #8 can move it to Secret Manager.
 function cloudConfig(image: string, env: Record<string, string>) {
@@ -136,7 +139,8 @@ ${envLines.join("\n")}
       ExecStartPre=/bin/bash /etc/chiefbot/mount-home.sh
       ExecStartPre=-/usr/bin/docker rm -f chiefbot
       ExecStartPre=/usr/bin/docker pull ${image}
-      ExecStart=/usr/bin/docker run --rm --name=chiefbot --init --network=host --env-file=/etc/chiefbot/env -v /mnt/disks/home:/home/bot ${image}
+      ExecStartPre=/bin/bash -c 'iptables -C DOCKER-USER -d 169.254.169.254 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254 -j DROP'
+      ExecStart=/usr/bin/docker run --rm --name=chiefbot --init --user=bot --cap-drop=ALL --security-opt=no-new-privileges --env-file=/etc/chiefbot/env -v /mnt/disks/home:/home/bot ${image}
       ExecStop=/usr/bin/docker stop chiefbot
       Restart=always
       RestartSec=10

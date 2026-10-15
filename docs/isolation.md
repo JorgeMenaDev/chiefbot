@@ -33,9 +33,9 @@ Proof:
 | --- | --- | --- |
 | Compute | Container on a shared kernel | One Compute Engine VM per bot, with its own kernel. The shared-kernel limit goes away. |
 | Disk | Named volume | One persistent disk per bot, attached only to that bot's VM. |
-| Network | One bridge network per bot | VPC firewall rules: deny ingress between bot VMs, allow ingress only from control (and IAP for admin), egress through Cloud NAT, no external IP. The "Mac is reachable" limit becomes "control is reachable", and only control. |
-| Credential | Bot token in the container env | The same bot token, delivered to the VM by instance metadata or Secret Manager. Control's checks do not change. |
-| Cloud identity | None | The VM's service account must have no roles (or the VM has no service account), so the metadata server gives a bot no access to GCP or to other bots' secrets. |
+| Network | One bridge network per bot | VPC firewall rules (`infra/gcp`): ingress only from IAP (SSH), so bot VMs cannot reach each other; egress through Cloud NAT, no external IP. Bot VMs may open only control's port. The "Mac is reachable" limit becomes "control is reachable", and only control. |
+| Credential | Bot token in the container env | The same bot token, delivered in the VM's instance metadata (cloud-init) and handed to the container as env. Project members who can read VMs can read it; Secret Manager is a later step. Control's checks do not change. |
+| Cloud identity | None | The VM's service account `chiefbot-computer` can only pull the image and write logs. The bot container cannot use it: a firewall rule on the VM drops the container's traffic to the metadata server. |
 | Resource limits | None | The machine type sets them per bot. |
 
 The worker, the bot token and control's checks are the same in both places. Only the `ComputerProvider` changes.
