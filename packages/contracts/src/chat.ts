@@ -63,12 +63,6 @@ export type SendMessageResponse = z.infer<typeof SendMessageResponse>;
 export const BrokeredGitHubToken = z.object({ accessToken: z.string().min(1), expiresAt: z.number().int() });
 export type BrokeredGitHubToken = z.infer<typeof BrokeredGitHubToken>;
 
-// The broker's 403 when control holds no usable GitHub sign-in for the bot's
-// owner (it expired, GitHub revoked it, or the owner disconnected GitHub). Bots
-// get no token until the owner signs in again in the desktop app.
-export const BrokerRefusal = z.object({ error: z.literal("reauth_needed") });
-export type BrokerRefusal = z.infer<typeof BrokerRefusal>;
-
 // A bot's chat as the desktop window shows it, folded from ChatEvents.
 // Sent from Electron main to the renderer.
 export const ChatItem = z.discriminatedUnion("kind", [

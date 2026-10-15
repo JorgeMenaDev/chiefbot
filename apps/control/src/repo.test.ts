@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApprovalId, Bot, ChatEvent, ClientEvent, SignInResponse, type BotId } from "@chiefbot/contracts";
+import { ApiError, ApprovalId, Bot, ChatEvent, ClientEvent, SignInResponse, type BotId } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeRuntime } from "@chiefbot/worker/fake-copilot";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -177,7 +177,7 @@ test("a declined push never reaches GitHub, and an approval is answered once", a
 
   expect(results.at(-1)).toMatchObject({ approved: false });
   expect(github.git("octo/demo", "branch", "--list", "fix-typo")).toBe("");
-  expect([again.status, await again.json()]).toEqual([409, { error: "not_pending" }]);
+  expect([again.status, ApiError.parse(await again.json())]).toEqual([409, { error: "not_pending" }]);
 });
 
 test("a push the shell matcher cannot see still asks the user, through git's pre-push hook", async () => {

@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, ChatEvent, ClientEvent, ModelOption, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
+import { ApiError, Bot, ChatEvent, ClientEvent, ModelOption, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
 import { defaultFakeUser, startFakeGitHub, type FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, type FakeModels } from "@chiefbot/worker/fake-copilot";
 import { z } from "zod";
@@ -161,7 +161,7 @@ test("a locked or unknown model is refused and the bot stays on its model", asyn
   const locked = await api("PUT", `/bots/${bot.id}/model`, { model: "claude-sonnet-4.6" });
   const unknown = await api("PUT", `/bots/${bot.id}/model`, { model: "made-up" });
 
-  expect([locked.status, await locked.json()]).toEqual([400, { error: "model_unavailable" }]);
+  expect([locked.status, ApiError.parse(await locked.json())]).toEqual([400, { error: "model_unavailable" }]);
   expect(unknown.status).toBe(400);
   const [after] = Bot.array().parse(await (await api("GET", "/bots")).json());
   expect(after?.model).toBe("auto");

@@ -1,4 +1,5 @@
 import { SignInResponse, User, type AuthState, type SessionToken } from "@chiefbot/contracts";
+import { refusal } from "./controlApi.ts";
 import { runDeviceFlow, type DeviceFlowOptions } from "./deviceFlow.ts";
 
 // Where the desktop keeps its control session between launches.
@@ -48,7 +49,7 @@ export function createAuth({ controlUrl, deviceFlow, store, onChange }: AuthOpti
           headers: { "content-type": "application/json" },
           body: JSON.stringify(tokens),
         });
-        if (!res.ok) throw new Error(`Control refused the sign-in (${res.status})`);
+        if (!res.ok) throw await refusal(res);
         const { sessionToken, user } = SignInResponse.parse(await res.json());
         store.save(sessionToken);
         set({ status: "signed-in", user });
@@ -67,7 +68,7 @@ export function createAuth({ controlUrl, deviceFlow, store, onChange }: AuthOpti
     async disconnectGitHub() {
       const headers = { authorization: `Bearer ${store.load() ?? ""}` };
       const res = await fetch(`${controlUrl}/me/github`, { method: "DELETE", headers });
-      if (!res.ok) throw new Error(`Control refused (${res.status})`);
+      if (!res.ok) throw await refusal(res);
       const me = await fetch(`${controlUrl}/me`, { headers });
       if (me.ok) set({ status: "signed-in", user: User.parse(await me.json()) });
     },

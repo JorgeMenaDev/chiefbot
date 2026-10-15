@@ -161,7 +161,7 @@ test("a bot whose computer fails to start is not kept", async () => {
   const res = await api("POST", "/bots", { name: "Ada" });
 
   expect(res.status).toBe(502);
-  expect(await (await api("GET", "/bots")).json()).toEqual([]);
+  expect(Bot.array().parse(await (await api("GET", "/bots")).json())).toEqual([]);
   expect(broken.destroyed).toHaveLength(1);
 });
 

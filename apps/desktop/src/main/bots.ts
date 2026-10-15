@@ -1,5 +1,6 @@
 import { Bot, ClientEvent, ModelOption, type BotId, type User } from "@chiefbot/contracts";
 import { z } from "zod";
+import { refusal } from "./controlApi.ts";
 
 export type BotsOptions = {
   controlUrl: string;
@@ -48,7 +49,7 @@ export function createBots({ controlUrl, session, onChange, onUser, retryMs = 20
       headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    if (!res.ok) throw new Error(`Control refused (${res.status}): ${await res.text()}`);
+    if (!res.ok) throw await refusal(res);
     return res;
   }
 

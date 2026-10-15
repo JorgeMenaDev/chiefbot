@@ -1,4 +1,5 @@
 import { Routine, type BotId, type RoutineId, type RoutineInput } from "@chiefbot/contracts";
+import { refusal } from "./controlApi.ts";
 
 export type RoutinesOptions = {
   controlUrl: string;
@@ -16,7 +17,7 @@ export function createRoutines({ controlUrl, session }: RoutinesOptions) {
       headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
-    if (!res.ok) throw new Error(`Control refused (${res.status}): ${await res.text()}`);
+    if (!res.ok) throw await refusal(res);
     return res;
   }
 

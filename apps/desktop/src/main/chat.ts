@@ -1,4 +1,5 @@
 import { ChatEvent, SendMessageResponse, type ApprovalId, type BotId, type ChatItem, type ChatView } from "@chiefbot/contracts";
+import { refusal } from "./controlApi.ts";
 
 export type ChatsOptions = {
   controlUrl: string;
@@ -52,7 +53,7 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
         headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) throw new Error(`Control refused (${res.status}): ${await res.text()}`);
+      if (!res.ok) throw await refusal(res);
       return SendMessageResponse.parse(await res.json()).turnId;
     },
 
@@ -64,7 +65,7 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
         headers: { authorization: `Bearer ${session() ?? ""}`, "content-type": "application/json" },
         body: JSON.stringify({ approved }),
       });
-      if (!res.ok) throw new Error(`Control refused (${res.status}): ${await res.text()}`);
+      if (!res.ok) throw await refusal(res);
     },
 
     // Call on sign-out.

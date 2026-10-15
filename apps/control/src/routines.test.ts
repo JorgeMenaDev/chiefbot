@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, ChatEvent, ClientEvent, Routine, SignInResponse, type BotId, type RoutineInput } from "@chiefbot/contracts";
+import { ApiError, Bot, ChatEvent, ClientEvent, Routine, SignInResponse, type BotId, type RoutineInput } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
@@ -249,7 +249,7 @@ test("routines are created, edited and deleted per bot, and a schedule control c
   // 09:00 in New York is 13:00 UTC.
   expect(Routine.parse(await edited.json()).nextDueAt).toBe(Date.parse("2026-10-15T13:00:00Z"));
   for (const refused of [badCron, badZone, never]) {
-    expect([refused.status, await refused.json()]).toEqual([400, { error: "invalid_schedule" }]);
+    expect([refused.status, ApiError.parse(await refused.json())]).toEqual([400, { error: "invalid_schedule" }]);
   }
   expect((await api("DELETE", `/bots/${ada.id}/routines/${routine.id}`)).status).toBe(204);
   expect(await routines(ada.id)).toEqual([]);

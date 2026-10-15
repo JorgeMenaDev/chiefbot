@@ -1,4 +1,4 @@
-import type { BotId, RoutineRun, TurnId, UserId } from "@chiefbot/contracts";
+import type { BotId, RoutineRun, TurnId, TurnRefusal, UserId } from "@chiefbot/contracts";
 import type { Clock } from "./clock.ts";
 import type { openStore } from "./store.ts";
 
@@ -19,8 +19,6 @@ export type RoutineHost = {
   // when the turn ends, with its error message if it failed.
   runTurn(userId: UserId, botId: BotId, text: string): { turnId: TurnId; done: Promise<string | null> } | { error: TurnRefusal };
 };
-
-type TurnRefusal = "bot_offline" | "turn_running" | "human_has_screen";
 
 // How a run ends when control refuses its turn. No retry: the next due time runs as usual.
 const refused: Record<TurnRefusal, { status: Exclude<RoutineRun["status"], "running">; error: string }> = {

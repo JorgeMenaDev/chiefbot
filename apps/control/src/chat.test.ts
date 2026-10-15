@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, ChatEvent, ClientEvent, ControlToWorker, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
+import { ApiError, Bot, ChatEvent, ClientEvent, ControlToWorker, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
@@ -204,8 +204,8 @@ test("a message is refused while the bot is offline or still on a turn", async (
   await api("POST", `/bots/${bot.id}/stop`);
   const offline = await api("POST", `/bots/${bot.id}/messages`, { text: "hello?" });
 
-  expect([busy.status, await busy.json()]).toEqual([409, { error: "turn_running" }]);
-  expect([offline.status, await offline.json()]).toEqual([409, { error: "bot_offline" }]);
+  expect([busy.status, ApiError.parse(await busy.json())]).toEqual([409, { error: "turn_running" }]);
+  expect([offline.status, ApiError.parse(await offline.json())]).toEqual([409, { error: "bot_offline" }]);
 });
 
 test("the agent waits while the human has the screen: a message is refused until hand-back", async () => {
@@ -217,7 +217,7 @@ test("the agent waits while the human has the screen: a message is refused until
   await api("POST", `/bots/${bot.id}/hand-back`);
   const resumed = await api("POST", `/bots/${bot.id}/messages`, { text: "go on" });
 
-  expect([waiting.status, await waiting.json()]).toEqual([409, { error: "human_has_screen" }]);
+  expect([waiting.status, ApiError.parse(await waiting.json())]).toEqual([409, { error: "human_has_screen" }]);
   expect(resumed.status).toBe(202);
 });
 

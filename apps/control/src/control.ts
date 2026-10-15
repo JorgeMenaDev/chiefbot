@@ -13,8 +13,9 @@ import {
   SetBotModelRequest,
   WorkerToControl,
   type Bot,
+  type ApiError,
+  type ApiErrorCode,
   type BotId,
-  type BrokerRefusal,
   type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
@@ -23,6 +24,7 @@ import {
   type SendMessageResponse,
   type SignInResponse,
   type TurnId,
+  type TurnRefusal,
   type User,
   type UserId,
 } from "@chiefbot/contracts";
@@ -113,6 +115,8 @@ type ScreenStream = {
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
 //                             (403 BrokerRefusal when the owner must sign in again)
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//
+// Every error body is an ApiError (packages/contracts errors.ts).
 //
 // The screen never listens beyond the computer's loopback: for each viewer,
 // control asks the worker to dial back and pipe x11vnc, and joins the two sockets.
@@ -206,7 +210,7 @@ export function startControl({
     userId: UserId,
     botId: BotId,
     text: string,
-  ): { turnId: TurnId } | { error: "bot_offline" | "turn_running" | "human_has_screen" } => {
+  ): { turnId: TurnId } | { error: TurnRefusal } => {
     const worker = workers.get(botId);
     if (!worker) return { error: "bot_offline" };
     if (store.unfinishedTurns(botId).length > 0) return { error: "turn_running" };
@@ -223,12 +227,12 @@ export function startControl({
   // The bot's routine with a schedule control can run, or a 400.
   const scheduled = async (req: Request) => {
     const body = RoutineInput.safeParse(await req.json().catch(() => null));
-    if (!body.success) return Response.json({ error: "invalid_routine" }, { status: 400 });
+    if (!body.success) return apiError(400, "invalid_routine");
     try {
       const next = nextDueAt(body.data.cron, body.data.timezone, clock.now());
       if (next !== null) return { input: body.data, nextDueAt: next };
     } catch {}
-    return Response.json({ error: "invalid_schedule" }, { status: 400 });
+    return apiError(400, "invalid_schedule");
   };
 
   // Runs a worker route for the bot whose credential it carries; 401 or 403 otherwise.
@@ -240,7 +244,7 @@ export function startControl({
   ) => {
     const bot = store.botForToken(bearer(req));
     if (!bot) return unauthorized();
-    if (bot.botId !== req.params.botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
+    if (bot.botId !== req.params.botId) return apiError(403, "wrong_bot");
     return bot;
   };
 
@@ -258,7 +262,7 @@ export function startControl({
       const user = store.userForSession(bearer(req));
       if (!user) return unauthorized();
       const bot = store.botFor(user.id, req.params.id);
-      if (!bot) return Response.json({ error: "not_found" }, { status: 404 });
+      if (!bot) return apiError(404, "not_found");
       return handle(user, bot.id, req, server);
     };
 
@@ -269,7 +273,7 @@ export function startControl({
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));
-          if (!tokens.success) return Response.json({ error: "invalid_tokens" }, { status: 400 });
+          if (!tokens.success) return apiError(400, "invalid_tokens");
           try {
             const identity = await fetchIdentity(githubApiUrl, tokens.data.accessToken);
             const sessionToken = SessionToken.parse(randomToken());
@@ -278,7 +282,7 @@ export function startControl({
             store.openSession(userId, sessionToken);
             return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
-            if (error instanceof GitHubAuthError) return Response.json({ error: "github_rejected_token" }, { status: 401 });
+            if (error instanceof GitHubAuthError) return apiError(401, "github_rejected_token");
             throw error;
           }
         },
@@ -312,7 +316,7 @@ export function startControl({
           const user = store.userForSession(bearer(req));
           if (!user) return unauthorized();
           const body = CreateBotRequest.safeParse(await req.json().catch(() => null));
-          if (!body.success) return Response.json({ error: "invalid_bot" }, { status: 400 });
+          if (!body.success) return apiError(400, "invalid_bot");
           const botToken = BotToken.parse(randomToken());
           const { id } = store.createBot(user.id, body.data.name, botToken);
           try {
@@ -329,7 +333,7 @@ export function startControl({
           } catch (error) {
             store.deleteBot(id);
             await computers.destroy(id, { deleteData: true }).catch(() => {});
-            return Response.json({ error: "computer_failed", message: String(error) }, { status: 502 });
+            return apiError(502, "computer_failed", String(error));
           }
           publish(user.id);
           return Response.json(botOf(user.id, id), { status: 201 });
@@ -355,7 +359,7 @@ export function startControl({
       },
       "/bots/:id/screen": {
         GET: ownBot((_user, botId, req, server) => {
-          if (!workers.has(botId)) return Response.json({ error: "bot_offline" }, { status: 409 });
+          if (!workers.has(botId)) return apiError(409, "bot_offline");
           return upgrade(server, req, { kind: "viewer", botId, streamId: crypto.randomUUID() });
         }),
       },
@@ -374,7 +378,7 @@ export function startControl({
         PUT: ownBot(async (user, botId, req) => {
           const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
           const offered = modelOptionsOf(user).some(({ id, lockedReason }) => id === body.data?.model && lockedReason === null);
-          if (!body.success || !offered) return Response.json({ error: "model_unavailable" }, { status: 400 });
+          if (!body.success || !offered) return apiError(400, "model_unavailable");
           store.setBotModel(botId, body.data.model);
           publish(user.id);
           return Response.json(botOf(user.id, botId));
@@ -383,9 +387,9 @@ export function startControl({
       "/bots/:id/messages": {
         POST: ownBot(async (user, botId, req) => {
           const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
-          if (!body.success) return Response.json({ error: "invalid_message" }, { status: 400 });
+          if (!body.success) return apiError(400, "invalid_message");
           const sent = sendTurn(user.id, botId, body.data.text);
-          if ("error" in sent) return Response.json(sent, { status: 409 });
+          if ("error" in sent) return apiError(409, sent.error);
           return Response.json(sent satisfies SendMessageResponse, { status: 202 });
         }),
       },
@@ -393,10 +397,10 @@ export function startControl({
       "/bots/:id/approvals/:approvalId": {
         POST: ownBot(async (_user, botId, req) => {
           const body = AnswerApprovalRequest.safeParse(await req.json().catch(() => null));
-          if (!body.success) return Response.json({ error: "invalid_answer" }, { status: 400 });
+          if (!body.success) return apiError(400, "invalid_answer");
           const approvalId = ApprovalId.safeParse(req.params.approvalId);
           const answer = approvalId.success ? store.answerApproval(botId, approvalId.data, body.data.approved) : null;
-          if (!answer || !approvalId.success) return Response.json({ error: "not_pending" }, { status: 409 });
+          if (!answer || !approvalId.success) return apiError(409, "not_pending");
           publishChat(botId, answer);
           workers.get(botId)?.send(
             JSON.stringify({
@@ -421,18 +425,18 @@ export function startControl({
           const routine = await scheduled(req);
           if (routine instanceof Response) return routine;
           const updated = store.updateRoutine(botId, req.params.routineId, routine.input, routine.nextDueAt);
-          return updated ? Response.json(updated) : Response.json({ error: "not_found" }, { status: 404 });
+          return updated ? Response.json(updated) : apiError(404, "not_found");
         }),
         DELETE: ownBot((_user, botId, req) =>
           store.deleteRoutine(botId, req.params.routineId)
             ? new Response(null, { status: 204 })
-            : Response.json({ error: "not_found" }, { status: 404 }),
+            : apiError(404, "not_found"),
         ),
       },
       "/bots/:id/chat": {
         GET: ownBot((_user, botId, req, server) => {
           const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
-          if (!Number.isInteger(after) || after < 0) return Response.json({ error: "invalid_after" }, { status: 400 });
+          if (!Number.isInteger(after) || after < 0) return apiError(400, "invalid_after");
           return upgrade(server, req, { kind: "chat", botId, after });
         }),
       },
@@ -463,7 +467,7 @@ export function startControl({
           if (bot instanceof Response) return bot;
           const token = await broker.accessToken(bot.userId);
           if (token) return Response.json(token);
-          return Response.json({ error: "reauth_needed" } satisfies BrokerRefusal, { status: 403 });
+          return apiError(403, "reauth_needed");
         },
       },
       // Only a stream control opened for this bot, and only once.
@@ -473,7 +477,7 @@ export function startControl({
           if (bot instanceof Response) return bot;
           const stream = screenStreams.get(req.params.streamId);
           if (!stream || stream.botId !== bot.botId || stream.screen) {
-            return Response.json({ error: "not_found" }, { status: 404 });
+            return apiError(404, "not_found");
           }
           return upgrade(server, req, { kind: "screen", streamId: req.params.streamId });
         },
@@ -605,7 +609,7 @@ export function startControl({
 
 function upgrade(server: Bun.Server<SocketData>, req: Request, data: SocketData) {
   if (server.upgrade(req, { data })) return undefined;
-  return Response.json({ error: "expected_websocket" }, { status: 400 });
+  return apiError(400, "expected_websocket");
 }
 
 function randomToken() {
@@ -617,5 +621,10 @@ function bearer(req: Request) {
 }
 
 function unauthorized() {
-  return Response.json({ error: "unauthorized" }, { status: 401 });
+  return apiError(401, "unauthorized");
+}
+
+// Every error body control sends: an ApiError.
+function apiError(status: number, error: ApiErrorCode, message?: string) {
+  return Response.json((message === undefined ? { error } : { error, message }) satisfies ApiError, { status });
 }
