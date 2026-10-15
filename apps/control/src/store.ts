@@ -360,11 +360,14 @@ export function openStore(path: string) {
       );
     },
 
-    // The answered approvals of a turn, for a worker that may have missed the answers.
-    answeredApprovals(turnId: TurnId) {
+    // The answered approvals of one of the bot's turns, for its worker, which may
+    // have missed the answers. Another bot's turn has none.
+    answeredApprovals(botId: BotId, turnId: TurnId) {
       return db
-        .query<{ id: string; approved: number }, [string]>("SELECT id, approved FROM approvals WHERE turn_id = ?1 AND approved IS NOT NULL")
-        .all(turnId)
+        .query<{ id: string; approved: number }, [string, string]>(
+          "SELECT id, approved FROM approvals WHERE bot_id = ?1 AND turn_id = ?2 AND approved IS NOT NULL",
+        )
+        .all(botId, turnId)
         .map((row) => ({ approvalId: ApprovalId.parse(row.id), approved: row.approved === 1 }));
     },
 

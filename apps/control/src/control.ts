@@ -534,7 +534,7 @@ export function startControl({
         if (message.type === "models") return store.setModelReport(ws.data.userId, message.report);
         // Answers the worker may have missed while it was away.
         if (message.activeTurnId) {
-          for (const answer of store.answeredApprovals(message.activeTurnId)) {
+          for (const answer of store.answeredApprovals(botId, message.activeTurnId)) {
             ws.send(JSON.stringify({ type: "approval-answer", ...answer } satisfies ControlToWorker));
           }
         }

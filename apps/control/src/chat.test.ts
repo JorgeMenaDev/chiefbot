@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, ChatEvent, ClientEvent, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
+import { Bot, ChatEvent, ClientEvent, ControlToWorker, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
@@ -266,6 +266,39 @@ test("the token broker gives a bot's worker its owner's access token only, and n
   expect(text).not.toContain("ghr_");
   expect((await broker(ada.id, tokenOf(grace.id))).status).toBe(403);
   expect((await broker(ada.id, auth.authorization.slice("Bearer ".length))).status).toBe(401);
+});
+
+test("a worker reads only its own bot's approval answers, whatever turn it names", async () => {
+  const { api, computers, control, auth, onlineBot, send } = await setup();
+  computers.copilot.script = async function* (_prompt, runtime) {
+    await runtime.shell("git push origin main");
+    yield sdk.idle();
+  };
+  const ada = await onlineBot("Ada");
+  const grace = await onlineBot("Grace");
+  const chat = watchChat(control.url, auth, ada.id);
+  const adaTurn = await send(ada.id, "push it");
+  const request = (await chat.until((events) => events.some((e) => e.event.type === "approval-request"))).find(
+    (e) => e.event.type === "approval-request",
+  );
+  await api("POST", `/bots/${ada.id}/approvals/${request?.event.type === "approval-request" ? request.event.approvalId : ""}`, {
+    approved: true,
+  });
+  await chat.until(doneCount(1));
+
+  // Grace's worker, on her credential, says it is still running Ada's turn.
+  await computers.provider.stop(grace.id);
+  const graceToken = computers.computers.get(grace.id)?.spec.env.CHIEFBOT_BOT_TOKEN ?? "";
+  const received: unknown[] = [];
+  const socket = new WebSocket(`${control.url.replace("http", "ws")}/worker/${grace.id}`, {
+    headers: { authorization: `Bearer ${graceToken}` },
+  });
+  stops.push(() => socket.close());
+  socket.onmessage = (event) => received.push(JSON.parse(String(event.data)));
+  socket.onopen = () => socket.send(JSON.stringify({ type: "hello", activeTurnId: adaTurn }));
+  await Bun.sleep(200);
+
+  expect(received.map((message) => ControlToWorker.parse(message).type)).toEqual(["bound", "screen-control"]);
 });
 
 test("a reply that did not stream still shows, sub-agent chatter stays out, and a session error ends the turn", async () => {
