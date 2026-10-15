@@ -23,9 +23,14 @@ export function fakeComputers() {
     },
     async start(botId) {
       const computer = get(botId);
-      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_TOKEN } = computer.spec.env;
-      if (!CHIEFBOT_CONTROL_URL || !CHIEFBOT_BOT_TOKEN) throw new Error("worker env missing");
-      computer.worker ??= startWorker({ controlUrl: CHIEFBOT_CONTROL_URL, botToken: CHIEFBOT_BOT_TOKEN, retryMs: 20 });
+      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN } = computer.spec.env;
+      if (!CHIEFBOT_CONTROL_URL || !CHIEFBOT_BOT_ID || !CHIEFBOT_BOT_TOKEN) throw new Error("worker env missing");
+      computer.worker ??= startWorker({
+        controlUrl: CHIEFBOT_CONTROL_URL,
+        botId: CHIEFBOT_BOT_ID,
+        botToken: CHIEFBOT_BOT_TOKEN,
+        retryMs: 20,
+      });
     },
     async stop(botId) {
       const computer = get(botId);
