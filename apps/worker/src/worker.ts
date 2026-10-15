@@ -49,6 +49,7 @@ export type WorkerOptions = {
 // Copilot plan offers. The latest turn's events are kept and resent on
 // every reconnect (control stores each once), so a turn survives a control restart.
 // On `screen-open` it pipes the screen to a viewer through control (screen.ts).
+// While the human has the screen (take-over), every tool call waits for hand-back.
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
 export function startWorker({
   controlUrl,
@@ -68,8 +69,12 @@ export function startWorker({
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
   let stopped = false;
-  // Who drives the screen, as control last said. Agent input to the screen waits while it is "human".
+  // Who drives the screen, as control last said. While it is "human", every tool
+  // call of the running turn waits until hand-back: these wake it.
   let screenControl: ScreenControl = "agent";
+  const handBackWaiters = new Set<() => void>();
+  const agentHasScreen = () =>
+    screenControl === "agent" ? Promise.resolve() : new Promise<void>((resolve) => handBackWaiters.add(resolve));
   // Every event of the latest turn, numbered by position.
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
   let session: Promise<BotSession> | null = null;
@@ -121,9 +126,10 @@ export function startWorker({
     return answered;
   }
 
-  // Runs safe tool calls at once. A risky one becomes an approval-request in the
-  // chat, and the session waits until the user answers.
+  // Runs safe tool calls once the agent has the screen. A risky one becomes an
+  // approval-request in the chat, and the session waits until the user answers.
   const onPermissionRequest: PermissionHandler = async (request) => {
+    await agentHasScreen();
     const ask = approvalFor(request);
     if (!ask) return { kind: "approve-once" };
     const approved = await askUser(ask);
@@ -255,6 +261,10 @@ export function startWorker({
           break;
         case "screen-control":
           screenControl = message.control;
+          if (screenControl === "agent") {
+            for (const wake of handBackWaiters) wake();
+            handBackWaiters.clear();
+          }
           break;
         case "screen-open": {
           const close = openScreenStream(`${url}/screen/${message.streamId}`, botToken, screen, () =>

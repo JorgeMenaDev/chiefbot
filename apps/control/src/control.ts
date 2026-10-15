@@ -203,7 +203,8 @@ export function startControl({
     const worker = workers.get(botId);
     if (!worker) return { error: "bot_offline" };
     if (store.unfinishedTurns(botId).length > 0) return { error: "turn_running" };
-    // The agent waits while the human drives the screen. A turn already running is not paused.
+    // The agent waits while the human drives the screen. A turn already running
+    // pauses at its next tool call (the worker holds it until hand-back).
     if (screenControl.get(botId) === "human") return { error: "human_has_screen" };
     const model = store.botFor(userId, botId)?.model ?? AUTO_MODEL;
     const started = store.startTurn(botId, text);

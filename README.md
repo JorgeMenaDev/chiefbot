@@ -110,7 +110,7 @@ Needs Colima running. Makes no Copilot calls.
 4. Click **Take over**. The pane turns green and says **You have control. The bot waits.** Click Chromium's address bar in the pane and type. The text appears. The chat box says **Hand the screen back to message …** and will not send.
 5. Click **Hand back**. Typing in the pane does nothing again, and the chat sends.
 
-Take-over lives in control's memory, so restarting control hands the screen back to the agent. A chat turn already running when you take over is not paused.
+Take-over lives in control's memory, so restarting control hands the screen back to the agent. A chat turn already running when you take over pauses at its next tool call and goes on after hand-back.
 
 ## Manual check: one live Copilot reply
 

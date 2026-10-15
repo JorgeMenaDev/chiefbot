@@ -17,7 +17,7 @@ export type BotStatus = z.infer<typeof BotStatus>;
 
 // Who drives the bot's screen. agent: the bot; a viewer only watches.
 // human: the user took over (mouse and keyboard); the agent waits until
-// hand-back, so control refuses new chat turns.
+// hand-back: control refuses new chat turns, and a running turn's tool calls wait.
 export const ScreenControl = z.enum(["agent", "human"]);
 export type ScreenControl = z.infer<typeof ScreenControl>;
 
