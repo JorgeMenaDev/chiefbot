@@ -4,7 +4,7 @@
 
 https://github.com/pingdotgg/t3code
 
-Used in: the bot status dot in `apps/desktop/src/renderer` (colour per status and the ping while starting) is adapted from `apps/web/src/components/ConnectionStatusDot.tsx`.
+Used in: the bot status dot in `apps/desktop/src/renderer` (colour per status and the ping while starting) is adapted from `apps/web/src/components/ConnectionStatusDot.tsx`. The approval card in `apps/desktop/src/renderer/src/App.tsx` (label per request kind, the exact command in monospace, Decline and Approve) is adapted from `apps/web/src/components/chat/ComposerPendingApprovalPanel.tsx` and `ComposerPendingApprovalActions.tsx`.
 
 ```
 MIT License

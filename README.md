@@ -19,6 +19,8 @@ Creating a bot needs Docker (Colima: `colima start`) and the `chiefbot-computer:
 
 **Chat.** A message to a bot goes to control, which stores it and forwards it to the bot's worker. The worker runs the turn on the Copilot SDK (`@github/copilot-sdk`, pinned exactly in `apps/worker/package.json`) in `copilot-cli` mode, working in `/home/bot/workspace`. The bot has one conversation; the SDK keeps it under `/home/bot/.copilot`, so it resumes after the computer restarts. The SDK gets the user's GitHub access token from control's broker (`GET /worker/<bot id>/github-token`) through `gitHubTokenProvider`. Reply text, tool calls and status stream back to the desktop and are stored in control, so history survives a restart of any process. Until ticket #8, the broker does not refresh tokens: 8 hours after sign-in, sign out and in again. The image carries the SDK's bundled Linux runtime (about 170 MB of the image).
 
+**Repo work and approvals.** A bot clones, branches, edits and commits in its workspace without asking. Before it pushes or opens a pull request, it asks you: the chat shows an approval card (after T3 Code's) with the exact command or pull request, and the bot waits until you click **Approve** or **Decline**, however long that takes. The worker's permission handler decides what asks (`apps/worker/src/approvals.ts`): shell commands that mention `git … push`, `gh pr create|merge` or `gh repo delete`, the bot's `create_pull_request` tool, and GitHub tools that write. Control stores each request and answer (`POST /bots/<id>/approvals/<approval id>`), so a pending card survives a restart of the desktop or control and you can answer later; if the bot's computer restarts first, the turn ends and the card shows **Expired**. Git gets the owner's token from control's broker on each use: the image configures a credential helper for github.com that asks the worker over a unix socket (`apps/worker/src/gitCredential.ts`), so no token is written to the bot's disk or into a remote URL. Pull requests go through the GitHub API from the worker (`CHIEFBOT_GITHUB_API_URL`, passed on by control). Sign-in asks for the `repo` scope for this; if you signed in before, sign out and in again.
+
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
 `bun run dev` starts both apps. To run them apart: `bun run --cwd apps/control dev` and `bun run --cwd apps/desktop dev`.
@@ -78,3 +80,19 @@ Tests use a fake Copilot. This check makes **one** real Copilot chat on your pla
 4. The chat shows your message, a status line while the bot works, possibly a tool row (for example a shell call), then a reply that streams in and names `/home/bot/workspace`. The status line goes away when the reply is done.
 5. Restart control (save a file in `apps/control`) and quit and start the desktop app. The conversation is still there.
 6. If the reply is an error instead: `Failed to fetch Copilot user info: 401` means the token expired (sign out and in again); a `quota` or `rate_limit` error means the month's Free chats are used up.
+
+## Manual check: clone, push and pull request on a disposable repo
+
+Tests use a fake GitHub with a real git remote. This check uses the real GitHub and makes **one** Copilot chat (the agent may take several steps inside it). It creates a repo, a branch and a pull request on your account: delete them at the end.
+
+1. Create a throwaway private repo with a README: `gh repo create chiefbot-scratch --private --add-readme`.
+2. Run `bun run computer:build`, then `bun run dev`. Sign out and sign in again: GitHub's page now asks for repository access (the `repo` scope). Approve it.
+3. Pick a bot (or create one) and wait until it is **online**.
+4. Send: `Clone https://github.com/<your login>/chiefbot-scratch, create a branch chiefbot-check, add the line "Hello from Chiefbot" to README.md, commit, push the branch and open a pull request into main with the create_pull_request tool.`
+5. The clone and the commit run without a card. Then a **Command approval** card shows the `git push` command, and the status line says **Waiting for your approval**. On github.com the repo has no `chiefbot-check` branch yet.
+6. Quit the desktop app and start it again. The card is still there and still pending. Click **Approve**. The push runs, and the branch appears on github.com.
+7. A **Pull request approval** card shows `<your login>/chiefbot-scratch: chiefbot-check → main` and the title. Click **Approve**. The bot replies with the pull request's URL. Open it: it has the README change.
+8. Check that the token is not on the bot's disk: `docker exec chiefbot-<bot id> sh -c 'grep -rl gho_ /home/bot /tmp; git -C /home/bot/workspace/chiefbot-scratch remote get-url origin'` prints only `https://github.com/<your login>/chiefbot-scratch` (no file names, no token in the URL).
+9. Send: `Add a second line to README.md, commit and push.` Click **Decline** on the card. The bot says the push was declined, and github.com shows no new commit.
+10. If a card turns **Expired** while the bot was still running, the Copilot runtime gave up waiting: note how long it waited. If the push fails with 403, sign in again for the `repo` scope, or the repo's organization blocks this OAuth app.
+11. Clean up: `gh repo delete <your login>/chiefbot-scratch --yes` (it removes the pull request too).
