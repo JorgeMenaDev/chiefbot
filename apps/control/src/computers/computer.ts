@@ -1,7 +1,7 @@
 import type { BotId } from "@chiefbot/contracts";
 
 // The one planned seam: where a bot's computer runs. DockerProvider runs it as a
-// local container; GceProvider (ticket #10) will run it as a Compute Engine VM.
+// local container; GceProvider runs it as a Compute Engine VM.
 // Every computer has a durable disk for the bot's home and workspace that
 // survives stop/start, and is removed only by destroy({ deleteData: true }).
 
@@ -14,7 +14,8 @@ export type ComputerSpec = {
 };
 
 export type ComputerProvider = {
-  // Makes the computer and its disk, stopped.
+  // Makes the computer and its disk. Docker leaves it stopped; a GCE VM boots on
+  // creation. Call start next either way.
   create(spec: ComputerSpec): Promise<void>;
   start(botId: BotId): Promise<void>;
   stop(botId: BotId): Promise<void>;

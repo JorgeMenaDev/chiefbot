@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@chiefbot/contracts": "workspace:*",
+    "@google-cloud/compute": "^7.8.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
