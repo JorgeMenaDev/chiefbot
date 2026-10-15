@@ -395,6 +395,26 @@ export function openStore(path: string) {
         .map(toChatEvent);
     },
 
+    // Every bot whose computer control wants running, with its owner.
+    runningBots() {
+      return db
+        .query<{ id: string; user_id: string }, []>("SELECT id, user_id FROM bots WHERE running = 1")
+        .all()
+        .map((row) => ({ botId: BotId.parse(row.id), userId: UserId.parse(row.user_id) }));
+    },
+
+    // Whether one of the bot's routines has a run in progress.
+    routineRunning(botId: BotId) {
+      return (
+        db
+          .query<{ due_at: number }, [string]>(
+            `SELECT routine_runs.due_at FROM routine_runs JOIN routines ON routines.id = routine_runs.routine_id
+             WHERE routines.bot_id = ?1 AND routine_runs.status = 'running' LIMIT 1`,
+          )
+          .get(botId) !== null
+      );
+    },
+
     // Whether control wants the bot's computer running; null for a deleted bot.
     botRunning(botId: BotId): boolean | null {
       const row = db.query<{ running: number }, [string]>("SELECT running FROM bots WHERE id = ?1").get(botId);

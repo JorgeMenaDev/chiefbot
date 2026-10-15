@@ -29,6 +29,7 @@ import {
 import { systemClock, type Clock } from "./clock.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fetchIdentity, GitHubAuthError, refreshGitHubTokens } from "./github.ts";
+import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
 import { startScheduler } from "./routines.ts";
 import { nextDueAt } from "./schedule.ts";
@@ -54,8 +55,11 @@ export type ControlOptions = {
   computers: ComputerProvider;
   // Control's URL as a bot computer reaches it. Defaults to the URL control listens on.
   workerControlUrl?: string;
-  // When routines are due. A fake in tests.
+  // When routines are due and bots count as idle. A fake in tests.
   clock?: Clock;
+  // A running bot's computer stops after this long with no running turn, no
+  // pending approval, no screen viewer and no routine run in progress. Default 30.
+  idleStopMinutes?: number;
 };
 
 // What a WebSocket connection is bound to: a desktop client of one user, one
@@ -123,6 +127,7 @@ export function startControl({
   computers,
   workerControlUrl,
   clock = systemClock,
+  idleStopMinutes = 30,
 }: ControlOptions) {
   const store = openStore(dbPath);
   const broker = tokenBroker({
@@ -147,6 +152,7 @@ export function startControl({
   // Closes both ends of a screen stream.
   function endStream(streamId: string) {
     const stream = screenStreams.get(streamId);
+    if (stream) idle.touch(stream.botId);
     screenStreams.delete(streamId);
     stream?.viewer.close();
     stream?.screen?.close();
@@ -179,6 +185,7 @@ export function startControl({
   // Every stored chat event passes here.
   const publishChat = (botId: BotId, event: ChatEvent | null) => {
     if (!event) return;
+    idle.touch(botId);
     server.publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
     const watcher = turnWatchers.get(event.turnId);
     if (watcher && event.event.type === "error") watcher.error = event.event.message;
@@ -502,6 +509,7 @@ export function startControl({
           return;
         }
         // One connection per bot: a reconnecting worker replaces its stale socket.
+        idle.touch(ws.data.botId);
         workers.get(ws.data.botId)?.close(4000, "replaced");
         workers.set(ws.data.botId, ws);
         greeted.delete(ws.data.botId);
@@ -572,9 +580,22 @@ export function startControl({
     },
   });
 
+  // Pending approvals belong to unfinished turns, so those count as busy too.
+  const idle = startIdleStop({
+    clock,
+    idleMs: idleStopMinutes * 60_000,
+    runningBots: store.runningBots,
+    busy: (botId) =>
+      store.unfinishedTurns(botId).length > 0 ||
+      store.routineRunning(botId) ||
+      [...screenStreams.values()].some((stream) => stream.botId === botId),
+    stop: (userId, botId) => setRunning(userId, botId, false),
+  });
+
   return {
     url: server.url.origin,
     stop: () => {
+      idle.stop();
       scheduler.stop();
       server.stop(true);
       store.close();

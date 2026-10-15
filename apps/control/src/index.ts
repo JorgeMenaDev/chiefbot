@@ -22,7 +22,10 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 //                                which keeps refresh tokens in Secret Manager in CHIEFBOT_GCP_PROJECT.
 //   CHIEFBOT_COMPUTERS           docker (default) | gce
 //   CHIEFBOT_WORKER_CONTROL_URL  default http://host.docker.internal:<port> (control as containers reach it)
+//   CHIEFBOT_IDLE_STOP_MINUTES   default 30: an idle bot's computer stops after this long
 const port = Number(process.env.CHIEFBOT_CONTROL_PORT ?? 7410);
+const idleStopMinutes = Number(process.env.CHIEFBOT_IDLE_STOP_MINUTES ?? 30);
+if (!(idleStopMinutes > 0)) throw new Error("CHIEFBOT_IDLE_STOP_MINUTES must be a positive number of minutes");
 const dbPath = process.env.CHIEFBOT_DB_PATH ?? ".data/control.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
 
@@ -46,5 +49,6 @@ const control = startControl({
       ? gceProvider({ ...config, client: googleCompute(config) })
       : dockerProvider(config),
   workerControlUrl: process.env.CHIEFBOT_WORKER_CONTROL_URL ?? `http://host.docker.internal:${port}`,
+  idleStopMinutes,
 });
 console.log(`control listening on ${control.url} with ${config.provider} computers`);

@@ -39,6 +39,8 @@ async function setup({
     githubApiUrl: github.url,
     computers: provider ? provider(computers.provider) : computers.provider,
     clock: time.clock,
+    // A day, so idle stop (idle.test.ts) stays out of these hour-long runs.
+    idleStopMinutes: 24 * 60,
   };
   let control = startControl(options);
   stops.push(github.stop, computers.stopAll, () => control.stop());

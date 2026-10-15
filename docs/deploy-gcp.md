@@ -32,7 +32,7 @@ London on-demand prices, USD, no discounts. Sources: [E2 pricing](https://cloud.
 Examples:
 
 - **Proof of concept: 2 bots, each active 4 h a day on 22 days:** 2 × 88 h × $0.0877 = $15.44, plus 2 × $7.20 disks, plus $35 control, plus ≈ $1.5 other ≈ **$66 a month**.
-- **2 bots never stopped:** 2 × ($63.02 + $7.20 + $1.02) + $35 ≈ **$178 a month**. It passes the $100 budget in about 17 days. Stop bots when they are idle.
+- **2 bots never stopped:** 2 × ($63.02 + $7.20 + $1.02) + $35 ≈ **$178 a month**. It passes the $100 budget in about 17 days. Control stops a bot after 30 idle minutes (`CHIEFBOT_IDLE_STOP_MINUTES`), so this happens only to bots kept busy all day.
 - Stopping the control VM at night saves about $1 a day.
 
 Research figure for comparison (us-central1): e2-standard-2 ≈ $0.074 per active hour including disk, control ≈ $30 a month. London is about 15-30% higher.
@@ -111,7 +111,7 @@ Makes no Copilot calls. Each bot costs about $0.09 per running hour.
 
 ## Day to day
 
-- Stop bots in the app when they are idle. A stopped bot costs only its disks ($7.20 a month).
+- Control stops a bot's VM after 30 minutes with no running turn, no pending approval, no screen viewer and no routine run (`CHIEFBOT_IDLE_STOP_MINUTES`). **Stop** in the app stops it at once. A stopped bot costs only its disks ($7.20 a month). Its routines start it again when due.
 - Stop control when nobody uses Chiefbot: `gcloud compute instances stop chiefbot-control --zone=europe-west2-a`. Bots cannot come online while it is stopped. Start it with `instances start`.
 - **New version:** push the images again with the same tag (step 5). For control, run `sudo systemctl restart chiefbot-control` on its VM. Bots pull their image on every start: Stop and Start them in the app.
 
@@ -125,5 +125,4 @@ Makes no Copilot calls. Each bot costs about $0.09 per running hour.
 
 - GitHub refresh tokens are in Secret Manager, one secret `github-refresh-token-<user id>` each, with only the latest version enabled. Access tokens (8 hours) and expiry times stay in control's SQLite on the data disk.
 - The bot's credential (`CHIEFBOT_BOT_TOKEN`) stays in its VM's metadata (decided in ticket #8). Project members who can read VMs can read it. It gets only that one bot's owner's access token (8 hours at most, never a refresh token), and it stops working when the bot is deleted. Anyone with SSH to the VM (Owner, Editor, Compute Admin) could read it from the VM anyway. Moving it to Secret Manager needs a host-side fetch on Container-Optimized OS (no `gcloud` or `jq`), a secret per bot, and an IAM grant to the shared `chiefbot-computer` account that lets every bot VM read every bot's secret unless each bot gets its own service account. Revisit when the project gets members with read-only roles such as Compute Viewer.
-- Nothing stops idle bots automatically yet. **Stop** in the app is the only way.
 - No snapshot schedule backs up the control data disk.
