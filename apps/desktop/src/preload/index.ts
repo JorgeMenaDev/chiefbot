@@ -22,6 +22,8 @@ const api = {
     start: (id: string): Promise<void> => ipcRenderer.invoke("bots:start", id),
     stop: (id: string): Promise<void> => ipcRenderer.invoke("bots:stop", id),
     remove: (id: string): Promise<void> => ipcRenderer.invoke("bots:delete", id),
+    models: (): Promise<unknown> => ipcRenderer.invoke("bots:models"),
+    setModel: (id: string, model: string): Promise<unknown> => ipcRenderer.invoke("bots:set-model", id, model),
     onChange: (listener: (bots: unknown) => void) => subscribe("bots:state", listener),
   },
   chat: {

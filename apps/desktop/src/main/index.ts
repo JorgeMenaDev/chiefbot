@@ -1,4 +1,4 @@
-import { BotId, CreateBotRequest, SendMessageRequest } from "@chiefbot/contracts";
+import { BotId, CreateBotRequest, SendMessageRequest, SetBotModelRequest } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -67,6 +67,10 @@ ipcMain.handle("bots:get", () => bots.list());
 ipcMain.handle("bots:create", (_event, name: unknown) => bots.create(CreateBotRequest.parse({ name }).name));
 ipcMain.handle("bots:start", (_event, id: unknown) => bots.start(BotId.parse(id)));
 ipcMain.handle("bots:stop", (_event, id: unknown) => bots.stop(BotId.parse(id)));
+ipcMain.handle("bots:models", () => bots.models());
+ipcMain.handle("bots:set-model", (_event, id: unknown, model: unknown) =>
+  bots.setModel(BotId.parse(id), SetBotModelRequest.parse({ model }).model),
+);
 // Opening a chat answers with what main has so far; the rest follows on chat:state.
 ipcMain.handle("chat:open", (_event, id: unknown) => {
   const botId = BotId.parse(id);

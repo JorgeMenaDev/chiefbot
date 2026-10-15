@@ -3,6 +3,7 @@ import { SignInResponse, type Bot } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
+import { fakeCopilot } from "@chiefbot/worker/fake-copilot";
 import { createBots } from "./bots.ts";
 
 const stops: Array<() => unknown> = [];
@@ -60,4 +61,33 @@ test("create fails with control's reason when control refuses it", async () => {
   const bots = createBots({ controlUrl: control.url, session: () => "not-a-session", onChange: () => {} });
 
   await expect(bots.create("Ada")).rejects.toThrow("unauthorized");
+});
+
+test("the model picker reads the plan's models from control, and a refused pick fails with control's reason", async () => {
+  const github = startFakeGitHub();
+  const computers = fakeComputers({ copilot: fakeCopilot({ models: { list: [], modelPriceCategories: [{ id: "gpt-6-luna" }] } }) });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
+  stops.push(github.stop, computers.stopAll, control.stop);
+  const { accessToken, refreshToken } = github.issueTokens();
+  const signIn = await fetch(`${control.url}/sessions`, {
+    method: "POST",
+    body: JSON.stringify({ accessToken, accessTokenExpiresAt: 0, refreshToken, refreshTokenExpiresAt: 0 }),
+  });
+  const { sessionToken } = SignInResponse.parse(await signIn.json());
+  const bots = createBots({ controlUrl: control.url, session: () => sessionToken, onChange: () => {} });
+  const bot = await bots.create("Ada");
+
+  // The worker reports the plan's models just after it connects.
+  let models = await bots.models();
+  for (let tries = 0; tries < 50 && models.length < 2; tries++) {
+    await Bun.sleep(10);
+    models = await bots.models();
+  }
+
+  expect(models.map(({ id, lockedReason }) => [id, lockedReason])).toEqual([
+    ["auto", null],
+    ["gpt-6-luna", "Needs a paid Copilot plan"],
+  ]);
+  await expect(bots.setModel(bot.id, "gpt-6-luna")).rejects.toThrow("model_unavailable");
+  expect((await bots.setModel(bot.id, "auto")).model).toBe("auto");
 });
