@@ -1,3 +1,4 @@
+import type { RoutineInput } from "@chiefbot/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 // Subscribes to one main → renderer channel; returns the unsubscribe.
@@ -32,6 +33,13 @@ const api = {
     open: (botId: string): Promise<unknown> => ipcRenderer.invoke("chat:open", botId),
     send: (botId: string, text: string): Promise<unknown> => ipcRenderer.invoke("chat:send", botId, text),
     onChange: (listener: (view: unknown) => void) => subscribe("chat:state", listener),
+  },
+  routines: {
+    list: (botId: string): Promise<unknown> => ipcRenderer.invoke("routines:list", botId),
+    create: (botId: string, input: RoutineInput): Promise<unknown> => ipcRenderer.invoke("routines:create", botId, input),
+    update: (botId: string, routineId: string, input: RoutineInput): Promise<unknown> =>
+      ipcRenderer.invoke("routines:update", botId, routineId, input),
+    remove: (botId: string, routineId: string): Promise<void> => ipcRenderer.invoke("routines:delete", botId, routineId),
   },
 };
 
