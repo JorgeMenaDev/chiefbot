@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { Bot, ChatEvent, ClientEvent, Routine, SignInResponse, type BotId, type RoutineInput } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
-import { fakeCopilot } from "@chiefbot/worker/fake-copilot";
+import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import { fakeClock } from "./clock.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
 import { startControl } from "./control.ts";
+import { WORKER_TIMEOUT_MS } from "./routines.ts";
 
 const stops: Array<() => unknown> = [];
 afterEach(() => {
@@ -21,7 +22,7 @@ const nineLondon = Date.parse("2026-10-15T08:00:00Z");
 const daily: RoutineInput = { prompt: "Summarise my inbox", cron: "0 9 * * *", timezone: "Europe/London" };
 
 // Control on a fake clock, with bot computers whose workers run a fake Copilot.
-// `restart` stops control and starts it again on the same database and clock.
+// `down` stops control; `up` starts it again on the same port, database and clock.
 async function setup({ provider }: { provider?: (fake: ComputerProvider) => ComputerProvider } = {}) {
   const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-routines-")), "control.sqlite");
   const github = startFakeGitHub();
@@ -63,12 +64,11 @@ async function setup({ provider }: { provider?: (fake: ComputerProvider) => Comp
   const routines = async (botId: BotId) => Routine.array().parse(await (await api("GET", `/bots/${botId}/routines`)).json());
   const chat = async (botId: BotId) =>
     (await allMessages(control.url, auth, `/bots/${botId}/chat`)).map((message) => ChatEvent.parse(message).event);
-  const restart = () => {
-    control.stop();
-    control = startControl({ ...options, port: Number(new URL(control.url).port) });
-  };
+  const port = Number(new URL(control.url).port);
+  const down = () => control.stop();
+  const up = () => void (control = startControl({ ...options, port }));
 
-  return { time, computers, api, bot, statusOf, addRoutine, routines, chat, restart };
+  return { time, computers, api, bot, statusOf, addRoutine, routines, chat, down, up };
 }
 
 // Opens a WebSocket on control and resolves with its first message.
@@ -119,4 +119,113 @@ test("at its due time a routine starts the stopped bot, runs the prompt as a tur
   expect(await statusOf(ada.id)).toBe("stopped");
   expect(await computers.provider.status(ada.id)).toBe("stopped");
   expect((await routines(ada.id))[0]?.nextDueAt).toBe(nineLondon + 86400_000);
+});
+
+test("a routine on a running bot leaves it running", async () => {
+  const { time, bot, statusOf, addRoutine, routines } = await setup();
+  const ada = await bot({ running: true });
+  await addRoutine(ada.id);
+
+  time.advance(nineLondon - start);
+
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "succeeded");
+  expect(await statusOf(ada.id)).toBe("online");
+});
+
+test("due times missed while control was down run once when it is back", async () => {
+  const { time, bot, addRoutine, routines, chat, down, up } = await setup();
+  const ada = await bot();
+  await addRoutine(ada.id, { ...daily, cron: "0 * * * *" });
+  const prompts = async () => (await chat(ada.id)).filter((event) => event.type === "user-message").length;
+  time.advance(3600_000);
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "succeeded");
+
+  // Down over three due times (09:00, 10:00 and 11:00 UTC), then back at 11:01.
+  down();
+  time.advance(3 * 3600_000 + 60_000);
+  up();
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.dueAt === start + 2 * 3600_000);
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "succeeded");
+  expect(await prompts()).toBe(2);
+});
+
+test("a run cut short by a control restart is marked failed, its computer is stopped again, and it never runs twice", async () => {
+  const { time, computers, bot, statusOf, addRoutine, routines, chat, down, up } = await setup();
+  const ada = await bot();
+  await addRoutine(ada.id);
+  let release = () => {};
+  computers.copilot.script = async function* () {
+    yield sdk.delta("msg-1", "Working on it");
+    await new Promise<void>((resolve) => (release = resolve));
+    yield sdk.idle();
+  };
+  time.advance(nineLondon - start);
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.turnId != null);
+
+  down();
+  release();
+  up();
+  time.advance(1000);
+
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "failed");
+  expect((await routines(ada.id))[0]?.lastRun?.error).toBe("Control restarted before this run finished.");
+  await eventually(async () => (await statusOf(ada.id)) === "stopped");
+  expect(await computers.provider.status(ada.id)).toBe("stopped");
+  expect((await chat(ada.id)).filter((event) => event.type === "user-message")).toHaveLength(1);
+});
+
+test("a computer whose worker never comes online fails the run and is stopped again", async () => {
+  const { time, computers, bot, statusOf, addRoutine, routines } = await setup({
+    // Starting the computer the first time works; after that its worker never connects.
+    provider: (fake) => {
+      let starts = 0;
+      return { ...fake, start: async (botId) => (++starts === 1 ? fake.start(botId) : undefined) };
+    },
+  });
+  const ada = await bot();
+  await addRoutine(ada.id);
+  time.advance(nineLondon - start);
+  await eventually(async () => (await statusOf(ada.id)) === "starting");
+
+  time.advance(WORKER_TIMEOUT_MS);
+
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "failed");
+  expect((await routines(ada.id))[0]?.lastRun?.error).toBe("The bot's computer did not come online in time.");
+  await eventually(async () => (await statusOf(ada.id)) === "stopped");
+  expect(computers.computers.get(ada.id)?.worker).toBeNull();
+});
+
+test("a routine is skipped, not retried, while someone has taken over the bot's screen", async () => {
+  const { time, api, bot, addRoutine, routines, chat } = await setup();
+  const ada = await bot({ running: true });
+  await addRoutine(ada.id);
+  await api("POST", `/bots/${ada.id}/take-over`);
+
+  time.advance(nineLondon - start);
+
+  await eventually(async () => (await routines(ada.id))[0]?.lastRun?.status === "skipped");
+  expect((await routines(ada.id))[0]?.lastRun?.error).toBe("Someone had taken over the bot's screen.");
+  time.advance(60_000);
+  await Bun.sleep(50);
+  expect(await chat(ada.id)).toEqual([]);
+});
+
+test("routines are created, edited and deleted per bot, and a schedule control cannot run is refused", async () => {
+  const { api, bot, addRoutine, routines } = await setup();
+  const ada = await bot({ running: true });
+  const routine = await addRoutine(ada.id);
+
+  const edited = await api("PUT", `/bots/${ada.id}/routines/${routine.id}`, { ...daily, timezone: "America/New_York" });
+  const badCron = await api("POST", `/bots/${ada.id}/routines`, { ...daily, cron: "every morning" });
+  const badZone = await api("POST", `/bots/${ada.id}/routines`, { ...daily, timezone: "Mars/Olympus_Mons" });
+  const never = await api("POST", `/bots/${ada.id}/routines`, { ...daily, cron: "0 9 30 2 *" });
+
+  // 09:00 in New York is 13:00 UTC.
+  expect(Routine.parse(await edited.json()).nextDueAt).toBe(Date.parse("2026-10-15T13:00:00Z"));
+  for (const refused of [badCron, badZone, never]) {
+    expect([refused.status, await refused.json()]).toEqual([400, { error: "invalid_schedule" }]);
+  }
+  expect((await api("DELETE", `/bots/${ada.id}/routines/${routine.id}`)).status).toBe(204);
+  expect(await routines(ada.id)).toEqual([]);
+  expect((await api("DELETE", `/bots/${ada.id}/routines/${routine.id}`)).status).toBe(404);
 });
