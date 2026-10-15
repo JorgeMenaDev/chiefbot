@@ -32,3 +32,159 @@ button {
 a {
   color: #79c0ff;
 }
+body {
+  margin: 0;
+}
+.muted {
+  color: #8b8b93;
+}
+
+/* Signed-in layout, after T3 Code: bot sidebar on the left, the selected bot on the right. */
+.workspace {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100vh;
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 8px;
+  border-right: 1px solid #1f1f23;
+  background: #111113;
+}
+.new-bot {
+  text-align: left;
+  background: transparent;
+  border: 1px dashed #2c2c31;
+  border-radius: 6px;
+  color: inherit;
+}
+.new-bot-form input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font: inherit;
+  color: inherit;
+  background: #0b0b0c;
+  border: 1px solid #2c2c31;
+  border-radius: 6px;
+}
+.new-bot-form p {
+  margin: 6px 2px;
+  font-size: 12px;
+}
+.bot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  overflow-y: auto;
+}
+.bot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  text-align: left;
+}
+.bot-row:hover {
+  background: #1a1a1d;
+}
+.bot-row.selected {
+  background: #222226;
+}
+.bot-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-status {
+  font-size: 11px;
+  color: #8b8b93;
+}
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 4px 0;
+  border-top: 1px solid #1f1f23;
+  font-size: 12px;
+}
+.account {
+  display: grid;
+  gap: 2px;
+}
+.link-button {
+  white-space: nowrap;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: #79c0ff;
+  font-size: 12px;
+}
+.pane {
+  padding: 24px 32px;
+}
+.bot-pane h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 4px;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+}
+.danger {
+  color: #ff7b72;
+}
+
+/* Status dot: green online, amber with a ping while starting, grey stopped. */
+.status-dot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.status-dot .dot,
+.status-dot .ping {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.status-dot .ping {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  animation: status-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.status-dot.online .dot {
+  background: #3fb950;
+}
+.status-dot.starting .dot {
+  background: #d29922;
+}
+.status-dot.starting .ping {
+  background: rgb(210 153 34 / 0.6);
+}
+.status-dot.stopped .dot {
+  background: rgb(139 139 147 / 0.5);
+}
+@keyframes status-ping {
+  75%,
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}

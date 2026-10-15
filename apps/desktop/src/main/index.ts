@@ -1,7 +1,9 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { BotId, CreateBotRequest } from "@chiefbot/contracts";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
+import { createBots } from "./bots.ts";
 
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
@@ -27,17 +29,50 @@ function fileSessionStore(path: string): SessionStore {
 }
 
 let window: BrowserWindow | null = null;
+const sessionStore = fileSessionStore(join(app.getPath("userData"), "session"));
+
+const bots = createBots({
+  controlUrl,
+  session: sessionStore.load,
+  onChange: (list) => window?.webContents.send("bots:state", list),
+});
 
 const auth = createAuth({
   controlUrl,
   deviceFlow: { githubUrl, clientId },
-  store: fileSessionStore(join(app.getPath("userData"), "session")),
-  onChange: (state) => window?.webContents.send("auth:state", state),
+  store: sessionStore,
+  onChange: (state) => {
+    window?.webContents.send("auth:state", state);
+    if (state.status === "signed-in") bots.connect();
+    else bots.disconnect();
+  },
 });
 
 ipcMain.handle("auth:get", () => auth.state());
 ipcMain.handle("auth:sign-in", () => auth.signIn());
 ipcMain.handle("auth:sign-out", () => auth.signOut());
+
+// Renderer arguments are untrusted, so each is parsed before it reaches control.
+ipcMain.handle("bots:get", () => bots.list());
+ipcMain.handle("bots:create", (_event, name: unknown) => bots.create(CreateBotRequest.parse({ name }).name));
+ipcMain.handle("bots:start", (_event, id: unknown) => bots.start(BotId.parse(id)));
+ipcMain.handle("bots:stop", (_event, id: unknown) => bots.stop(BotId.parse(id)));
+// Asks first. The bot's files (its volume) are kept unless the box is ticked.
+ipcMain.handle("bots:delete", async (_event, id: unknown) => {
+  const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));
+  if (!bot || !window) return;
+  const { response, checkboxChecked } = await dialog.showMessageBox(window, {
+    type: "warning",
+    message: `Delete ${bot.name}?`,
+    detail: "Its computer is removed.",
+    buttons: ["Delete", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    checkboxLabel: "Also delete its files (home and workspace)",
+    checkboxChecked: false,
+  });
+  if (response === 0) await bots.remove(bot.id, { deleteData: checkboxChecked });
+});
 
 app.whenReady().then(async () => {
   window = new BrowserWindow({
