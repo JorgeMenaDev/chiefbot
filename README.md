@@ -23,6 +23,8 @@ Creating a bot needs Docker (Colima: `colima start`) and the `chiefbot-computer:
 
 **Model per bot.** Each bot has its own Copilot model, chosen in the composer's model picker. Once a bot's worker connects, it lists the models the owner's Copilot plan offers on the bot's SDK session and reports them to control. Control keeps the latest list per user in SQLite (`GET /models`). Picking a model saves it on the bot (`PUT /bots/:id/model`). Every turn carries the bot's model, and the worker switches the session before the turn, so the conversation is kept. On Copilot Free only Auto can be picked: the SDK accepts a switch but every turn still runs on Auto, so the other models in Copilot's catalog show as locked rows with "Needs a paid Copilot plan". On a paid plan, models a Copilot policy turns off show locked too.
 
+**Routines.** A routine is a prompt plus a schedule: a cron expression (5 fields, or 6 with seconds) read in an IANA timezone, parsed by `croner`. Open **Routines** on a bot to add, edit or delete them. Control runs them whether or not the desktop is open: at the due time it starts the bot's computer if it is stopped, waits up to 5 minutes for the worker, sends the prompt as a chat turn (30 minutes at most) and stops the computer again if the run started it. The reply lands in the bot's chat, and the routine shows its last run: succeeded, failed (with the reason, such as a lost GitHub sign-in) or skipped (the bot was busy, or someone had taken over its screen; no retry). A bot runs one routine at a time. Each (routine, due time) runs at most once, even across control restarts: a run cut short by a restart is marked failed and its computer stopped again, and due times missed while control was down run once when it is back.
+
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
 `bun run dev` starts both apps. To run them apart: `bun run --cwd apps/control dev` and `bun run --cwd apps/desktop dev`.
@@ -118,6 +120,17 @@ Tests use a fake Copilot. This check makes **one** real Copilot chat on your pla
 4. The chat shows your message, a status line while the bot works, possibly a tool row (for example a shell call), then a reply that streams in and names `/home/bot/workspace`. The status line goes away when the reply is done.
 5. Restart control (save a file in `apps/control`) and quit and start the desktop app. The conversation is still there.
 6. If the reply is an error instead: "Sign in again" means control lost your GitHub sign-in (click **Sign in again**); a `quota` or `rate_limit` error means the month's Free chats are used up.
+
+## Manual check: a routine wakes a stopped bot
+
+Tests use a fake clock and a fake Copilot, and a fake-Copilot run of this flow passed in the desktop app. This check makes **one** real Copilot chat on your plan.
+
+1. Run `bun run computer:build`, then `bun run dev`. Sign in and create a bot. Once it is **online**, click **Stop**.
+2. Click **Routines**, then **+ New routine**. Prompt: `Reply with one short sentence: what time is it where you are?`. Cron: two minutes from now, for example `32 14 * * *` at 14:30. Timezone: yours (filled in). Click **Save**. The row shows the next run time in your local time.
+3. Quit the desktop app.
+4. Wait a few minutes past the due time. `docker ps -a` shows the bot's container exited again.
+5. Start the desktop app and open the bot. The chat shows the prompt and the reply, and **Routines** shows `Last run …: succeeded`.
+6. Delete the routine.
 
 ## Manual check: the model picker on a real plan
 
