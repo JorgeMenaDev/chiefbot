@@ -161,8 +161,9 @@ export function startWorker({
     return new Response(body);
   }
 
-  // The bot's one Copilot session, opened on its first turn. Its id is the bot
-  // id, so after a restart the worker resumes the same conversation.
+  // The bot's one Copilot session, opened by reportModels when the worker first
+  // binds (or by the next turn, if that open failed). Its id is the bot id, so
+  // after a restart the worker resumes the same conversation.
   function openSession() {
     const tools = [pullRequestTool({ githubApiUrl, token: async () => (await gitHubToken()).accessToken })];
     session ??= copilot.openSession({ sessionId: BotId.parse(botId), gitHubTokenProvider: gitHubToken, onPermissionRequest, tools }).then((opened) => {
