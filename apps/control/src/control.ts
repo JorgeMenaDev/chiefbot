@@ -12,6 +12,7 @@ import {
   type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
+  type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
   type TurnId,
@@ -41,11 +42,23 @@ export type ControlOptions = {
 };
 
 // What a WebSocket connection is bound to: a desktop client of one user, one
-// bot's chat from `after` on, or the worker of exactly one bot.
+// bot's chat from `after` on, the worker of exactly one bot, or one end of a
+// screen stream: the owner's viewer, or the bot's worker piping its VNC server.
 type SocketData =
   | { kind: "client"; userId: UserId }
   | { kind: "chat"; botId: BotId; after: number }
-  | { kind: "worker"; userId: UserId; botId: BotId };
+  | { kind: "worker"; userId: UserId; botId: BotId }
+  | { kind: "viewer"; botId: BotId; streamId: string }
+  | { kind: "screen"; streamId: string };
+
+// One viewer watching one bot's screen. Viewer frames sent before the worker
+// joins wait in `queued`.
+type ScreenStream = {
+  botId: BotId;
+  viewer: ServerWebSocket<SocketData>;
+  screen: ServerWebSocket<SocketData> | null;
+  queued: Array<string | Buffer>;
+};
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -55,9 +68,12 @@ type SocketData =
 //   POST   /bots              bearer session, body CreateBotRequest → 201 Bot (its computer is starting)
 //   POST   /bots/:id/start    bearer session    → Bot
 //   POST   /bots/:id/stop     bearer session    → Bot
+//   POST   /bots/:id/take-over bearer session   → Bot (the human drives the screen; agent input waits)
+//   POST   /bots/:id/hand-back bearer session   → Bot (the agent drives the screen again)
+//   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
 //   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
-//                             (409 when the bot is not online or is still on a turn)
+//                             (409 when the bot is not online, is still on a turn or the human has its screen)
 //   GET    /bots/:id/routines bearer session    → Routine[]
 //   POST   /bots/:id/routines bearer session, body RoutineInput → 201 Routine (400 invalid_schedule)
 //   PUT    /bots/:id/routines/:routineId  bearer session, body RoutineInput → Routine
@@ -67,6 +83,10 @@ type SocketData =
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
 //                             (403 for another bot's)
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
+//   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//
+// The screen never listens beyond the computer's loopback: for each viewer,
+// control asks the worker to dial back and pipe x11vnc, and joins the two sockets.
 export function startControl({
   port,
   hostname = "127.0.0.1",
@@ -84,17 +104,40 @@ export function startControl({
   const greeted = new Set<BotId>();
   const onlineWaiters = new Map<BotId, Set<() => void>>();
   const turnWatchers = new Map<TurnId, { error: string | null; done: (error: string | null) => void }>();
+  // Who drives each bot's screen; absent means the agent. Kept in memory, so a
+  // control restart hands every screen back to the agent.
+  const screenControl = new Map<BotId, ScreenControl>();
+  const screenStreams = new Map<string, ScreenStream>();
+
+  // Closes both ends of a screen stream.
+  function endStream(streamId: string) {
+    const stream = screenStreams.get(streamId);
+    screenStreams.delete(streamId);
+    stream?.viewer.close();
+    stream?.screen?.close();
+  }
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running }) => ({
       id,
       name,
       status: !running ? "stopped" : workers.has(id) ? "online" : "starting",
+      screenControl: screenControl.get(id) ?? "agent",
     }));
   const botOf = (userId: UserId, botId: BotId) => botsOf(userId).find((bot) => bot.id === botId);
   const topic = (userId: UserId) => `bots:${userId}`;
   const botsEvent = (userId: UserId) => JSON.stringify({ type: "bots", bots: botsOf(userId) } satisfies ClientEvent);
   const publish = (userId: UserId) => server.publish(topic(userId), botsEvent(userId));
+  const screenControlMessage = (botId: BotId) =>
+    JSON.stringify({ type: "screen-control", control: screenControl.get(botId) ?? "agent" } satisfies ControlToWorker);
+
+  // Take-over and hand-back: tell the bot's worker and the owner's clients.
+  function setScreenControl(user: User, botId: BotId, control: ScreenControl) {
+    screenControl.set(botId, control);
+    workers.get(botId)?.send(screenControlMessage(botId));
+    publish(user.id);
+    return Response.json(botOf(user.id, botId));
+  }
   const chatTopic = (botId: BotId) => `chat:${botId}`;
   // Every stored chat event passes here.
   const publishChat = (botId: BotId, event: ChatEvent | null) => {
@@ -115,10 +158,15 @@ export function startControl({
   };
 
   // Starts a chat turn with `text` on the bot's worker: a user's message or a routine's prompt.
-  const sendTurn = (botId: BotId, text: string): { turnId: TurnId } | { error: "bot_offline" | "turn_running" } => {
+  const sendTurn = (
+    botId: BotId,
+    text: string,
+  ): { turnId: TurnId } | { error: "bot_offline" | "turn_running" | "human_has_screen" } => {
     const worker = workers.get(botId);
     if (!worker) return { error: "bot_offline" };
     if (store.unfinishedTurns(botId).length > 0) return { error: "turn_running" };
+    // The agent waits while the human drives the screen. A turn already running is not paused.
+    if (screenControl.get(botId) === "human") return { error: "human_has_screen" };
     const started = store.startTurn(botId, text);
     publishChat(botId, started);
     worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, text } satisfies ControlToWorker));
@@ -137,7 +185,12 @@ export function startControl({
   };
 
   // Runs a worker route for the bot whose credential it carries; 401 or 403 otherwise.
-  const ownWorker = (req: Bun.BunRequest<"/worker/:botId"> | Bun.BunRequest<"/worker/:botId/github-token">) => {
+  const ownWorker = (
+    req:
+      | Bun.BunRequest<"/worker/:botId">
+      | Bun.BunRequest<"/worker/:botId/github-token">
+      | Bun.BunRequest<"/worker/:botId/screen/:streamId">,
+  ) => {
     const bot = store.botForToken(bearer(req));
     if (!bot) return unauthorized();
     if (bot.botId !== req.params.botId) return Response.json({ error: "wrong_bot" }, { status: 403 });
@@ -147,7 +200,12 @@ export function startControl({
   // Runs a bot route for the signed-in owner of :id; 401 or 404 otherwise.
   const ownBot =
     <Req extends Request & { params: { id: string } }>(
-      handle: (user: User, botId: BotId, req: Req, server: Bun.Server<SocketData>) => Promise<Response> | Response | undefined,
+      handle: (
+        user: User,
+        botId: BotId,
+        req: Req,
+        server: Bun.Server<SocketData>,
+      ) => Response | undefined | Promise<Response | undefined>,
     ) =>
     (req: Req, server: Bun.Server<SocketData>) => {
       const user = store.userForSession(bearer(req));
@@ -231,11 +289,24 @@ export function startControl({
           return Response.json(botOf(user.id, botId));
         }),
       },
+      "/bots/:id/take-over": {
+        POST: ownBot((user, botId) => setScreenControl(user, botId, "human")),
+      },
+      "/bots/:id/hand-back": {
+        POST: ownBot((user, botId) => setScreenControl(user, botId, "agent")),
+      },
+      "/bots/:id/screen": {
+        GET: ownBot((_user, botId, req, server) => {
+          if (!workers.has(botId)) return Response.json({ error: "bot_offline" }, { status: 409 });
+          return upgrade(server, req, { kind: "viewer", botId, streamId: crypto.randomUUID() });
+        }),
+      },
       "/bots/:id": {
         DELETE: ownBot(async (user, botId, req) => {
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
           await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
+          screenControl.delete(botId);
           workers.get(botId)?.close();
           publish(user.id);
           return new Response(null, { status: 204 });
@@ -301,11 +372,37 @@ export function startControl({
           return token ? Response.json(token) : Response.json({ error: "no_github_token" }, { status: 404 });
         },
       },
+      // Only a stream control opened for this bot, and only once.
+      "/worker/:botId/screen/:streamId": {
+        GET: (req, server) => {
+          const bot = ownWorker(req);
+          if (bot instanceof Response) return bot;
+          const stream = screenStreams.get(req.params.streamId);
+          if (!stream || stream.botId !== bot.botId || stream.screen) {
+            return Response.json({ error: "not_found" }, { status: 404 });
+          }
+          return upgrade(server, req, { kind: "screen", streamId: req.params.streamId });
+        },
+      },
     },
     websocket: {
       // Bun's documented way to type ws.data.
       data: {} as SocketData,
       open(ws) {
+        if (ws.data.kind === "viewer") {
+          const worker = workers.get(ws.data.botId);
+          if (!worker) return ws.close();
+          screenStreams.set(ws.data.streamId, { botId: ws.data.botId, viewer: ws, screen: null, queued: [] });
+          worker.send(JSON.stringify({ type: "screen-open", streamId: ws.data.streamId } satisfies ControlToWorker));
+          return;
+        }
+        if (ws.data.kind === "screen") {
+          const stream = screenStreams.get(ws.data.streamId);
+          if (!stream) return ws.close();
+          stream.screen = ws;
+          for (const frame of stream.queued.splice(0)) ws.send(frame);
+          return;
+        }
         if (ws.data.kind === "client") {
           ws.subscribe(topic(ws.data.userId));
           ws.send(botsEvent(ws.data.userId));
@@ -322,15 +419,25 @@ export function startControl({
         workers.set(ws.data.botId, ws);
         greeted.delete(ws.data.botId);
         ws.send(JSON.stringify({ type: "bound", botId: ws.data.botId } satisfies ControlToWorker));
+        ws.send(screenControlMessage(ws.data.botId));
         publish(ws.data.userId);
       },
       close(ws) {
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") return endStream(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
         greeted.delete(ws.data.botId);
         publish(ws.data.userId);
       },
       message(ws, raw) {
+        if (ws.data.kind === "viewer" || ws.data.kind === "screen") {
+          const stream = screenStreams.get(ws.data.streamId);
+          if (!stream) return;
+          if (ws.data.kind === "screen") stream.viewer.send(raw);
+          else if (stream.screen) stream.screen.send(raw);
+          else stream.queued.push(raw);
+          return;
+        }
         if (ws.data.kind !== "worker") return;
         const { botId } = ws.data;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));

@@ -12,10 +12,11 @@ export const RoutineInput = z.object({
 export type RoutineInput = z.infer<typeof RoutineInput>;
 
 // One run of a routine, for one due time. Times are epoch milliseconds.
+// skipped: control refused its turn (the bot was busy, or someone had its screen).
 // `turnId` is the chat turn the run sent, once it got that far.
 export const RoutineRun = z.object({
   dueAt: z.number().int(),
-  status: z.enum(["running", "succeeded", "failed"]),
+  status: z.enum(["running", "succeeded", "failed", "skipped"]),
   turnId: TurnId.nullable(),
   error: z.string().nullable(),
 });

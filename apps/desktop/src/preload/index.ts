@@ -22,6 +22,10 @@ const api = {
     start: (id: string): Promise<void> => ipcRenderer.invoke("bots:start", id),
     stop: (id: string): Promise<void> => ipcRenderer.invoke("bots:stop", id),
     remove: (id: string): Promise<void> => ipcRenderer.invoke("bots:delete", id),
+    takeOver: (id: string): Promise<void> => ipcRenderer.invoke("bots:take-over", id),
+    handBack: (id: string): Promise<void> => ipcRenderer.invoke("bots:hand-back", id),
+    // The bot's screen WebSocket on control, for noVNC. Main adds the session to it.
+    screenUrl: (id: string): Promise<string> => ipcRenderer.invoke("bots:screen-url", id),
     onChange: (listener: (bots: unknown) => void) => subscribe("bots:state", listener),
   },
   chat: {

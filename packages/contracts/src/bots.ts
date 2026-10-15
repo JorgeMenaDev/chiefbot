@@ -13,7 +13,13 @@ export type BotToken = z.infer<typeof BotToken>;
 export const BotStatus = z.enum(["starting", "online", "stopped"]);
 export type BotStatus = z.infer<typeof BotStatus>;
 
-export const Bot = z.object({ id: BotId, name: z.string(), status: BotStatus });
+// Who drives the bot's screen. agent: the bot; a viewer only watches.
+// human: the user took over (mouse and keyboard); the agent waits until
+// hand-back, so control refuses new chat turns.
+export const ScreenControl = z.enum(["agent", "human"]);
+export type ScreenControl = z.infer<typeof ScreenControl>;
+
+export const Bot = z.object({ id: BotId, name: z.string(), status: BotStatus, screenControl: ScreenControl });
 export type Bot = z.infer<typeof Bot>;
 
 // Body of POST /bots.
@@ -27,11 +33,15 @@ export const ClientEvent = z.discriminatedUnion("type", [
 export type ClientEvent = z.infer<typeof ClientEvent>;
 
 // Control → worker on the /worker WebSocket.
-//   bound     names the one bot this connection belongs to; sent right after control accepts the credential
-//   run-turn  run one turn on the bot's Copilot session; control sends one at a time
+//   bound           names the one bot this connection belongs to; sent right after control accepts the credential
+//   run-turn        run one turn on the bot's Copilot session; control sends one at a time
+//   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
+//   screen-open     a viewer is waiting: dial /worker/:botId/screen/:streamId and pipe the screen's VNC bytes through it
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), botId: BotId }),
   z.object({ type: z.literal("run-turn"), turnId: TurnId, text: z.string() }),
+  z.object({ type: z.literal("screen-control"), control: ScreenControl }),
+  z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),
 ]);
 export type ControlToWorker = z.infer<typeof ControlToWorker>;
 

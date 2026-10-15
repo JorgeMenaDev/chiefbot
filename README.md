@@ -68,6 +68,18 @@ Needs Colima running. Makes no Copilot calls.
 6. Click **Delete**, tick **Also delete its files** and confirm. The bot leaves the sidebar, and `docker ps -a`, `docker volume ls` and `docker network ls` show nothing for it. Without the tick, the volume `chiefbot-<bot id>-home` stays: remove it with `docker volume rm`.
 7. Clean up: `docker rmi chiefbot-computer:dev`.
 
+## Manual check: watch and take over a bot's screen
+
+Needs Colima running. Makes no Copilot calls.
+
+1. Run `bun run computer:build`, then `bun run dev`, sign in and create a bot.
+2. When the bot is **online**, the side pane shows its screen: Chromium on a 1280×800 desktop. The pane says **Watching. The bot drives.** Clicks and keys in the pane do nothing.
+3. `docker ps` shows no published port for the bot's container.
+4. Click **Take over**. The pane turns green and says **You have control. The bot waits.** Click Chromium's address bar in the pane and type. The text appears. The chat box says **Hand the screen back to message …** and will not send.
+5. Click **Hand back**. Typing in the pane does nothing again, and the chat sends.
+
+Take-over lives in control's memory, so restarting control hands the screen back to the agent. A chat turn already running when you take over is not paused.
+
 ## Manual check: one live Copilot reply
 
 Tests use a fake Copilot. This check makes **one** real Copilot chat on your plan (Copilot Free allows 200 a month) with the plan's default model (Auto on Free).

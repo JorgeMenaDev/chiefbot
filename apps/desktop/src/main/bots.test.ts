@@ -53,6 +53,35 @@ test("the bot list follows control live: a new bot goes starting → online, and
   expect(computers.destroyed).toEqual([{ botId: bot.id, deleteData: true }]);
 });
 
+test("take over and hand back show in the live list", async () => {
+  const github = startFakeGitHub();
+  const computers = fakeComputers();
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
+  stops.push(github.stop, computers.stopAll, control.stop);
+  const { accessToken, refreshToken } = github.issueTokens();
+  const signIn = await fetch(`${control.url}/sessions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ accessToken, accessTokenExpiresAt: 0, refreshToken, refreshTokenExpiresAt: 0 }),
+  });
+  const { sessionToken } = SignInResponse.parse(await signIn.json());
+  let changed = () => {};
+  const bots = createBots({ controlUrl: control.url, session: () => sessionToken, onChange: () => changed() });
+  stops.push(bots.disconnect);
+  const until = (matches: (list: Bot[]) => boolean) =>
+    new Promise<void>((resolve) => {
+      changed = () => matches(bots.list()) && resolve();
+      changed();
+    });
+  bots.connect();
+  const bot = await bots.create("Ada");
+
+  await bots.takeOver(bot.id);
+  await until((list) => list[0]?.screenControl === "human");
+  await bots.handBack(bot.id);
+  await until((list) => list[0]?.screenControl === "agent");
+});
+
 test("create fails with control's reason when control refuses it", async () => {
   const github = startFakeGitHub();
   const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: fakeComputers().provider });
