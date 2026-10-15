@@ -102,7 +102,8 @@ export function gceProvider({ client, project, zone, instanceTemplate, image }: 
 // On first boot it copies the image's /home/bot onto the empty disk, owner
 // included, as Docker does for a new volume.
 // The env (with the bot's credential) sits in the VM's metadata, readable by
-// project members who can read the VM. Ticket #8 can move it to Secret Manager.
+// project members who can read the VM. It stays there on purpose: see
+// docs/deploy-gcp.md, Known limits.
 function cloudConfig(image: string, env: Record<string, string>) {
   const registry = image.split("/")[0];
   const envLines = Object.entries(env).map(([key, value]) => `      ${key}=${value}`);

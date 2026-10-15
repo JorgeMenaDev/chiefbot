@@ -6,7 +6,7 @@ This runbook puts control and the bot computers on Google Cloud in London (`euro
 
 - **Network:** one VPC and subnet (`10.10.0.0/24`) with no public IPs. Cloud NAT gives outbound internet (GitHub, Copilot). The firewall lets in only IAP (SSH and control's port 7410) and bot VMs dialling control.
 - **Artifact Registry** repository `chiefbot` with two images: `control` and `computer`.
-- **Service accounts:** `chiefbot-control` (manages bot VMs and disks, Secret Manager for ticket #8) and `chiefbot-computer` (pulls its image and writes logs, nothing else).
+- **Service accounts:** `chiefbot-control` (manages bot VMs and disks, and keeps users' GitHub refresh tokens in Secret Manager) and `chiefbot-computer` (pulls its image and writes logs, nothing else).
 - **Control VM** `chiefbot-control` (e2-medium, Container-Optimized OS) running the control image, with SQLite on its own 10 GB disk.
 - **Instance template** `chiefbot-computer`. Control makes one VM per bot from it (`GceProvider`): e2-standard-2, Container-Optimized OS running the bot computer image, and a 50 GB home disk per bot. Stop in the app stops the VM. The home disk survives stop, VM replacement and delete without **Also delete its files**.
 - **Budget alert** on the project at 100 a month (50%, 90%, 100% emails to billing admins).
@@ -123,8 +123,8 @@ Makes no Copilot calls. Each bot costs about $0.09 per running hour.
 
 ## Known limits
 
-- The bot's credential (`CHIEFBOT_BOT_TOKEN`) is in its VM's metadata. Project members who can read VMs can read it. Ticket #8 can move it to Secret Manager.
-- No `SecretStore` exists yet, so there is no Secret Manager store for GitHub refresh tokens. They stay in control's SQLite on the data disk. Ticket #8 adds the store. Terraform already enables Secret Manager and gives the control service account `roles/secretmanager.admin` for it.
+- GitHub refresh tokens are in Secret Manager, one secret `github-refresh-token-<user id>` each, with only the latest version enabled. Access tokens (8 hours) and expiry times stay in control's SQLite on the data disk.
+- The bot's credential (`CHIEFBOT_BOT_TOKEN`) stays in its VM's metadata (decided in ticket #8). Project members who can read VMs can read it. It gets only that one bot's owner's access token (8 hours at most, never a refresh token), and it stops working when the bot is deleted. Anyone with SSH to the VM (Owner, Editor, Compute Admin) could read it from the VM anyway. Moving it to Secret Manager needs a host-side fetch on Container-Optimized OS (no `gcloud` or `jq`), a secret per bot, and an IAM grant to the shared `chiefbot-computer` account that lets every bot VM read every bot's secret unless each bot gets its own service account. Revisit when the project gets members with read-only roles such as Compute Viewer.
 - Nothing stops idle bots automatically yet. **Stop** in the app is the only way.
 - The noVNC screen (ticket #5) needs port 6080 added to the `chiefbot-allow-iap` firewall rule.
 - No snapshot schedule backs up the control data disk.
