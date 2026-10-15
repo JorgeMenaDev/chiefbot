@@ -1,0 +1,41 @@
+#cloud-config
+# Container-Optimized OS runs this on every boot of the control VM: mount the
+# data disk (formatting it on first boot), then run the control image.
+write_files:
+  - path: /etc/chiefbot/env
+    permissions: "0600"
+    content: |
+%{ for key, value in env ~}
+      ${key}=${value}
+%{ endfor ~}
+  - path: /etc/chiefbot/mount-data.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+      dev=/dev/disk/by-id/google-data
+      mnt=/mnt/disks/data
+      blkid "$dev" >/dev/null || mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$dev"
+      mkdir -p "$mnt"
+      mountpoint -q "$mnt" || mount -o discard,defaults "$dev" "$mnt"
+  - path: /etc/systemd/system/chiefbot-control.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Chiefbot control plane
+      Wants=gcr-online.target network-online.target
+      After=gcr-online.target network-online.target
+      [Service]
+      Environment=HOME=/home/chiefbot
+      ExecStartPre=/bin/mkdir -p /home/chiefbot
+      ExecStartPre=/usr/bin/docker-credential-gcr configure-docker --registries=${registry}
+      ExecStartPre=/bin/bash /etc/chiefbot/mount-data.sh
+      ExecStartPre=-/usr/bin/docker rm -f chiefbot-control
+      ExecStartPre=/usr/bin/docker pull ${image}
+      ExecStart=/usr/bin/docker run --rm --name=chiefbot-control --network=host --env-file=/etc/chiefbot/env -v /mnt/disks/data:/data ${image}
+      ExecStop=/usr/bin/docker stop chiefbot-control
+      Restart=always
+      RestartSec=10
+runcmd:
+  - systemctl daemon-reload
+  - systemctl start chiefbot-control.service

@@ -22,6 +22,8 @@ import { openStore } from "./store.ts";
 
 export type ControlOptions = {
   port: number;
+  // Interface to listen on. Default 127.0.0.1.
+  hostname?: string;
   dbPath: string;
   // api.github.com in production; a fake in tests.
   githubApiUrl: string;
@@ -54,7 +56,7 @@ type SocketData =
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
 //                             (403 for another bot's)
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
-export function startControl({ port, dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
+export function startControl({ port, hostname = "127.0.0.1", dbPath, githubApiUrl, computers, workerControlUrl }: ControlOptions) {
   const store = openStore(dbPath);
   // The connected worker of each bot. A bot is online while it has one.
   const workers = new Map<BotId, ServerWebSocket<SocketData>>();
@@ -110,7 +112,7 @@ export function startControl({ port, dbPath, githubApiUrl, computers, workerCont
 
   const server = Bun.serve({
     port,
-    hostname: "127.0.0.1",
+    hostname,
     routes: {
       "/sessions": {
         POST: async (req) => {
