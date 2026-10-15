@@ -130,7 +130,24 @@ body {
   font-size: 12px;
 }
 .pane {
-  padding: 24px 32px;
+  min-height: 0;
+  padding: 24px 32px 16px;
+}
+.bot-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.bot-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #1f1f23;
+}
+.bot-header p {
+  margin: 0;
 }
 .bot-pane h2 {
   display: flex;
@@ -187,4 +204,92 @@ body {
     transform: scale(2);
     opacity: 0;
   }
+}
+
+/* Chat, after T3 Code: one centred lane for messages and the composer. */
+.chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.lane {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 0;
+}
+.messages .lane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.empty {
+  text-align: center;
+}
+.message {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.message.user {
+  align-self: flex-end;
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: #222226;
+}
+.message.error {
+  padding: 8px 12px;
+  border: 1px solid rgb(255 123 114 / 0.4);
+  border-radius: 8px;
+}
+.tool-row {
+  font-size: 12px;
+  color: #8b8b93;
+  font-family: ui-monospace, monospace;
+}
+.tool-row.failed .tool-mark {
+  color: #ff7b72;
+}
+.tool-row.succeeded .tool-mark {
+  color: #3fb950;
+}
+.working {
+  margin: 0;
+  font-size: 12px;
+  color: #8b8b93;
+  animation: working-pulse 1.6s ease-in-out infinite;
+}
+@keyframes working-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+.composer {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #2c2c31;
+  border-radius: 12px;
+  background: #111113;
+}
+.composer textarea {
+  resize: none;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+.composer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
 }

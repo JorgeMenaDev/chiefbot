@@ -24,6 +24,11 @@ const api = {
     remove: (id: string): Promise<void> => ipcRenderer.invoke("bots:delete", id),
     onChange: (listener: (bots: unknown) => void) => subscribe("bots:state", listener),
   },
+  chat: {
+    open: (botId: string): Promise<unknown> => ipcRenderer.invoke("chat:open", botId),
+    send: (botId: string, text: string): Promise<unknown> => ipcRenderer.invoke("chat:send", botId, text),
+    onChange: (listener: (view: unknown) => void) => subscribe("chat:state", listener),
+  },
 };
 
 export type ChiefbotApi = typeof api;
