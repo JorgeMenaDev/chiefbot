@@ -163,6 +163,6 @@ test("a locked or unknown model is refused and the bot stays on its model", asyn
 
   expect([locked.status, await locked.json()]).toEqual([400, { error: "model_unavailable" }]);
   expect(unknown.status).toBe(400);
-  const [after] = (await (await api("GET", "/bots")).json()) as unknown[];
-  expect(Bot.parse(after).model).toBe("auto");
+  const [after] = Bot.array().parse(await (await api("GET", "/bots")).json());
+  expect(after?.model).toBe("auto");
 });

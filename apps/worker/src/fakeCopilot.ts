@@ -1,4 +1,4 @@
-import type { PermissionRequest, SessionEvent } from "@github/copilot-sdk";
+import type { JsonValue, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
 import type { BotSession, Copilot, SdkModelList } from "./copilot.ts";
 
 // A fake Copilot SDK for tests. Each send() plays a script of real-shaped SDK
@@ -13,7 +13,7 @@ export type FakeRuntime = {
   // Runs a real shell command in `shell.cwd` once the permission handler approves it.
   shell(command: string): Promise<{ approved: boolean; exitCode: number; output: string }>;
   // Calls one of the session's custom tools once the permission handler approves it.
-  tool(name: string, args: unknown): Promise<{ approved: boolean; result: unknown }>;
+  tool(name: string, args: JsonValue): Promise<{ approved: boolean; result: unknown }>;
 };
 
 // What every session's model listing returns. The default is Copilot Free with an empty catalog.
@@ -161,12 +161,7 @@ export const fakeRequest = {
     hasWriteFileRedirection: false,
     canOfferSessionApproval: false,
   }),
-  tool: (toolName: string, args: unknown): PermissionRequest => ({
-    kind: "custom-tool",
-    toolName,
-    toolDescription: toolName,
-    args: JSON.parse(JSON.stringify(args)),
-  }),
+  tool: (toolName: string, args: JsonValue): PermissionRequest => ({ kind: "custom-tool", toolName, toolDescription: toolName, args }),
   mcp: (serverName: string, toolTitle: string, readOnly: boolean): PermissionRequest => ({
     kind: "mcp",
     serverName,

@@ -9,15 +9,16 @@
 //    docker buildx build of another platform (docs/deploy-gcp.md).
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
+import workerPackage from "../../apps/worker/package.json" with { type: "json" };
 
 const root = join(import.meta.dir, "../..");
 const dist = join(import.meta.dir, "dist");
 const sdk = "@github/copilot-sdk";
 const image = process.env.CHIEFBOT_COMPUTER_IMAGE ?? "chiefbot-computer:dev";
 
-const worker = await Bun.file(join(root, "apps/worker/package.json")).json();
-const version = worker.dependencies?.[sdk];
-if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+// Typed from the JSON itself, so a missing SDK dependency fails to compile.
+const version = workerPackage.dependencies[sdk];
+if (!/^\d+\.\d+\.\d+$/.test(version)) {
   throw new Error(`apps/worker/package.json must pin ${sdk} to an exact version, found ${version}`);
 }
 

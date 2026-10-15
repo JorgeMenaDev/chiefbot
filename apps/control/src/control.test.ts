@@ -46,7 +46,7 @@ test("sign-in answers with the GitHub login and Copilot plan, never the refresh 
   const text = await res.text();
 
   expect(res.status).toBe(200);
-  const body = JSON.parse(text);
+  const body = SignInResponse.parse(JSON.parse(text));
   expect(body.user.login).toBe("octo-jorge");
   expect(body.user.copilotPlan).toEqual({ plan: "individual", sku: "free_limited_copilot" });
   expect(typeof body.sessionToken).toBe("string");
