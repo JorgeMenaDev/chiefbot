@@ -1,5 +1,4 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "lib": ["ES2023", "DOM"], "jsx": "react-jsx" },
-  "include": ["src", "electron.vite.config.ts"]
+  "include": ["src/main", "src/preload", "electron.vite.config.ts"]
 }

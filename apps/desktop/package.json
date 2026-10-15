@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "env -u ELECTRON_RUN_AS_NODE electron-vite dev",
     "build": "electron-vite build",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p . && tsc -p tsconfig.web.json"
   },
   "dependencies": {
     "@chiefbot/contracts": "workspace:*",

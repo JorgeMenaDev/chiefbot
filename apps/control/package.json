@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/control.ts"
+    ".": "./src/control.ts",
+    "./fake-computers": "./src/computers/fakeComputers.ts"
   },
   "scripts": {
     "dev": "bun --watch src/index.ts",
@@ -14,6 +15,7 @@
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@chiefbot/fake-github": "workspace:*"
+    "@chiefbot/fake-github": "workspace:*",
+    "@chiefbot/worker": "workspace:*"
   }
 }

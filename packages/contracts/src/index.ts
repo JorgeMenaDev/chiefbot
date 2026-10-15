@@ -2,3 +2,4 @@
 // Every message that crosses a process boundary is defined here as a Zod schema.
 export * from "./ids.ts";
 export * from "./auth.ts";
+export * from "./bots.ts";

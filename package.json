@@ -10,7 +10,8 @@
     "dev": "bun run --parallel --filter '@chiefbot/control' --filter '@chiefbot/desktop' dev",
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun test",
-    "check": "bun run typecheck && bun test"
+    "check": "bun run typecheck && bun test",
+    "computer:build": "bun build apps/worker/src/index.ts --target=bun --outfile infra/computer/dist/worker.js && docker build -t chiefbot-computer:dev infra/computer"
   },
   "devDependencies": {
     "@types/bun": "latest",

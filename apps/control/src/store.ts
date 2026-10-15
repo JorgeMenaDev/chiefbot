@@ -1,5 +1,13 @@
 import { Database } from "bun:sqlite";
-import { CopilotPlan, UserId, type GitHubTokens, type SessionToken, type User } from "@chiefbot/contracts";
+import {
+  BotId,
+  CopilotPlan,
+  UserId,
+  type BotToken,
+  type GitHubTokens,
+  type SessionToken,
+  type User,
+} from "@chiefbot/contracts";
 import type { GitHubIdentity } from "./github.ts";
 
 // Control's durable state in SQLite. Every row hangs off a user.
@@ -27,6 +35,19 @@ export function openStore(path: string) {
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at INTEGER NOT NULL
   )`);
+  // A bot's worker credential is stored as a SHA-256 too. `running` is the state
+  // control wants the bot's computer in; online-ness lives in memory.
+  db.run(`CREATE TABLE IF NOT EXISTS bots (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    running INTEGER NOT NULL,
+    created_at INTEGER NOT NULL
+  )`);
+
+  type BotRow = { id: string; name: string; running: number };
+  const toBotRecord = (row: BotRow) => ({ id: BotId.parse(row.id), name: row.name, running: row.running === 1 });
 
   const toUser = (row: { id: string; login: string; copilot_plan: string | null }): User => ({
     id: UserId.parse(row.id),
@@ -73,10 +94,53 @@ export function openStore(path: string) {
       db.query("DELETE FROM sessions WHERE token_hash = ?1").run(hash(sessionToken));
     },
 
+    // A new bot whose computer should run.
+    createBot(userId: UserId, name: string, botToken: BotToken) {
+      const row = db
+        .query<BotRow, [string, string, string, string, number]>(
+          `INSERT INTO bots (id, user_id, name, token_hash, running, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)
+           RETURNING id, name, running`,
+        )
+        .get(`bot_${crypto.randomUUID()}`, userId, name, hash(botToken), Date.now());
+      if (!row) throw new Error("bot insert returned no row");
+      return toBotRecord(row);
+    },
+
+    botsFor(userId: UserId) {
+      return db
+        .query<BotRow, [string]>("SELECT id, name, running FROM bots WHERE user_id = ?1 ORDER BY created_at, id")
+        .all(userId)
+        .map(toBotRecord);
+    },
+
+    // Only the owner's bot: another user's bot id reads as missing.
+    botFor(userId: UserId, botId: string) {
+      const row = db
+        .query<BotRow, [string, string]>("SELECT id, name, running FROM bots WHERE user_id = ?1 AND id = ?2")
+        .get(userId, botId);
+      return row ? toBotRecord(row) : null;
+    },
+
+    // The bot a worker credential belongs to, and its owner.
+    botForToken(botToken: string) {
+      const row = db
+        .query<{ id: string; user_id: string }, [string]>("SELECT id, user_id FROM bots WHERE token_hash = ?1")
+        .get(hash(botToken));
+      return row ? { botId: BotId.parse(row.id), userId: UserId.parse(row.user_id) } : null;
+    },
+
+    setRunning(botId: BotId, running: boolean) {
+      db.query("UPDATE bots SET running = ?2 WHERE id = ?1").run(botId, running ? 1 : 0);
+    },
+
+    deleteBot(botId: BotId) {
+      db.query("DELETE FROM bots WHERE id = ?1").run(botId);
+    },
+
     close: () => db.close(),
   };
 }
 
-function hash(sessionToken: string) {
-  return new Bun.CryptoHasher("sha256").update(sessionToken).digest("hex");
+function hash(token: string) {
+  return new Bun.CryptoHasher("sha256").update(token).digest("hex");
 }

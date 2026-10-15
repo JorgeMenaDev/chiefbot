@@ -17,6 +17,7 @@
       },
       "devDependencies": {
         "@chiefbot/fake-github": "workspace:*",
+        "@chiefbot/worker": "workspace:*",
       },
     },
     "apps/desktop": {

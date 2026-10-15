@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import type { AuthState } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
 import { startControl } from "@chiefbot/control";
+import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { createAuth, type SessionStore } from "./auth.ts";
 
 const stops: Array<() => unknown> = [];
@@ -11,7 +12,7 @@ afterEach(() => {
 
 function setup() {
   const github = startFakeGitHub({ pollErrors: ["authorization_pending"] });
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: fakeComputers().provider });
   stops.push(github.stop, control.stop);
   let saved: string | null = null;
   const store: SessionStore = {
