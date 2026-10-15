@@ -2,13 +2,13 @@
 
 Personal chief-of-staff bots, each with its own computer, powered by the GitHub Copilot SDK on your own Copilot plan.
 
-Status: proof of concept. It runs locally, with bot computers as Docker containers under Colima. The GCP deploy (one Compute Engine VM per bot) is written but not deployed.
+Status: proof of concept. It runs locally, with bot computers as Docker containers under Colima. The GCP deploy (one Compute Engine VM per bot) is written but not deployed: `infra/gcp` and the runbook `docs/deploy-gcp.md`.
 
 See `AGENTS.md` for the architecture.
 
 ```bash
 bun install
-bun run check           # typecheck + tests (no network, no Docker)
+bun run check           # typecheck + tests (no network, no Docker, no GCP)
 bun run computer:build  # bundle the worker and build the bot computer image (chiefbot-computer:dev)
 bun run dev             # control on http://127.0.0.1:7410 and the desktop app
 ```
@@ -28,10 +28,14 @@ The desktop dev script unsets `ELECTRON_RUN_AS_NODE`. Shells started by T3 Code 
 | Variable | App | Default |
 | --- | --- | --- |
 | `CHIEFBOT_CONTROL_PORT` | control | `7410` |
+| `CHIEFBOT_CONTROL_HOSTNAME` | control | `127.0.0.1` (`0.0.0.0` on the GCP control VM) |
 | `CHIEFBOT_DB_PATH` | control | `.data/control.sqlite` (in `apps/control`) |
 | `CHIEFBOT_GITHUB_API_URL` | control | `https://api.github.com` |
 | `CHIEFBOT_DOCKER_SOCKET` | control | `DOCKER_HOST`'s unix socket, else `~/.colima/default/docker.sock` |
-| `CHIEFBOT_COMPUTER_IMAGE` | control | `chiefbot-computer:dev` |
+| `CHIEFBOT_COMPUTERS` | control | `docker`; `gce` runs bots as Compute Engine VMs |
+| `CHIEFBOT_COMPUTER_IMAGE` | control | `chiefbot-computer:dev` for docker; required for gce |
+| `CHIEFBOT_GCP_PROJECT` | control (gce) | required |
+| `CHIEFBOT_GCP_ZONE` | control (gce) | `europe-west2-a` (London) |
 | `CHIEFBOT_WORKER_CONTROL_URL` | control | `http://host.docker.internal:<port>` (control as a container reaches it) |
 | `CHIEFBOT_CONTROL_URL` | desktop | `http://127.0.0.1:7410` |
 | `CHIEFBOT_GITHUB_URL` | desktop | `https://github.com` |
