@@ -57,14 +57,14 @@ const personalSecretName = (workspaceId: WorkspaceId, name: string, userId: User
 //   GET    /projects/:id/connector-calls           → ConnectorCall[]: the project's call log, oldest first
 // Coordinator routes (bearer: the project's credential; 403 for another project's):
 //   GET|POST|DELETE /coordinator/:projectId/mcp/:name  control's proxy to a remote connector the project
-//                    declares (404 for any other), Streamable HTTP. Header x-chiefbot-member names the
-//                    member whose session it is. Control adds that call's identity (403
-//                    connector_not_ready without one) and logs each tools/call, which must come during
-//                    that member's turn (409 no_turn otherwise).
+//                    declares (404 for any other), Streamable HTTP. Every request runs as the member
+//                    whose turn control is running on the coordinator, never as anyone the request
+//                    names: control adds that member's identity (403 connector_not_ready without one)
+//                    and logs each tools/call. Outside a turn it refuses all of them (409 no_turn).
 //   POST   /coordinator/:projectId/connector-calls  body ReportedConnectorCall → 204: a command
 //                    connector's call, logged for the running turn (409 no_turn without one)
 // Task worker routes (bearer: the task worker's credential; 403 for another worker's), the same
-// for a project's worker, whose calls run as the member who asked for it during its task:
+// for a project's worker, whose requests run as the member who asked for it while its task runs:
 //   GET|POST|DELETE /task-worker/:workerId/mcp/:name
 //   POST   /task-worker/:workerId/connector-calls
 export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOptions) {
@@ -156,42 +156,43 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
     return project?.file.connectors.includes(name) ? connectors.get(project.workspaceId, name) : null;
   };
 
-  // Who calls a connector through control: the project, the member the agent's
-  // session runs for, and the turn running for them now. A coordinator names its
-  // member in x-chiefbot-member; a task worker's is the member who asked for it,
-  // and its turn is its task while it works.
-  type Caller = { projectId: ProjectId; asker: ProjectMember | null; running: { turnId: TurnId; userId: UserId } | null };
+  // Who calls a connector through control: the project, and the turn control is
+  // running for it now with the member it runs for, or null outside one. A
+  // coordinator's turn is the one its scheduler gave it; a task worker's is its
+  // task while it works, for the member who asked for it. Only control's own
+  // records name the member, never the request.
+  type Caller = { projectId: ProjectId; running: { turnId: TurnId; member: ProjectMember } | null };
+  const runningAs = (projectId: ProjectId, turn: { turnId: TurnId; userId: UserId } | null) => {
+    const member = turn && projects.member(projectId, { userId: turn.userId });
+    return turn && member ? { turnId: turn.turnId, member } : null;
+  };
   const coordinatorCaller = (req: Request & { params: { projectId: string } }): Caller | Response => {
     const projectId = ownCoordinator(req);
     if (projectId instanceof Response) return projectId;
-    const asker = projects.member(projectId, { userId: req.headers.get("x-chiefbot-member") ?? "" });
-    return { projectId, asker, running: projects.runningTurn(projectId) };
+    return { projectId, running: runningAs(projectId, projects.runningTurn(projectId)) };
   };
   const taskWorkerCaller = (req: Request & { params: { workerId: string } }): Caller | Response => {
     const own = store.taskWorkers.forToken(bearer(req));
     if (!own) return unauthorized();
     if (own.workerId !== req.params.workerId) return apiError(403, "wrong_bot");
     const working = store.taskWorkers.worker(own.workerId)?.state === "working";
-    const asker = projects.member(own.projectId, { userId: own.userId });
-    return { projectId: own.projectId, asker, running: working ? { turnId: own.turnId, userId: own.userId } : null };
+    return { projectId: own.projectId, running: working ? runningAs(own.projectId, own) : null };
   };
 
   // The proxy to a remote connector (see the route list above).
   async function proxy(caller: Caller | Response, req: Request & { params: { name: string } }, server: Bun.Server<unknown>) {
     if (caller instanceof Response) return caller;
-    const { projectId, asker, running } = caller;
+    const { projectId, running } = caller;
     const connector = declared(projectId, req.params.name);
     if (connector?.server.kind !== "remote") return apiError(404, "not_found");
-    if (!asker) return apiError(404, "not_found", "x-chiefbot-member is not a member of this project's workspace");
+    if (!running) return apiError(409, "no_turn", `${connector.name} can only be reached during a turn`);
+    const { member } = running;
     const body = req.method === "POST" ? await req.text() : null;
     const tools = body === null ? [] : toolCallsIn(body);
-    if (tools.length > 0 && running?.userId !== asker.userId) {
-      return apiError(409, "no_turn", `A ${connector.name} call can only run during ${asker.login}'s turn`);
-    }
-    const credential = await credentialFor(connector, asker.userId);
-    if (!credential) return apiError(403, "connector_not_ready", `${asker.login} has no ${connector.name} credential: see the checklist`);
+    const credential = await credentialFor(connector, member.userId);
+    if (!credential) return apiError(403, "connector_not_ready", `${member.login} has no ${connector.name} credential: see the checklist`);
     for (const tool of tools) {
-      connectors.logCall(projectId, { connector: connector.name, tool, requester: asker.login, identity: credential.identity, run: running?.turnId ?? "" });
+      connectors.logCall(projectId, { connector: connector.name, tool, requester: member.login, identity: credential.identity, run: running.turnId });
     }
     const headers = pick(req.headers, ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]);
     if (credential.token !== null) headers.set("authorization", `Bearer ${credential.token}`);
@@ -199,7 +200,7 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
     server.timeout(req, 0);
     const upstream = await fetch(connector.server.url, { method: req.method, headers, body, signal: req.signal });
     if (upstream.status === 401) {
-      return apiError(403, "connector_not_ready", `${connector.name} refused ${asker.login}'s credential: connect again`);
+      return apiError(403, "connector_not_ready", `${connector.name} refused ${member.login}'s credential: connect again`);
     }
     return new Response(upstream.body, { status: upstream.status, headers: pick(upstream.headers, ["content-type", "mcp-session-id"]) });
   }
@@ -234,8 +235,7 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
     const connector = declared(projectId, body.data.connector);
     if (connector?.server.kind !== "command") return apiError(404, "not_found");
     if (!running) return apiError(409, "no_turn");
-    const identity: CallIdentity = connector.auth === "none" ? "none" : connector.auth === "workspace-secret" ? "workspace" : "personal";
-    connectors.logCall(projectId, { ...body.data, requester: store.user(running.userId).login, identity, run: running.turnId });
+    connectors.logCall(projectId, { ...body.data, requester: running.member.login, identity: "none", run: running.turnId });
     return new Response(null, { status: 204 });
   }
 

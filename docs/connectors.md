@@ -22,7 +22,7 @@ The workspace owner adds, deletes and sets the secrets of connectors. Members co
 
 ## Identity per call
 
-- **Remote connectors** are reached only through control: each agent session gets `<control>/coordinator/<project>/mcp/<name>` (a project's worker: `<control>/task-worker/<worker>/mcp/<name>`, running as the member who asked for it) as the server's URL, with the computer's own credential. For each request control picks the identity (no credential, the workspace secret, or the member's own token), adds it as `Authorization: Bearer …` and forwards the request. Tokens never reach a computer. A tool call is only accepted during a turn of the member the session belongs to.
+- **Remote connectors** are reached only through control: each agent session gets `<control>/coordinator/<project>/mcp/<name>` (a project's worker: `<control>/task-worker/<worker>/mcp/<name>`, running as the member who asked for it) as the server's URL, with the computer's own credential. For each request control picks the identity (no credential, the workspace secret, or the member's own token), adds it as `Authorization: Bearer …` and forwards the request. Tokens never reach a computer. The member is always the one whose turn control is running for that agent (the coordinator's scheduled turn, or the worker's task), never one a request names, and outside a turn control refuses every request (`409 no_turn`).
 - **Command connectors** run on the agent's computer with no credential. A credential on a computer could be read by the agent and used without control seeing it, so a connector with one must be remote. Their `env` is plain configuration that members and agents can read: put no secret in it.
 - A member's OAuth sign-in is refreshed by control shortly before it expires.
 

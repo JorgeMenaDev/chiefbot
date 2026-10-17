@@ -2,7 +2,7 @@ import { z } from "zod";
 import { User } from "./auth.ts";
 import { TurnEventMessage, TurnHello } from "./chat.ts";
 import { AgentConnector } from "./connectors.ts";
-import { ApprovalId, BotId, ProjectId, TurnId, UserId } from "./ids.ts";
+import { ApprovalId, BotId, ProjectId, TurnId } from "./ids.ts";
 import { ModelReport } from "./models.ts";
 import { Task } from "./projects.ts";
 import { TaskWorker } from "./taskWorkers.ts";
@@ -52,7 +52,7 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //                   that one bot (or, on /task-worker, that one task worker).
 //   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
-//                   (proxied as `member`, the member who asked). Sent once, after its first hello.
+//                   (control's proxy runs them as the member who asked). Sent once, after its first hello.
 //   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
 //   screen-open     a viewer is waiting: dial /worker/:botId/screen/:streamId and pipe the screen's VNC bytes through it
 //   approval-answer the user's answer to one of the worker's approval-requests.
@@ -65,7 +65,6 @@ export const ControlToWorker = z.discriminatedUnion("type", [
     type: z.literal("run-task"),
     turnId: TurnId,
     text: z.string(),
-    member: UserId,
     payer: CopilotPayer,
     connectors: z.array(AgentConnector),
   }),

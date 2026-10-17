@@ -292,7 +292,7 @@ export function taskWorkerHost({
     if (!run || !started) return;
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
-    send(workerId, { type: "run-task", turnId: started.turnId, text: started.prompt, member: userId, payer: run.payer, connectors });
+    send(workerId, { type: "run-task", turnId: started.turnId, text: started.prompt, payer: run.payer, connectors });
     if (run.payer.kind !== "org") return;
     clock.setTimeout(() => {
       const ended = workers.end(workerId, "failed", "The task ran out of time: its organization's one-hour Copilot token cannot be renewed mid-task. Dispatch what is left as a smaller task.");

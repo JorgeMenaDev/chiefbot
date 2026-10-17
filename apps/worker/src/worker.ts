@@ -160,11 +160,11 @@ export function startWorker({
   // is reported. A failed report does not stop the call.
   function taskSession(
     options: Omit<Parameters<Copilot["openSession"]>[0], "auth">,
-    { member, payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
+    { payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
   ) {
     const withConnectors = {
       ...options,
-      mcpServers: connectorServers(connectors, { base, credential: token, member }),
+      mcpServers: connectorServers(connectors, { base, credential: token }),
       onMcpCall: async (serverName: string, toolName: string) => {
         if (!connectors.some(({ name, kind }: AgentConnector) => name === serverName && kind === "command")) return;
         const call: ReportedConnectorCall = { connector: serverName, tool: toolName };

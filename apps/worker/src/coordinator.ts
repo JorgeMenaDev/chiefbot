@@ -123,7 +123,7 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       onPermissionRequest: permissionFor(connectors),
       tools,
       instructions: instructions(project, member),
-      mcpServers: connectorServers(connectors, { base, credential: projectToken, member: member.userId }),
+      mcpServers: connectorServers(connectors, { base, credential: projectToken }),
       onMcpCall: reportCall(connectors),
     };
     const opening =
