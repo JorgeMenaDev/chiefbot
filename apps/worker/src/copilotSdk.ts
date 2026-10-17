@@ -26,9 +26,9 @@ export function copilotSdk({ workingDirectory, gitConfig }: { workingDirectory: 
 }
 
 // Tokens the agent's shell is not handed: a GitHub token would let gh or curl
-// write to repos without control's approval. The bot credential is withheld too,
+// write to repos without control's approval. The bot's (or task worker's) credential is withheld too,
 // though a process in the computer can still read it (docs/isolation.md).
-const withheld = ["GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "CHIEFBOT_BOT_TOKEN"];
+const withheld = ["GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "CHIEFBOT_BOT_TOKEN", "CHIEFBOT_TASK_WORKER_TOKEN"];
 
 // The environment the Copilot runtime (and every command it runs) gets: the worker's, minus those tokens.
 export function agentEnv(env: Record<string, string | undefined>) {

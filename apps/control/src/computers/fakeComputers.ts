@@ -5,7 +5,7 @@ import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 
 // An in-memory ComputerProvider for tests. A running computer is the real worker
-// (or, on a project's computer, the real coordinator), started in this process
+// (a bot's or a task worker's; or, on a project's computer, the real coordinator), started in this process
 // with the env control handed over, so tests see the whole loop (create → worker
 // dials control → bot online) without Docker. Every worker and coordinator runs
 // turns on the same fake Copilot. Its screen is a fake VNC
@@ -75,13 +75,18 @@ export function fakeComputers({ copilot = fakeCopilot(), gitSocket }: { copilot?
         });
         return;
       }
-      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN } = env;
-      if (!CHIEFBOT_BOT_ID || !CHIEFBOT_BOT_TOKEN) throw new Error("worker env missing");
+      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN, CHIEFBOT_TASK_WORKER_ID, CHIEFBOT_TASK_WORKER_TOKEN } = env;
+      const agent =
+        CHIEFBOT_TASK_WORKER_ID && CHIEFBOT_TASK_WORKER_TOKEN
+          ? { route: "task-worker" as const, id: CHIEFBOT_TASK_WORKER_ID, token: CHIEFBOT_TASK_WORKER_TOKEN }
+          : CHIEFBOT_BOT_ID && CHIEFBOT_BOT_TOKEN
+            ? { id: CHIEFBOT_BOT_ID, token: CHIEFBOT_BOT_TOKEN }
+            : null;
+      if (!agent) throw new Error("worker env missing");
       computer.screen = fakeScreen(computer.spec.id);
       computer.worker = startWorker({
         controlUrl: CHIEFBOT_CONTROL_URL,
-        botId: CHIEFBOT_BOT_ID,
-        botToken: CHIEFBOT_BOT_TOKEN,
+        ...agent,
         copilot: copilot.copilot,
         screen: { hostname: "127.0.0.1", port: computer.screen.port },
         ...(gitSocket === undefined ? {} : { gitSocket }),

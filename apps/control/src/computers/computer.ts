@@ -1,4 +1,4 @@
-import type { BotId, ProjectId } from "@chiefbot/contracts";
+import type { BotId, ProjectId, TaskWorkerId } from "@chiefbot/contracts";
 
 // The one planned seam: where a computer runs. DockerProvider runs it as a
 // local container; GceProvider runs it as a Compute Engine VM.
@@ -7,12 +7,12 @@ import type { BotId, ProjectId } from "@chiefbot/contracts";
 
 export type ComputerStatus = "absent" | "stopped" | "running";
 
-// A bot's computer, or a project's: the one its coordinator runs on.
-export type ComputerId = BotId | ProjectId;
+// A bot's computer, a project's (the one its coordinator runs on), or a task worker's throwaway one.
+export type ComputerId = BotId | ProjectId | TaskWorkerId;
 
 export type ComputerSpec = {
   id: ComputerId;
-  // Handed to the worker at start. Carries the bot's or project's credential, never a user's GitHub token.
+  // Handed to the worker at start. Carries the bot's, project's or task worker's credential, never a user's GitHub token.
   env: Record<string, string>;
 };
 

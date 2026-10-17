@@ -49,6 +49,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
         for (const handler of handlers) handler(event);
       };
       let shellCalls = 0;
+      let toolCalls = 0;
       const runtime: FakeRuntime = {
         async shell(command) {
           const toolCallId = `shell-${++shellCalls}`;
@@ -61,7 +62,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           const tool = tools.find((candidate) => candidate.name === name);
           if (!tool?.handler) throw new Error(`no tool ${name}`);
           if (!(await allowed(fakeRequest.tool(name, args)))) return { approved: false, result: null };
-          const result = await tool.handler(args, { sessionId, toolCallId: `call-${name}`, toolName: name, arguments: args });
+          const result = await tool.handler(args, { sessionId, toolCallId: `call-${name}-${++toolCalls}`, toolName: name, arguments: args });
           return { approved: true, result };
         },
         mcp: (serverName, toolTitle, readOnly) => allowed(fakeRequest.mcp(serverName, toolTitle, readOnly)),

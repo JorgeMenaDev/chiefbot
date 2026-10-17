@@ -30,3 +30,7 @@ export type InviteId = z.infer<typeof InviteId>;
 // A project: one repo of a workspace, with its coordinator, shared context and task ledger.
 export const ProjectId = z.string().min(1).brand<"ProjectId">();
 export type ProjectId = z.infer<typeof ProjectId>;
+
+// A project's worker: one task on one throwaway computer.
+export const TaskWorkerId = z.string().min(1).brand<"TaskWorkerId">();
+export type TaskWorkerId = z.infer<typeof TaskWorkerId>;

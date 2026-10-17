@@ -2,7 +2,6 @@ import {
   RepoFullName,
   type ApiErrorCode,
   type ApprovalKind,
-  type BotId,
   type OpenedPullRequest,
   type PullRequestArgs,
   type UserId,
@@ -16,7 +15,16 @@ import { createPullRequest, installationToken, repoPermission, type GitHubAppKey
 // control's git proxy with its bot credential: fetches pass through, and every
 // push waits for the owner's approval before control forwards it. Pull requests
 // are opened by control, also after approval. Each request first checks, with
-// the owner's own GitHub token, that the owner may do it themselves.
+// the owner's own GitHub token, that the owner may do it themselves. A project's
+// task worker reaches repos the same way, with its own credential: for it, the
+// "owner" is the member who asked for it.
+
+// Who a credential acts for: whose GitHub account bounds its repo access, and
+// how to ask that person to approve, in the running turn of the bot or task worker.
+export type RepoAgent = {
+  userId: UserId;
+  ask: (kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
+};
 
 export type RepoAccessOptions = {
   // github.com (git) and api.github.com; fakes in tests.
@@ -25,10 +33,8 @@ export type RepoAccessOptions = {
   app: GitHubAppKey;
   // The bot owner's GitHub access token from the broker, or null when they must sign in again.
   userToken: (userId: UserId) => Promise<string | null>;
-  // The bot a bot credential belongs to, if any.
-  botFor: (credential: string) => { botId: BotId; userId: UserId } | null;
-  // Asks the bot's owner in its running turn (approvals.ts).
-  ask: (botId: BotId, kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
+  // The agent a bot's or task worker's credential belongs to, if any.
+  agentFor: (credential: string) => RepoAgent | null;
 };
 
 type Refusal = { error: ApiErrorCode; status: number; message: string };
@@ -47,7 +53,7 @@ const unapproved = {
   },
 };
 
-export function repoAccess({ githubUrl, githubApiUrl, app, userToken, botFor, ask }: RepoAccessOptions) {
+export function repoAccess({ githubUrl, githubApiUrl, app, userToken, agentFor }: RepoAccessOptions) {
   // A token that may `access` the repo: the app's installation token for it
   // (null for a read where the app is not installed: GitHub is asked without
   // one, which works for public repos). Or why not, after checking the bot owner
@@ -75,7 +81,7 @@ export function repoAccess({ githubUrl, githubApiUrl, app, userToken, botFor, as
     // bot credential as the Basic auth password. Errors are text/plain, which git
     // prints as "remote: …".
     async git(req: Request, server: Bun.Server<unknown>, { owner, repo }: { owner: string; repo: string }): Promise<Response> {
-      const bot = botFor(basicPassword(req));
+      const bot = agentFor(basicPassword(req));
       if (!bot) {
         return new Response("Chiefbot: no bot credential, or an unknown one.\n", {
           status: 401,
@@ -103,7 +109,7 @@ export function repoAccess({ githubUrl, githubApiUrl, app, userToken, botFor, as
         const request = pushRequest(body, req.headers.get("content-encoding"));
         if (request === null) return text(415, "Chiefbot's git proxy reads only plain or gzip push requests.");
         server.timeout(req, 0);
-        const outcome = await ask(bot.botId, "push", `git push to ${fullName}: ${branchList(request.refs)}`, req.signal);
+        const outcome = await bot.ask("push", `git push to ${fullName}: ${branchList(request.refs)}`, req.signal);
         if (outcome !== "approved") return rejectPush(request, unapproved.push[outcome]);
         const fresh = await grant(bot.userId, fullName, "write");
         if ("error" in fresh) return rejectPush(request, fresh.message);
@@ -129,16 +135,16 @@ export function repoAccess({ githubUrl, githubApiUrl, app, userToken, botFor, as
       return new Response(res.body, { status: res.status, headers: forwarded });
     },
 
-    // The bot's create_pull_request tool (POST /worker/:botId/pull-requests): asks the
-    // owner, then opens the pull request with the app's installation token.
+    // The create_pull_request tool (POST /worker/:botId/pull-requests, or a task worker's):
+    // asks the owner, then opens the pull request with the app's installation token.
     async pullRequest(
-      bot: { botId: BotId; userId: UserId },
+      bot: RepoAgent,
       args: PullRequestArgs,
       signal: AbortSignal,
     ): Promise<OpenedPullRequest | Refusal> {
       const access = await grant(bot.userId, args.repository, "write");
       if ("error" in access) return access;
-      const outcome = await ask(bot.botId, "pull-request", `${args.repository}: ${args.head} → ${args.base}\n${args.title}`, signal);
+      const outcome = await bot.ask("pull-request", `${args.repository}: ${args.head} → ${args.base}\n${args.title}`, signal);
       if (outcome !== "approved") {
         return { error: outcome === "declined" ? "declined" : "no_turn", status: outcome === "declined" ? 403 : 409, message: unapproved["pull-request"][outcome] };
       }

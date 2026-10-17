@@ -1,10 +1,11 @@
 import { z } from "zod";
 
 // Every error code control answers with. Each error body is an ApiError.
-//   unauthorized          no session, bot token or project credential, or an unknown one (401)
-//   wrong_bot             a bot token used for another bot, or a project's credential for another project (403)
+//   unauthorized          no session, bot token, project or task worker credential, or an unknown one (401)
+//   wrong_bot             a bot token used for another bot, a project's credential for another project,
+//                         or a task worker's for another worker (403)
 //   not_found             no such bot or routine for this user, no such workspace or project among
-//                         theirs, no such invite for them, or no such task (404)
+//                         theirs, no such invite for them, or no such task or worker (404)
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
@@ -33,6 +34,7 @@ import { z } from "zod";
 //   project_exists        the workspace already has a project for that repo (409)
 //   invalid_tool_call     a coordinator tool call failed its schema or its rules; `message` says why (400),
 //                         or no coordinator turn is running (409)
+//   requester_only        only the member who asked for a project's worker answers its approvals (403)
 //   expected_websocket    a WebSocket route got a plain request (400)
 export const ApiErrorCode = z.enum([
   "unauthorized",
@@ -70,6 +72,7 @@ export const ApiErrorCode = z.enum([
   "invalid_project_file",
   "project_exists",
   "invalid_tool_call",
+  "requester_only",
   "expected_websocket",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;
