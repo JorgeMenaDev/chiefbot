@@ -76,8 +76,18 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
 }
 
 // A project: the user's chat with its coordinator, and the task ledger beside it.
-export function ProjectPane({ project }: { project: Project }) {
+// The workspace owner can delete it; `onDeleted` runs once it is gone.
+export function ProjectPane({ project, workspace, onDeleted }: { project: Project; workspace: Workspace; onDeleted: () => void }) {
   const { commands } = project.file;
+  const [error, setError] = useState<string | null>(null);
+  async function remove() {
+    setError(null);
+    try {
+      if (await window.chiefbot.projects.remove(project.id, project.name)) onDeleted();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
   return (
     <div className="bot-pane">
       <header className="bot-header">
@@ -88,7 +98,15 @@ export function ProjectPane({ project }: { project: Project }) {
             {commands.build && ` · build: ${commands.build}`}
             {commands.test && ` · test: ${commands.test}`}
           </p>
+          {error && <p className="error">{error}</p>}
         </div>
+        {workspace.role === "owner" && (
+          <div className="actions">
+            <button className="danger" onClick={() => void remove()}>
+              Delete
+            </button>
+          </div>
+        )}
       </header>
       <div className="bot-body">
         <CoordinatorChat project={project} />

@@ -32,6 +32,12 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
     // Throws with control's reason, e.g. what is wrong with the repo's chiefbot.project.yaml.
     create: async (workspaceId: WorkspaceId, repo: string) =>
       Project.parse(await (await call("POST", `/workspaces/${workspaceId}/projects`, { repo })).json()),
+    // The workspace owner only. Its computer, ledger, chats and context go too.
+    remove: async (projectId: ProjectId) => {
+      await call("DELETE", `/projects/${projectId}`);
+      chats.get(projectId)?.close();
+      chats.delete(projectId);
+    },
     tasks: async (projectId: ProjectId) => Task.array().parse(await (await call("GET", `/projects/${projectId}/tasks`)).json()),
 
     // Starts following the user's chat with the coordinator. Repeat calls are harmless.

@@ -76,6 +76,20 @@ test("an invalid project file gives a clear error, and no project is made", asyn
   }
 });
 
+test("only the workspace owner deletes a project, and its computer goes with it", async () => {
+  const { owner, guest, workspace, createProject, computers } = await team();
+  const project = Project.parse(await (await createProject()).json());
+
+  const refused = await guest.api("DELETE", `/projects/${project.id}`);
+  const deleted = await owner.api("DELETE", `/projects/${project.id}`);
+
+  expect([refused.status, ApiError.parse(await refused.json()).error]).toEqual([403, "owner_only"]);
+  expect(deleted.status).toBe(204);
+  expect(computers.destroyed).toEqual([{ id: project.id, deleteData: true }]);
+  expect((await guest.api("GET", `/projects/${project.id}`)).status).toBe(404);
+  expect(await (await owner.api("GET", `/workspaces/${workspace.id}/projects`)).json()).toEqual([]);
+});
+
 // A team with a project for octo-org/shop whose coordinator is online.
 async function teamProject() {
   const control = await team();

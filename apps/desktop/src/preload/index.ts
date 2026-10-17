@@ -61,6 +61,8 @@ const api = {
     list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("projects:list", workspaceId),
     create: (workspaceId: string, repo: string): Promise<unknown> => ipcRenderer.invoke("projects:create", workspaceId, repo),
     tasks: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:tasks", id),
+    // Asks first; resolves true once deleted.
+    remove: (id: string, name: string): Promise<boolean> => ipcRenderer.invoke("projects:delete", id, name),
     // The user's own chat with the project's coordinator.
     openChat: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:open-chat", id),
     send: (id: string, text: string): Promise<unknown> => ipcRenderer.invoke("projects:send", id, text),

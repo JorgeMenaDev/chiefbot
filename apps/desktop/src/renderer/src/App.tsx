@@ -173,8 +173,16 @@ function Workspace({ user }: { user: User }) {
               void teams.reload();
             }}
           />
-        ) : project ? (
-          <ProjectPane key={project.id} project={project} />
+        ) : project && current ? (
+          <ProjectPane
+            key={project.id}
+            project={project}
+            workspace={current}
+            onDeleted={() => {
+              setSelectedId(null);
+              void reloadProjects();
+            }}
+          />
         ) : selected ? (
           <BotPane key={selected.id} bot={selected} />
         ) : (

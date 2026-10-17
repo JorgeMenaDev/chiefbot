@@ -158,6 +158,21 @@ ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) 
   projects.create(WorkspaceId.parse(workspaceId), CreateProjectRequest.parse({ repo }).repo),
 );
 ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
+// Asks first. Resolves true once the project is deleted.
+ipcMain.handle("projects:delete", async (_event, id: unknown, name: unknown) => {
+  if (!window) return false;
+  const { response } = await dialog.showMessageBox(window, {
+    type: "warning",
+    message: `Delete the project ${String(name)}?`,
+    detail: "Its coordinator's computer, task ledger, chats and shared context are deleted. The repo is not touched.",
+    buttons: ["Delete", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+  await projects.remove(ProjectId.parse(id));
+  return true;
+});
 // Opening a project's chat answers with what main has so far; the rest follows on projects:chat.
 ipcMain.handle("projects:open-chat", (_event, id: unknown) => {
   const projectId = ProjectId.parse(id);
