@@ -4,7 +4,8 @@ import { z } from "zod";
 //   unauthorized          no session, bot token or project credential, or an unknown one (401)
 //   wrong_bot             a bot token used for another bot, or a project's credential for another project (403)
 //   not_found             no such bot or routine for this user, no such workspace or project among
-//                         theirs, no such invite for them, or no such task (404)
+//                         theirs, no such invite for them, no such task, or no such project or
+//                         handoff for a chief of staff (404)
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
@@ -31,8 +32,8 @@ import { z } from "zod";
 //   invalid_project_file  the repo's chiefbot.project.yaml is missing, unreadable, not YAML or
 //                         not a valid project file; `message` says which and where (400)
 //   project_exists        the workspace already has a project for that repo (409)
-//   invalid_tool_call     a coordinator tool call failed its schema or its rules; `message` says why (400),
-//                         or no coordinator turn is running (409)
+//   invalid_tool_call     a coordinator's or chief's tool call failed its schema or its rules; `message`
+//                         says why (400), or no coordinator turn is running (409)
 //   expected_websocket    a WebSocket route got a plain request (400)
 export const ApiErrorCode = z.enum([
   "unauthorized",

@@ -13,6 +13,7 @@ import {
 } from "@chiefbot/contracts";
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
+import { chiefTools } from "./chiefTools.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
@@ -50,6 +51,7 @@ export type WorkerOptions = {
 // While the human has the screen (take-over), every tool call waits for hand-back.
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
 // Pushes and pull requests go through control, which asks the user itself.
+// As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
 export function startWorker({
   controlUrl,
   botId,
@@ -136,7 +138,7 @@ export function startWorker({
   // binds (or by the next turn, if that open failed). Its id is the bot id, so
   // after a restart the worker resumes the same conversation.
   function openSession() {
-    const tools = [pullRequestTool({ controlUrl, botId, botToken })];
+    const tools = [pullRequestTool({ controlUrl, botId, botToken }), ...chiefTools({ controlUrl, botId, botToken })];
     session ??= copilot.openSession({ sessionId: BotId.parse(botId), gitHubTokenProvider: gitHubToken, onPermissionRequest, tools }).then((opened) => {
       opened.on(onSessionEvent);
       return opened;

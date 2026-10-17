@@ -44,6 +44,8 @@ export type ProjectHostOptions = {
   publishToUser: (userId: UserId, event: ClientEvent) => void;
   // Upgrades the request to a project WebSocket; undefined once upgraded.
   upgrade: (req: Request, data: ProjectSocketData) => Response | undefined;
+  // The project's task ledger changed.
+  onLedgerChange: (projectId: ProjectId) => void;
 };
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
@@ -80,6 +82,7 @@ export function projectHost({
   publish,
   publishToUser,
   upgrade,
+  onLedgerChange,
 }: ProjectHostOptions) {
   const { projects } = store;
   // Each project's connected coordinator, and the projects whose coordinator has said hello.
@@ -92,6 +95,7 @@ export function projectHost({
   const publishTasks = (projectId: ProjectId) => {
     const tasks = projects.tasks(projectId);
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, { type: "tasks", projectId, tasks });
+    onLedgerChange(projectId);
   };
   const toCoordinator = (projectId: ProjectId, message: ControlToCoordinator) =>
     coordinators.get(projectId)?.send(JSON.stringify(message));
@@ -275,6 +279,18 @@ export function projectHost({
 
   return {
     routes,
+
+    // Call after changing the project's ledger outside a coordinator tool call:
+    // members see it, and the handoffs linked to its tasks are checked.
+    ledgerChanged: publishTasks,
+
+    // Queues `text` in the member's chat with the coordinator, behind their own
+    // unanswered message if there is one (a handoff from their chief of staff).
+    deliver(projectId: ProjectId, userId: UserId, text: string) {
+      const queued = projects.queueTurn(projectId, userId, text, true);
+      if (queued) publishChat(projectId, { userId, event: queued });
+      schedule(projectId);
+    },
 
     open(ws: Socket, data: ProjectSocketData) {
       if (data.kind === "project-chat") {

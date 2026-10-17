@@ -6,6 +6,7 @@ export * from "./bots.ts";
 export * from "./chat.ts";
 export * from "./config.ts";
 export * from "./errors.ts";
+export * from "./handoffs.ts";
 export * from "./models.ts";
 export * from "./projects.ts";
 export * from "./repos.ts";
