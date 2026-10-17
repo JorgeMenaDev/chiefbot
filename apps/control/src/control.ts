@@ -29,6 +29,7 @@ import {
 import { systemClock, type Clock } from "./clock.ts";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
+import { chiefHost } from "./handoffs.ts";
 import { fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
@@ -55,10 +56,11 @@ export type ControlOptions = {
   githubApiUrl: string;
   // github.com, for the refresh grant. Defaults to githubApiUrl: the fake serves both.
   githubUrl?: string;
-  // Client ID of the deployer's GitHub App (`bun run setup`). The desktop signs
-  // in with it; refreshes must use the same one.
+  // Client ID of the deployer's sign-in app (`bun run setup`), which has no
+  // repository permissions. The desktop signs in with it; refreshes must use the
+  // same one. Its tokens are what bot computers get, for the Copilot SDK.
   githubClientId: string;
-  // The same app's ID and private key: control mints its installation tokens to
+  // The repo app's ID and private key: control mints its installation tokens to
   // reach repos for bots (repos.ts), and never hands them to a bot computer.
   githubApp: GitHubAppKey;
   // Where users' refresh tokens live. Defaults to an encrypted store in dbPath
@@ -137,6 +139,8 @@ type SocketData =
 //   …      /workspaces/:id/connectors, /workspaces/:id/checklist, /connectors/oauth/callback,
 //          /coordinator/:projectId/mcp  connectors, the access checklist and the MCP proxy
 //                             (connectors/connectors.ts)
+//   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff: handing work to
+//                             projects and watching it (handoffs.ts)
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //
@@ -194,7 +198,7 @@ export function startControl({
     githubUrl,
     githubApiUrl,
     app: githubApp,
-    userToken: async (userId) => (await broker.accessToken(userId))?.accessToken ?? null,
+    ownerLogin: async (userId) => ((await broker.accessToken(userId)) ? (store.user(userId)?.login ?? null) : null),
     botFor: (credential) => store.botForToken(credential),
     ask: approvals.ask,
   });
@@ -209,12 +213,19 @@ export function startControl({
     computers,
     context,
     githubApiUrl,
+    repoReadToken: repos.readToken,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publish: (topic, message) => server.publish(topic, message),
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     upgrade: (req, data) => upgrade(server, req, data),
     connectorsFor: connectors.agentConnectors,
+    // The handoffs watcher: tells chiefs when their task needs input or is done.
+    onLedgerChange: (projectId) => {
+      for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
+    },
   });
+  // Chiefs of staff handing work to projects (handoffs.ts).
+  const chiefs = chiefHost({ store, projects });
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running, model }) => ({
@@ -305,6 +316,7 @@ export function startControl({
       ...workspaceRoutes(store),
       ...projects.routes,
       ...connectors.routes,
+      ...chiefs.routes,
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));

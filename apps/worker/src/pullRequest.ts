@@ -4,7 +4,7 @@ import { ApiError, OpenedPullRequest, PullRequestArgs } from "@chiefbot/contract
 export const pullRequestToolName = "create_pull_request";
 
 // The bot's one way to open a pull request: a custom Copilot tool that asks
-// control, which asks the user and then opens it with the GitHub App. The
+// control, which asks the user and then opens it with the repo app. The
 // worker holds no token that could open one itself. The user may take hours to
 // answer, so the request has no idle timeout.
 export function pullRequestTool({ controlUrl, botId, botToken }: { controlUrl: string; botId: string; botToken: string }) {

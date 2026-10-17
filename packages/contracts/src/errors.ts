@@ -4,7 +4,8 @@ import { z } from "zod";
 //   unauthorized          no session, bot token or project credential, or an unknown one (401)
 //   wrong_bot             a bot token used for another bot, or a project's credential for another project (403)
 //   not_found             no such bot or routine for this user, no such workspace or project among
-//                         theirs, no such invite for them, or no such task (404)
+//                         theirs, no such invite for them, no such task, or no such project or
+//                         handoff for a chief of staff (404)
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
@@ -20,7 +21,7 @@ import { z } from "zod";
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
 //   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
 //   repo_read_only        the bot owner may not push to the repo (403)
-//   app_not_installed     the deployer's GitHub App is not installed on the repo (403)
+//   app_not_installed     the deployer's repo app is not installed on the repo (403)
 //   no_turn               a push or pull request outside a turn: nobody can approve it, or a
 //                         connector call outside a turn of the member it runs for (409)
 //   declined              the user declined the push or pull request (403)
@@ -32,8 +33,8 @@ import { z } from "zod";
 //   invalid_project_file  the repo's chiefbot.project.yaml is missing, unreadable, not YAML or
 //                         not a valid project file; `message` says which and where (400)
 //   project_exists        the workspace already has a project for that repo (409)
-//   invalid_tool_call     a coordinator tool call failed its schema or its rules; `message` says why (400),
-//                         or no coordinator turn is running (409)
+//   invalid_tool_call     a coordinator's or chief's tool call failed its schema or its rules; `message`
+//                         says why (400), or no coordinator turn is running (409)
 //   invalid_connector     a connector definition, token or connect request failed its schema or its
 //                         connector's auth type; `message` says why (400)
 //   connector_exists      the workspace already has a connector of that name (409)

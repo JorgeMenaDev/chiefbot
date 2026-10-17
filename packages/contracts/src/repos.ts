@@ -8,7 +8,7 @@ export const RepoFullName = z
   .refine((fullName) => !/\/\.\.?$/.test(fullName), "not a repository name");
 
 // Body of POST /worker/:botId/pull-requests: the bot's create_pull_request tool
-// asks control, which asks the user and then opens it with the GitHub App.
+// asks control, which asks the user and then opens it with the repo app.
 export const PullRequestArgs = z.object({
   repository: RepoFullName.describe("The GitHub repository as owner/name"),
   head: z.string().min(1).describe("The branch with the changes. Push it first."),

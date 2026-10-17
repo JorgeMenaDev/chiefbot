@@ -6,11 +6,19 @@ import { z } from "zod";
 import { createBareRepo, git, gitHttpBackend } from "./git.ts";
 
 // A fake github.com + api.github.com for tests: the OAuth device flow, the
-// refresh grant, the API reads control makes, private git repos over smart
-// HTTP, opening pull requests, registering a GitHub App from a manifest (what
-// `bun run setup` does), and the deployer's GitHub App: its installations on
-// repos and the installation tokens control mints with its private key. One
+// refresh grant, the two API reads control makes at sign-in, private git repos
+// over smart HTTP, a file in a repo, opening pull requests, registering a GitHub
+// App from a manifest (what `bun run setup` does), and the deployer's repo app:
+// its installations on repos, the installation tokens control mints with its
+// private key, and a user's permission on a repo as such a token reads it. One
 // origin serves both hosts' paths.
+//
+// Like GitHub, a user token may act on repos only as far as the app that issued
+// it may (by client ID). Only the repo app has repository permissions, so only
+// its user tokens reach repos, where it is installed. Every other client is a
+// sign-in app (a GitHub App with no repository permissions, or an OAuth App
+// with only read:user): its tokens read the user and their Copilot plan, and no
+// private repo.
 
 export type FakeGitHubUser = {
   id: number;
@@ -63,17 +71,19 @@ export type FakeRepoAccess = "read" | "write";
 export type FakeRepoOptions = {
   // Each login's access. Default: the fake's user may write.
   access?: Record<string, FakeRepoAccess>;
-  // Whether the deployer's GitHub App is installed on it. Default true.
+  // Whether the deployer's repo app is installed on it. Default true.
   installed?: boolean;
 };
 
-// The deployer's GitHub App (what `bun run setup` saved): one key pair for every fake.
+// The deployer's repo app (what `bun run setup` saved): one key pair for every fake.
 const appKeys = generateKeyPairSync("rsa", {
   modulusLength: 2048,
   publicKeyEncoding: { type: "spki", format: "pem" },
   privateKeyEncoding: { type: "pkcs1", format: "pem" },
 });
-const fakeApp = { id: 777, privateKey: appKeys.privateKey };
+const fakeApp = { id: 777, privateKey: appKeys.privateKey, clientId: "Iv-fake-repo-app" };
+// Who a user token belongs to and the client that issued it.
+type FakeUserToken = { user: FakeGitHubUser; clientId: string };
 
 const AccessTokensBody = z.object({ repositories: z.array(z.string()), permissions: z.record(z.string(), z.string()) });
 export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], deviceFlowDisabled = false }: FakeGitHubOptions = {}) {
@@ -81,12 +91,15 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
   const userCode = "ABCD-1234";
   const pending = [...pollErrors];
   let issued = 0;
-  // Each valid access token and the user it belongs to.
-  const validAccessTokens = new Map<string, FakeGitHubUser>();
-  // Each unused refresh token, with the access token issued with it and its user.
-  const validRefreshTokens = new Map<string, { accessToken: string; user: FakeGitHubUser }>();
-  // Body of every POST to the token endpoint, so tests can check what was sent.
+  // Each valid access token, its user and client.
+  const validAccessTokens = new Map<string, FakeUserToken>();
+  // Each unused refresh token, with the access token issued with it.
+  const validRefreshTokens = new Map<string, FakeUserToken & { accessToken: string }>();
+  // Body of every POST to the device code and token endpoints, so tests can check what was sent.
+  const deviceCodeRequests: Record<string, string>[] = [];
   const tokenRequests: Record<string, string>[] = [];
+  // The client each pending device code was asked for.
+  let deviceClientId = "";
   // Bare repos live here as <owner>/<name>.git.
   const repoRoot = mkdtempSync(join(tmpdir(), "fake-github-repos-"));
   const pullRequests: FakePullRequest[] = [];
@@ -122,8 +135,11 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
     port: 0,
     routes: {
       "/login/device/code": {
-        POST: () =>
-          deviceFlowDisabled
+        POST: async (req) => {
+          const body = Object.fromEntries(new URLSearchParams(await req.text()));
+          deviceCodeRequests.push(body);
+          deviceClientId = body.client_id ?? "";
+          return deviceFlowDisabled
             ? Response.json({ error: "device_flow_disabled", error_description: "Device Flow must be explicitly enabled for this App" }, { status: 400 })
             : Response.json({
             device_code: deviceCode,
@@ -131,7 +147,8 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
             verification_uri: "https://github.com/login/device",
             expires_in: 900,
             interval: 5,
-          }),
+          });
+        },
       },
       "/login/oauth/access_token": {
         POST: async (req) => {
@@ -142,13 +159,13 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
             const issuedWith = validRefreshTokens.get(body.refresh_token ?? "");
             if (!issuedWith || !body.client_id) return Response.json({ error: "bad_refresh_token" });
             revoke(body.refresh_token ?? "");
-            return tokenResponse(issuedWith.user);
+            return tokenResponse(issuedWith.user, issuedWith.clientId);
           }
           if (body.device_code !== deviceCode) return Response.json({ error: "incorrect_device_code" });
           const error = pending.shift();
           if (error === "slow_down") return Response.json({ error, interval: 10 });
           if (error) return Response.json({ error });
-          return tokenResponse();
+          return tokenResponse(user, deviceClientId);
         },
       },
       "/settings/apps/new": { POST: (req) => registerApp(req, { login: user.login, type: "User" }) },
@@ -197,12 +214,11 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
       },
       // A file at the root of the repo's default branch, raw (what Accept:
       // application/vnd.github.raw+json asks for). Like GitHub, 404 for a missing
-      // file and for a repo the token's user cannot see.
+      // file and for a repo the token cannot read.
       "/repos/:owner/:repo/contents/:path": {
         GET: (req) => {
           const repository = `${req.params.owner}/${req.params.repo}`;
-          const user = authorized(req);
-          if (!user || !repos.get(repository)?.access[user.login]) return Response.json({ message: "Not Found" }, { status: 404 });
+          if (!reader(bearerToken(req), repository)) return Response.json({ message: "Not Found" }, { status: 404 });
           try {
             return new Response(git(bareRepo(repository), ["show", `HEAD:${req.params.path}`]) + "\n");
           } catch {
@@ -210,14 +226,12 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
           }
         },
       },
-      // What the token's user may do on the repo; 404 when they cannot see it.
-      "/repos/:owner/:repo": {
+      // A user's permission on the repo, read with an installation token for it.
+      "/repos/:owner/:repo/collaborators/:username/permission": {
         GET: (req) => {
           const repository = `${req.params.owner}/${req.params.repo}`;
-          const user = authorized(req);
-          const access = user && repos.get(repository)?.access[user.login];
-          if (!access) return Response.json({ message: "Not Found" }, { status: 404 });
-          return Response.json({ full_name: repository, permissions: { pull: true, push: access === "write" } });
+          if (!installationTokens.get(bearerToken(req))?.has(repository)) return Response.json({ message: "Not Found" }, { status: 404 });
+          return Response.json({ permission: repos.get(repository)?.access[req.params.username] ?? "none" });
         },
       },
       // The app's installation on the repo's account, with the app's JWT.
@@ -286,15 +300,21 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
   // Who a token acts as on a repo when it may read it (a login, or "app"), else null.
   function reader(token: string, repository: string) {
     if (installationTokens.get(token)?.has(repository)) return "app";
-    const user = validAccessTokens.get(token);
+    const user = repoAppUser(token, repository);
     return user && repos.get(repository)?.access[user.login] ? user.login : null;
   }
 
   // The same, for writing.
   function writer(token: string, repository: string) {
     if (installationTokens.get(token)?.has(repository)) return "app";
-    const user = validAccessTokens.get(token);
+    const user = repoAppUser(token, repository);
     return user && repos.get(repository)?.access[user.login] === "write" ? user.login : null;
+  }
+
+  // The user of a repo app's user token, on a repo the app is installed on. Sign-in apps' tokens never qualify.
+  function repoAppUser(token: string, repository: string) {
+    const issued = validAccessTokens.get(token);
+    return issued?.clientId === fakeApp.clientId && repos.get(repository)?.installed ? issued.user : null;
   }
 
   // Whether the request carries a JWT signed with the app's private key, unexpired, for the app.
@@ -310,18 +330,18 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
   }
 
   // Mints a token pair GitHub accepts, as if `as` (default: the fake's user)
-  // finished the device flow.
-  function issueTokens(as: FakeGitHubUser = user) {
+  // finished the device flow of `clientId` (default: a sign-in app).
+  function issueTokens(as: FakeGitHubUser = user, clientId = "fake-sign-in-client") {
     issued += 1;
     const accessToken = `gho_fake_${issued}`;
     const refreshToken = `ghr_fake_${issued}`;
-    validAccessTokens.set(accessToken, as);
-    validRefreshTokens.set(refreshToken, { accessToken, user: as });
+    validAccessTokens.set(accessToken, { user: as, clientId });
+    validRefreshTokens.set(refreshToken, { accessToken, user: as, clientId });
     return { accessToken, refreshToken };
   }
 
-  function tokenResponse(as: FakeGitHubUser = user) {
-    const { accessToken, refreshToken } = issueTokens(as);
+  function tokenResponse(as: FakeGitHubUser, clientId: string) {
+    const { accessToken, refreshToken } = issueTokens(as, clientId);
     return Response.json({
       access_token: accessToken,
       expires_in: 28800,
@@ -343,12 +363,13 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
 
   // The user a request's token belongs to, or undefined.
   function authorized(req: Request) {
-    return validAccessTokens.get(bearerToken(req));
+    return validAccessTokens.get(bearerToken(req))?.user;
   }
 
   return {
     url: server.url.origin,
     userCode,
+    deviceCodeRequests,
     tokenRequests,
     // Refresh-grant requests only.
     refreshRequests: () => tokenRequests.filter((body) => body.grant_type === "refresh_token"),
@@ -356,7 +377,7 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
     revoke,
     pullRequests,
     pushes,
-    // The deployer's GitHub App: control signs its JWTs with this key.
+    // The deployer's repo app: control signs its JWTs with this key.
     app: fakeApp,
     // Manifests posted to the "new GitHub App" page, oldest first.
     manifests,

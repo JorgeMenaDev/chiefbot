@@ -3,8 +3,9 @@ import { z } from "zod";
 import type { CopilotPlan, GitHubTokens, OpenedPullRequest, PullRequestArgs } from "@chiefbot/contracts";
 
 // Control's GitHub calls: the two reads it makes with a user's access token at
-// sign-in, the refresh grant, and repo access: what a user may do on a repo, the
-// deployer's GitHub App's installation tokens, and opening pull requests.
+// sign-in, the refresh grant (both for the sign-in app), and repo access through
+// the deployer's repo app: its installation tokens, what a user may do on a repo
+// as such a token reads it, and opening pull requests.
 
 const GitHubUserResponse = z.object({ id: z.number().int(), login: z.string() });
 const CopilotUserResponse = z.object({ copilot_plan: z.string(), access_type_sku: z.string() });
@@ -69,17 +70,27 @@ export async function refreshGitHubTokens(githubUrl: string, clientId: string, r
   };
 }
 
-// What a user may do on a repo, per GitHub, with their own token: "none" when
-// they cannot see it (404), else "read" or "write" (push).
-export async function repoPermission(apiUrl: string, accessToken: string, fullName: string): Promise<"none" | "read" | "write"> {
-  const res = await fetch(`${apiUrl}/repos/${fullName}`, { headers: { authorization: `Bearer ${accessToken}`, accept: "application/vnd.github+json" } });
-  if (res.status === 404 || res.status === 403) return "none";
-  if (!res.ok) throw new Error(`GitHub /repos/${fullName} failed: ${res.status}`);
-  const repo = z.object({ permissions: z.object({ push: z.boolean() }).optional() }).parse(await res.json());
-  return repo.permissions?.push ? "write" : "read";
+// What the user `login` may do on a repo, read with an installation token for it
+// (https://docs.github.com/en/rest/collaborators/collaborators#get-repository-permissions-for-a-user).
+// The user's own token cannot tell: the sign-in app has no repository
+// permissions, so it sees no private repo. GitHub's admin and write (maintain
+// too) may push; read (triage too) may fetch.
+export async function repoPermission(
+  apiUrl: string,
+  installationToken: string,
+  fullName: string,
+  login: string,
+): Promise<"none" | "read" | "write"> {
+  const res = await fetch(`${apiUrl}/repos/${fullName}/collaborators/${encodeURIComponent(login)}/permission`, {
+    headers: { authorization: `Bearer ${installationToken}`, accept: "application/vnd.github+json" },
+  });
+  if (res.status === 404) return "none";
+  if (!res.ok) throw new Error(`GitHub /repos/${fullName}/collaborators/${login}/permission failed: ${res.status}`);
+  const { permission } = z.object({ permission: z.string() }).parse(await res.json());
+  return permission === "admin" || permission === "write" ? "write" : permission === "read" ? "read" : "none";
 }
 
-// The deployer's GitHub App (`bun run setup`): its ID and PEM private key.
+// The deployer's repo app (`bun run setup`): its ID and PEM private key.
 export type GitHubAppKey = { id: number; privateKey: string };
 
 // The access an installation token gets: read to fetch; write to push and open pull requests.

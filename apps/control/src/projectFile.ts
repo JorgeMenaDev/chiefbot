@@ -1,11 +1,14 @@
 import { ProjectFile, projectFileName } from "@chiefbot/contracts";
 
 // Reads and checks a repo's chiefbot.project.yaml through the GitHub API with
-// the asking user's access token (from the GitHub App they signed in with).
+// a read token from control's repo access (repos.ts): the repo app's
+// installation token once the asking user may read the repo, or none for a
+// public repo the app is not installed on. Not the user's own token: it comes
+// from the sign-in app, which sees no private repo.
 // Resolves with the file, or with an error that says what is wrong and where.
-export async function readProjectFile(githubApiUrl: string, accessToken: string, repo: string): Promise<ProjectFile | { error: string }> {
+export async function readProjectFile(githubApiUrl: string, token: string | null, repo: string): Promise<ProjectFile | { error: string }> {
   const res = await fetch(`${githubApiUrl}/repos/${repo}/contents/${projectFileName}`, {
-    headers: { authorization: `Bearer ${accessToken}`, accept: "application/vnd.github.raw+json" },
+    headers: { ...(token === null ? {} : { authorization: `Bearer ${token}` }), accept: "application/vnd.github.raw+json" },
   });
   if (res.status === 404) {
     return { error: `No ${projectFileName} at the root of ${repo}'s default branch, or your GitHub account cannot see ${repo}.` };
