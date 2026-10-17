@@ -2,6 +2,23 @@
   "name": "@chiefbot/control",
   "private": true,
   "type": "module",
-  "scripts": { "typecheck": "tsc -p ." },
-  "dependencies": { "@chiefbot/contracts": "workspace:*" }
+  "exports": {
+    ".": "./src/control.ts",
+    "./fake-computers": "./src/computers/fakeComputers.ts"
+  },
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@chiefbot/contracts": "workspace:*",
+    "@google-cloud/compute": "^7.8.0",
+    "@google-cloud/secret-manager": "^7.2.0",
+    "croner": "10.0.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@chiefbot/fake-github": "workspace:*",
+    "@chiefbot/worker": "workspace:*"
+  }
 }

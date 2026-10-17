@@ -1,0 +1,608 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  background: #0b0b0c;
+  color: #e7e7e9;
+}
+.screen {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 24px;
+  min-height: 100vh;
+  margin: 0;
+}
+.card {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+.code {
+  font-size: 32px;
+  letter-spacing: 4px;
+}
+.error {
+  color: #ff7b72;
+}
+button {
+  padding: 8px 16px;
+  font: inherit;
+  cursor: pointer;
+}
+a {
+  color: #79c0ff;
+}
+body {
+  margin: 0;
+}
+.muted {
+  color: #8b8b93;
+}
+
+/* Signed-in layout, after T3 Code: bot sidebar on the left, the selected bot on the right. */
+.workspace {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100vh;
+}
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 8px;
+  border-right: 1px solid #1f1f23;
+  background: #111113;
+}
+.new-bot {
+  text-align: left;
+  background: transparent;
+  border: 1px dashed #2c2c31;
+  border-radius: 6px;
+  color: inherit;
+}
+.new-bot-form input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font: inherit;
+  color: inherit;
+  background: #0b0b0c;
+  border: 1px solid #2c2c31;
+  border-radius: 6px;
+}
+.new-bot-form p {
+  margin: 6px 2px;
+  font-size: 12px;
+}
+.bot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  overflow-y: auto;
+}
+.bot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  text-align: left;
+}
+.bot-row:hover {
+  background: #1a1a1d;
+}
+.bot-row.selected {
+  background: #222226;
+}
+.bot-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bot-status {
+  font-size: 11px;
+  color: #8b8b93;
+}
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 4px 0;
+  border-top: 1px solid #1f1f23;
+  font-size: 12px;
+}
+.account {
+  display: grid;
+  gap: 2px;
+}
+.account-actions {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+}
+.github-notice {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #5a3e1b;
+  border-radius: 6px;
+  background: #2a1f10;
+  font-size: 12px;
+}
+.github-notice p {
+  margin: 0;
+}
+.link-button {
+  white-space: nowrap;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: #79c0ff;
+  font-size: 12px;
+}
+.pane {
+  min-height: 0;
+  padding: 24px 32px 16px;
+}
+.bot-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.bot-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #1f1f23;
+}
+.bot-header p {
+  margin: 0;
+}
+.bot-pane h2 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 4px;
+}
+.actions {
+  display: flex;
+  gap: 8px;
+}
+.danger {
+  color: #ff7b72;
+}
+
+/* Status dot: green online, amber with a ping while starting, grey with a ping while stopping, grey stopped. */
+.status-dot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+.status-dot .dot,
+.status-dot .ping {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.status-dot .ping {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  animation: status-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+.status-dot.online .dot {
+  background: #3fb950;
+}
+.status-dot.starting .dot {
+  background: #d29922;
+}
+.status-dot.starting .ping {
+  background: rgb(210 153 34 / 0.6);
+}
+.status-dot.stopping .ping {
+  background: rgb(139 139 147 / 0.4);
+}
+.status-dot.stopping .dot,
+.status-dot.stopped .dot {
+  background: rgb(139 139 147 / 0.5);
+}
+@keyframes status-ping {
+  75%,
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+
+/* Chat, after T3 Code: one centred lane for messages and the composer. */
+.chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.lane {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 0;
+}
+.messages .lane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.empty {
+  text-align: center;
+}
+.message {
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.message.user {
+  align-self: flex-end;
+  max-width: 80%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: #222226;
+}
+.message.error {
+  padding: 8px 12px;
+  border: 1px solid rgb(255 123 114 / 0.4);
+  border-radius: 8px;
+}
+.tool-row {
+  font-size: 12px;
+  color: #8b8b93;
+  font-family: ui-monospace, monospace;
+}
+.tool-row.failed .tool-mark {
+  color: #ff7b72;
+}
+.tool-row.succeeded .tool-mark {
+  color: #3fb950;
+}
+.working {
+  margin: 0;
+  font-size: 12px;
+  color: #8b8b93;
+  animation: working-pulse 1.6s ease-in-out infinite;
+}
+@keyframes working-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+.composer {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #2c2c31;
+  border-radius: 12px;
+  background: #111113;
+}
+.composer textarea {
+  resize: none;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+.composer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+/* Model picker, after T3 Code's ProviderModelPicker and ModelListRow: a quiet
+   trigger in the composer row and a searchable glass list that opens upwards. */
+.icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon.small {
+  width: 12px;
+  height: 12px;
+}
+.icon.filled {
+  fill: currentColor;
+  stroke: none;
+}
+.model-picker {
+  position: relative;
+  min-width: 0;
+}
+.model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 224px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #b4b4bb;
+  font-size: 13px;
+  font-weight: 500;
+}
+.model-trigger:hover {
+  background: #1f1f23;
+  color: #e7e7e9;
+}
+.model-trigger-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-trigger .chevron {
+  width: 14px;
+  height: 14px;
+  color: #6e6e76;
+}
+.model-popup {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  width: 360px;
+  max-height: 346px;
+  border: 1px solid #2c2c31;
+  border-radius: 8px;
+  background: rgb(24 24 27 / 0.94);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 18px 44px -18px rgb(0 0 0 / 0.8);
+  overflow: hidden;
+}
+.model-search {
+  margin: 10px 12px 0;
+  padding: 0 0 6px;
+  border: 0;
+  border-bottom: 1px solid rgb(44 44 49 / 0.7);
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+.model-search:focus {
+  border-bottom-color: #79c0ff;
+}
+.model-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 1px 6px 8px;
+}
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  margin-bottom: 2px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+.model-row:hover {
+  background: #222226;
+}
+.model-row.selected {
+  background: rgb(255 255 255 / 0.08);
+}
+.model-row.locked {
+  opacity: 0.64;
+  cursor: not-allowed;
+}
+.model-row.locked:hover {
+  background: transparent;
+}
+.model-row-text {
+  display: grid;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.model-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+.model-row-provider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: rgb(139 139 147 / 0.8);
+}
+.model-row > .icon {
+  color: #8b8b93;
+}
+.model-empty {
+  margin: 0;
+  padding: 12px 8px;
+  text-align: center;
+  font-size: 12px;
+}
+.composer-error {
+  flex: 1;
+}
+
+/* Below the bot header: the chat, with the bot's live screen (noVNC) in a side
+   pane. 16:10 like the 1280×800 Xvfb screen. */
+.bot-body {
+  display: flex;
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+}
+.screen-pane {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  width: 42%;
+  min-width: 360px;
+  padding-top: 16px;
+}
+.screen-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+}
+.screen-view {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  background: #000;
+  border: 1px solid #2c2c31;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.screen-view.interactive {
+  border-color: #3fb950;
+}
+.screen-canvas {
+  width: 100%;
+  height: 100%;
+}
+.screen-empty,
+.screen-overlay {
+  display: grid;
+  place-items: center;
+  margin: 0;
+  font-size: 13px;
+}
+.screen-overlay {
+  position: absolute;
+  inset: 0;
+}
+
+/* Approval card, after T3 Code's pending approval panel: amber label, the exact
+   command in monospace, Decline and Approve. */
+.approval-card {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid rgb(210 153 34 / 0.45);
+  border-radius: 10px;
+  background: rgb(210 153 34 / 0.06);
+}
+.approval-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #d29922;
+}
+.approval-detail {
+  display: block;
+  max-height: 80px;
+  overflow: auto;
+  white-space: pre;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+.approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+.approval-actions .error {
+  margin-right: auto;
+  font-size: 12px;
+}
+.outline {
+  background: transparent;
+  border: 1px solid #2c2c31;
+}
+.approval-row {
+  font-size: 12px;
+  color: #8b8b93;
+}
+.approval-row code {
+  font-family: ui-monospace, monospace;
+}
+.approval-row.approved {
+  color: #3fb950;
+}
+.approval-row.declined,
+.approval-row.expired {
+  color: #ff7b72;
+}
+
+/* A bot's routines, shown above its chat when opened. */
+.routines {
+  display: grid;
+  gap: 8px;
+  padding: 12px 24px;
+  border-bottom: 1px solid #1f1f23;
+}
+.routine-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.routine-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.routine-text strong {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.routine-form {
+  display: grid;
+  gap: 8px;
+}
+.routine-form textarea,
+.routine-form input {
+  font: inherit;
+  padding: 6px 8px;
+}
+.routine-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.routines .link-button {
+  justify-self: start;
+}

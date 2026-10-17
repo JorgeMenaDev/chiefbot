@@ -2,14 +2,23 @@
   "name": "chiefbot",
   "private": true,
   "type": "module",
-  "workspaces": ["apps/*", "packages/*"],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
+    "dev": "bun run --parallel --filter '@chiefbot/control' --filter '@chiefbot/desktop' dev",
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun test",
-    "check": "bun run typecheck && bun test"
+    "check": "bun run typecheck && bun test",
+    "computer:dist": "bun infra/computer/build.ts --dist-only",
+    "computer:build": "bun infra/computer/build.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^7.0.2"
-  }
+  },
+  "trustedDependencies": [
+    "electron"
+  ]
 }
