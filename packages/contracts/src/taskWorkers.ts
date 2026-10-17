@@ -15,7 +15,8 @@ export type TaskWorkerState = z.infer<typeof TaskWorkerState>;
 // One worker of a project, as the coordinator and the project's members see it.
 // `requestedBy` is the login of the member whose coordinator turn dispatched it:
 // it runs on their Copilot seat and only they answer its approvals. Its computer
-// lives until the task is done or abandoned, or the worker is stopped.
+// stops when its turn ends and is deleted, disk and all, once the task is done
+// or abandoned, or the worker is stopped.
 // Times are epoch milliseconds.
 export const TaskWorker = z.object({
   id: TaskWorkerId,

@@ -23,7 +23,8 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   // user_id is the member who asked: their Copilot seat, their approvals.
   // `computer`: wanted while the worker may need it; unwanted once it must go
   // (the worker stopped, or its launch failed); removed once the provider
-  // deleted it. A wanted computer of a done or abandoned task must go too.
+  // deleted it. A wanted computer of a done or abandoned task must go too;
+  // one whose turn ended (finished, failed) is kept stopped until then.
   // `payer` is who pays for its Copilot (JSON), set when its task starts.
   // The worker's credential is stored as a SHA-256.
   db.run(`CREATE TABLE IF NOT EXISTS task_workers (
@@ -276,6 +277,15 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     launching(): TaskWorkerId[] {
       return db
         .query<{ id: string }, []>("SELECT id FROM task_workers WHERE state = 'launching'")
+        .all()
+        .map((row) => TaskWorkerId.parse(row.id));
+    },
+
+    // Workers whose turn ended (finished or failed) and whose computer is kept
+    // until their task closes: it should be stopped.
+    ended(): TaskWorkerId[] {
+      return db
+        .query<{ id: string }, []>("SELECT id FROM task_workers WHERE state IN ('finished', 'failed') AND computer = 'wanted'")
         .all()
         .map((row) => TaskWorkerId.parse(row.id));
     },

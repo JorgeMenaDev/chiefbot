@@ -91,7 +91,9 @@ test("the coordinator dispatches a task: a worker gets its own computer and does
   expect(worker).toMatchObject({ projectId: project.id, taskNumber: 1, requestedBy: "octo-friend" });
   const finished = await workerWhen(owner, project, worker.id, ({ state }) => state === "finished");
   expect(finished).toMatchObject({ result: "Added the checkout page.", computerRemoved: false, pullRequest: null });
-  expect(await computers.provider.status(worker.id)).toBe("running");
+  // Its turn is over: the computer stops at once but keeps its disk until the task closes.
+  await eventually(async () => (await computers.provider.status(worker.id)) === "stopped");
+  expect(computers.destroyed).toEqual([]);
   const prompt = copilot.sends.find(({ sessionId }) => sessionId === worker.id)?.prompt ?? "";
   expect(prompt).toContain("Task #1: Add a checkout page\nFrom cart to payment");
   expect(prompt).toContain("Keep it small");
@@ -336,6 +338,36 @@ test("on restart control removes leaked worker computers and fails a launch the 
   expect(computers.destroyed.map(({ id }) => id).sort()).toEqual([leaked.id, failed.id].sort());
 });
 
+test("on restart control stops a finished worker's computer that failed to stop", async () => {
+  let stopFails = true;
+  const control = await teamProject({
+    persistent: true,
+    provider: (fake) => ({
+      ...fake,
+      async stop(id) {
+        if (stopFails && id.startsWith("worker_")) throw new Error("Docker is not answering");
+        await fake.stop(id);
+      },
+    }),
+  });
+  const { owner, project, computers } = control;
+  const { tool, release } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  await Bun.sleep(20);
+  expect(await computers.provider.status(id)).toBe("running");
+  release();
+
+  stopFails = false;
+  control.restart();
+
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
+  expect(computers.destroyed).toEqual([]);
+});
+
 test("a worker whose computer restarts mid-task fails, and deleting the project removes its computer", async () => {
   const control = await teamProject();
   const { owner, project, computers } = control;
@@ -350,6 +382,7 @@ test("a worker whose computer restarts mid-task fails, and deleting the project 
     result: "The worker's computer restarted before it finished the task.",
     computerRemoved: false,
   });
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
   release();
   expect((await owner.api("DELETE", `/projects/${project.id}`)).status).toBe(204);
   expect(computers.destroyed).toEqual([
@@ -413,4 +446,5 @@ test("when the organization pays, a worker runs on its installation token and fa
   expect(await workerWhen(owner, project, id, ({ state }) => state === "failed")).toMatchObject({
     result: "The task ran out of time: its organization's one-hour Copilot token cannot be renewed mid-task. Dispatch what is left as a smaller task.",
   });
+  await eventually(async () => (await control.computers.provider.status(id)) === "stopped");
 });

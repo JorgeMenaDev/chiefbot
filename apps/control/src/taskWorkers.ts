@@ -74,9 +74,10 @@ export type TaskWorkerHostOptions = {
 // project's connectors ready for them (through connectors.ts's proxy). It clones
 // and pushes through control's git proxy and opens its pull request through
 // control, each push and pull request approved by that member. Its last message is its
-// result; its pull request is linked on the task. The computer goes once the
-// worker is stopped or its task is done or abandoned; on start, control removes
-// every worker computer that should be gone (`recover`).
+// result; its pull request is linked on the task. Its computer stops as soon as
+// its turn ends, keeping its disk, and goes once the worker is stopped or its
+// task is done or abandoned; on start, control stops every computer of an
+// ended turn and removes every one that should be gone (`recover`).
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's
@@ -164,6 +165,13 @@ export function taskWorkerHost({
       const projectId = workers.worker(workerId)?.projectId;
       if (projectId) publish(projectId);
     }
+  }
+
+  // The worker's turn ended: its approvals stop waiting and its computer stops,
+  // keeping its disk until the task closes. A failed stop is retried on control's next start.
+  function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
+    approvals.turnEnded(turnId);
+    computers.stop(workerId).catch((error: unknown) => console.error(`could not stop the computer of ${workerId}:`, error));
   }
 
   // Ends the worker's turn (if it runs) and marks its computer to go.
@@ -289,7 +297,7 @@ export function taskWorkerHost({
     clock.setTimeout(() => {
       const ended = workers.end(workerId, "failed", "The task ran out of time: its organization's one-hour Copilot token cannot be renewed mid-task. Dispatch what is left as a smaller task.");
       if (ended.length === 0) return;
-      approvals.turnEnded(started.turnId);
+      turnOver(workerId, started.turnId);
       publish(projectId);
     }, orgTaskLimitMs);
   }
@@ -379,11 +387,15 @@ export function taskWorkerHost({
     },
 
     // On control's start: a worker still launching whose computer is not
-    // running lost its launch to the restart, so it fails. Then every worker
-    // computer that should be gone is removed.
+    // running lost its launch to the restart, so it fails. A computer whose
+    // turn ended but still runs stops. Then every worker computer that should
+    // be gone is removed.
     async recover() {
       for (const workerId of workers.launching()) {
         if ((await computers.status(workerId)) !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
+      }
+      for (const workerId of workers.ended()) {
+        if ((await computers.status(workerId)) === "running") await computers.stop(workerId);
       }
       await reap();
     },
@@ -406,7 +418,7 @@ export function taskWorkerHost({
       if (message.type === "turn-event") {
         const stored = workers.appendTurnEvent(workerId, message.turnId, message.index, message.event);
         if (!stored) return;
-        if (message.event.type === "done") approvals.turnEnded(message.turnId);
+        if (message.event.type === "done") turnOver(workerId, message.turnId);
         if (message.event.type === "done" || message.event.type === "approval-request") publish(worker.projectId);
         return;
       }
@@ -418,7 +430,7 @@ export function taskWorkerHost({
         void startTask(workerId, worker.projectId, userId);
       } else if (worker.state === "working" && message.activeTurnId !== turnId) {
         workers.end(workerId, "failed", "The worker's computer restarted before it finished the task.");
-        approvals.turnEnded(turnId);
+        turnOver(workerId, turnId);
         publish(worker.projectId);
       } else if (worker.state === "working") {
         for (const answer of workers.answeredApprovals(workerId)) send(workerId, { type: "approval-answer", ...answer });
