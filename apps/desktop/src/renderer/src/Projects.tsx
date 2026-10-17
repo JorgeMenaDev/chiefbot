@@ -10,6 +10,7 @@ import {
 } from "@chiefbot/contracts";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { z } from "zod";
+import { ConnectorCalls } from "./Connectors.tsx";
 
 const ProjectList = z.array(Project);
 const TaskList = z.array(Task);
@@ -80,6 +81,7 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
 export function ProjectPane({ project, workspace, onDeleted }: { project: Project; workspace: Workspace; onDeleted: () => void }) {
   const { commands } = project.file;
   const [error, setError] = useState<string | null>(null);
+  const [showCalls, setShowCalls] = useState(false);
   async function remove() {
     setError(null);
     try {
@@ -100,14 +102,16 @@ export function ProjectPane({ project, workspace, onDeleted }: { project: Projec
           </p>
           {error && <p className="error">{error}</p>}
         </div>
-        {workspace.role === "owner" && (
-          <div className="actions">
+        <div className="actions">
+          <button onClick={() => setShowCalls(!showCalls)}>{showCalls ? "Hide connector calls" : "Connector calls"}</button>
+          {workspace.role === "owner" && (
             <button className="danger" onClick={() => void remove()}>
               Delete
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </header>
+      {showCalls && <ConnectorCalls project={project} />}
       <div className="bot-body">
         <CoordinatorChat project={project} />
         <TaskLedger project={project} />

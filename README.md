@@ -62,6 +62,8 @@ commands:
 
 Each project gets one computer from the `ComputerProvider` (`chiefbot-<project id>`), which runs the project's **coordinator** instead of a bot worker. The coordinator plans and tracks work and never writes code: it runs the Copilot SDK in `mode: "empty"` (no shell, no files, no ambient config) with five tools only, all served by control: `create_task`, `update_task`, `list_tasks`, `read_context` and `write_context`. The **task ledger** in control's SQLite is the only record of task state (open, in progress, needs input, done, abandoned; an owner, who asked, and links to pull requests, context files or pages). **Shared context** is a set of Markdown files every agent of the project reads and adds to (`notes.md`, `docs/`, `plans/`), kept by control in a `ContextStore`: a `context` folder next to the database now, a bucket later. Each member has their own chat with the coordinator, which runs on that member's Copilot seat: control brokers a token only for the member whose turn is running. One scheduler per project runs the coordinator's turns one at a time across all members' chats, oldest first, so each turn sees the tasks the turns before it made, and two members asking for the same thing get one task. The desktop shows the ledger beside the chat and updates it live. Workers that carry out tasks come next.
 
+**Connectors** are MCP servers a workspace defines once (GitHub, GitHub Actions and Jira are presets). A project's agents get only the connectors its `chiefbot.project.yaml` declares, each call running as the workspace's service credential or as the member who asked, and every call is logged. Each member's **Connectors** screen is their access checklist: what their projects need minus what they have connected. See `docs/connectors.md`.
+
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
 `bun run dev` starts both apps. To run them apart: `bun run --cwd apps/control dev` and `bun run --cwd apps/desktop dev`.
@@ -87,6 +89,7 @@ The desktop dev script unsets `ELECTRON_RUN_AS_NODE`. Shells started by T3 Code 
 | `CHIEFBOT_GCP_ZONE` | control (gce) | `europe-west2-a` (London) |
 | `CHIEFBOT_WORKER_CONTROL_URL` | control | `http://host.docker.internal:<port>` (control as a container reaches it) |
 | `CHIEFBOT_IDLE_STOP_MINUTES` | control | `30`: a bot's computer stops after this long with no running turn, no pending approval, no screen viewer and no routine run |
+| `CHIEFBOT_PUBLIC_URL` | control | `http://127.0.0.1:<port>`: control as members' browsers reach it. Connector OAuth sign-ins return to `<it>/connectors/oauth/callback` |
 | `CHIEFBOT_CONTROL_URL` | desktop | `http://127.0.0.1:7410` |
 | `CHIEFBOT_GITHUB_URL` | desktop | `https://github.com` |
 | `CHIEFBOT_GITHUB_CLIENT_ID` | desktop | The client ID in `~/.chiefbot/config.json` (`bun run setup`): device flow, no secret, 8-hour tokens |
@@ -226,6 +229,20 @@ Tests use a fake Copilot. This check makes 3 live Copilot calls on the real GitH
 6. Start a second desktop as the member (`bun run --cwd apps/desktop dev -- --user-data-dir=/tmp/chiefbot-second`), open the project and send: "Can we get dark mode in the settings page?" The coordinator answers that task #1 already covers it. The ledger still shows one task in both desktops.
 7. In the second desktop send: "Mark the dark mode task as in progress." Both desktops show #1 **In progress** without a reload.
 8. In the second desktop the project has no **Delete** button: only the owner deletes. In the first desktop click **Delete** and confirm. The project leaves the sidebar and `docker ps -a` no longer lists `chiefbot-project_…`. Clean up: `rm -rf /tmp/chiefbot-second`.
+
+## Manual check: connectors, the checklist and the call log
+
+Tests use a fake MCP server and a fake Copilot. This check uses the real GitHub MCP server and Atlassian's, and makes 2 live Copilot calls. It needs Docker, the computer image rebuilt with this code (`bun run computer:build`), a project as in the check above, and a Jira site you can sign in to.
+
+1. Commit `connectors: [github, jira]` to the project repo's `chiefbot.project.yaml` and create the project again (control reads the file when the project is made).
+2. Open **Connectors** in the sidebar. The checklist lists **github** and **jira** as **Not defined**. Click **Add preset** on each. Both now say **Connect your own account**, needed by the project.
+3. Click **Connect** on GitHub. A token field opens (GitHub's MCP server has no sign-in control can run). Paste a fine-grained personal access token with read access to the repo and click **Save**. GitHub shows **Ready**.
+4. Click **Connect** on Jira. The browser opens Atlassian's consent page. Approve. The browser shows "Connected to Jira", and within a few seconds the checklist shows **Ready**. If Atlassian refuses the `http://127.0.0.1` callback, note its error: set `CHIEFBOT_PUBLIC_URL` to an https URL that reaches control and retry.
+5. In the project's chat send: "List the open issues of this repo on GitHub and my assigned Jira issues." The reply uses both.
+6. Click **Connector calls** in the project's header. It lists the GitHub and Jira calls, asked by you, as you, with the turn's id.
+7. Check that your GitHub token never reached the coordinator's computer: `docker exec chiefbot-<project id> sh -c 'env | grep -c github_pat_; grep -rl github_pat_ /home/bot 2>/dev/null'` prints `0` and no file.
+8. In a second desktop signed in as a member (as in the check above), open **Connectors**: GitHub and Jira say **Connect your own account**, since your connections are yours alone.
+9. Clean up: delete both connectors as the owner (their tokens go too), and revoke the GitHub token on github.com.
 
 ## Manual check: invite a second GitHub account to a workspace
 
