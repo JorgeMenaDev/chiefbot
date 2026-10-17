@@ -77,3 +77,33 @@ test("a member creates a project from a repo, chats with its coordinator and see
   for (let wait = 0; ledgers.length === 0 && wait < 200; wait++) await Bun.sleep(10);
   expect(ledgers).toEqual([{ projectId: project.id, tasks: ledger }]);
 });
+
+test("a member adds and removes what a project listens to, and sees control's refusals", async () => {
+  const github = startFakeGitHub();
+  const computers = fakeComputers();
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
+  stops.push(github.stop, computers.stopAll, control.stop);
+  const { accessToken, refreshToken } = github.issueTokens();
+  const signIn = await fetch(`${control.url}/sessions`, {
+    method: "POST",
+    body: JSON.stringify({ accessToken, accessTokenExpiresAt: Date.now() + 8 * 3600_000, refreshToken, refreshTokenExpiresAt: 0 }),
+  });
+  const { sessionToken } = SignInResponse.parse(await signIn.json());
+  const headers = { authorization: `Bearer ${sessionToken}` };
+  const team = Workspace.parse(await (await fetch(`${control.url}/workspaces`, { method: "POST", headers, body: '{"name":"Platform team"}' })).json());
+  github.createRepo("octo-org/shop", { "chiefbot.project.yaml": "connectors: [github-actions]\n" });
+  const projects = createProjects({ controlUrl: control.url, session: () => sessionToken, onChat: () => {} });
+  stops.push(projects.disconnect);
+  const project = await projects.create(team.id, "octo-org/shop");
+
+  const added = await projects.subscribe(project.id, { kind: "schedule", prompt: "Triage new bugs", cron: "0 9 * * 1-5", timezone: "Europe/London" });
+  const listed = await projects.subscriptions(project.id);
+  await projects.unsubscribe(project.id, added.id);
+
+  expect(listed).toEqual([added]);
+  expect(added).toMatchObject({ addedBy: "octo-user", events: 0, lastPolledAt: null });
+  expect(await projects.subscriptions(project.id)).toEqual([]);
+  await expect(projects.subscribe(project.id, { kind: "ci-status", connector: "github-actions", branch: "main", intervalSeconds: 300 })).rejects.toThrow(
+    "invalid_subscription",
+  );
+});

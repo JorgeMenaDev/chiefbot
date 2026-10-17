@@ -1,9 +1,12 @@
 import {
   Project,
   SendMessageResponse,
+  Subscription,
   Task,
   type ProjectChatView,
   type ProjectId,
+  type SubscriptionId,
+  type SubscriptionInput,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { foldChat, followChat } from "./chat.ts";
@@ -39,6 +42,15 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
       chats.delete(projectId);
     },
     tasks: async (projectId: ProjectId) => Task.array().parse(await (await call("GET", `/projects/${projectId}/tasks`)).json()),
+
+    // What the project listens to. Adding throws with control's reason (a connector
+    // the project does not declare, a schedule it cannot run).
+    subscriptions: async (projectId: ProjectId) =>
+      Subscription.array().parse(await (await call("GET", `/projects/${projectId}/subscriptions`)).json()),
+    subscribe: async (projectId: ProjectId, input: SubscriptionInput) =>
+      Subscription.parse(await (await call("POST", `/projects/${projectId}/subscriptions`, input)).json()),
+    unsubscribe: async (projectId: ProjectId, subscriptionId: SubscriptionId) =>
+      void (await call("DELETE", `/projects/${projectId}/subscriptions/${subscriptionId}`)),
 
     // Starts following the user's chat with the coordinator. Repeat calls are harmless.
     openChat(projectId: ProjectId) {

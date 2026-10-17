@@ -11,6 +11,7 @@ import {
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { z } from "zod";
 import { ConnectorCalls } from "./Connectors.tsx";
+import { ListeningTo } from "./Subscriptions.tsx";
 
 const ProjectList = z.array(Project);
 const TaskList = z.array(Task);
@@ -82,6 +83,7 @@ export function ProjectPane({ project, workspace, onDeleted }: { project: Projec
   const { commands } = project.file;
   const [error, setError] = useState<string | null>(null);
   const [showCalls, setShowCalls] = useState(false);
+  const [showListening, setShowListening] = useState(false);
   async function remove() {
     setError(null);
     try {
@@ -103,6 +105,7 @@ export function ProjectPane({ project, workspace, onDeleted }: { project: Projec
           {error && <p className="error">{error}</p>}
         </div>
         <div className="actions">
+          <button onClick={() => setShowListening(!showListening)}>{showListening ? "Hide listening" : "Listening to"}</button>
           <button onClick={() => setShowCalls(!showCalls)}>{showCalls ? "Hide connector calls" : "Connector calls"}</button>
           {workspace.role === "owner" && (
             <button className="danger" onClick={() => void remove()}>
@@ -111,6 +114,7 @@ export function ProjectPane({ project, workspace, onDeleted }: { project: Projec
           )}
         </div>
       </header>
+      {showListening && <ListeningTo project={project} />}
       {showCalls && <ConnectorCalls project={project} />}
       <div className="bot-body">
         <CoordinatorChat project={project} />

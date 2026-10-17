@@ -1,4 +1,4 @@
-import type { ConnectorInput, RoutineInput } from "@chiefbot/contracts";
+import type { ConnectorInput, RoutineInput, SubscriptionInput } from "@chiefbot/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 // Subscribes to one main → renderer channel; returns the unsubscribe.
@@ -67,6 +67,10 @@ const api = {
     openChat: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:open-chat", id),
     send: (id: string, text: string): Promise<unknown> => ipcRenderer.invoke("projects:send", id, text),
     onChat: (listener: (view: unknown) => void) => subscribe("projects:chat", listener),
+    // What the project listens to: CI runs, issue queries and schedules.
+    subscriptions: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:subscriptions", id),
+    subscribe: (id: string, input: SubscriptionInput): Promise<unknown> => ipcRenderer.invoke("projects:subscribe", id, input),
+    unsubscribe: (id: string, subscriptionId: string): Promise<void> => ipcRenderer.invoke("projects:unsubscribe", id, subscriptionId),
     // { projectId, tasks } whenever a project's task ledger changes.
     onTasks: (listener: (ledger: unknown) => void) => subscribe("projects:tasks", listener),
   },

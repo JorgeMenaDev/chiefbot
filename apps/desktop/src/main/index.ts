@@ -15,6 +15,8 @@ import {
   RoutineInput,
   SendMessageRequest,
   SetBotModelRequest,
+  SubscriptionId,
+  SubscriptionInput,
   UserId,
   WorkspaceId,
 } from "@chiefbot/contracts";
@@ -187,6 +189,13 @@ ipcMain.handle("projects:open-chat", (_event, id: unknown) => {
 });
 ipcMain.handle("projects:send", (_event, id: unknown, text: unknown) =>
   projects.send(ProjectId.parse(id), SendMessageRequest.parse({ text }).text),
+);
+ipcMain.handle("projects:subscriptions", (_event, id: unknown) => projects.subscriptions(ProjectId.parse(id)));
+ipcMain.handle("projects:subscribe", (_event, id: unknown, input: unknown) =>
+  projects.subscribe(ProjectId.parse(id), SubscriptionInput.parse(input)),
+);
+ipcMain.handle("projects:unsubscribe", (_event, id: unknown, subscriptionId: unknown) =>
+  projects.unsubscribe(ProjectId.parse(id), SubscriptionId.parse(subscriptionId)),
 );
 ipcMain.handle("connectors:list", (_event, workspaceId: unknown) => connectors.list(WorkspaceId.parse(workspaceId)));
 ipcMain.handle("connectors:define", (_event, workspaceId: unknown, input: unknown) =>
