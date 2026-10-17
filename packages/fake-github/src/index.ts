@@ -6,7 +6,8 @@ import { createBareRepo, git, gitHttpBackend } from "./git.ts";
 
 // A fake github.com + api.github.com for tests: the OAuth device flow, the
 // refresh grant, the two API reads control makes, private git repos over smart
-// HTTP, and opening pull requests. One origin serves both hosts' paths.
+// HTTP, opening pull requests, and registering a GitHub App from a manifest
+// (what `bun run setup` does). One origin serves both hosts' paths.
 
 export type FakeGitHubUser = {
   id: number;
@@ -20,19 +21,31 @@ type PollError = "authorization_pending" | "slow_down" | "access_denied" | "expi
 export type FakeGitHubOptions = {
   user?: FakeGitHubUser;
   pollErrors?: PollError[];
+  // The app's Enable Device Flow box is unticked.
+  deviceFlowDisabled?: boolean;
 };
 
 export const defaultFakeUser: FakeGitHubUser = {
   id: 4242,
-  login: "octo-jorge",
+  login: "octo-user",
   copilot: { plan: "individual", sku: "free_limited_copilot" },
 };
 
 const PullRequestBody = z.object({ head: z.string(), base: z.string(), title: z.string(), body: z.string().default("") });
 
+// The part of a GitHub App manifest the fake reads.
+const AppManifest = z.object({
+  name: z.string(),
+  url: z.string(),
+  redirect_url: z.string(),
+  public: z.boolean().default(false),
+  default_permissions: z.record(z.string(), z.string()).default({}),
+});
+export type FakeAppManifest = z.infer<typeof AppManifest>;
+
 export type FakePullRequest = { repository: string; number: number; head: string; base: string; title: string; body: string };
 
-export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: FakeGitHubOptions = {}) {
+export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], deviceFlowDisabled = false }: FakeGitHubOptions = {}) {
   const deviceCode = "fake-device-code";
   const userCode = "ABCD-1234";
   const pending = [...pollErrors];
@@ -47,13 +60,34 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
   const repoRoot = mkdtempSync(join(tmpdir(), "fake-github-repos-"));
   const pullRequests: FakePullRequest[] = [];
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
+  // Every manifest posted to the "new GitHub App" page, and the apps waiting for
+  // their one-time code to be converted.
+  const manifests: FakeAppManifest[] = [];
+  const pendingApps = new Map<string, { manifest: FakeAppManifest; owner: { login: string; type: "User" | "Organization" } }>();
+
+  // Like github.com/settings/apps/new after the user clicks Create GitHub App:
+  // registers the app and redirects to the manifest's redirect_url with a code.
+  async function registerApp(req: Request, owner: { login: string; type: "User" | "Organization" }) {
+    const form = new URLSearchParams(await req.text());
+    const manifest = AppManifest.parse(JSON.parse(form.get("manifest") ?? ""));
+    manifests.push(manifest);
+    const code = `fake-manifest-code-${manifests.length}`;
+    pendingApps.set(code, { manifest, owner });
+    const redirect = new URL(manifest.redirect_url);
+    redirect.searchParams.set("code", code);
+    const state = new URL(req.url).searchParams.get("state");
+    if (state !== null) redirect.searchParams.set("state", state);
+    return Response.redirect(redirect.toString(), 302);
+  }
 
   const server = Bun.serve({
     port: 0,
     routes: {
       "/login/device/code": {
         POST: () =>
-          Response.json({
+          deviceFlowDisabled
+            ? Response.json({ error: "device_flow_disabled", error_description: "Device Flow must be explicitly enabled for this App" }, { status: 400 })
+            : Response.json({
             device_code: deviceCode,
             user_code: userCode,
             verification_uri: "https://github.com/login/device",
@@ -77,6 +111,35 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
           if (error === "slow_down") return Response.json({ error, interval: 10 });
           if (error) return Response.json({ error });
           return tokenResponse();
+        },
+      },
+      "/settings/apps/new": { POST: (req) => registerApp(req, { login: user.login, type: "User" }) },
+      "/organizations/:org/settings/apps/new": {
+        POST: (req) => registerApp(req, { login: req.params.org, type: "Organization" }),
+      },
+      // Like GitHub: each code converts once, into the app's id, client ID and secrets.
+      "/app-manifests/:code/conversions": {
+        POST: (req) => {
+          const pending = pendingApps.get(req.params.code);
+          if (!pending) return Response.json({ message: "Not Found" }, { status: 404 });
+          pendingApps.delete(req.params.code);
+          const id = 1000 + manifests.indexOf(pending.manifest);
+          const slug = pending.manifest.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+          return Response.json(
+            {
+              id,
+              slug,
+              name: pending.manifest.name,
+              owner: pending.owner,
+              html_url: `${new URL(req.url).origin}/apps/${slug}`,
+              client_id: `Iv-fake-client-${id}`,
+              client_secret: `fake-client-secret-${id}`,
+              webhook_secret: null,
+              pem: `fake-private-key-${id}`,
+              permissions: pending.manifest.default_permissions,
+            },
+            { status: 201 },
+          );
         },
       },
       "/user": {
@@ -167,6 +230,8 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [] }: Fak
     issueTokens,
     revoke,
     pullRequests,
+    // Manifests posted to the "new GitHub App" page, oldest first.
+    manifests,
     // A private repo at <url>/<fullName>.git with one commit on main.
     createRepo: (fullName: string, files: Record<string, string>) => void createBareRepo(repoRoot, fullName, files),
     // Runs git in the repo's bare copy, e.g. to read what a push left there.

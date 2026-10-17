@@ -13,6 +13,7 @@
       "name": "@chiefbot/control",
       "dependencies": {
         "@chiefbot/contracts": "workspace:*",
+        "@chiefbot/setup": "workspace:*",
         "@google-cloud/compute": "^7.8.0",
         "@google-cloud/secret-manager": "^7.2.0",
         "croner": "10.0.1",
@@ -27,6 +28,7 @@
       "name": "@chiefbot/desktop",
       "dependencies": {
         "@chiefbot/contracts": "workspace:*",
+        "@chiefbot/setup": "workspace:*",
         "@novnc/novnc": "^1.7.0",
         "react": "^19.3.1",
         "react-dom": "^19.3.1",
@@ -62,6 +64,16 @@
       "name": "@chiefbot/fake-github",
       "dependencies": {
         "zod": "^4.6.7",
+      },
+    },
+    "packages/setup": {
+      "name": "@chiefbot/setup",
+      "dependencies": {
+        "@chiefbot/contracts": "workspace:*",
+        "zod": "^4.6.7",
+      },
+      "devDependencies": {
+        "@chiefbot/fake-github": "workspace:*",
       },
     },
   },
@@ -112,6 +124,8 @@
     "@chiefbot/desktop": ["@chiefbot/desktop@workspace:apps/desktop"],
 
     "@chiefbot/fake-github": ["@chiefbot/fake-github@workspace:packages/fake-github"],
+
+    "@chiefbot/setup": ["@chiefbot/setup@workspace:packages/setup"],
 
     "@chiefbot/worker": ["@chiefbot/worker@workspace:apps/worker"],
 
