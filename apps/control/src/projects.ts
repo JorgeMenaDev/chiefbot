@@ -307,6 +307,13 @@ export function projectHost({
       schedule(projectId);
     },
 
+    // Call after queueing a turn in the store directly (a subscription's event):
+    // the member's chat shows it, and the scheduler picks it up.
+    queued(projectId: ProjectId, userId: UserId, event: ChatEvent) {
+      publishChat(projectId, { userId, event });
+      schedule(projectId);
+    },
+
     open(ws: Socket, data: ProjectSocketData) {
       if (data.kind === "project-chat") {
         // Subscribe first: nothing can be published between these two lines.

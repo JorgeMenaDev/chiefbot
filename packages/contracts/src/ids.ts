@@ -34,3 +34,7 @@ export type ProjectId = z.infer<typeof ProjectId>;
 // One request a person's chief of staff handed to a project.
 export const HandoffId = z.string().min(1).brand<"HandoffId">();
 export type HandoffId = z.infer<typeof HandoffId>;
+
+// Something a project listens to: CI runs, an issue query or a schedule.
+export const SubscriptionId = z.string().min(1).brand<"SubscriptionId">();
+export type SubscriptionId = z.infer<typeof SubscriptionId>;

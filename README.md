@@ -76,6 +76,8 @@ Each project gets one computer from the `ComputerProvider` (`chiefbot-<project i
 
 **Connectors** are MCP servers a workspace defines once (GitHub, GitHub Actions and Jira are presets). A project's agents get only the connectors its `chiefbot.project.yaml` declares, each call running as the workspace's service credential or as the member who asked, and every call is logged. Each member's **Connectors** screen is their access checklist: what their projects need minus what they have connected. See `docs/connectors.md`.
 
+**Subscriptions.** A project can listen to events: CI runs failing on a branch, new or updated results of an issue-tracker query, and schedules. Open **Listening to** in a project's header to add or remove them; any member can. Control polls CI and issue queries itself, every few minutes (5 by default, 1 at least), through a remote connector the project declares: GitHub Actions' `actions_list` for CI, GitHub's `search_issues` or Jira's `searchJiraIssuesUsingJql` for issues. Each poll runs as the workspace's credential, or for a personal connector as the member who added the subscription, and shows in **Connector calls**. A schedule is a prompt with a cron expression, run like a routine. Each event has a stable id (a CI run and its conclusion, an issue and when it was updated, a due time), stored in control, so it becomes exactly one task in the ledger and one message to the coordinator in the adding member's chat, even across control restarts. The first poll only notes what is already there. A subscription whose member leaves the workspace pauses.
+
 **Handoffs.** Your own bot is also your chief of staff: it can hand work to a project of any workspace you belong to, and it never sees other projects. It has three tools, served by control (`POST /worker/<bot id>/chief-tools`): `list_projects`, `send_to_project` (a title, the request and an acceptance condition: how you will know it is done) and `handoff_status`. Sending creates a handoff record in control (who asked, the project, the request, the acceptance condition, the linked task) and a task in the project's ledger, asked by you. The coordinator gets it as a message in your own chat with it, through the project's scheduler, so it runs on your Copilot seat like any message of yours, queued behind one you already sent. The chief only starts and watches: the coordinator plans the work and manages its workers. A handoff's status is its task's status in the ledger. Whenever that task becomes **needs input** or **done**, control posts one notice in the chief's chat ("shop needs your input on … Answer in the project's chat", or "shop finished …" with the task's links). A repeat of the same status posts nothing; a task that goes back to in progress and needs input again posts again. If you leave the workspace, your chief sees and hears nothing more of its handoffs there.
 
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
@@ -292,6 +294,19 @@ Tests use a fake Copilot. This check makes 5 live Copilot calls on the real GitH
 5. In the project chat send: "Mark task #1 done." The bot's chat shows a second notice: the project finished task #1.
 6. In the bot's chat send: "How is the dark mode handoff going?" The chat shows `handoff_status` and a reply saying it is done.
 7. Restart control and the desktop. Both notices are still in the bot's chat. Clean up: delete the project and the bot.
+
+## Manual check: a project listens to CI and an issue query
+
+Tests use a fake MCP server, a fake clock and a fake Copilot. This check polls the real GitHub MCP server and makes about 3 live Copilot calls (one per event). It needs Docker, the computer image rebuilt with this code (`bun run computer:build`), and a repo with a GitHub Actions workflow you can make fail.
+
+1. Commit `connectors: [github, github-actions]` to the repo's `chiefbot.project.yaml`, create the project, add both presets on **Connectors** and connect a fine-grained personal access token with read access to the repo's actions, issues and metadata to each.
+2. Open the project and click **Listening to**. Add **CI failures on a branch**: connector `github-actions`, branch `main`, every 1 min. Add **An issue query**: connector `github`, query `repo:<owner>/<repo> is:issue is:open label:chiefbot-test`, every 1 min. Add **A schedule**: "Post a one-line status note", cron two minutes from now, your timezone.
+3. Within a minute both polls show "checked …" and "as <your login>", with no error. No task appears: the first poll only notes what is there.
+4. Push a commit that makes the workflow fail on `main`. Within a minute of the run finishing, **Tasks** shows "CI failed on main: …" linking the run, and your chat shows the subscription's message about that task and the coordinator's reply.
+5. Open an issue with the label `chiefbot-test`. Within a minute a task "Issue #…" appears with one message. Edit the issue's title: one more task appears. Nothing else repeats.
+6. At the schedule's due time, a task "Scheduled: Post a one-line status note" and its message appear.
+7. Restart control. After two more minutes the ledger has no duplicates. **Connector calls** lists `actions_list` and `search_issues` calls, as you, with the subscription's id as the run.
+8. Clean up: remove the three subscriptions, delete the project, the issue and the failing commit, and revoke the token.
 
 ## Manual check: invite a second GitHub account to a workspace
 

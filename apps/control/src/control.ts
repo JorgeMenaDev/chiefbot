@@ -41,6 +41,7 @@ import { nextDueAt } from "./schedule.ts";
 import { connectorHost } from "./connectors/connectors.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
+import { subscriptionHost } from "./subscriptions.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
@@ -139,6 +140,8 @@ type SocketData =
 //   …      /workspaces/:id/connectors, /workspaces/:id/checklist, /connectors/oauth/callback,
 //          /coordinator/:projectId/mcp  connectors, the access checklist and the MCP proxy
 //                             (connectors/connectors.ts)
+//   …      /projects/:id/subscriptions  what a project listens to: CI runs, issue queries and
+//                             schedules, each event handled once (subscriptions.ts)
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff: handing work to
 //                             projects and watching it (handoffs.ts)
 //
@@ -226,6 +229,8 @@ export function startControl({
   });
   // Chiefs of staff handing work to projects (handoffs.ts).
   const chiefs = chiefHost({ store, projects });
+  // What projects listen to: polled CI runs and issue queries, and schedules (subscriptions.ts).
+  const subscriptions = subscriptionHost({ store, clock, connectors, projects });
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running, model }) => ({
@@ -317,6 +322,7 @@ export function startControl({
       ...projects.routes,
       ...connectors.routes,
       ...chiefs.routes,
+      ...subscriptions.routes,
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));
@@ -610,6 +616,8 @@ export function startControl({
     },
   });
 
+  subscriptions.start();
+
   // Pending approvals belong to unfinished turns, so those count as busy too.
   const idle = startIdleStop({
     clock,
@@ -627,6 +635,7 @@ export function startControl({
     stop: () => {
       idle.stop();
       scheduler.stop();
+      subscriptions.stop();
       server.stop(true);
       store.close();
       if (tempContext) rmSync(tempContext, { recursive: true, force: true });

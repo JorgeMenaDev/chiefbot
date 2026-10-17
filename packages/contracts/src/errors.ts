@@ -4,14 +4,14 @@ import { z } from "zod";
 //   unauthorized          no session, bot token or project credential, or an unknown one (401)
 //   wrong_bot             a bot token used for another bot, or a project's credential for another project (403)
 //   not_found             no such bot or routine for this user, no such workspace or project among
-//                         theirs, no such invite for them, no such task, or no such project or
-//                         handoff for a chief of staff (404)
+//                         theirs, no such invite for them, no such task or subscription, or no such
+//                         project or handoff for a chief of staff (404)
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
 //   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request
 //                         the body or query failed its schema (400)
-//   invalid_schedule      a routine's cron or timezone control cannot run (400)
+//   invalid_schedule      a routine's or schedule subscription's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
 //   github_rejected_token GitHub refused the sign-in's access token (401)
 //   computer_failed       the bot's (or project's) computer could not be made or started; `message` says why (502)
@@ -40,6 +40,8 @@ import { z } from "zod";
 //   connector_exists      the workspace already has a connector of that name (409)
 //   connector_not_ready   a connector call has no credential: the workspace secret is unset, or the
 //                         member has not connected (403)
+//   invalid_subscription  a subscription failed its schema, or names a connector that is not a remote
+//                         one the project declares; `message` says why (400)
 //   expected_websocket    a WebSocket route got a plain request (400)
 export const ApiErrorCode = z.enum([
   "unauthorized",
@@ -80,6 +82,7 @@ export const ApiErrorCode = z.enum([
   "invalid_connector",
   "connector_exists",
   "connector_not_ready",
+  "invalid_subscription",
   "expected_websocket",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;

@@ -17,6 +17,7 @@ import {
 import { z } from "zod";
 import { apiError, bearer, unauthorized } from "../http.ts";
 import type { SecretStore } from "../secrets/secretStore.ts";
+import { openMcpSession } from "./mcpClient.ts";
 import { finishSignIn, PersonalCredential, refreshed, startSignIn, type PendingSignIn } from "./mcpOAuth.ts";
 import type { openStore } from "../store.ts";
 
@@ -186,6 +187,27 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
     return new Response(upstream.body, { status: upstream.status, headers: pick(upstream.headers, ["content-type", "mcp-session-id"]) });
   }
 
+  // Control's own MCP session with a remote connector the project declares, for
+  // subscription polls: as the workspace's credential, or as `userId` for a
+  // personal connector. Each tool call is logged with `userId` as the requester
+  // and `run` (the subscription) as the run. Throws with why it cannot connect.
+  async function controlSession(projectId: ProjectId, name: string, userId: UserId, run: string) {
+    const connector = declared(projectId, name);
+    if (connector?.server.kind !== "remote") throw new Error(`The project declares no remote connector ${name}.`);
+    const credential = await credentialFor(connector, userId);
+    const login = store.user(userId).login;
+    if (!credential) throw new Error(`${name} has no credential for ${login} yet: see the checklist.`);
+    const session = await openMcpSession(connector.server.url, credential.token);
+    return {
+      identity: credential.identity,
+      listTools: session.listTools,
+      callTool(tool: string, args: Record<string, unknown>) {
+        connectors.logCall(projectId, { connector: name, tool, requester: login, identity: credential.identity, run });
+        return session.callTool(tool, args);
+      },
+    };
+  }
+
   const routes = {
     "/coordinator/:projectId/mcp/:name": { GET: proxy, POST: proxy, DELETE: proxy },
     "/coordinator/:projectId/connector-calls": {
@@ -297,7 +319,7 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
     connectors.link(workspaceId, name, userId, via);
   }
 
-  return { routes, agentConnectors };
+  return { routes, agentConnectors, controlSession };
 }
 
 // The tools a JSON-RPC message (or batch) calls: each tools/call's tool name.

@@ -1,12 +1,17 @@
 import { createHash } from "node:crypto";
 
 // A fake remote MCP server for tests: Streamable HTTP at /mcp, answering JSON
-// (never SSE), with one tool, `list_issues`. With `oauth`, it also is its own
+// (never SSE). Its tools are `tools`, each answering its handler's result as
+// JSON text, or by default one tool, `list_issues`. With `oauth`, it also is its own
 // OAuth authorization server the way the MCP spec describes: protected resource
 // metadata, authorization server metadata with dynamic client registration, an
 // authorize endpoint that approves at once, and a token endpoint with PKCE and
 // refresh. Its access tokens last `accessTokenSeconds`.
-export function startFakeMcpServer({ oauth = false, accessTokenSeconds = 3600 }: { oauth?: boolean; accessTokenSeconds?: number } = {}) {
+export function startFakeMcpServer({
+  oauth = false,
+  accessTokenSeconds = 3600,
+  tools,
+}: { oauth?: boolean; accessTokenSeconds?: number; tools?: Record<string, (args: Record<string, unknown>) => unknown> } = {}) {
   // Every tools/call, with the Authorization header it came with.
   const calls: Array<{ tool: string; authorization: string | null }> = [];
   // Every JSON-RPC method received, in order.
@@ -42,17 +47,20 @@ export function startFakeMcpServer({ oauth = false, accessTokenSeconds = 3600 }:
             headers: { "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"` },
           });
         }
-        const message = (await req.json()) as { id?: number; method: string; params?: { name?: string } };
+        const message = (await req.json()) as { id?: number; method: string; params?: { name?: string; arguments?: Record<string, unknown> } };
         methods.push(message.method);
         if (message.id === undefined) return new Response(null, { status: 202 });
         const answer = (result: unknown) => Response.json({ jsonrpc: "2.0", id: message.id, result }, { headers: { "mcp-session-id": "fake-session" } });
         if (message.method === "initialize") {
           return answer({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "1" } });
         }
-        if (message.method === "tools/list") return answer({ tools: [{ name: "list_issues", inputSchema: { type: "object" } }] });
+        const names = tools ? Object.keys(tools) : ["list_issues"];
+        if (message.method === "tools/list") return answer({ tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
         const tool = message.params?.name ?? "";
         calls.push({ tool, authorization });
-        return answer({ content: [{ type: "text", text: `${tool} ran` }] });
+        const handler = tools?.[tool];
+        if (!handler) return answer({ content: [{ type: "text", text: `${tool} ran` }] });
+        return answer({ content: [{ type: "text", text: JSON.stringify(handler(message.params?.arguments ?? {})) }] });
       }
       if (!oauth) return new Response("not found", { status: 404 });
       switch (url.pathname) {
