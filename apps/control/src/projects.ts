@@ -400,7 +400,7 @@ export function projectHost({
     // queued turns go and their running one ends, so the next one runs.
     memberRemoved(workspaceId: WorkspaceId, userId: UserId) {
       for (const project of projects.projectsIn(workspaceId)) {
-        for (const ws of chatSockets.get(chatTopic(project.id, userId)) ?? []) ws.close(4003, "removed");
+        for (const ws of [...(chatSockets.get(chatTopic(project.id, userId)) ?? [])]) ws.close(4003, "removed");
       }
       const ended = projects.dropMember(workspaceId, userId);
       for (const { projectId, event } of ended) {
