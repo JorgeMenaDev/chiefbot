@@ -75,4 +75,3 @@ Any other MCP server works the same way: a remote URL with an auth type and a sc
 - A pending OAuth sign-in lives in control's memory for ten minutes: after a control restart, click **Connect** again.
 - Removing a member from a workspace leaves their connector secrets in the `SecretStore` until the connector is deleted.
 - Subscriptions (README, **Subscriptions**) poll only remote connectors: control calls them itself, as the workspace's credential or the adding member's own, and logs each call with the subscription's id as the run.
-- Workers (one task, one throwaway computer) get connectors the same way once they exist: `connectorServers` in `apps/worker` builds the SDK config.

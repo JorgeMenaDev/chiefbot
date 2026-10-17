@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { agentEnv, coordinatorSessionConfig } from "./copilotSdk.ts";
+import { agentEnv, coordinatorSessionConfig, workerSessionConfig } from "./copilotSdk.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
 
 test("the agent's shell gets no GitHub token and no bot or task worker credential, so gh and the broker are out of reach", () => {
@@ -58,6 +58,24 @@ test("a coordinator session with connectors also gets their MCP servers' tools, 
   await config.hooks?.onPreMcpToolCall(call);
 
   expect(config.availableTools.at(-1)).toBe("mcp:*");
+  expect(Object.keys(config.mcpServers ?? {})).toEqual(["jira"]);
+  expect(reported).toEqual(["jira/search"]);
+});
+
+test("a worker session gets its connectors' MCP servers and reports each call", async () => {
+  const reported: string[] = [];
+  const config = workerSessionConfig("/home/bot/workspace")({
+    sessionId: "worker_1",
+    auth: { kind: "seat", gitHubTokenProvider: async () => ({ kind: "token", accessToken: "gho_a", expiresIn: 3600 }) },
+    onPermissionRequest: async () => ({ kind: "reject" }),
+    tools: [],
+    mcpServers: { jira: { type: "http", url: "http://control/task-worker/worker_1/mcp/jira", tools: ["*"] } },
+    onMcpCall: async (server, tool) => void reported.push(`${server}/${tool}`),
+  });
+  const call = { sessionId: "s", timestamp: new Date(), workingDirectory: "/", serverName: "jira", toolName: "search", arguments: {} };
+  await config.hooks?.onPreMcpToolCall?.(call);
+
+  expect(config.workingDirectory).toBe("/home/bot/workspace");
   expect(Object.keys(config.mcpServers ?? {})).toEqual(["jira"]);
   expect(reported).toEqual(["jira/search"]);
 });

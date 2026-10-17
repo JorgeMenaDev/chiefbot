@@ -1,4 +1,4 @@
-import { CopilotClient, type CopilotClientOptions, type ResumeSessionConfig, type SessionHooks } from "@github/copilot-sdk";
+import { CopilotClient, type CopilotClientOptions, type MCPServerConfig, type ResumeSessionConfig, type SessionHooks } from "@github/copilot-sdk";
 import type { BotSession, Copilot } from "./copilot.ts";
 
 // The real Copilot SDK in copilot-cli mode: the bundled runtime runs in the bot
@@ -13,10 +13,22 @@ import type { BotSession, Copilot } from "./copilot.ts";
 export function copilotSdk({ workingDirectory, gitConfig }: { workingDirectory: string; gitConfig: Record<string, string> }): Copilot {
   return sdkCopilot(
     { mode: "copilot-cli", workingDirectory, useLoggedInUser: false, env: { ...agentEnv(process.env), ...gitConfig } },
-    // No model here: the worker sets the bot's model before each turn that needs it.
-    ({ onPermissionRequest, tools }) => ({ workingDirectory, streaming: true, onPermissionRequest, tools }),
+    workerSessionConfig(workingDirectory),
   );
 }
+
+// A bot's or task worker's session config: the runtime's full tool set, its
+// custom tools and its connectors' MCP servers. No model here: the worker sets
+// the bot's model before each turn that needs it.
+export const workerSessionConfig =
+  (workingDirectory: string) =>
+  ({ onPermissionRequest, tools, mcpServers, onMcpCall }: Parameters<Copilot["openSession"]>[0]) => ({
+    workingDirectory,
+    streaming: true,
+    onPermissionRequest,
+    tools,
+    ...connectorConfig(mcpServers, onMcpCall),
+  });
 
 // Tokens the agent's shell is not handed: a GitHub token would let gh or curl
 // write to repos without control's approval. The bot's (or task worker's) credential is withheld too,
@@ -50,9 +62,16 @@ export function coordinatorSessionConfig({
     tools,
     streaming: true,
     availableTools: [...tools.map(({ name }) => `custom:${name}`), ...(hasMcp ? ["mcp:*"] : [])],
-    ...(hasMcp ? { mcpServers } : {}),
-    ...(onMcpCall ? { hooks: { onPreMcpToolCall: async ({ serverName, toolName }) => void (await onMcpCall(serverName, toolName)) } satisfies SessionHooks } : {}),
+    ...connectorConfig(mcpServers, onMcpCall),
     ...(instructions === undefined ? {} : { systemMessage: { mode: "append" as const, content: instructions } }),
+  };
+}
+
+// A session's connectors: their MCP servers, and `onMcpCall` before each of their tool calls.
+function connectorConfig(mcpServers: Record<string, MCPServerConfig> = {}, onMcpCall?: (serverName: string, toolName: string) => Promise<void>) {
+  return {
+    ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
+    ...(onMcpCall ? { hooks: { onPreMcpToolCall: async ({ serverName, toolName }) => void (await onMcpCall(serverName, toolName)) } satisfies SessionHooks } : {}),
   };
 }
 
