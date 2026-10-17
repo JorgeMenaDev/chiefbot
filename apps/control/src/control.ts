@@ -27,7 +27,7 @@ import {
   type User,
   type UserId,
 } from "@chiefbot/contracts";
-import { systemClock, type Clock } from "./clock.ts";
+import { systemClock, type Clock } from "@chiefbot/worker/clock";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";

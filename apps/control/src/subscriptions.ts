@@ -1,6 +1,6 @@
 import { SubscriptionInput, type Project, type Subscription, type SubscriptionId, type User } from "@chiefbot/contracts";
 import { z } from "zod";
-import type { Clock } from "./clock.ts";
+import type { Clock } from "@chiefbot/worker/clock";
 import type { connectorHost } from "./connectors/connectors.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import type { projectHost } from "./projects.ts";

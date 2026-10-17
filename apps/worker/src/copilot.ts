@@ -38,6 +38,8 @@ export type BotSession = {
   on(handler: (event: SessionEvent) => void): () => void;
   // Starts a turn. Its events follow through on(), ending with session.idle.
   send(prompt: string): Promise<unknown>;
+  // Cuts the running turn short. The conversation is kept.
+  abort(): Promise<void>;
   // Runs the next turns on `model`. The conversation is kept.
   setModel(model: string): Promise<void>;
   // Lists models with the session's own auth, so for the bot owner's plan.

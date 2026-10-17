@@ -22,7 +22,7 @@ import {
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import type { controlApprovals } from "./approvals.ts";
-import type { Clock } from "./clock.ts";
+import type { Clock } from "@chiefbot/worker/clock";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
@@ -32,11 +32,6 @@ import type { openStore } from "./store.ts";
 // A task worker's WebSocket: the worker of exactly one task worker, the turn it
 // runs and the member who asked for it.
 export type TaskWorkerSocketData = { kind: "task-worker"; workerId: TaskWorkerId; turnId: TurnId; userId: UserId };
-
-// An organization's installation token lasts an hour and is renewed only between
-// turns, but a task is one turn: control fails a task the organization pays for
-// once it has run this long, before its token runs out mid-turn.
-export const orgTaskLimitMs = 50 * 60_000;
 
 // The coordinator's worker tools.
 export type WorkerToolCall = Extract<CoordinatorToolCall, { tool: "dispatch_worker" | "worker_status" | "worker_transcript" | "stop_worker" }>;
@@ -286,8 +281,8 @@ export function taskWorkerHost({
   }
 
   // Starts the worker's task, once: on the Copilot of whoever pays for the
-  // member who asked, with the connectors ready for them. A task the
-  // organization pays for fails after orgTaskLimitMs (not across a control restart).
+  // member who asked, with the connectors ready for them. On the organization's
+  // Copilot the worker renews its one-hour token mid-task (installationSession.ts).
   async function startTask(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId) {
     const run = payerOf({ kind: "project", projectId, askerId: userId });
     const started = run && workers.startTurn(workerId, run.payer);
@@ -295,13 +290,6 @@ export function taskWorkerHost({
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
     send(workerId, { type: "run-task", turnId: started.turnId, text: started.prompt, payer: run.payer, connectors });
-    if (run.payer.kind !== "org") return;
-    clock.setTimeout(() => {
-      const ended = workers.end(workerId, "failed", "The task ran out of time: its organization's one-hour Copilot token cannot be renewed mid-task. Dispatch what is left as a smaller task.");
-      if (ended.length === 0) return;
-      turnOver(workerId, started.turnId);
-      publish(projectId);
-    }, orgTaskLimitMs);
   }
 
   // The worker whose credential the request carries, if it is :workerId's; 401 or 403 otherwise.

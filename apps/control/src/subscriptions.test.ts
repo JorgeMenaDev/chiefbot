@@ -11,7 +11,7 @@ import {
 } from "@chiefbot/contracts";
 import type { z } from "zod";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
-import { fakeClock } from "./clock.ts";
+import { fakeClock } from "@chiefbot/worker/clock";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestUser } from "./testControl.ts";

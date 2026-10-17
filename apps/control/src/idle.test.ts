@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ApiError, Routine } from "@chiefbot/contracts";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { tmpdir } from "node:os";
-import { fakeClock } from "./clock.ts";
+import { fakeClock } from "@chiefbot/worker/clock";
 import { cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
 
 afterEach(cleanUp);

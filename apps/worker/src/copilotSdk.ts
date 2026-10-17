@@ -111,6 +111,7 @@ function bound(session: Awaited<ReturnType<typeof openOn>>): Omit<BotSession, "d
   return {
     on: (handler) => session.on(handler),
     send: (prompt) => session.send(prompt),
+    abort: () => session.abort(),
     setModel: (model) => session.setModel(model),
     rpc: session.rpc,
   };

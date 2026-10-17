@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ApiError, BrokeredGitHubToken, ClientEvent, ContextFile, Project, Task, User, Workspace, WorkspaceInvite, type ChatEvent, type ProjectId } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
-import { fakeClock } from "./clock.ts";
+import { fakeClock } from "@chiefbot/worker/clock";
 import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 afterEach(cleanUp);

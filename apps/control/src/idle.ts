@@ -1,4 +1,4 @@
-import type { Clock } from "./clock.ts";
+import type { Clock } from "@chiefbot/worker/clock";
 
 // How often control looks for idle computers.
 export const IDLE_POLL_MS = 60_000;

@@ -41,6 +41,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const tokens: string[] = [];
   // Ids of every session disconnected, in order.
   const closed: string[] = [];
+  // Ids of every session whose running turn was aborted, in order.
+  const aborted: string[] = [];
   // Ids of every session opened, in order (a resume counts again).
   const sessionIds: string[] = [];
   // Each opened session's MCP servers, in the order sessions opened.
@@ -107,6 +109,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
         return { approved: true, exitCode, output: stdout + stderr };
       }
       let model = "default";
+      // Bumped by abort: a script of an earlier turn publishes nothing more.
+      let turn = 0;
       const session: BotSession = {
         on(handler) {
           handlers.add(handler);
@@ -114,11 +118,19 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
         },
         async send(prompt) {
           sends.push({ sessionId, prompt, model });
+          const mine = ++turn;
           // Like the SDK: send returns once the message is admitted; events follow.
           void (async () => {
-            for await (const event of fake.script(prompt, runtime)) publish(event);
+            for await (const event of fake.script(prompt, runtime)) {
+              if (turn !== mine) return;
+              publish(event);
+            }
           })();
           return "user-msg";
+        },
+        async abort() {
+          turn++;
+          aborted.push(sessionId);
         },
         async setModel(next) {
           model = next;
@@ -133,7 +145,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
     },
   };
 
-  const fake = { copilot, tokens, closed, sessionIds, mcpServers, sends, script, shell };
+  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, sends, script, shell };
   return fake;
 }
 

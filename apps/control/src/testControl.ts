@@ -4,7 +4,7 @@ import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Clock } from "./clock.ts";
+import type { Clock } from "@chiefbot/worker/clock";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";

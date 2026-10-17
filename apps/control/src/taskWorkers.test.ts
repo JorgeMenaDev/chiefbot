@@ -6,9 +6,8 @@ import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fakeClock } from "./clock.ts";
+import { fakeClock } from "@chiefbot/worker/clock";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
-import { orgTaskLimitMs } from "./taskWorkers.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 // A project's workers end to end: the coordinator (fake Copilot) dispatches a
@@ -524,11 +523,9 @@ test("a member removed mid-turn: their coordinator turn ends, nothing is minted 
   expect(token.status).toBe(404);
 });
 
-test("when the organization pays, a worker runs on its installation token and fails before the token's hour runs out", async () => {
-  const time = fakeClock(Date.now());
+test("when the organization pays, a worker runs on its installation token", async () => {
   let minted = 0;
   const control = await teamProject({
-    clock: time.clock,
     copilotTokens: async (repo) => ({ token: `ghs_org_${++minted}`, expiresAt: Date.now() + 3600_000, account: repo.split("/")[0] ?? repo }),
   });
   const { owner, workspace, project, copilot } = control;
@@ -541,11 +538,4 @@ test("when the organization pays, a worker runs on its installation token and fa
   await eventually(() => copilot.sends.some(({ sessionId }) => sessionId === id));
   // The coordinator's session took the first token, the worker's the second.
   expect(copilot.tokens).toEqual(["ghs_org_1", "ghs_org_2"]);
-
-  time.advance(orgTaskLimitMs);
-
-  expect(await workerWhen(owner, project, id, ({ state }) => state === "failed")).toMatchObject({
-    result: "The task ran out of time: its organization's one-hour Copilot token cannot be renewed mid-task. Dispatch what is left as a smaller task.",
-  });
-  await eventually(async () => (await control.computers.provider.status(id)) === "stopped");
 });

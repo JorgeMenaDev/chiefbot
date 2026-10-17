@@ -1,5 +1,5 @@
 import type { BotId, RoutineRun, TurnId, TurnRefusal, UserId } from "@chiefbot/contracts";
-import type { Clock } from "./clock.ts";
+import type { Clock } from "@chiefbot/worker/clock";
 import type { openStore } from "./store.ts";
 
 // How often the scheduler looks for due routines.
