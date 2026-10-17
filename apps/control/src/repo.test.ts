@@ -212,7 +212,7 @@ test("the bot may clone only what its owner can see, and push only where the own
   expect(results.map((r) => r.exitCode === 0)).toEqual([false, true, false, false]);
   expect(results[0]?.output).toContain("someone/secret was not found, or your GitHub account cannot see it.");
   expect(results[2]?.output).toContain("Your GitHub account cannot push to octo/read-only.");
-  expect(results[3]?.output).toContain("Install your Chiefbot GitHub App on octo/no-app");
+  expect(results[3]?.output).toContain("Install your Chiefbot repo app on octo/no-app");
   expect(approvalIds(chat.events)).toEqual([]);
   expect(github.pushes).toEqual([]);
 });

@@ -156,7 +156,7 @@ function notInstalled(fullName: string): Refusal {
   return {
     error: "app_not_installed",
     status: 403,
-    message: `Install your Chiefbot GitHub App on ${fullName}: control reaches only the repositories it is installed on.`,
+    message: `Install your Chiefbot repo app on ${fullName}: control reaches only the repositories it is installed on.`,
   };
 }
 

@@ -71,11 +71,11 @@ export type FakeRepoAccess = "read" | "write";
 export type FakeRepoOptions = {
   // Each login's access. Default: the fake's user may write.
   access?: Record<string, FakeRepoAccess>;
-  // Whether the deployer's GitHub App is installed on it. Default true.
+  // Whether the deployer's repo app is installed on it. Default true.
   installed?: boolean;
 };
 
-// The deployer's GitHub App (what `bun run setup` saved): one key pair for every fake.
+// The deployer's repo app (what `bun run setup` saved): one key pair for every fake.
 const appKeys = generateKeyPairSync("rsa", {
   modulusLength: 2048,
   publicKeyEncoding: { type: "spki", format: "pem" },

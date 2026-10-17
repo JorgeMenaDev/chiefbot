@@ -52,11 +52,11 @@ You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (
    gcloud config set project chiefbot-poc-2611
    ```
 
-2. **Fill in the Terraform variables.** Create `infra/gcp/terraform.tfvars` (git-ignored). Set `budget_currency` to the billing account's currency (shown in the Console under Billing): a budget in the wrong currency fails. `github_client_id` is your GitHub App's client ID: run `bun run setup` first (README quickstart) and copy `githubApp.clientId` from `~/.chiefbot/config.json`.
+2. **Fill in the Terraform variables.** Create `infra/gcp/terraform.tfvars` (git-ignored). Set `budget_currency` to the billing account's currency (shown in the Console under Billing): a budget in the wrong currency fails. `github_client_id` is your sign-in app's client ID: run `bun run setup` first (README quickstart) and copy `signIn.app.clientId` from `~/.chiefbot/config.json` (`signIn.clientId` for the OAuth App fallback).
 
    ```hcl
    project_id         = "chiefbot-poc-2611"
-   github_client_id   = "<YOUR_GITHUB_APP_CLIENT_ID>"
+   github_client_id   = "<YOUR_SIGN_IN_APP_CLIENT_ID>"
    billing_account_id = "<BILLING_ACCOUNT_ID>"
    budget_currency    = "GBP"
    monthly_budget     = 80
@@ -77,7 +77,7 @@ You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (
 
    The control VM boots and retries its image every 10 seconds until step 5 pushes it.
 
-   Then copy your GitHub App's config and private key to control's data disk, where control reads them (`CHIEFBOT_HOME=/data/chiefbot`). Control mints the app's installation tokens with the key to reach repos for bots. Without them control stops with "Run `bun run setup`".
+   Then copy your apps' config and the repo app's private key to control's data disk, where control reads them (`CHIEFBOT_HOME=/data/chiefbot`). Control mints the repo app's installation tokens with the key to reach repos for bots. Without them control stops with "Run `bun run setup`".
 
    ```bash
    gcloud compute scp ~/.chiefbot/config.json ~/.chiefbot/github-app-secrets.json chiefbot-control:/tmp/ --zone=europe-west2-a --tunnel-through-iap
