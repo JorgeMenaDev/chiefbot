@@ -11,6 +11,7 @@ import {
   type ApprovalKind,
   type TaskWorkerState,
   type TurnEvent,
+  type WorkspaceId,
 } from "@chiefbot/contracts";
 
 // A project's task workers in control's SQLite: each one's launch record, the
@@ -195,11 +196,16 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         .map(toWorker);
     },
 
-    // The worker a credential belongs to, the member who asked for it and its turn.
+    // The worker a credential belongs to, the member who asked for it and its
+    // turn, while that member is still in the project's workspace: once they
+    // are not, the credential is refused on every route.
     forToken(token: string) {
       const row = db
         .query<{ id: string; project_id: string; user_id: string; turn_id: string }, [string]>(
-          "SELECT id, project_id, user_id, turn_id FROM task_workers WHERE token_hash = ?1",
+          `SELECT task_workers.id, task_workers.project_id, task_workers.user_id, task_workers.turn_id FROM task_workers
+           JOIN projects ON projects.id = task_workers.project_id
+           JOIN workspace_members ON workspace_members.workspace_id = projects.workspace_id AND workspace_members.user_id = task_workers.user_id
+           WHERE task_workers.token_hash = ?1`,
         )
         .get(hash(token));
       return row
@@ -261,6 +267,17 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       db.query("UPDATE task_workers SET computer = 'unwanted', updated_at = ?2 WHERE id = ?1 AND computer = 'wanted'").run(workerId, Date.now());
       return ended;
     }),
+
+    // Workers the member asked for in the workspace's projects that still launch or work.
+    runningFor(workspaceId: WorkspaceId, userId: UserId): Array<{ workerId: TaskWorkerId; projectId: ProjectId }> {
+      return db
+        .query<{ id: string; project_id: string }, [string, string]>(
+          `SELECT id, project_id FROM task_workers WHERE user_id = ?2 AND state IN ('launching', 'working')
+           AND project_id IN (SELECT id FROM projects WHERE workspace_id = ?1)`,
+        )
+        .all(workspaceId, userId)
+        .map((row) => ({ workerId: TaskWorkerId.parse(row.id), projectId: ProjectId.parse(row.project_id) }));
+    },
 
     // Workers of the project still launching or working, e.g. to stop them.
     running(projectId: ProjectId, taskNumber?: number): TaskWorkerId[] {

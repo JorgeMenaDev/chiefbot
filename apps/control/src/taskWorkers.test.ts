@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, ConnectorCall, Project, Task, TaskWorker, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ApiError, ConnectorCall, Project, Task, TaskWorker, User, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -454,6 +454,74 @@ test("a worker's call to a connector tool that may write waits for the member wh
   expect(waiting.pendingApprovals).toEqual([{ approvalId: expect.any(String), kind: "connector", detail: "Tracker: create_issue" }]);
   expect(held).toBe(0);
   expect(upstream.calls).toEqual([{ tool: "create_issue", authorization: "Bearer tracker-guest" }]);
+});
+
+test("a removed member loses everything at once: their project chat closes, their queued turns go, their workers stop and their credentials stop working", async () => {
+  const upstream = startFakeMcpServer();
+  atCleanUp(upstream.stop);
+  const control = await teamProject({}, "connectors: [tracker]\n");
+  const { url, owner, guest, workspace, project, copilot, computers } = control;
+  await owner.api("POST", `/workspaces/${workspace.id}/connectors`, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "none", scope: "" });
+  let release = () => {};
+  let dispatched: unknown = null;
+  copilot.script = async function* (prompt, runtime) {
+    if (isWorker(prompt)) return yield* forever(prompt, runtime);
+    if (prompt === "Hold on") await new Promise<void>((resolve) => (release = resolve));
+    if (prompt === "Fix the typo") {
+      await runtime.tool("create_task", { title: "Fix the typo" });
+      dispatched = await answer(runtime.tool("dispatch_worker", { task: 1 }));
+    }
+    yield sdk.idle();
+  };
+  await ask(guest, project, "Fix the typo");
+  const { id } = TaskWorker.parse(dispatched);
+  await workerWhen(owner, project, id, ({ state }) => state === "working");
+  const workerAuth = { authorization: `Bearer ${computers.computers.get(id)?.spec.env.CHIEFBOT_TASK_WORKER_TOKEN}` };
+  // The owner's turn runs; octo-friend's next message waits behind it.
+  await owner.api("POST", `/projects/${project.id}/messages`, { text: "Hold on" });
+  await eventually(() => copilot.sends.some(({ prompt }) => prompt === "Hold on"));
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "Queued" });
+  const guestChat = new WebSocket(`${url.replace("http", "ws")}/projects/${project.id}/chat`, { headers: guest.auth });
+  atCleanUp(() => guestChat.close());
+  await new Promise((resolve) => (guestChat.onopen = resolve));
+  const chatClosed = new Promise((resolve) => (guestChat.onclose = resolve));
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+
+  expect((await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`)).status).toBe(204);
+
+  await chatClosed;
+  expect(await workerWhen(owner, project, id, ({ computerRemoved }) => computerRemoved)).toMatchObject({ state: "stopped" });
+  const refused = await Promise.all([
+    fetch(`${url}/task-worker/${id}/github-token`, { headers: workerAuth }),
+    fetch(`${url}/task-worker/${id}/mcp/tracker`, { method: "POST", headers: workerAuth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }),
+    fetch(`${url}/task-worker/${id}/pull-requests`, { method: "POST", headers: workerAuth, body: "{}" }),
+  ]);
+  expect(refused.map(({ status }) => status)).toEqual([401, 401, 401]);
+  release();
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  await Bun.sleep(50);
+  expect(copilot.sends.map(({ prompt }) => prompt).filter((prompt) => !isWorker(prompt))).toEqual(["Fix the typo", "Hold on"]);
+});
+
+test("a member removed mid-turn: their coordinator turn ends, nothing is minted or done for it, and the next member's turn runs", async () => {
+  const control = await teamProject();
+  const { url, owner, guest, workspace, project, copilot, computers } = control;
+  copilot.script = async function* (prompt) {
+    if (prompt === "Hold on") await new Promise(() => {});
+    yield sdk.idle();
+  };
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "Hold on" });
+  await eventually(() => copilot.sends.length === 1);
+  await owner.api("POST", `/projects/${project.id}/messages`, { text: "Next" });
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+  const coordinator = { authorization: `Bearer ${computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN}` };
+
+  await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`);
+
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  expect(copilot.sends.map(({ prompt }) => prompt)).toEqual(["Hold on", "Next"]);
+  const token = await fetch(`${url}/coordinator/${project.id}/github-token/${guestId}`, { headers: coordinator });
+  expect(token.status).toBe(404);
 });
 
 test("when the organization pays, a worker runs on its installation token and fails before the token's hour runs out", async () => {

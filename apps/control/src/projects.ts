@@ -18,6 +18,7 @@ import {
   type Task,
   type User,
   type UserId,
+  type WorkspaceId,
 } from "@chiefbot/contracts";
 import type { ApprovalOutcome, controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
@@ -117,6 +118,8 @@ export function projectHost({
   onActivity,
 }: ProjectHostOptions) {
   const { projects } = store;
+  // Each member's open chat sockets, by project and member.
+  const chatSockets = new Map<string, Set<Socket>>();
   // Each project's connected coordinator, and the projects whose coordinator has said hello.
   const coordinators = new Map<ProjectId, Socket>();
   const greeted = new Set<ProjectId>();
@@ -393,6 +396,20 @@ export function projectHost({
       wake(projectId);
     },
 
+    // The member left the workspace or was removed: their chats close, their
+    // queued turns go and their running one ends, so the next one runs.
+    memberRemoved(workspaceId: WorkspaceId, userId: UserId) {
+      for (const project of projects.projectsIn(workspaceId)) {
+        for (const ws of chatSockets.get(chatTopic(project.id, userId)) ?? []) ws.close(4003, "removed");
+      }
+      const ended = projects.dropMember(workspaceId, userId);
+      for (const { projectId, event } of ended) {
+        if (event.event.type === "done") approvals.turnEnded(event.turnId);
+        publishChat(projectId, { userId, event });
+      }
+      for (const projectId of new Set(ended.map(({ projectId }) => projectId))) schedule(projectId);
+    },
+
     // Asks the member of the project's running turn to approve `detail`, in their
     // chat, and resolves with their answer ("no_turn" when no turn runs).
     ask(projectId: ProjectId, kind: ApprovalKind, detail: string, signal: AbortSignal): Promise<ApprovalOutcome> {
@@ -424,8 +441,10 @@ export function projectHost({
 
     open(ws: Socket, data: ProjectSocketData) {
       if (data.kind === "project-chat") {
+        const topic = chatTopic(data.projectId, data.userId);
+        chatSockets.set(topic, (chatSockets.get(topic) ?? new Set()).add(ws));
         // Subscribe first: nothing can be published between these two lines.
-        ws.subscribe(chatTopic(data.projectId, data.userId));
+        ws.subscribe(topic);
         for (const event of projects.chatAfter(data.projectId, data.userId, data.after)) ws.send(JSON.stringify(event));
         return;
       }
@@ -439,7 +458,13 @@ export function projectHost({
     },
 
     close(ws: Socket, data: ProjectSocketData) {
-      if (data.kind !== "coordinator" || coordinators.get(data.projectId) !== ws) return;
+      if (data.kind === "project-chat") {
+        const topic = chatTopic(data.projectId, data.userId);
+        chatSockets.get(topic)?.delete(ws);
+        if (chatSockets.get(topic)?.size === 0) chatSockets.delete(topic);
+        return;
+      }
+      if (coordinators.get(data.projectId) !== ws) return;
       coordinators.delete(data.projectId);
       greeted.delete(data.projectId);
     },

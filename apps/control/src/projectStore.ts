@@ -129,6 +129,18 @@ export function projectStore(db: Database, hash: (token: string) => string) {
 
   // A stored chat event and the member whose chat it is in.
   type MemberEvent = { userId: UserId; event: ChatEvent };
+
+  const runningTurn = (projectId: ProjectId): { turnId: TurnId; userId: UserId } | null => {
+    const row = db
+      .query<{ id: string; user_id: string }, [string]>(
+        `SELECT coordinator_turns.id, coordinator_turns.user_id FROM coordinator_turns
+         JOIN projects ON projects.id = coordinator_turns.project_id
+         JOIN workspace_members ON workspace_members.workspace_id = projects.workspace_id AND workspace_members.user_id = coordinator_turns.user_id
+         WHERE coordinator_turns.project_id = ?1 AND coordinator_turns.state = 'running'`,
+      )
+      .get(projectId);
+    return row ? { turnId: TurnId.parse(row.id), userId: UserId.parse(row.user_id) } : null;
+  };
   const userOfTurn = (turnId: TurnId) => {
     const row = db.query<{ user_id: string }, [string]>("SELECT user_id FROM coordinator_turns WHERE id = ?1").get(turnId);
     if (!row) throw new Error(`no coordinator turn ${turnId}`);
@@ -290,21 +302,35 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return db.query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND state = 'queued'").get(projectId) !== null;
     },
 
-    // The member whose turn is running on the project's coordinator, if any.
+    // The member whose turn is running on the project's coordinator, if any and
+    // while they are still a member: what a coordinator gets is minted for them.
     runningMember(projectId: ProjectId): UserId | null {
-      const row = db
-        .query<{ user_id: string }, [string]>("SELECT user_id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'")
-        .get(projectId);
-      return row ? UserId.parse(row.user_id) : null;
+      return runningTurn(projectId)?.userId ?? null;
     },
 
-    // The project's running coordinator turn and the member it runs for, if any.
-    runningTurn(projectId: ProjectId): { turnId: TurnId; userId: UserId } | null {
-      const row = db
-        .query<{ id: string; user_id: string }, [string]>("SELECT id, user_id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'")
-        .get(projectId);
-      return row ? { turnId: TurnId.parse(row.id), userId: UserId.parse(row.user_id) } : null;
-    },
+    // The project's running coordinator turn and the member it runs for, if any
+    // and while they are still a member.
+    runningTurn,
+
+    // The member left the workspace or was removed: their queued turns in its
+    // projects go, and their running one ends. The events that end it, to publish.
+    dropMember: db.transaction((workspaceId: WorkspaceId, userId: UserId): Array<MemberEvent & { projectId: ProjectId }> => {
+      const inWorkspace = "project_id IN (SELECT id FROM projects WHERE workspace_id = ?1) AND user_id = ?2";
+      db.query(`DELETE FROM coordinator_turns WHERE ${inWorkspace} AND state = 'queued'`).run(workspaceId, userId);
+      const ended = db
+        .query<{ id: string; project_id: string }, [string, string]>(
+          `UPDATE coordinator_turns SET state = 'done' WHERE ${inWorkspace} AND state = 'running' RETURNING id, project_id`,
+        )
+        .all(workspaceId, userId);
+      return ended.flatMap(({ id, project_id }) => {
+        const turnId = TurnId.parse(id);
+        const projectId = ProjectId.parse(project_id);
+        return [
+          { projectId, userId, event: append(turnId, { type: "error", message: "You are no longer a member of this workspace." }) },
+          { projectId, userId, event: append(turnId, { type: "done" }) },
+        ];
+      });
+    }),
 
     // Adds the coordinator's event number `index` to the project's running turn;
     // `done` finishes it. Null, storing nothing, for a repeat or any other turn.

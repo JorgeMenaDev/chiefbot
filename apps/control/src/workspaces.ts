@@ -2,8 +2,10 @@ import {
   CreateWorkspaceRequest,
   SetCopilotModeRequest,
   InviteRequest,
+  UserId,
   type User,
   type Workspace,
+  type WorkspaceId,
   type WorkspaceDetail,
   type WorkspaceInvite,
 } from "@chiefbot/contracts";
@@ -23,10 +25,14 @@ import type { openStore } from "./store.ts";
 //   DELETE /workspaces/:id/invites/:inviteId  → 204; the owner withdraws a pending invite
 //   DELETE /workspaces/:id/members/:userId  → 204. A member may remove themselves (leave);
 //                             only the owner removes others (403 owner_only). The owner cannot
-//                             leave (409 owner_cannot_leave).
+//                             leave (409 owner_cannot_leave). `onMemberRemoved` then ends what
+//                             still runs for them in the workspace's projects.
 //   GET    /invites          → WorkspaceInvite[]: the pending invites for the user's GitHub login
 //   POST   /invites/:inviteId/accept  → Workspace; the user is a member now (404 unless the invite is for their login)
-export function workspaceRoutes(store: ReturnType<typeof openStore>) {
+export function workspaceRoutes(
+  store: ReturnType<typeof openStore>,
+  onMemberRemoved: (workspaceId: WorkspaceId, userId: UserId) => Promise<void>,
+) {
   const { workspaces } = store;
 
   // Runs a /workspaces/:id route for a signed-in member of :id; 401 or 404 otherwise.
@@ -92,11 +98,12 @@ export function workspaceRoutes(store: ReturnType<typeof openStore>) {
       }),
     },
     "/workspaces/:id/members/:userId": {
-      DELETE: member((user, workspace, req: Bun.BunRequest<"/workspaces/:id/members/:userId">) => {
+      DELETE: member(async (user, workspace, req: Bun.BunRequest<"/workspaces/:id/members/:userId">) => {
         const leaving = req.params.userId === user.id;
         if (leaving && workspace.role === "owner") return apiError(409, "owner_cannot_leave");
         if (!leaving && workspace.role !== "owner") return apiError(403, "owner_only");
         if (!workspaces.removeMember(workspace.id, req.params.userId)) return apiError(404, "not_found");
+        await onMemberRemoved(workspace.id, UserId.parse(req.params.userId));
         return new Response(null, { status: 204 });
       }),
     },

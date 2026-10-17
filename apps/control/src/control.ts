@@ -367,7 +367,10 @@ export function startControl({
     port,
     hostname,
     routes: {
-      ...workspaceRoutes(store),
+      ...workspaceRoutes(store, async (workspaceId, userId) => {
+        projects.memberRemoved(workspaceId, userId);
+        taskWorkers.memberRemoved(workspaceId, userId);
+      }),
       ...projects.routes,
       ...taskWorkers.routes,
       ...connectors.routes,

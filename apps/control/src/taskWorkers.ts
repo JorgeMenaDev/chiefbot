@@ -19,6 +19,7 @@ import {
   type TurnId,
   type UserId,
   type WorkerTranscript,
+  type WorkspaceId,
 } from "@chiefbot/contracts";
 import type { controlApprovals } from "./approvals.ts";
 import type { Clock } from "./clock.ts";
@@ -371,6 +372,15 @@ export function taskWorkerHost({
           void reap();
           return Response.json(workers.worker(worker.id) satisfies TaskWorker | null);
       }
+    },
+
+    // The member left the workspace or was removed: the workers they asked for
+    // stop and their computers go.
+    memberRemoved(workspaceId: WorkspaceId, userId: UserId) {
+      const stopped = workers.runningFor(workspaceId, userId);
+      for (const { workerId } of stopped) stop(workerId, "The member who asked for it left the workspace.");
+      for (const projectId of new Set(stopped.map(({ projectId }) => projectId))) publish(projectId);
+      void reap();
     },
 
     // The task is done or abandoned: its workers stop and their computers go.
