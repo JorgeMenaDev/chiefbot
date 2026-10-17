@@ -49,10 +49,11 @@ export type ControlOptions = {
   githubApiUrl: string;
   // github.com, for the refresh grant. Defaults to githubApiUrl: the fake serves both.
   githubUrl?: string;
-  // Client ID of the deployer's GitHub App (`bun run setup`). The desktop signs
-  // in with it; refreshes must use the same one.
+  // Client ID of the deployer's sign-in app (`bun run setup`), which has no
+  // repository permissions. The desktop signs in with it; refreshes must use the
+  // same one. Its tokens are what bot computers get, for the Copilot SDK.
   githubClientId: string;
-  // The same app's ID and private key: control mints its installation tokens to
+  // The repo app's ID and private key: control mints its installation tokens to
   // reach repos for bots (repos.ts), and never hands them to a bot computer.
   githubApp: GitHubAppKey;
   // Where users' refresh tokens live. Defaults to an encrypted store in dbPath

@@ -14,7 +14,7 @@ import {
   WorkspaceId,
 } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
-import { configuredGitHubClientId, setupNeeded } from "@chiefbot/setup";
+import { configuredSignIn, setupNeeded } from "@chiefbot/setup";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -27,12 +27,12 @@ import { createWorkspaces } from "./workspaces.ts";
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
 //   CHIEFBOT_GITHUB_URL       default https://github.com
-//   CHIEFBOT_GITHUB_CLIENT_ID default: the GitHub App `bun run setup` registered (~/.chiefbot/config.json)
+//   CHIEFBOT_GITHUB_CLIENT_ID default: the sign-in app `bun run setup` recorded (~/.chiefbot/config.json)
 //   CHIEFBOT_HOME             default ~/.chiefbot
 const controlUrl = process.env.CHIEFBOT_CONTROL_URL ?? "http://127.0.0.1:7410";
 const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
-const clientId = configuredGitHubClientId(process.env, homedir());
-if (clientId === null) {
+const signIn = configuredSignIn(process.env, homedir());
+if (signIn === null) {
   console.error(setupNeeded);
   dialog.showErrorBox("Chiefbot is not set up", setupNeeded);
   process.exit(1);
@@ -75,7 +75,7 @@ const workspaces = createWorkspaces({ controlUrl, session: sessionStore.load });
 
 const auth = createAuth({
   controlUrl,
-  deviceFlow: { githubUrl, clientId },
+  deviceFlow: { githubUrl, ...signIn },
   store: sessionStore,
   onChange: (state) => {
     window?.webContents.send("auth:state", state);

@@ -1,14 +1,24 @@
-import type { GitHubAppConfig, GitHubAppSecrets } from "@chiefbot/contracts";
+import type { GitHubAppConfig, GitHubAppSecrets, SignInConfig } from "@chiefbot/contracts";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { readLocalConfig, writeLocalConfig, writeOwnerOnly } from "./config.ts";
 
-// `bun run setup`: registers the deployer's own GitHub App with GitHub's App
-// Manifest flow (https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest).
-// A local server on 127.0.0.1 serves a page that posts the manifest to
-// github.com; after the deployer clicks Create GitHub App, GitHub redirects to
-// the local /callback with a one-time code, which setup exchanges for the app's
-// id, client ID and secrets. They go to the Chiefbot home (config.ts).
+// `bun run setup`: registers the deployer's own two GitHub Apps with GitHub's
+// App Manifest flow (https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest):
+//   - the repo app (contents and pull requests write). Only control uses it,
+//     through installation tokens, to reach repos for bots.
+//   - the sign-in app, with no repository permissions. The desktop signs in with
+//     it, and its user tokens are what bot computers get for the Copilot SDK, so
+//     a token stolen from a bot computer cannot write to any repo.
+// A local server on 127.0.0.1 serves a page that posts a manifest to github.com;
+// after the deployer clicks Create GitHub App, GitHub redirects to the local
+// /callback with a one-time code, which setup exchanges for the app's id, client
+// ID and secrets, then posts the next manifest. They go to the Chiefbot home
+// (config.ts), each app as soon as it is saved: a run cut short resumes with
+// the missing app.
+//
+// Fallback: if a sign-in app's token cannot drive Copilot, the deployer makes
+// an OAuth App by hand (README) and runs setup with its client ID instead.
 
 export type SetupOptions = {
   // https://github.com and https://api.github.com in production; a fake in tests.
@@ -16,30 +26,41 @@ export type SetupOptions = {
   githubApiUrl: string;
   // The Chiefbot home (chiefbotHome).
   dir: string;
-  // Register the app under this organization instead of the deployer's account.
+  // Register the apps under this organization instead of the deployer's account.
   org?: string;
+  // Sign in with this OAuth App instead of a sign-in GitHub App.
+  oauthClientId?: string;
   // Opens the local page in the deployer's browser.
   open: (url: string) => Promise<void>;
 };
 
 export type SetupResult = {
+  // The repo app.
   app: GitHubAppConfig;
-  // Where the deployer ticks Enable Device Flow, which a manifest cannot set.
-  settingsUrl: string;
-  // Where they install the app on the repositories bots may work on.
+  signIn: SignInConfig;
+  // Where the deployer ticks Enable Device Flow on a sign-in GitHub App this run
+  // registered, which a manifest cannot set. Null otherwise.
+  signInSettingsUrl: string | null;
+  // Where they install the repo app on the repositories bots may work on.
   installUrl: string;
 };
 
-// Permissions a bot's token gets, on the repositories the app is installed on.
-// Signing in needs none: the desktop uses the device flow (Enable Device Flow).
-const permissions = {
-  // Clone, commit and push.
-  contents: "write",
-  // Open pull requests.
-  pull_requests: "write",
-  // Copilot requests for the SDK go here once ticket #21 settles the name:
-  // copilot_requests: "write",
+// What each app is for, and its permissions on the repositories it is installed on.
+const apps = {
+  repo: {
+    name: "Chiefbot",
+    description: "Chiefbot's repo access: its control server clones your repos and opens pull requests for your bots, after you approve.",
+    permissions: { contents: "write", pull_requests: "write" },
+  },
+  "sign-in": {
+    name: "Chiefbot sign-in",
+    description: "Signs you in to Chiefbot, whose bots run on your Copilot plan. It has no repository permissions.",
+    // Copilot requests for the SDK go here once ticket #21 settles the name, if
+    // a user token needs it: copilot_requests is not a repository permission.
+    permissions: {},
+  },
 };
+type AppRole = keyof typeof apps;
 
 // GitHub's answer to POST /app-manifests/{code}/conversions (the fields setup keeps).
 const Conversion = z.object({
@@ -53,63 +74,84 @@ const Conversion = z.object({
   pem: z.string(),
 });
 
-// Resolves once the app is registered and saved. Refuses when the home already
-// has an app: delete its config.json to register a new one.
-export async function runSetup({ githubUrl, githubApiUrl, dir, org, open }: SetupOptions): Promise<SetupResult> {
-  const existing = readLocalConfig(dir);
-  if (existing) {
+// Resolves once both apps are registered or recorded and saved. Registers only
+// what the home lacks; refuses when it has both, unless oauthClientId switches
+// the sign-in app. Delete config.json to register new apps.
+export async function runSetup({ githubUrl, githubApiUrl, dir, org, oauthClientId, open }: SetupOptions): Promise<SetupResult> {
+  let config = readLocalConfig(dir);
+  if (config?.signIn && oauthClientId === undefined) {
     throw new Error(
-      `Chiefbot is already set up with the GitHub App ${existing.githubApp.slug} (${existing.githubApp.htmlUrl}). To register a new one, delete ${dir}/config.json first.`,
+      `Chiefbot is already set up with the GitHub App ${config.githubApp.slug} (${config.githubApp.htmlUrl}) and a sign-in app. To register new ones, delete ${dir}/config.json first.`,
     );
   }
+  const oauth: SignInConfig | undefined = oauthClientId === undefined ? undefined : { kind: "oauth-app", clientId: oauthClientId };
+  // The apps to register through the manifest flow, in order.
+  const missing: AppRole[] = [...(config ? [] : ["repo" as const]), ...(oauth ? [] : ["sign-in" as const])];
+  let signInSettingsUrl: string | null = null;
+
+  const finish = (): SetupResult => {
+    const app = config?.githubApp;
+    const signIn = oauth ?? config?.signIn;
+    if (!app || !signIn) throw new Error("setup finished without both apps");
+    if (oauth) writeLocalConfig(dir, { githubApp: app, signIn: oauth });
+    return { app, signIn, signInSettingsUrl, installUrl: `${app.htmlUrl}/installations/new` };
+  };
+  if (missing.length === 0) return finish();
+
   const state = randomBytes(16).toString("hex");
   const newAppUrl = org
     ? `${githubUrl}/organizations/${encodeURIComponent(org)}/settings/apps/new`
     : `${githubUrl}/settings/apps/new`;
 
   const { promise, resolve, reject } = Promise.withResolvers<SetupResult>();
+  // A page that posts the manifest of `role` straight away; the button is there if scripts are off.
+  const manifestPage = (role: AppRole, before = "") => {
+    const manifest = {
+      name: `${apps[role].name} ${randomBytes(3).toString("hex")}`,
+      url: "https://github.com/JorgeMenaDev/chiefbot",
+      description: apps[role].description,
+      redirect_url: `${server.url.origin}/callback`,
+      public: false,
+      default_permissions: apps[role].permissions,
+    };
+    return html(`${before}
+      <form id="register" method="post" action="${escape(`${newAppUrl}?state=${state}`)}">
+        <input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}">
+        <p>Opening GitHub to register your Chiefbot ${role} app…</p>
+        <button type="submit">Create the ${role} app on GitHub</button>
+      </form>
+      <script>document.getElementById("register").submit()</script>`);
+  };
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     routes: {
-      // Posts the manifest straight away; the button is there if scripts are off.
-      "/": (): Response => {
-        const manifest = {
-          name: `Chiefbot ${randomBytes(3).toString("hex")}`,
-          url: "https://github.com/JorgeMenaDev/chiefbot",
-          description: "Chiefbot: chief-of-staff bots that sign in as you, clone your repos and open pull requests.",
-          redirect_url: `${server.url.origin}/callback`,
-          public: false,
-          default_permissions: permissions,
-        };
-        return html(`
-          <form id="register" method="post" action="${escape(`${newAppUrl}?state=${state}`)}">
-            <input type="hidden" name="manifest" value="${escape(JSON.stringify(manifest))}">
-            <p>Opening GitHub to register your Chiefbot GitHub App…</p>
-            <button type="submit">Create the GitHub App on GitHub</button>
-          </form>
-          <script>document.getElementById("register").submit()</script>`);
-      },
+      "/": (): Response => manifestPage(missing[0] ?? "repo"),
       "/callback": async (req): Promise<Response> => {
         const params = new URL(req.url).searchParams;
         const code = params.get("code");
-        if (params.get("state") !== state || !code) return html("<p>This link is not from this setup run.</p>", 400);
+        const role = missing[0];
+        if (params.get("state") !== state || !code || !role) return html("<p>This link is not from this setup run.</p>", 400);
         try {
-          const result = await saveApp(code);
+          await saveApp(role, code);
+          missing.shift();
+          const next = missing[0];
+          if (next) return manifestPage(next, `<p>Your Chiefbot ${role} app is registered.</p>`);
+          const result = finish();
           resolve(result);
-          return html(`<h1>Your Chiefbot GitHub App is registered</h1>${nextSteps(result).map((step) => `<p>${escape(step)}</p>`).join("")}`);
+          setTimeout(() => server.stop(), 0);
+          return html(`<h1>Chiefbot is set up</h1>${nextSteps(result).map((step) => `<p>${escape(step)}</p>`).join("")}`);
         } catch (error) {
           reject(error);
-          return html(`<p>Setup failed: ${escape(String(error))}</p>`, 500);
-        } finally {
           setTimeout(() => server.stop(), 0);
+          return html(`<p>Setup failed: ${escape(String(error))}</p>`, 500);
         }
       },
     },
     fetch: () => new Response("Not Found", { status: 404 }),
   });
 
-  async function saveApp(code: string): Promise<SetupResult> {
+  async function saveApp(role: AppRole, code: string) {
     const res = await fetch(`${githubApiUrl}/app-manifests/${encodeURIComponent(code)}/conversions`, {
       method: "POST",
       headers: { accept: "application/vnd.github+json" },
@@ -123,29 +165,37 @@ export async function runSetup({ githubUrl, githubApiUrl, dir, org, open }: Setu
       owner: created.owner.login,
       htmlUrl: created.html_url,
     };
-    writeOwnerOnly(
-      dir,
-      "github-app-secrets.json",
-      `${JSON.stringify({ clientSecret: created.client_secret, webhookSecret: created.webhook_secret, privateKey: created.pem } satisfies GitHubAppSecrets, null, 2)}\n`,
-    );
-    writeLocalConfig(dir, { githubApp: app });
-    const settingsUrl =
-      created.owner.type === "Organization"
-        ? `${githubUrl}/organizations/${created.owner.login}/settings/apps/${created.slug}`
-        : `${githubUrl}/settings/apps/${created.slug}`;
-    return { app, settingsUrl, installUrl: `${created.html_url}/installations/new` };
+    if (role === "repo") {
+      writeOwnerOnly(
+        dir,
+        "github-app-secrets.json",
+        `${JSON.stringify({ clientSecret: created.client_secret, webhookSecret: created.webhook_secret, privateKey: created.pem } satisfies GitHubAppSecrets, null, 2)}\n`,
+      );
+      config = { githubApp: app };
+    } else {
+      if (!config) throw new Error("the repo app must be saved first");
+      config = { githubApp: config.githubApp, signIn: { kind: "github-app", app } };
+      signInSettingsUrl =
+        created.owner.type === "Organization"
+          ? `${githubUrl}/organizations/${created.owner.login}/settings/apps/${created.slug}`
+          : `${githubUrl}/settings/apps/${created.slug}`;
+    }
+    writeLocalConfig(dir, config);
   }
 
   await open(`${server.url.origin}/`);
   return promise;
 }
 
-// The two clicks left after registering, as setup prints and shows them.
-export function nextSteps({ settingsUrl, installUrl }: SetupResult): string[] {
-  return [
-    `1. Open ${settingsUrl}, tick Enable Device Flow (under Identifying and authorizing users) and click Save changes. The desktop signs in with it.`,
-    `2. Open ${installUrl} and install the app on the repositories your bots may work on.`,
+// The clicks left after registering, as setup prints and shows them.
+export function nextSteps({ signInSettingsUrl, installUrl }: SetupResult): string[] {
+  const steps = [
+    ...(signInSettingsUrl === null
+      ? []
+      : [`Open ${signInSettingsUrl}, tick Enable Device Flow (under Identifying and authorizing users) and click Save changes. The desktop signs in with this app.`]),
+    `Open ${installUrl} and install the repo app on the repositories your bots may work on.`,
   ];
+  return steps.map((step, i) => `${i + 1}. ${step}`);
 }
 
 const html = (body: string, status = 200) =>

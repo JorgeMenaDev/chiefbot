@@ -3,10 +3,12 @@ import { parseArgs } from "node:util";
 import { chiefbotHome } from "./config.ts";
 import { nextSteps, runSetup } from "./setup.ts";
 
-// bun run setup [--org <organization>]
+// bun run setup [--org <organization>] [--oauth-client-id <client id>]
+// --oauth-client-id: sign in with an OAuth App you made (README, "Fallback: an
+// OAuth App to sign in") instead of a sign-in GitHub App.
 // Env: CHIEFBOT_HOME (default ~/.chiefbot); CHIEFBOT_GITHUB_URL and
 // CHIEFBOT_GITHUB_API_URL (default github.com) point it at another GitHub.
-const { values } = parseArgs({ options: { org: { type: "string" } } });
+const { values } = parseArgs({ options: { org: { type: "string" }, "oauth-client-id": { type: "string" } } });
 const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
 const dir = chiefbotHome(process.env, homedir());
 
@@ -16,9 +18,10 @@ try {
     githubApiUrl: process.env.CHIEFBOT_GITHUB_API_URL ?? "https://api.github.com",
     dir,
     ...(values.org === undefined ? {} : { org: values.org }),
+    ...(values["oauth-client-id"] === undefined ? {} : { oauthClientId: values["oauth-client-id"] }),
     open: async (url) => {
-      console.log(`Opening ${url} to register your GitHub App on ${values.org ?? "your account"}.`);
-      console.log("If no browser opens, open that link yourself. Then click Create GitHub App.");
+      console.log(`Opening ${url} to register your GitHub Apps on ${values.org ?? "your account"}.`);
+      console.log("If no browser opens, open that link yourself. Then click Create GitHub App on each page.");
       const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
       try {
         Bun.spawn([opener, url], { stdout: "ignore", stderr: "ignore" });
@@ -27,7 +30,8 @@ try {
       }
     },
   });
-  console.log(`\nRegistered ${result.app.htmlUrl} and saved it in ${dir}.\nTwo clicks left:`);
+  const signIn = result.signIn.kind === "github-app" ? result.signIn.app.htmlUrl : `the OAuth App ${result.signIn.clientId}`;
+  console.log(`\nSaved the repo app ${result.app.htmlUrl} and the sign-in app (${signIn}) in ${dir}.\nLeft to do:`);
   for (const step of nextSteps(result)) console.log(step);
   console.log("\nThen run `bun run computer:build` once and `bun run dev`.");
 } catch (error) {
