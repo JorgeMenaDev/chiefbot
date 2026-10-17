@@ -1,6 +1,9 @@
 #cloud-config
 # Container-Optimized OS runs this on every boot of the control VM: mount the
-# data disk (formatting it on first boot), then run the control image.
+# data disk (formatting it on first boot), then run the control image, and Caddy
+# in front of it for HTTPS on ${domain}. The OS's own firewall accepts only SSH
+# until the units below open control's port (computers, inside the network) and
+# 80 and 443 (Caddy).
 write_files:
   - path: /etc/chiefbot/env
     permissions: "0600"
@@ -18,6 +21,20 @@ write_files:
       blkid "$dev" >/dev/null || mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$dev"
       mkdir -p "$mnt"
       mountpoint -q "$mnt" || mount -o discard,defaults "$dev" "$mnt"
+  - path: /etc/chiefbot/open-port.sh
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # Accepts inbound TCP on each port given, once.
+      for port in "$@"; do
+        iptables -C INPUT -p tcp --dport "$port" -j ACCEPT 2>/dev/null || iptables -A INPUT -p tcp --dport "$port" -j ACCEPT
+      done
+  - path: /etc/chiefbot/Caddyfile
+    permissions: "0644"
+    content: |
+      ${domain} {
+        reverse_proxy 127.0.0.1:${port}
+      }
   - path: /etc/systemd/system/chiefbot-control.service
     permissions: "0644"
     content: |
@@ -30,12 +47,28 @@ write_files:
       ExecStartPre=/bin/mkdir -p /home/chiefbot
       ExecStartPre=/usr/bin/docker-credential-gcr configure-docker --registries=${registry}
       ExecStartPre=/bin/bash /etc/chiefbot/mount-data.sh
+      ExecStartPre=/bin/bash /etc/chiefbot/open-port.sh ${port}
       ExecStartPre=-/usr/bin/docker rm -f chiefbot-control
       ExecStartPre=/usr/bin/docker pull ${image}
-      ExecStart=/usr/bin/docker run --rm --name=chiefbot-control --network=host --env-file=/etc/chiefbot/env -v /mnt/disks/data:/data ${image}
+      ExecStart=/usr/bin/docker run --rm --name=chiefbot-control --network=host --env-file=/etc/chiefbot/env -v /mnt/disks/data:/data --tmpfs=/run/chiefbot:mode=700 ${image}
       ExecStop=/usr/bin/docker stop chiefbot-control
+      Restart=always
+      RestartSec=10
+  - path: /etc/systemd/system/chiefbot-caddy.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Caddy: HTTPS for Chiefbot control
+      Wants=network-online.target
+      After=network-online.target chiefbot-control.service
+      [Service]
+      ExecStartPre=/bin/bash /etc/chiefbot/mount-data.sh
+      ExecStartPre=/bin/bash /etc/chiefbot/open-port.sh 80 443
+      ExecStartPre=-/usr/bin/docker rm -f chiefbot-caddy
+      ExecStart=/usr/bin/docker run --rm --name=chiefbot-caddy --network=host -v /etc/chiefbot/Caddyfile:/etc/caddy/Caddyfile:ro -v /mnt/disks/data/caddy:/data caddy:2
+      ExecStop=/usr/bin/docker stop chiefbot-caddy
       Restart=always
       RestartSec=10
 runcmd:
   - systemctl daemon-reload
-  - systemctl start chiefbot-control.service
+  - systemctl start chiefbot-control.service chiefbot-caddy.service
