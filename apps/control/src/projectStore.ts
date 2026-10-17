@@ -1,13 +1,13 @@
 import type { Database } from "bun:sqlite";
 import {
-  ApprovalId,
-  ChatEvent,
   Project,
   ProjectId,
   Task,
   TurnId,
   UserId,
+  type ApprovalId,
   type ApprovalKind,
+  type ChatEvent,
   type CopilotPayer,
   type CreateTaskArgs,
   type ProjectFile,
@@ -18,6 +18,7 @@ import {
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import type { z } from "zod";
+import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 
 // Projects, their task ledgers and their members' chats with the coordinator,
 // in control's SQLite. openStore (store.ts) calls this once the users and
@@ -71,12 +72,21 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   )`);
   db.run("CREATE INDEX IF NOT EXISTS coordinator_events_by_chat ON coordinator_events (project_id, user_id, seq)");
   // What control asked the member of a coordinator turn to approve (a connector
-  // call, connectors.ts), and the answer (NULL while pending).
+  // call, connectors.ts), and the answer (NULL while pending) (turnRecords.ts approvalRecords).
   db.run(`CREATE TABLE IF NOT EXISTS coordinator_approvals (
     id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     turn_id TEXT NOT NULL REFERENCES coordinator_turns(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    requested_at INTEGER NOT NULL,
     approved INTEGER
   )`);
+  const approvals = approvalRecords(db, {
+    table: "coordinator_approvals",
+    owner: "project_id",
+    liveTurns: "SELECT id FROM coordinator_turns WHERE state = 'running'",
+  });
 
   type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string };
   const toProject = (row: ProjectRow): Project =>
@@ -113,12 +123,10 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     return row ? toTask(row) : null;
   };
 
-  type EventRow = { seq: number; turn_id: string; event: string };
-  const toChatEvent = (row: EventRow) => ChatEvent.parse({ seq: row.seq, turnId: row.turn_id, event: JSON.parse(row.event) });
   // Stores one event of a turn in its member's chat.
   const append = (turnId: TurnId, event: ChatEvent["event"]) => {
     const row = db
-      .query<EventRow, [string, string]>(
+      .query<ChatEventRow, [string, string]>(
         `INSERT INTO coordinator_events (project_id, user_id, turn_id, event)
          SELECT project_id, user_id, id, ?2 FROM coordinator_turns WHERE id = ?1 RETURNING seq, turn_id, event`,
       )
@@ -335,13 +343,8 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     // Adds the coordinator's event number `index` to the project's running turn;
     // `done` finishes it. Null, storing nothing, for a repeat or any other turn.
     appendTurnEvent: db.transaction((projectId: ProjectId, turnId: TurnId, index: number, event: TurnEvent): MemberEvent | null => {
-      const updated = db
-        .query(
-          `UPDATE coordinator_turns SET next_index = next_index + 1, state = ?4
-           WHERE id = ?1 AND project_id = ?2 AND state = 'running' AND next_index = ?3 RETURNING id`,
-        )
-        .get(turnId, projectId, index, event.type === "done" ? "done" : "running");
-      if (!updated) return null;
+      if (!acceptEvent(db, "coordinator_turns", "id = ?1 AND project_id = ?2 AND state = 'running'", [turnId, projectId], index)) return null;
+      if (event.type === "done") db.query("UPDATE coordinator_turns SET state = 'done' WHERE id = ?1").run(turnId);
       return { userId: userOfTurn(turnId), event: append(turnId, event) };
     }),
 
@@ -351,21 +354,16 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       const turn = db.query<{ id: string }, [string]>("SELECT id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'").get(projectId);
       if (!turn) return null;
       const turnId = TurnId.parse(turn.id);
-      db.query("INSERT INTO coordinator_approvals (id, turn_id) VALUES (?1, ?2)").run(ask.approvalId, turnId);
+      approvals.record(projectId, turnId, ask, Date.now());
       return { userId: userOfTurn(turnId), event: append(turnId, { type: "approval-request", ...ask }) };
     }),
 
     // Records the member's answer to a pending approval of their running turn.
     // Null, storing nothing, when there is no such pending approval for them.
     answerApproval: db.transaction((projectId: ProjectId, userId: UserId, approvalId: string, approved: boolean): MemberEvent | null => {
-      const row = db
-        .query<{ id: string; turn_id: string }, [string, string, string, number]>(
-          `UPDATE coordinator_approvals SET approved = ?4 WHERE id = ?1 AND approved IS NULL AND turn_id IN
-             (SELECT id FROM coordinator_turns WHERE project_id = ?2 AND user_id = ?3 AND state = 'running') RETURNING id, turn_id`,
-        )
-        .get(approvalId, projectId, userId, approved ? 1 : 0);
-      if (!row) return null;
-      return { userId, event: append(TurnId.parse(row.turn_id), { type: "approval-answer", approvalId: ApprovalId.parse(row.id), approved }) };
+      const turnId = approvals.pendingTurn(projectId, approvalId);
+      const answered = turnId && userOfTurn(turnId) === userId ? approvals.answer(projectId, approvalId, approved) : null;
+      return answered && { userId, event: append(answered.turnId, { type: "approval-answer", approvalId: answered.approvalId, approved }) };
     }),
 
     // Ends the project's running turn unless it is `keep`: the coordinator lost it.
@@ -387,7 +385,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     // The member's chat with the project's coordinator after `seq` (0 for all of it), oldest first.
     chatAfter(projectId: ProjectId, userId: UserId, seq: number): ChatEvent[] {
       return db
-        .query<EventRow, [string, string, number]>(
+        .query<ChatEventRow, [string, string, number]>(
           "SELECT seq, turn_id, event FROM coordinator_events WHERE project_id = ?1 AND user_id = ?2 AND seq > ?3 ORDER BY seq",
         )
         .all(projectId, userId, seq)

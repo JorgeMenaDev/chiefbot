@@ -479,7 +479,7 @@ export function taskWorkerHost({
         turnOver(workerId, turnId);
         publish(worker.projectId);
       } else if (worker.state === "working") {
-        for (const answer of workers.answeredApprovals(workerId)) send(workerId, { type: "approval-answer", ...answer });
+        for (const answer of workers.answeredApprovals(workerId, turnId)) send(workerId, { type: "approval-answer", ...answer });
       }
     },
   };
