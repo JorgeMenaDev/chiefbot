@@ -4,7 +4,9 @@ import { createHash } from "node:crypto";
 // (never SSE). Its tools are `tools`, each answering its handler's result as
 // JSON text, or by default `list_issues`, `list_runs` and `search`, plus `writes`.
 // tools/list marks every tool read-only (annotations.readOnlyHint) except those
-// in `writes`, which answer like the defaults. With `oauth`, it also is its own
+// in `writes`, which answer like the defaults. `writes` may instead depend on the
+// request's Authorization header, the way a server can show each credential its own
+// annotations. With `oauth`, it also is its own
 // OAuth authorization server the way the MCP spec describes: protected resource
 // metadata, authorization server metadata with dynamic client registration, an
 // authorize endpoint that approves at once, and a token endpoint with PKCE and
@@ -14,7 +16,12 @@ export function startFakeMcpServer({
   accessTokenSeconds = 3600,
   tools,
   writes = [],
-}: { oauth?: boolean; accessTokenSeconds?: number; tools?: Record<string, (args: Record<string, unknown>) => unknown>; writes?: string[] } = {}) {
+}: {
+  oauth?: boolean;
+  accessTokenSeconds?: number;
+  tools?: Record<string, (args: Record<string, unknown>) => unknown>;
+  writes?: string[] | ((authorization: string | null) => string[]);
+} = {}) {
   // Every tools/call, with the Authorization header it came with.
   const calls: Array<{ tool: string; authorization: string | null }> = [];
   // Every JSON-RPC method received, in order.
@@ -57,9 +64,10 @@ export function startFakeMcpServer({
         if (message.method === "initialize") {
           return answer({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "1" } });
         }
-        const names = [...(tools ? Object.keys(tools) : ["list_issues", "list_runs", "search"]), ...writes];
+        const writing = typeof writes === "function" ? writes(authorization) : writes;
+        const names = [...new Set([...(tools ? Object.keys(tools) : ["list_issues", "list_runs", "search"]), ...writing])];
         if (message.method === "tools/list") {
-          return answer({ tools: names.map((name) => ({ name, inputSchema: { type: "object" }, annotations: { readOnlyHint: !writes.includes(name) } })) });
+          return answer({ tools: names.map((name) => ({ name, inputSchema: { type: "object" }, annotations: { readOnlyHint: !writing.includes(name) } })) });
         }
         const tool = message.params?.name ?? "";
         calls.push({ tool, authorization });

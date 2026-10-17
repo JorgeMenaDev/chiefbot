@@ -109,19 +109,22 @@ export function connectorHost({ store, secrets, publicUrl, ask }: ConnectorHostO
       return handle(user, workspace, req);
     };
 
-  // The tools each remote connector's server marks read-only, by server URL, for
-  // readOnlyListMs. A listing that fails is not kept: every tool needs approval until one works.
+  // The tools each remote connector's server marks read-only for a credential, for
+  // readOnlyListMs. Kept per connector and credential (the workspace's, or each
+  // member's own), since a server may annotate its tools differently for each.
+  // A listing that fails is not kept: every tool needs approval until one works.
   const readOnly = new Map<string, { until: number; tools: Promise<Set<string>> }>();
-  function readOnlyTools(url: string, token: string | null) {
-    const cached = readOnly.get(url);
+  function readOnlyTools(connector: Connector, url: string, userId: UserId, credential: { identity: CallIdentity; token: string | null }) {
+    const key = JSON.stringify([connector.workspaceId, connector.name, credential.identity, credential.identity === "personal" ? userId : null]);
+    const cached = readOnly.get(key);
     if (cached && cached.until > Date.now()) return cached.tools;
-    const tools = openMcpSession(url, token)
+    const tools = openMcpSession(url, credential.token)
       .then((session) => session.readOnlyTools())
       .catch(() => {
-        readOnly.delete(url);
+        readOnly.delete(key);
         return new Set<string>();
       });
-    readOnly.set(url, { until: Date.now() + readOnlyListMs, tools });
+    readOnly.set(key, { until: Date.now() + readOnlyListMs, tools });
     return tools;
   }
 
@@ -245,7 +248,7 @@ export function connectorHost({ store, secrets, publicUrl, ask }: ConnectorHostO
     // A GET is the server's event stream: it stays open. An approval waits however long it takes.
     server.timeout(req, 0);
     if (tools.length > 0 && !connector.writesWithoutApproval) {
-      const readOnlyNow = await readOnlyTools(connector.server.url, credential.token);
+      const readOnlyNow = await readOnlyTools(connector, connector.server.url, member.userId, credential);
       for (const tool of tools.filter((name) => !readOnlyNow.has(name))) {
         const outcome = await caller.ask(`${connector.title}: ${tool}`, req.signal);
         if (outcome === "declined") return apiError(403, "declined", `${member.login} declined ${connector.title}: ${tool}`);

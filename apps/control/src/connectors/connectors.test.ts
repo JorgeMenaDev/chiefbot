@@ -387,3 +387,36 @@ test("a member connects with the MCP server's own OAuth sign-in when it offers o
   expect(withOAuth.issued).toEqual(["access-1", "access-2"]);
   expect(withOAuth.calls).toEqual([{ tool: "search", authorization: "Bearer access-2" }]);
 });
+
+test("the read-only tools one credential sees never let another credential's write go through without approval", async () => {
+  const { owner, guest, path, define, createProject, copilot } = await team();
+  // The server shows the owner's token create_issue as read-only, and the guest's as a write.
+  const upstream = startFakeMcpServer({
+    tools: { list_issues: () => [], create_issue: () => "created" },
+    writes: (authorization) => (authorization === "Bearer tracker-guest" ? ["create_issue"] : []),
+  });
+  atCleanUp(upstream.stop);
+  await define({ name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
+  const project = await createProject("octo-org/shop", ["tracker"]);
+  await owner.api("PUT", `${path}/tracker/token`, { token: "tracker-owner" });
+  await guest.api("PUT", `${path}/tracker/token`, { token: "tracker-guest" });
+  const statuses: Array<number | null> = [];
+  copilot.script = async function* (_prompt, runtime) {
+    statuses.push((await runtime.callMcp("tracker", "create_issue")).status);
+    yield sdk.idle();
+  };
+
+  await askAndWait(owner, project.id, "File the bug");
+  const chat = guest.watchProjectChat(project.id);
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "File another" });
+  const [request] = (await chat.until((all) => all.some(({ event }) => event.type === "approval-request"))).filter(
+    ({ event }) => event.type === "approval-request",
+  );
+  if (request?.event.type !== "approval-request") throw new Error("unreachable");
+  await guest.api("POST", `/projects/${project.id}/approvals/${request.event.approvalId}`, { approved: false });
+  await chat.until(doneCount(1));
+
+  expect(request.event).toMatchObject({ kind: "connector", detail: "Tracker: create_issue" });
+  expect(statuses).toEqual([200, 403]);
+  expect(upstream.calls).toEqual([{ tool: "create_issue", authorization: "Bearer tracker-owner" }]);
+});
