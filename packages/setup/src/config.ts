@@ -38,9 +38,8 @@ export function writeOwnerOnly(dir: string, name: string, contents: string): voi
 }
 
 // The sign-in app: the desktop signs in with its client ID and control refreshes
-// with it. CHIEFBOT_GITHUB_CLIENT_ID (the GCP control VM sets it) overrides the
-// client ID; the kind comes from the config, else github-app. Null when neither
-// exists: print `setupNeeded`.
+// with it. CHIEFBOT_GITHUB_CLIENT_ID overrides the client ID; the kind comes
+// from the config, else github-app. Null when neither exists: print `setupNeeded`.
 export function configuredSignIn(env: Env, homeDir: string): { kind: SignInConfig["kind"]; clientId: string } | null {
   const signIn = readLocalConfig(chiefbotHome(env, homeDir))?.signIn;
   const clientId = env.CHIEFBOT_GITHUB_CLIENT_ID ?? (signIn?.kind === "github-app" ? signIn.app.clientId : signIn?.clientId);
