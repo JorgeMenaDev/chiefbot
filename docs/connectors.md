@@ -14,8 +14,8 @@ Control gives each agent session only those connectors, and only the ones ready 
 | --- | --- |
 | `name` | How project files name it, and the MCP server name agents see. Lower-case letters, digits and hyphens. |
 | `title` | What the desktop shows. |
-| `server` | `remote`: a Streamable HTTP MCP server at `url`. `command`: a stdio MCP server the agent's computer starts (`command`, `args`, `env`), with the identity's token in the variable `tokenEnv`. |
-| `auth` | `none`, `workspace-secret` (one service credential the workspace owner sets) or `personal-oauth` (each member's own account). |
+| `server` | `remote`: a Streamable HTTP MCP server at `url`. `command`: a stdio MCP server the agent's computer starts (`command`, `args`, `env`). |
+| `auth` | `none`, `workspace-secret` (one service credential the workspace owner sets) or `personal-oauth` (each member's own account). A `command` connector takes only `none`: control refuses any other with `400 invalid_connector`. |
 | `scope` | The OAuth scope a personal sign-in asks for. Empty asks for the server's default. |
 
 The workspace owner adds, deletes and sets the secrets of connectors. Members connect their own accounts. Secrets go through control's `SecretStore` (encrypted in SQLite locally, Secret Manager on GCP) and never appear in an API answer.
@@ -23,7 +23,7 @@ The workspace owner adds, deletes and sets the secrets of connectors. Members co
 ## Identity per call
 
 - **Remote connectors** are reached only through control: each agent session gets `<control>/coordinator/<project>/mcp/<name>` (a project's worker: `<control>/task-worker/<worker>/mcp/<name>`, running as the member who asked for it) as the server's URL, with the computer's own credential. For each request control picks the identity (no credential, the workspace secret, or the member's own token), adds it as `Authorization: Bearer …` and forwards the request. Tokens never reach a computer. A tool call is only accepted during a turn of the member the session belongs to.
-- **Command connectors** run on the agent's computer, so their token (if any) is in the process's environment there. Prefer remote servers where a vendor offers one.
+- **Command connectors** run on the agent's computer with no credential. A credential on a computer could be read by the agent and used without control seeing it, so a connector with one must be remote. Their `env` is plain configuration that members and agents can read: put no secret in it.
 - A member's OAuth sign-in is refreshed by control shortly before it expires.
 
 ## The call log
@@ -57,10 +57,10 @@ Add these with the custom connector form. Check each vendor's documentation for 
 | Tool | Connector |
 | --- | --- |
 | GitLab | Remote `https://<your GitLab host>/api/v4/mcp`, `personal-oauth`, scope `mcp`. GitLab's MCP server signs members in with OAuth and dynamic client registration. |
-| Harness | Command `npx -y harness-mcp-v2`, `workspace-secret`, token variable `HARNESS_API_KEY`. Harness's official MCP server (github.com/harness/mcp-server); it also has a hosted version. |
-| Dynatrace | Command `npx -y @dynatrace-oss/dynatrace-mcp-server` with env `DT_ENVIRONMENT=https://<environment>.apps.dynatrace.com` (github.com/dynatrace-oss/dynatrace-mcp). Dynatrace also hosts a remote MCP server per environment. |
+| Harness | Remote: Harness's hosted MCP server (github.com/harness/mcp-server documents its URL), `workspace-secret` with a Harness API key. |
+| Dynatrace | Remote: the MCP server Dynatrace hosts for each environment, `workspace-secret` with a platform token (github.com/dynatrace-oss/dynatrace-mcp). |
 
-Any other MCP server works the same way: a remote URL or a command, an auth type and a scope.
+Any other MCP server works the same way: a remote URL with an auth type and a scope, or a command that needs no credential.
 
 ## Limits
 

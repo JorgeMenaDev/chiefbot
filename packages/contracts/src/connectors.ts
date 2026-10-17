@@ -13,7 +13,8 @@ export type ConnectorName = z.infer<typeof ConnectorName>;
 //            control, which adds the identity's token to each request
 //            (`Authorization: Bearer …`), so tokens never reach a computer.
 //   command  a stdio MCP server the agent's computer starts: `command` with `args`
-//            and `env`. The identity's token, if any, goes in the variable `tokenEnv`.
+//            and `env`. It runs with no credential (auth `none`): anything in
+//            `env` is visible to every agent and member, so it holds no secret.
 export const ConnectorServer = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("remote"), url: z.url({ protocol: /^https?$/ }) }),
   z.strictObject({
@@ -21,7 +22,6 @@ export const ConnectorServer = z.discriminatedUnion("kind", [
     command: z.string().trim().min(1),
     args: z.array(z.string()).default([]),
     env: z.record(z.string(), z.string()).default({}),
-    tokenEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/).optional(),
   }),
 ]);
 export type ConnectorServer = z.infer<typeof ConnectorServer>;
@@ -34,20 +34,26 @@ export type ConnectorServer = z.infer<typeof ConnectorServer>;
 export const ConnectorAuth = z.enum(["none", "workspace-secret", "personal-oauth"]);
 export type ConnectorAuth = z.infer<typeof ConnectorAuth>;
 
-// A connector as the workspace owner defines it (body of POST /workspaces/:id/connectors).
-// `scope` is the OAuth scope a personal sign-in asks for (space-separated); empty
-// asks for the server's default.
-export const ConnectorInput = z.strictObject({
+const ConnectorFields = z.strictObject({
   name: ConnectorName,
   title: z.string().trim().min(1).max(60),
   server: ConnectorServer,
   auth: ConnectorAuth,
   scope: z.string().trim().max(500).default(""),
 });
+
+// A connector as the workspace owner defines it (body of POST /workspaces/:id/connectors).
+// `scope` is the OAuth scope a personal sign-in asks for (space-separated); empty
+// asks for the server's default. A credential never goes to a computer, so a
+// connector with one must be remote: a command connector's auth is `none`.
+export const ConnectorInput = ConnectorFields.refine(({ server, auth }) => server.kind === "remote" || auth === "none", {
+  path: ["auth"],
+  message: "a command connector runs on the agent's computer with no credential: use auth none, or a remote server",
+});
 export type ConnectorInput = z.infer<typeof ConnectorInput>;
 
 // A workspace's connector. `hasWorkspaceSecret`: its owner has set the service credential.
-export const Connector = ConnectorInput.extend({ workspaceId: WorkspaceId, hasWorkspaceSecret: z.boolean() });
+export const Connector = ConnectorFields.extend({ workspaceId: WorkspaceId, hasWorkspaceSecret: z.boolean() });
 export type Connector = z.infer<typeof Connector>;
 
 // Body of PUT /workspaces/:id/connectors/:name/secret (the workspace's credential)
@@ -104,7 +110,7 @@ export type ConnectorCall = z.infer<typeof ConnectorCall>;
 // A connector as an agent session gets it (in a coordinator's run-turn or a task worker's run-task):
 //   remote   reached through control at <control>/coordinator/:projectId/mcp/:name
 //            (a task worker's: <control>/task-worker/:workerId/mcp/:name)
-//   command  started on the computer; `env` already holds the identity's token
+//   command  started on the computer with `env`, and no credential
 export const AgentConnector = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("remote"), name: ConnectorName }),
   z.object({

@@ -11,6 +11,7 @@ import {
   Workspace,
   WorkspaceInvite,
   type ConnectorInput,
+  type ConnectorServer,
 } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk } from "@chiefbot/worker/fake-copilot";
@@ -73,7 +74,7 @@ test("the owner defines connectors from presets or by hand; members see them, ne
   const ci: ConnectorInput = {
     name: "ci",
     title: "CI",
-    server: { kind: "command", command: "npx", args: ["-y", "ci-mcp"], env: {}, tokenEnv: "CI_TOKEN" },
+    server: { kind: "remote", url: "https://ci.example.com/mcp" },
     auth: "workspace-secret",
     scope: "",
   };
@@ -135,6 +136,37 @@ test("a member's checklist is what their projects declare minus what is ready fo
   expect((await checklist(owner, path)).find(({ name }) => name === "github")?.status).toBe("connect");
 });
 
+test("a command connector runs with no credential: an authenticated connector must be remote, so no secret reaches a computer", async () => {
+  const { owner, guest, path, define, createProject, copilot, computers, connectorSecrets } = await team();
+  const upstream = startFakeMcpServer();
+  atCleanUp(upstream.stop);
+  const command: ConnectorServer = { kind: "command", command: "npx", args: ["-y", "ci-mcp"], env: {} };
+
+  const withSecret = await owner.api("POST", path, { name: "ci", title: "CI", server: command, auth: "workspace-secret", scope: "" });
+  const withOAuth = await owner.api("POST", path, { name: "ci", title: "CI", server: command, auth: "personal-oauth", scope: "" });
+  const withTokenEnv = await owner.api("POST", path, { name: "ci", title: "CI", server: { ...command, tokenEnv: "CI_TOKEN" }, auth: "none", scope: "" });
+
+  for (const refused of [withSecret, withOAuth, withTokenEnv]) {
+    expect([refused.status, ApiError.parse(await refused.json()).error]).toEqual([400, "invalid_connector"]);
+  }
+  await define({ name: "lint", title: "Lint", server: command, auth: "none", scope: "" });
+  await define({ name: "ci", title: "CI", server: { kind: "remote", url: upstream.url }, auth: "workspace-secret", scope: "" });
+  await define({ name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
+  await owner.api("PUT", `${path}/ci/secret`, { token: "ci-service-secret" });
+  await guest.api("PUT", `${path}/tracker/token`, { token: "tracker-member-secret" });
+  const project = await createProject("octo-org/shop", ["lint", "ci", "tracker"]);
+
+  await askAndWait(guest, project.id, "hi");
+
+  // What the computer got: its env and the session's MCP servers, built from control's run-turn.
+  const computerBound = JSON.stringify({ env: [...computers.computers.values()].map(({ spec }) => spec.env), servers: copilot.mcpServers });
+  expect(Object.keys(copilot.mcpServers[0] ?? {})).toEqual(["lint", "ci", "tracker"]);
+  // Both secrets are in control's SecretStore.
+  expect(connectorSecrets().join()).toContain("ci-service-secret");
+  expect(connectorSecrets().join()).toContain("tracker-member-secret");
+  for (const secret of ["ci-service-secret", "tracker-member-secret"]) expect(computerBound).not.toContain(secret);
+});
+
 // Sends a member's message to the project's coordinator and waits for its turn
 // to end: the member's `nth` turn in this chat (default the first).
 async function askAndWait(member: TestUser, projectId: Project["id"], text: string, nth = 1) {
@@ -151,11 +183,10 @@ test("a coordinator session gets only the connectors its project declares that a
   await define({
     name: "harness",
     title: "Harness",
-    server: { kind: "command", command: "npx", args: ["-y", "harness-mcp-v2"], env: { HARNESS_DEFAULT_ORG_ID: "default" }, tokenEnv: "HARNESS_API_KEY" },
-    auth: "workspace-secret",
+    server: { kind: "command", command: "npx", args: ["-y", "harness-mcp-v2"], env: { HARNESS_DEFAULT_ORG_ID: "default" } },
+    auth: "none",
     scope: "",
   });
-  await owner.api("PUT", `${path}/harness/secret`, { token: "harness-service-key" });
   await guest.api("PUT", `${path}/github/token`, { token: "ghp_member" });
   await guest.api("PUT", `${path}/jira/token`, { token: "jira_member" });
   const projectToken = computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN ?? "";
@@ -175,7 +206,7 @@ test("a coordinator session gets only the connectors its project declares that a
     type: "local",
     command: "npx",
     args: ["-y", "harness-mcp-v2"],
-    env: { HARNESS_DEFAULT_ORG_ID: "default", HARNESS_API_KEY: "harness-service-key" },
+    env: { HARNESS_DEFAULT_ORG_ID: "default" },
     tools: ["*"],
   });
   // The owner has not connected GitHub, so their session goes without it, until

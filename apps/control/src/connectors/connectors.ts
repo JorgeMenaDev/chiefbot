@@ -128,25 +128,18 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
 
   // The connectors a member's agent session gets in a project: those its project
   // file declares that the workspace defines and that are ready for the member.
+  // None carries a credential: a remote one is reached through control's proxy,
+  // and a command one has none (ConnectorInput).
   async function agentConnectors(projectId: ProjectId, userId: UserId): Promise<AgentConnector[]> {
     const project = projects.project(projectId);
     if (!project) return [];
     const linked = connectors.linkedNames(project.workspaceId, userId);
-    const result: AgentConnector[] = [];
-    for (const name of new Set(project.file.connectors)) {
+    return [...new Set(project.file.connectors)].flatMap((name): AgentConnector[] => {
       const connector = connectors.get(project.workspaceId, name);
-      if (!connector || !ready(connector, linked)) continue;
+      if (!connector || !ready(connector, linked)) return [];
       const { server } = connector;
-      if (server.kind === "remote") {
-        result.push({ kind: "remote", name: connector.name });
-        continue;
-      }
-      const credential = await credentialFor(connector, userId);
-      if (!credential) continue;
-      const token = server.tokenEnv && credential.token !== null ? { [server.tokenEnv]: credential.token } : {};
-      result.push({ kind: "command", name: connector.name, command: server.command, args: server.args, env: { ...server.env, ...token } });
-    }
-    return result;
+      return [server.kind === "remote" ? { kind: "remote", name } : { kind: "command", name, command: server.command, args: server.args, env: server.env }];
+    });
   }
 
   // The project whose credential the request carries, if it is :projectId's; 401 or 403 otherwise.

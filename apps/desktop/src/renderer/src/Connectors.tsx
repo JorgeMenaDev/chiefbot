@@ -200,9 +200,9 @@ function TokenForm({ placeholder, busy, onSave }: { placeholder: string; busy: b
 }
 
 // The owner's form for a connector that is not a preset: a remote MCP server's
-// URL, or a command (split on spaces) with the variable its token goes in.
+// URL, or a command (split on spaces), which runs with no credential.
 function NewConnector({ busy, onDefine }: { busy: boolean; onDefine: (input: ConnectorInput) => Promise<unknown> }) {
-  const empty = { name: "", title: "", kind: "remote", target: "", tokenEnv: "", auth: "personal-oauth", scope: "" };
+  const empty = { name: "", title: "", kind: "remote", target: "", auth: "personal-oauth", scope: "" };
   const [form, setForm] = useState(empty);
   const [command, ...args] = form.target.trim().split(/\s+/);
   const input = ConnectorInput.safeParse({
@@ -211,8 +211,8 @@ function NewConnector({ busy, onDefine }: { busy: boolean; onDefine: (input: Con
     server:
       form.kind === "remote"
         ? { kind: "remote", url: form.target.trim() }
-        : { kind: "command", command, args, env: {}, ...(form.tokenEnv === "" ? {} : { tokenEnv: form.tokenEnv }) },
-    auth: form.auth,
+        : { kind: "command", command, args, env: {} },
+    auth: form.kind === "remote" ? form.auth : "none",
     scope: form.scope,
   });
   const field = (key: keyof typeof empty) => ({
@@ -240,15 +240,20 @@ function NewConnector({ busy, onDefine }: { busy: boolean; onDefine: (input: Con
       </div>
       <div className="routine-schedule">
         <input placeholder={form.kind === "remote" ? "https://…/mcp" : "npx -y some-mcp-server"} {...field("target")} />
-        {form.kind === "command" && <input placeholder="Token variable, e.g. API_KEY" {...field("tokenEnv")} />}
       </div>
       <div className="routine-schedule">
-        <select {...field("auth")}>
-          <option value="personal-oauth">Each member's own account</option>
-          <option value="workspace-secret">Workspace service token</option>
-          <option value="none">No credential</option>
-        </select>
-        <input placeholder="OAuth scope (optional)" {...field("scope")} />
+        {form.kind === "remote" ? (
+          <>
+            <select {...field("auth")}>
+              <option value="personal-oauth">Each member's own account</option>
+              <option value="workspace-secret">Workspace service token</option>
+              <option value="none">No credential</option>
+            </select>
+            <input placeholder="OAuth scope (optional)" {...field("scope")} />
+          </>
+        ) : (
+          <span className="muted">Runs on the agent's computer with no credential</span>
+        )}
         <button type="submit" disabled={busy || !input.success}>
           Add connector
         </button>
