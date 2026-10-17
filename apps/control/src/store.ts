@@ -20,8 +20,9 @@ import {
 } from "@chiefbot/contracts";
 import type { GitHubIdentity } from "./github.ts";
 import { nextDueAt } from "./schedule.ts";
+import { workspaceStore } from "./workspaceStore.ts";
 
-// Control's durable state in SQLite. Every row hangs off a user.
+// Control's durable state in SQLite. Every row hangs off a user or a workspace.
 export function openStore(path: string) {
   const db = new Database(path, { strict: true });
   db.run("PRAGMA journal_mode = WAL");
@@ -192,7 +193,12 @@ export function openStore(path: string) {
     userId: UserId.parse(row.user_id),
   });
 
+  const workspaces = workspaceStore(db);
+
   return {
+    // Workspaces, members and invites (workspaceStore.ts).
+    workspaces,
+
     // Creates or updates the user GitHub identified.
     upsertUser(identity: GitHubIdentity): UserId {
       const row = db
