@@ -1,4 +1,4 @@
-import { Bot, ClientEvent, ModelOption, type BotId, type ProjectId, type Task, type User } from "@chiefbot/contracts";
+import { Bot, ClientEvent, ModelOption, type BotId, type ProjectId, type Task, type TaskWorker, type User } from "@chiefbot/contracts";
 import { z } from "zod";
 import { controlCaller } from "./controlApi.ts";
 
@@ -11,14 +11,16 @@ export type BotsOptions = {
   onUser?: (user: User) => void;
   // A project of one of the user's workspaces has a new task ledger.
   onTasks?: (projectId: ProjectId, tasks: Task[]) => void;
+  // A project of one of the user's workspaces has a worker that changed.
+  onWorkers?: (projectId: ProjectId, workers: TaskWorker[]) => void;
   // Wait between reconnects after the events socket drops.
   retryMs?: number;
 };
 
 // The signed-in user's bots, owned by Electron main. A WebSocket to control's
-// /events keeps the list live (and passes on project ledgers); actions are
+// /events keeps the list live (and passes on project ledgers and workers); actions are
 // plain HTTP calls to control.
-export function createBots({ controlUrl, session, onChange, onUser, onTasks, retryMs = 2000 }: BotsOptions) {
+export function createBots({ controlUrl, session, onChange, onUser, onTasks, onWorkers, retryMs = 2000 }: BotsOptions) {
   let bots: Bot[] = [];
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
@@ -39,7 +41,8 @@ export function createBots({ controlUrl, session, onChange, onUser, onTasks, ret
       const message = ClientEvent.parse(JSON.parse(String(event.data)));
       if (message.type === "bots") set(message.bots);
       else if (message.type === "user") onUser?.(message.user);
-      else onTasks?.(message.projectId, message.tasks);
+      else if (message.type === "tasks") onTasks?.(message.projectId, message.tasks);
+      else onWorkers?.(message.projectId, message.workers);
     };
     socket.onclose = () => {
       if (connected) retry = setTimeout(open, retryMs);

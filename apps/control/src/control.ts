@@ -20,6 +20,7 @@ import {
   type ControlToWorker,
   type ModelOption,
   type OpenedPullRequest,
+  type ProjectId,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
@@ -35,7 +36,7 @@ import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubToke
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
-import { repoAccess } from "./repos.ts";
+import { repoAccess, type RepoAgent } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
@@ -43,6 +44,7 @@ import { connectorHost } from "./connectors/connectors.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
 import { subscriptionHost } from "./subscriptions.ts";
+import { taskWorkerHost, type TaskWorkerSocketData } from "./taskWorkers.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
@@ -90,14 +92,16 @@ export type ControlOptions = {
 // What a WebSocket connection is bound to: a desktop client of one user, one
 // bot's chat from `after` on, the worker of exactly one bot, or one end of a
 // screen stream: the owner's viewer, or the bot's worker piping its VNC server.
-// Or a project's: its coordinator, or a member's chat with it (projects.ts).
+// Or a project's: its coordinator, or a member's chat with it (projects.ts), or one
+// of its task workers (taskWorkers.ts).
 type SocketData =
   | { kind: "client"; userId: UserId }
   | { kind: "chat"; botId: BotId; after: number }
   | { kind: "worker"; userId: UserId; botId: BotId }
   | { kind: "viewer"; botId: BotId; streamId: string }
   | { kind: "screen"; streamId: string }
-  | ProjectSocketData;
+  | ProjectSocketData
+  | TaskWorkerSocketData;
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -141,6 +145,7 @@ type SocketData =
 //   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
 //   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
 //                             task ledgers and chats (projects.ts)
+//   …      /projects/:id/workers, /task-worker  projects' task workers (taskWorkers.ts)
 //   …      /workspaces/:id/connectors, /workspaces/:id/checklist, /connectors/oauth/callback,
 //          /coordinator/:projectId/mcp  connectors, the access checklist and the MCP proxy
 //                             (connectors/connectors.ts)
@@ -201,20 +206,51 @@ export function startControl({
     },
   });
   // Approvals control asks for itself, and the repo access they guard.
-  const approvals = controlApprovals({ store, publishChat: turns.publishChat });
+  const approvals = controlApprovals();
+  // A bot as repo access sees it: its owner, asked in the bot's running turn.
+  const botAgent = ({ botId, userId }: { botId: BotId; userId: UserId }): RepoAgent => ({
+    userId,
+    ask: (kind, detail, signal) =>
+      approvals.ask((approvalId) => {
+        const event = store.requestApproval(botId, { approvalId, kind, detail });
+        turns.publishChat(botId, event);
+        return event;
+      }, signal),
+  });
   const repos = repoAccess({
     githubUrl,
     githubApiUrl,
     app: githubApp,
     ownerLogin: async (userId) => ((await broker.accessToken(userId)) ? (store.user(userId)?.login ?? null) : null),
-    botFor: (credential) => store.botForToken(credential),
-    ask: approvals.ask,
+    agentFor: (credential) => {
+      const bot = store.botForToken(credential);
+      return bot ? botAgent(bot) : taskWorkers.agentFor(credential);
+    },
   });
 
   // Who pays for each agent run's Copilot (copilotIdentity.ts).
   const payerOf = copilotIdentity({ store, broker, mint: copilotTokens });
   // Connectors, the access checklist, and the MCP proxy agents reach them through (connectors/connectors.ts).
   const connectors = connectorHost({ store, secrets, publicUrl: () => publicUrl ?? server.url.origin });
+  // The handoffs watcher: tells chiefs when their task needs input or is done.
+  const watchHandoffs = (projectId: ProjectId) => {
+    for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
+  };
+
+  // The projects' task workers, one throwaway computer each (taskWorkers.ts).
+  const taskWorkers = taskWorkerHost({
+    store,
+    payerOf,
+    connectorsFor: connectors.agentConnectors,
+    computers,
+    approvals,
+    clock,
+    pullRequest: repos.pullRequest,
+    controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
+    publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
+    onLedgerChange: watchHandoffs,
+    upgrade: (req, data) => upgrade(server, req, data),
+  });
 
   // Projects, their coordinators and the coordinators' scheduler (projects.ts).
   const projects = projectHost({
@@ -222,6 +258,7 @@ export function startControl({
     payerOf,
     computers,
     context,
+    workers: taskWorkers,
     githubApiUrl,
     repoReadToken: repos.readToken,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
@@ -229,10 +266,7 @@ export function startControl({
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     upgrade: (req, data) => upgrade(server, req, data),
     connectorsFor: connectors.agentConnectors,
-    // The handoffs watcher: tells chiefs when their task needs input or is done.
-    onLedgerChange: (projectId) => {
-      for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
-    },
+    onLedgerChange: watchHandoffs,
   });
   // Chiefs of staff handing work to projects (handoffs.ts).
   const chiefs = chiefHost({ store, projects });
@@ -327,6 +361,7 @@ export function startControl({
     routes: {
       ...workspaceRoutes(store),
       ...projects.routes,
+      ...taskWorkers.routes,
       ...connectors.routes,
       ...chiefs.routes,
       ...subscriptions.routes,
@@ -540,7 +575,7 @@ export function startControl({
           const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
           if (!args.success) return apiError(400, "invalid_pull_request");
           server.timeout(req, 0);
-          const opened = await repos.pullRequest(bot, args.data, req.signal);
+          const opened = await repos.pullRequest(botAgent(bot), args.data, req.signal);
           if ("error" in opened) return apiError(opened.status, opened.error, opened.message);
           return Response.json(opened satisfies OpenedPullRequest, { status: 201 });
         },
@@ -563,6 +598,7 @@ export function startControl({
       data: {} as SocketData,
       open(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.open(ws, ws.data);
+        if (ws.data.kind === "task-worker") return taskWorkers.open(ws, ws.data);
         if (ws.data.kind === "viewer") {
           const worker = workers.get(ws.data.botId);
           if (!worker) return ws.close();
@@ -590,12 +626,13 @@ export function startControl({
         workers.get(ws.data.botId)?.close(4000, "replaced");
         workers.set(ws.data.botId, ws);
         turns.workerChanged(ws.data.botId);
-        ws.send(JSON.stringify({ type: "bound", botId: ws.data.botId } satisfies ControlToWorker));
+        ws.send(JSON.stringify({ type: "bound" } satisfies ControlToWorker));
         ws.send(screenControlMessage(ws.data.botId));
         publish(ws.data.userId);
       },
       close(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.close(ws, ws.data);
+        if (ws.data.kind === "task-worker") return taskWorkers.close(ws, ws.data);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.end(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
@@ -604,6 +641,7 @@ export function startControl({
       },
       message(ws, raw) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.message(ws.data, raw);
+        if (ws.data.kind === "task-worker") return taskWorkers.message(ws.data, raw);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.relay(ws.data.streamId, ws.data.kind, raw);
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));
@@ -625,6 +663,8 @@ export function startControl({
   });
 
   subscriptions.start();
+  // Worker computers left behind by a control that stopped mid-way go now.
+  void taskWorkers.recover().catch((error: unknown) => console.error("could not recover task workers:", error));
 
   // Pending approvals belong to unfinished turns, so those count as busy too.
   const idle = startIdleStop({

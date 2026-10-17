@@ -14,7 +14,7 @@ import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeClock } from "./clock.ts";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
-import { atCleanUp, cleanUp, eventually, startTestControl, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestUser } from "./testControl.ts";
 
 afterEach(cleanUp);
 
@@ -129,7 +129,7 @@ test("an issue query polls as the adding member's own account for a personal con
     },
   });
   atCleanUp(github.stop);
-  const { owner, guest, define, connectorsPath, subscribe, subscriptions, tasks, calls, messages, advance } = await team(["github"]);
+  const { owner, guest, project, define, connectorsPath, subscribe, subscriptions, tasks, calls, messages, advance } = await team(["github"]);
   await define({ name: "github", title: "GitHub", auth: "personal-oauth" }, github);
   await guest.api("PUT", `${connectorsPath}/github/token`, { token: "friend-token" });
 
@@ -148,6 +148,11 @@ test("an issue query polls as the adding member's own account for a personal con
   ]);
   expect((await messages(guest)).length).toBe(2);
   expect(await messages(owner)).toEqual([]);
+  // Each message runs as any turn of octo-friend's does: on their Copilot seat.
+  const turns = await guest.watchProjectChat(project.id).until(doneCount(2));
+  expect(turns.flatMap(({ event }) => (event.type === "payer" ? [event.payer] : []))).toEqual(
+    Array(2).fill({ kind: "seat", userId: expect.any(String), login: "octo-friend" }),
+  );
   expect(queries).toEqual(Array(3).fill("repo:octo-org/shop label:bug is:open"));
   expect(github.calls.every(({ authorization }) => authorization === "Bearer friend-token")).toBe(true);
   expect((await subscriptions())[0]).toMatchObject({ addedBy: "octo-friend", identity: "personal", events: 2 });

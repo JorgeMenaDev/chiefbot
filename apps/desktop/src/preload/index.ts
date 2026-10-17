@@ -75,6 +75,12 @@ const api = {
     unsubscribe: (id: string, subscriptionId: string): Promise<void> => ipcRenderer.invoke("projects:unsubscribe", id, subscriptionId),
     // { projectId, tasks } whenever a project's task ledger changes.
     onTasks: (listener: (ledger: unknown) => void) => subscribe("projects:tasks", listener),
+    workers: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:workers", id),
+    // Answers a pending push or pull request of a worker the user asked for.
+    answer: (id: string, workerId: string, approvalId: string, approved: boolean): Promise<void> =>
+      ipcRenderer.invoke("projects:answer", id, workerId, approvalId, approved),
+    // { projectId, workers } whenever one of a project's workers changes.
+    onWorkers: (listener: (workers: unknown) => void) => subscribe("projects:workers", listener),
   },
   connectors: {
     list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("connectors:list", workspaceId),

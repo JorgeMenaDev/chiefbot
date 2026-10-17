@@ -13,4 +13,5 @@ export * from "./projects.ts";
 export * from "./repos.ts";
 export * from "./routines.ts";
 export * from "./subscriptions.ts";
+export * from "./taskWorkers.ts";
 export * from "./workspaces.ts";

@@ -37,7 +37,7 @@ async function allow(call: Promise<void>, ...statuses: number[]) {
 export function gceProvider({ client, project, zone, instanceTemplate, image }: GceProviderOptions): ComputerProvider {
   // Compute Engine names allow lowercase letters, digits and dashes only:
   // bot_<uuid> becomes chiefbot-bot-<uuid> (49 characters, 54 for the disk; the limit is 63),
-  // project_<uuid> chiefbot-project-<uuid> (53, 58 for the disk).
+  // project_<uuid> chiefbot-project-<uuid> (53, 58 for the disk), worker_<uuid> chiefbot-worker-<uuid> (52, 57).
   const vm = (id: ComputerId) => `chiefbot-${id.replaceAll("_", "-").toLowerCase()}`;
   const disk = (id: ComputerId) => `${vm(id)}-home`;
 

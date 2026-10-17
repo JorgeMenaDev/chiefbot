@@ -3,10 +3,13 @@ import {
   SendMessageResponse,
   Subscription,
   Task,
+  TaskWorker,
+  type ApprovalId,
   type ProjectChatView,
   type ProjectId,
   type SubscriptionId,
   type SubscriptionInput,
+  type TaskWorkerId,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { foldChat, followChat } from "./chat.ts";
@@ -24,7 +27,7 @@ export type ProjectsOptions = {
 
 // The projects of the user's workspaces, owned by Electron main: plain HTTP
 // calls to control, plus the user's own chat with each opened project's
-// coordinator. Task ledger changes arrive on /events (bots.ts, onTasks).
+// coordinator. Task ledger and worker changes arrive on /events (bots.ts, onTasks and onWorkers).
 export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: ProjectsOptions) {
   const call = controlCaller({ controlUrl, session });
   const chats = new Map<ProjectId, { view: ProjectChatView; close: () => void }>();
@@ -42,6 +45,12 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
       chats.delete(projectId);
     },
     tasks: async (projectId: ProjectId) => Task.array().parse(await (await call("GET", `/projects/${projectId}/tasks`)).json()),
+    workers: async (projectId: ProjectId) => TaskWorker.array().parse(await (await call("GET", `/projects/${projectId}/workers`)).json()),
+    // Approves or declines a push or pull request of a worker the user asked for.
+    // The card goes when control's next `workers` event comes.
+    async answer(projectId: ProjectId, workerId: TaskWorkerId, approvalId: ApprovalId, approved: boolean) {
+      await call("POST", `/projects/${projectId}/workers/${workerId}/approvals/${approvalId}`, { approved });
+    },
 
     // What the project listens to. Adding throws with control's reason (a connector
     // the project does not declare, a schedule it cannot run).

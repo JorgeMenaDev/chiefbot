@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { agentEnv, coordinatorSessionConfig } from "./copilotSdk.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
 
-test("the agent's shell gets no GitHub token and no bot credential, so gh and the broker are out of reach", () => {
+test("the agent's shell gets no GitHub token and no bot or task worker credential, so gh and the broker are out of reach", () => {
   const env = agentEnv({
     PATH: "/usr/bin",
     HOME: "/home/bot",
@@ -13,12 +13,13 @@ test("the agent's shell gets no GitHub token and no bot credential, so gh and th
     GITHUB_ENTERPRISE_TOKEN: "gho_e",
     CHIEFBOT_BOT_ID: "bot_1",
     CHIEFBOT_BOT_TOKEN: "secret",
+    CHIEFBOT_TASK_WORKER_TOKEN: "secret too",
   });
 
   expect(env).toEqual({ PATH: "/usr/bin", HOME: "/home/bot", CHIEFBOT_BOT_ID: "bot_1" });
 });
 
-test("a coordinator session may use only its task and context tools: no shell, no files, no MCP without connectors", () => {
+test("a coordinator session may use only its task, context and worker tools: no shell, no files, no MCP without connectors", () => {
   const tools = coordinatorTools(async () => "[]");
 
   const config = coordinatorSessionConfig({
@@ -35,6 +36,10 @@ test("a coordinator session may use only its task and context tools: no shell, n
     "custom:list_tasks",
     "custom:read_context",
     "custom:write_context",
+    "custom:dispatch_worker",
+    "custom:worker_status",
+    "custom:worker_transcript",
+    "custom:stop_worker",
   ]);
   expect(config.systemMessage).toEqual({ mode: "append", content: "Coordinate." });
 });

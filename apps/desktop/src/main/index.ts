@@ -18,6 +18,7 @@ import {
   SetBotModelRequest,
   SubscriptionId,
   SubscriptionInput,
+  TaskWorkerId,
   UserId,
   WorkspaceId,
 } from "@chiefbot/contracts";
@@ -72,6 +73,7 @@ const bots = createBots({
   onChange: (list) => window?.webContents.send("bots:state", list),
   onUser: (user) => auth.userChanged(user),
   onTasks: (projectId, tasks) => window?.webContents.send("projects:tasks", { projectId, tasks }),
+  onWorkers: (projectId, workers) => window?.webContents.send("projects:workers", { projectId, workers }),
 });
 
 const chats = createChats({
@@ -170,13 +172,17 @@ ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) 
   projects.create(WorkspaceId.parse(workspaceId), CreateProjectRequest.parse({ repo }).repo),
 );
 ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
+ipcMain.handle("projects:workers", (_event, id: unknown) => projects.workers(ProjectId.parse(id)));
+ipcMain.handle("projects:answer", (_event, id: unknown, workerId: unknown, approvalId: unknown, approved: unknown) =>
+  projects.answer(ProjectId.parse(id), TaskWorkerId.parse(workerId), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
+);
 // Asks first. Resolves true once the project is deleted.
 ipcMain.handle("projects:delete", async (_event, id: unknown, name: unknown) => {
   if (!window) return false;
   const { response } = await dialog.showMessageBox(window, {
     type: "warning",
     message: `Delete the project ${String(name)}?`,
-    detail: "Its coordinator's computer, task ledger, chats and shared context are deleted. The repo is not touched.",
+    detail: "Its coordinator's and workers' computers, task ledger, chats and shared context are deleted. The repo is not touched.",
     buttons: ["Delete", "Cancel"],
     defaultId: 1,
     cancelId: 1,

@@ -1,11 +1,14 @@
 import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
 import {
+  ApiError,
   ApprovalId,
-  BotId,
   BrokeredGitHubToken,
   BrokerRefusal,
   ControlToWorker,
+  CopilotInstallationToken,
+  type AgentConnector,
   type ApprovalKind,
+  type ReportedConnectorCall,
   type ScreenControl,
   type TurnEvent,
   type TurnId,
@@ -14,7 +17,9 @@ import {
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
+import { connectorServers } from "./connectorServers.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
+import { installationSession } from "./installationSession.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
@@ -23,10 +28,13 @@ import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 export type WorkerOptions = {
   // Control's base URL as seen from the computer, e.g. http://host.docker.internal:7410.
   controlUrl: string;
-  // The bot this computer belongs to, from CHIEFBOT_BOT_ID.
-  botId: string;
-  // The bot's credential from CHIEFBOT_BOT_TOKEN.
-  botToken: string;
+  // Whom the computer works for: a bot (control's /worker/:id routes, the default) or
+  // one of a project's task workers (control's /task-worker/:id routes).
+  route?: "worker" | "task-worker";
+  // The bot's id and credential (CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN), or the task
+  // worker's (CHIEFBOT_TASK_WORKER_ID, CHIEFBOT_TASK_WORKER_TOKEN).
+  id: string;
+  token: string;
   // The agent engine: the Copilot SDK in a bot computer, a fake in tests.
   copilot: Copilot;
   // The computer's VNC server. Default: x11vnc on 127.0.0.1:5900.
@@ -36,13 +44,13 @@ export type WorkerOptions = {
   gitSocket?: string;
   // Wait between reconnects after the connection drops.
   retryMs?: number;
-  onBound?: (botId: BotId) => void;
+  onBound?: () => void;
   // Listing the plan's models failed; control keeps its last report.
   onModelsError?: (error: unknown) => void;
 };
 
-// Dials out to control's /worker/:botId WebSocket with the bot's credential and keeps
-// the connection up: control restarts and network drops end in a reconnect.
+// Dials out to control's /worker/:id WebSocket with the bot's credential (or a task
+// worker's /task-worker/:id with its own: the same protocol) and keeps the connection up: control restarts and network drops end in a reconnect.
 // Runs the turns control sends on the bot's Copilot session, one at a time, and
 // streams their events back. After each bind it reports the models the owner's
 // Copilot plan offers. The latest turn's events are kept and resent on
@@ -54,8 +62,9 @@ export type WorkerOptions = {
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
 export function startWorker({
   controlUrl,
-  botId,
-  botToken,
+  route = "worker",
+  id,
+  token,
   copilot,
   gitSocket,
   screen = { hostname: "127.0.0.1", port: 5900 },
@@ -63,7 +72,9 @@ export function startWorker({
   onBound,
   onModelsError,
 }: WorkerOptions) {
-  const url = `${controlUrl.replace(/^http/, "ws")}/worker/${botId}`;
+  // Every control route of this computer starts here.
+  const base = `${controlUrl}/${route}/${id}`;
+  const url = base.replace(/^http/, "ws");
   // Each open screen stream's close function.
   const streams = new Set<() => void>();
   let socket: WebSocket | null = null;
@@ -99,7 +110,7 @@ export function startWorker({
   // Short-lived GitHub access token for the SDK, from control's broker. The
   // worker keeps no token: the SDK asks again when one has an hour or less left.
   async function gitHubToken() {
-    const res = await fetch(`${controlUrl}/worker/${botId}/github-token`, { headers: { authorization: `Bearer ${botToken}` } });
+    const res = await fetch(`${base}/github-token`, { headers: { authorization: `Bearer ${token}` } });
     if (!res.ok) {
       if (BrokerRefusal.safeParse(await res.json().catch(() => null)).success) {
         throw new Error("Chiefbot has lost your GitHub sign-in. Sign in again in the Chiefbot app, then resend.");
@@ -134,13 +145,51 @@ export function startWorker({
     return { kind: "approve-once", approvedInteractively: true };
   };
 
-  // The bot's one Copilot session, opened by reportModels when the worker first
-  // binds (or by the next turn, if that open failed). Its id is the bot id, so
-  // after a restart the worker resumes the same conversation.
-  function openSession() {
-    const tools = [pullRequestTool({ controlUrl, botId, botToken }), ...chiefTools({ controlUrl, botId, botToken })];
+  // Throws with control's reason when it refuses.
+  async function fromControl(path: string, init: RequestInit = {}) {
+    const res = await fetch(`${base}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } });
+    if (res.ok) return res;
+    const refusal = ApiError.safeParse(await res.json().catch(() => null));
+    throw new Error(refusal.success ? (refusal.data.message ?? refusal.data.error) : `Control answered ${res.status}`);
+  }
+
+  // A task worker's session, set up by its task: on the Copilot `payer` control
+  // named (the requester's seat, or the organization's installation tokens) and
+  // with the project's `connectors` for the member who asked. Control logs remote
+  // connectors' calls in its proxy; a command connector's call runs here, so it
+  // is reported. A failed report does not stop the call.
+  function taskSession(
+    options: Omit<Parameters<Copilot["openSession"]>[0], "auth">,
+    { member, payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
+  ) {
+    const withConnectors = {
+      ...options,
+      mcpServers: connectorServers(connectors, { base, credential: token, member }),
+      onMcpCall: async (serverName: string, toolName: string) => {
+        if (!connectors.some(({ name, kind }: AgentConnector) => name === serverName && kind === "command")) return;
+        const call: ReportedConnectorCall = { connector: serverName, tool: toolName };
+        await fromControl("/connector-calls", { method: "POST", body: JSON.stringify(call) }).catch(() => {});
+      },
+    };
+    return payer.kind === "org"
+      ? installationSession({
+          ...withConnectors,
+          copilot,
+          token: async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json()),
+        })
+      : copilot.openSession({ ...withConnectors, auth: { kind: "seat", gitHubTokenProvider: gitHubToken } });
+  }
+
+  // The computer's one Copilot session. A bot's is opened by reportModels when
+  // the worker first binds (or by the next turn, if that open failed). A task
+  // worker's is opened by its task (`task`). Its id is the bot's (or task
+  // worker's), so after a restart the worker resumes the same conversation.
+  function openSession(task?: Extract<ControlToWorker, { type: "run-task" }>) {
+    // A task worker does one task for a project: it is no one's chief of staff.
+    const tools = [pullRequestTool({ base, token }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, botToken: token }) : [])];
+    const options = { sessionId: id, onPermissionRequest, tools };
     // A chief always runs on its owner's own Copilot seat.
-    session ??= copilot.openSession({ sessionId: BotId.parse(botId), auth: { kind: "seat", gitHubTokenProvider: gitHubToken }, onPermissionRequest, tools }).then((opened) => {
+    session ??= (task ? taskSession(options, task) : copilot.openSession({ ...options, auth: { kind: "seat", gitHubTokenProvider: gitHubToken } })).then((opened) => {
       opened.on(onSessionEvent);
       return opened;
     });
@@ -172,11 +221,12 @@ export function startWorker({
 
   // Control sends a turn only once the previous one is done. A changed model is
   // set on the session first, so switching mid-conversation keeps the history.
-  async function runTurn(turnId: TurnId, text: string, model: string) {
+  // A task worker's one turn (`task`) opens its session and runs on the default model.
+  async function runTurn(turnId: TurnId, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
     active = { turnId, ...newTurnStream() };
     try {
-      const opened = await openSession();
-      if (sessionModel !== model) {
+      const opened = await openSession(task);
+      if (model !== null && sessionModel !== model) {
         await opened.setModel(model);
         sessionModel = model;
       }
@@ -188,7 +238,7 @@ export function startWorker({
   }
 
   function connect() {
-    socket = new WebSocket(url, { headers: { authorization: `Bearer ${botToken}` } });
+    socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } });
     socket.onopen = () => {
       if (latest) {
         const { turnId, events } = latest;
@@ -200,11 +250,15 @@ export function startWorker({
       const message = ControlToWorker.parse(JSON.parse(String(event.data)));
       switch (message.type) {
         case "bound":
-          onBound?.(message.botId);
-          void reportModels();
+          onBound?.();
+          // A task worker's session waits for its task, which names its payer; it has no model picker.
+          if (route === "worker") void reportModels();
           break;
         case "run-turn":
           void runTurn(message.turnId, message.text, message.model);
+          break;
+        case "run-task":
+          void runTurn(message.turnId, message.text, null, message);
           break;
         case "screen-control":
           screenControl = message.control;
@@ -214,7 +268,7 @@ export function startWorker({
           }
           break;
         case "screen-open": {
-          const close = openScreenStream(`${url}/screen/${message.streamId}`, botToken, screen, () =>
+          const close = openScreenStream(`${url}/screen/${message.streamId}`, token, screen, () =>
             streams.delete(close),
           );
           streams.add(close);
@@ -232,13 +286,13 @@ export function startWorker({
   }
   connect();
 
-  // Git's credential helper asks here for the bot's credential, which control's
+  // Git's credential helper asks here for the computer's credential, which control's
   // git proxy takes (never a GitHub token), so it is never written to disk. A
   // stopped container keeps /tmp, so a stale socket file is removed first.
   let git: Bun.Server<undefined> | null = null;
   if (gitSocket) {
     rmSync(gitSocket, { force: true });
-    git = Bun.serve({ unix: gitSocket, fetch: () => new Response(`username=chiefbot\npassword=${botToken}\n`) });
+    git = Bun.serve({ unix: gitSocket, fetch: () => new Response(`username=chiefbot\npassword=${token}\n`) });
   }
 
   return {

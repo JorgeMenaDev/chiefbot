@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ChatItem, TurnEventMessage, TurnHello } from "./chat.ts";
 import { AgentConnector } from "./connectors.ts";
-import { ProjectId, TurnId, UserId, WorkspaceId } from "./ids.ts";
+import { ProjectId, TaskWorkerId, TurnId, UserId, WorkspaceId } from "./ids.ts";
 import { RepoFullName } from "./repos.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
@@ -103,15 +103,36 @@ export const WriteContextArgs = z.object({
   content: z.string().max(200_000).describe("The file's whole new content, in Markdown"),
 });
 
+export const DispatchWorkerArgs = z.object({
+  task: z.number().int().min(1).describe("The number of the task the worker does"),
+  instructions: z.string().max(20_000).default("").describe("Anything the worker needs beyond the task's title and detail"),
+});
+export const WorkerStatusArgs = z.object({
+  worker: TaskWorkerId.optional().describe("The worker's id; left out, every worker of the project"),
+});
+export const WorkerTranscriptArgs = z.object({
+  worker: TaskWorkerId.describe("The worker's id"),
+  lines: z.number().int().min(1).max(500).default(100).describe("At most this many of its latest lines"),
+});
+export const StopWorkerArgs = z.object({ worker: TaskWorkerId.describe("The worker's id") });
+
 // Body of POST /coordinator/:projectId/tools: one tool call of the running coordinator turn.
 // Its answer, as JSON: create_task and update_task → Task; list_tasks → Task[];
-// read_context → ContextFile[] without a path, { path, content } with one; write_context → ContextFile.
+// read_context → ContextFile[] without a path, { path, content } with one; write_context → ContextFile;
+// dispatch_worker, stop_worker and worker_status with a worker → TaskWorker; worker_status
+// without one → TaskWorker[]; worker_transcript → WorkerTranscript (taskWorkers.ts).
+// dispatch_worker's `creationId` is not the model's: the coordinator sets it from the
+// tool call's id, so a resent call starts no second worker.
 export const CoordinatorToolCall = z.discriminatedUnion("tool", [
   CreateTaskArgs.extend({ tool: z.literal("create_task") }),
   UpdateTaskArgs.extend({ tool: z.literal("update_task") }),
   ListTasksArgs.extend({ tool: z.literal("list_tasks") }),
   ReadContextArgs.extend({ tool: z.literal("read_context") }),
   WriteContextArgs.extend({ tool: z.literal("write_context") }),
+  DispatchWorkerArgs.extend({ tool: z.literal("dispatch_worker"), creationId: z.string().min(1).max(300) }),
+  WorkerStatusArgs.extend({ tool: z.literal("worker_status") }),
+  WorkerTranscriptArgs.extend({ tool: z.literal("worker_transcript") }),
+  StopWorkerArgs.extend({ tool: z.literal("stop_worker") }),
 ]);
 export type CoordinatorToolCall = z.infer<typeof CoordinatorToolCall>;
 

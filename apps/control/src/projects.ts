@@ -11,6 +11,7 @@ import {
   type CopilotPayer,
   type Project,
   type ProjectId,
+  type ProjectMember,
   type SendMessageResponse,
   type Task,
   type User,
@@ -23,6 +24,7 @@ import { readProjectFile } from "./projectFile.ts";
 import type { repoAccess } from "./repos.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
+import type { taskWorkerHost } from "./taskWorkers.ts";
 
 // What a project WebSocket is bound to: a project's coordinator, or one
 // member's chat with it from `after` on.
@@ -39,6 +41,8 @@ export type ProjectHostOptions = {
   payerOf: ReturnType<typeof copilotIdentity>;
   computers: ComputerProvider;
   context: ContextStore;
+  // The projects' task workers (taskWorkers.ts): the coordinator's worker tools.
+  workers: ReturnType<typeof taskWorkerHost>;
   githubApiUrl: string;
   // A token to read a repo for a user, or why not (repos.ts readToken).
   repoReadToken: ReturnType<typeof repoAccess>["readToken"];
@@ -69,7 +73,8 @@ export type ProjectHostOptions = {
 //                                    invalid_project_file says what is wrong; 409 project_exists;
 //                                    403 reauth_needed), then starts the coordinator's computer.
 //   GET    /projects/:id             → Project
-//   DELETE /projects/:id             → 204 (workspace owner only): its computer, ledger, chats and context go
+//   DELETE /projects/:id             → 204 (workspace owner only): its computer, its workers' computers,
+//                                    ledger, chats and context go
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
 //   POST   /projects/:id/messages    body SendMessageRequest → 202 SendMessageResponse: queued for the
@@ -88,6 +93,7 @@ export function projectHost({
   payerOf,
   computers,
   context,
+  workers,
   githubApiUrl,
   repoReadToken,
   controlUrlForComputers,
@@ -173,7 +179,8 @@ export function projectHost({
 
   // One coordinator tool call, made in the turn of `asker`. Answers the call's
   // result as JSON, or a refusal the model sees.
-  async function runTool(projectId: ProjectId, asker: string, call: CoordinatorToolCall): Promise<Response> {
+  async function runTool(project: Project, asker: ProjectMember, call: CoordinatorToolCall): Promise<Response> {
+    const projectId = project.id;
     // A task's owner is named by login; it must be a member's.
     const ownerLogin = (owner: string | null | undefined) => {
       if (owner === null || owner === undefined) return { login: owner };
@@ -185,7 +192,7 @@ export function projectHost({
       case "create_task": {
         const owner = ownerLogin(call.owner);
         if (!owner) return notMember(String(call.owner));
-        const task = projects.createTask(projectId, { ...call, owner: owner.login ?? null }, asker);
+        const task = projects.createTask(projectId, { ...call, owner: owner.login ?? null }, asker.login);
         publishTasks(projectId);
         return Response.json(task satisfies Task);
       }
@@ -195,6 +202,7 @@ export function projectHost({
         const task = projects.updateTask(projectId, { ...call, owner: owner.login });
         if (!task) return apiError(404, "not_found", `No task #${call.number} in this project`);
         publishTasks(projectId);
+        if (task.status === "done" || task.status === "abandoned") workers.taskClosed(projectId, task.number);
         return Response.json(task satisfies Task);
       }
       case "list_tasks":
@@ -207,6 +215,11 @@ export function projectHost({
       }
       case "write_context":
         return Response.json((await context.write(projectId, call.path, call.content)) satisfies ContextFile);
+      case "dispatch_worker":
+      case "worker_status":
+      case "worker_transcript":
+      case "stop_worker":
+        return workers.tool(project, asker, call);
     }
   }
 
@@ -249,6 +262,7 @@ export function projectHost({
       GET: member((_user, { project }) => Response.json(project satisfies Project)),
       DELETE: member(async (_user, { project, owner }: { project: Project; owner: boolean }, _req: Bun.BunRequest<"/projects/:id">) => {
         if (!owner) return apiError(403, "owner_only");
+        await workers.removeProject(project.id);
         await computers.destroy(project.id, { deleteData: true });
         coordinators.get(project.id)?.close();
         await context.remove(project.id);
@@ -308,8 +322,9 @@ export function projectHost({
           return apiError(400, "invalid_tool_call", issues.join("; "));
         }
         const asker = projects.runningMember(projectId);
-        if (!asker) return apiError(409, "invalid_tool_call", "No coordinator turn is running");
-        return runTool(projectId, store.user(asker).login, call.data);
+        const project = projects.project(projectId);
+        if (!asker || !project) return apiError(409, "invalid_tool_call", "No coordinator turn is running");
+        return runTool(project, { userId: asker, login: store.user(asker).login }, call.data);
       },
     },
   };

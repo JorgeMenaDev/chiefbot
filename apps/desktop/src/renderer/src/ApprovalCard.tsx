@@ -1,7 +1,7 @@
-import type { BotId, ChatItem } from "@chiefbot/contracts";
+import type { ChatItem } from "@chiefbot/contracts";
 import { useState } from "react";
 
-type ApprovalItem = Extract<ChatItem, { kind: "approval" }>;
+export type ApprovalItem = Extract<ChatItem, { kind: "approval" }>;
 
 const approvalLabel: Record<ApprovalItem["request"], string> = {
   push: "Push approval",
@@ -18,9 +18,10 @@ const approvalOutcome: Record<Exclude<ApprovalItem["state"], "pending">, string>
 
 // What the bot waits on, after T3 Code's ComposerPendingApprovalPanel and
 // ComposerPendingApprovalActions: a label, the exact command or pull request,
-// and Decline / Approve. It stays answerable until the bot's turn ends, also
-// after the app restarts. Answered, it shrinks to one line.
-export function ApprovalCard({ botId, item }: { botId: BotId; item: ApprovalItem }) {
+// and Decline / Approve. It stays answerable until the bot's (or task worker's)
+// turn ends, also after the app restarts. Answered, it shrinks to one line.
+// `onAnswer` sends the answer to control.
+export function ApprovalCard({ item, onAnswer }: { item: ApprovalItem; onAnswer: (approved: boolean) => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,7 +29,7 @@ export function ApprovalCard({ botId, item }: { botId: BotId; item: ApprovalItem
     setBusy(true);
     setError(null);
     try {
-      await window.chiefbot.chat.answer(botId, item.approvalId, approved);
+      await onAnswer(approved);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {

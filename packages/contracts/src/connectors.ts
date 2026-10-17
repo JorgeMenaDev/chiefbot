@@ -101,8 +101,9 @@ export const ConnectorCall = z.object({
 });
 export type ConnectorCall = z.infer<typeof ConnectorCall>;
 
-// A connector as an agent session gets it (in a coordinator's run-turn):
+// A connector as an agent session gets it (in a coordinator's run-turn or a task worker's run-task):
 //   remote   reached through control at <control>/coordinator/:projectId/mcp/:name
+//            (a task worker's: <control>/task-worker/:workerId/mcp/:name)
 //   command  started on the computer; `env` already holds the identity's token
 export const AgentConnector = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("remote"), name: ConnectorName }),

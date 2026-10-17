@@ -26,6 +26,7 @@ import { nextDueAt } from "./schedule.ts";
 import { connectorStore } from "./connectors/connectorStore.ts";
 import { projectStore } from "./projectStore.ts";
 import { subscriptionStore } from "./subscriptionStore.ts";
+import { taskWorkerStore } from "./taskWorkerStore.ts";
 import { workspaceStore } from "./workspaceStore.ts";
 
 // Control's durable state in SQLite. Every row hangs off a user or a workspace.
@@ -210,6 +211,7 @@ export function openStore(path: string) {
     return append(botId, turnId, notice);
   };
   const handoffs = handoffStore(db, projects, postNotice);
+  const taskWorkers = taskWorkerStore(db, hash);
 
   return {
     // Workspaces, members and invites (workspaceStore.ts).
@@ -222,6 +224,8 @@ export function openStore(path: string) {
     handoffs,
     // Projects' subscriptions and the events they saw (subscriptionStore.ts).
     subscriptions,
+    // Projects' task workers: launch records, transcripts, approvals (taskWorkerStore.ts).
+    taskWorkers,
 
     // Creates or updates the user GitHub identified.
     upsertUser(identity: GitHubIdentity): UserId {
