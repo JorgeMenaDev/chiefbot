@@ -40,12 +40,16 @@ const ConnectorFields = z.strictObject({
   server: ConnectorServer,
   auth: ConnectorAuth,
   scope: z.string().trim().max(500).default(""),
+  writesWithoutApproval: z.boolean().default(false),
 });
 
 // A connector as the workspace owner defines it (body of POST /workspaces/:id/connectors).
 // `scope` is the OAuth scope a personal sign-in asks for (space-separated); empty
 // asks for the server's default. A credential never goes to a computer, so a
 // connector with one must be remote: a command connector's auth is `none`.
+// Control holds each call to a remote connector's tool that its server does not
+// mark read-only (annotations.readOnlyHint) until the member whose turn makes it
+// approves, unless the owner set `writesWithoutApproval`.
 export const ConnectorInput = ConnectorFields.refine(({ server, auth }) => server.kind === "remote" || auth === "none", {
   path: ["auth"],
   message: "a command connector runs on the agent's computer with no credential: use auth none, or a remote server",
@@ -55,6 +59,11 @@ export type ConnectorInput = z.infer<typeof ConnectorInput>;
 // A workspace's connector. `hasWorkspaceSecret`: its owner has set the service credential.
 export const Connector = ConnectorFields.extend({ workspaceId: WorkspaceId, hasWorkspaceSecret: z.boolean() });
 export type Connector = z.infer<typeof Connector>;
+
+// Body of PUT /workspaces/:id/connectors/:name/approval: the owner lets the
+// connector's tools that may write run without asking, or not.
+export const ConnectorApprovalRequest = z.object({ writesWithoutApproval: z.boolean() });
+export type ConnectorApprovalRequest = z.infer<typeof ConnectorApprovalRequest>;
 
 // Body of PUT /workspaces/:id/connectors/:name/secret (the workspace's credential)
 // and PUT /workspaces/:id/connectors/:name/token (the member's own token).
@@ -125,19 +134,35 @@ export type AgentConnector = z.infer<typeof AgentConnector>;
 
 // Ready-made connectors the owner adds in one click. Data, not code paths: each
 // is an ordinary ConnectorInput. docs/connectors.md has more examples.
-//   github          the official GitHub MCP server (remote), its default toolsets
-//   github-actions  the same server limited to its Actions toolset (workflows, runs, logs)
+//   github          the official GitHub MCP server (remote), its default toolsets, read-only:
+//                   agents push and open pull requests only through control's git proxy and PR tool
+//   github-actions  the same server limited to its Actions toolset (workflows, runs, logs), read-only
 //   jira            Atlassian's remote MCP server (Jira and Confluence)
 export const connectorPresets: ConnectorInput[] = [
-  { name: "github", title: "GitHub", server: { kind: "remote", url: "https://api.githubcopilot.com/mcp/" }, auth: "personal-oauth", scope: "" },
+  {
+    name: "github",
+    title: "GitHub",
+    server: { kind: "remote", url: "https://api.githubcopilot.com/mcp/readonly" },
+    auth: "personal-oauth",
+    scope: "",
+    writesWithoutApproval: false,
+  },
   {
     name: "github-actions",
     title: "GitHub Actions",
-    server: { kind: "remote", url: "https://api.githubcopilot.com/mcp/x/actions" },
+    server: { kind: "remote", url: "https://api.githubcopilot.com/mcp/x/actions/readonly" },
     auth: "personal-oauth",
     scope: "",
+    writesWithoutApproval: false,
   },
-  { name: "jira", title: "Jira", server: { kind: "remote", url: "https://mcp.atlassian.com/v1/mcp" }, auth: "personal-oauth", scope: "" },
+  {
+    name: "jira",
+    title: "Jira",
+    server: { kind: "remote", url: "https://mcp.atlassian.com/v1/mcp" },
+    auth: "personal-oauth",
+    scope: "",
+    writesWithoutApproval: false,
+  },
 ];
 
 // Body of POST /coordinator/:projectId/connector-calls: a call to a command

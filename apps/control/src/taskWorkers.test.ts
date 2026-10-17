@@ -423,6 +423,39 @@ test("a worker gets the project's connectors through control's proxy, and its ca
   ]);
 });
 
+test("a worker's call to a connector tool that may write waits for the member who asked, asked once, by control", async () => {
+  const upstream = startFakeMcpServer({ writes: ["create_issue"] });
+  atCleanUp(upstream.stop);
+  const { owner, guest, workspace, project, copilot } = await teamProject({}, "connectors: [tracker]\n");
+  const connectors = `/workspaces/${workspace.id}/connectors`;
+  await owner.api("POST", connectors, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
+  await guest.api("PUT", `${connectors}/tracker/token`, { token: "tracker-guest" });
+  let dispatched: unknown = null;
+  copilot.script = async function* (prompt, runtime) {
+    if (isWorker(prompt)) {
+      // The runtime knows the tool may write, as the server's annotations say.
+      await runtime.callMcp("tracker", "create_issue", false);
+      yield sdk.idle();
+      return;
+    }
+    await runtime.tool("create_task", { title: "File the bug" });
+    dispatched = await answer(runtime.tool("dispatch_worker", { task: 1 }));
+    yield sdk.idle();
+  };
+
+  await ask(guest, project, "File the bug");
+  const { id } = TaskWorker.parse(dispatched);
+  const waiting = await workerWhen(owner, project, id, ({ pendingApprovals }) => pendingApprovals.length > 0);
+  const held = upstream.calls.length;
+  const [pending] = waiting.pendingApprovals;
+  await guest.api("POST", `/projects/${project.id}/workers/${id}/approvals/${pending?.approvalId}`, { approved: true });
+
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  expect(waiting.pendingApprovals).toEqual([{ approvalId: expect.any(String), kind: "connector", detail: "Tracker: create_issue" }]);
+  expect(held).toBe(0);
+  expect(upstream.calls).toEqual([{ tool: "create_issue", authorization: "Bearer tracker-guest" }]);
+});
+
 test("when the organization pays, a worker runs on its installation token and fails before the token's hour runs out", async () => {
   const time = fakeClock(Date.now());
   let minted = 0;

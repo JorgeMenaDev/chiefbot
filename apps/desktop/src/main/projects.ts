@@ -46,6 +46,11 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
     },
     tasks: async (projectId: ProjectId) => Task.array().parse(await (await call("GET", `/projects/${projectId}/tasks`)).json()),
     workers: async (projectId: ProjectId) => TaskWorker.array().parse(await (await call("GET", `/projects/${projectId}/workers`)).json()),
+    // Approves or declines what control asked in the user's running turn with the
+    // coordinator (a connector call). The card updates when the answer comes back on the chat socket.
+    async answerChat(projectId: ProjectId, approvalId: ApprovalId, approved: boolean) {
+      await call("POST", `/projects/${projectId}/approvals/${approvalId}`, { approved });
+    },
     // Approves or declines a push or pull request of a worker the user asked for.
     // The card goes when control's next `workers` event comes.
     async answer(projectId: ProjectId, workerId: TaskWorkerId, approvalId: ApprovalId, approved: boolean) {

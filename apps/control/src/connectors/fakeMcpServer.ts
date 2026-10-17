@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 
 // A fake remote MCP server for tests: Streamable HTTP at /mcp, answering JSON
 // (never SSE). Its tools are `tools`, each answering its handler's result as
-// JSON text, or by default one tool, `list_issues`. With `oauth`, it also is its own
+// JSON text, or by default `list_issues`, `list_runs` and `search`, plus `writes`.
+// tools/list marks every tool read-only (annotations.readOnlyHint) except those
+// in `writes`, which answer like the defaults. With `oauth`, it also is its own
 // OAuth authorization server the way the MCP spec describes: protected resource
 // metadata, authorization server metadata with dynamic client registration, an
 // authorize endpoint that approves at once, and a token endpoint with PKCE and
@@ -11,7 +13,8 @@ export function startFakeMcpServer({
   oauth = false,
   accessTokenSeconds = 3600,
   tools,
-}: { oauth?: boolean; accessTokenSeconds?: number; tools?: Record<string, (args: Record<string, unknown>) => unknown> } = {}) {
+  writes = [],
+}: { oauth?: boolean; accessTokenSeconds?: number; tools?: Record<string, (args: Record<string, unknown>) => unknown>; writes?: string[] } = {}) {
   // Every tools/call, with the Authorization header it came with.
   const calls: Array<{ tool: string; authorization: string | null }> = [];
   // Every JSON-RPC method received, in order.
@@ -54,8 +57,10 @@ export function startFakeMcpServer({
         if (message.method === "initialize") {
           return answer({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "1" } });
         }
-        const names = tools ? Object.keys(tools) : ["list_issues"];
-        if (message.method === "tools/list") return answer({ tools: names.map((name) => ({ name, inputSchema: { type: "object" } })) });
+        const names = [...(tools ? Object.keys(tools) : ["list_issues", "list_runs", "search"]), ...writes];
+        if (message.method === "tools/list") {
+          return answer({ tools: names.map((name) => ({ name, inputSchema: { type: "object" }, annotations: { readOnlyHint: !writes.includes(name) } })) });
+        }
         const tool = message.params?.name ?? "";
         calls.push({ tool, authorization });
         const handler = tools?.[tool];

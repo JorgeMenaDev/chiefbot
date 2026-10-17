@@ -2,6 +2,7 @@ import {
   AnswerApprovalRequest,
   ApprovalId,
   BotId,
+  ConnectorApprovalRequest,
   ConnectorInput,
   ConnectorName,
   ConnectorTokenRequest,
@@ -173,6 +174,9 @@ ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) 
 );
 ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
 ipcMain.handle("projects:workers", (_event, id: unknown) => projects.workers(ProjectId.parse(id)));
+ipcMain.handle("projects:answer-chat", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
+  projects.answerChat(ProjectId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
+);
 ipcMain.handle("projects:answer", (_event, id: unknown, workerId: unknown, approvalId: unknown, approved: unknown) =>
   projects.answer(ProjectId.parse(id), TaskWorkerId.parse(workerId), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
 );
@@ -210,6 +214,13 @@ ipcMain.handle("projects:unsubscribe", (_event, id: unknown, subscriptionId: unk
 ipcMain.handle("connectors:list", (_event, workspaceId: unknown) => connectors.list(WorkspaceId.parse(workspaceId)));
 ipcMain.handle("connectors:define", (_event, workspaceId: unknown, input: unknown) =>
   connectors.define(WorkspaceId.parse(workspaceId), ConnectorInput.parse(input)),
+);
+ipcMain.handle("connectors:set-writes", (_event, workspaceId: unknown, name: unknown, allowed: unknown) =>
+  connectors.setWritesWithoutApproval(
+    WorkspaceId.parse(workspaceId),
+    ConnectorName.parse(name),
+    ConnectorApprovalRequest.parse({ writesWithoutApproval: allowed }).writesWithoutApproval,
+  ),
 );
 ipcMain.handle("connectors:set-secret", (_event, workspaceId: unknown, name: unknown, token: unknown) =>
   connectors.setSecret(WorkspaceId.parse(workspaceId), ConnectorName.parse(name), ConnectorTokenRequest.parse({ token }).token),

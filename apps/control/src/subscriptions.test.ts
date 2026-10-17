@@ -57,7 +57,7 @@ async function team(connectors: string[]) {
   const connectorsPath = `/workspaces/${workspace.id}/connectors`;
 
   // Defines a remote connector served by `server`.
-  const define = async (input: Omit<ConnectorInput, "server" | "scope">, server: { url: string }) => {
+  const define = async (input: Omit<z.input<typeof ConnectorInput>, "server" | "scope">, server: { url: string }) => {
     const res = await owner.api("POST", connectorsPath, { ...input, server: { kind: "remote", url: server.url }, scope: "" });
     if (res.status !== 201) throw new Error(`define failed: ${res.status} ${await res.text()}`);
   };

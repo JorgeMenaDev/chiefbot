@@ -6,8 +6,9 @@ import { CopilotPayer } from "./workspaces.ts";
 //   push          a git push, which control holds in its git proxy until the answer
 //   pull-request  opening a pull request with the bot's create_pull_request tool (control opens it)
 //   tool          a GitHub tool that writes
+//   connector     a call to a connector's tool its MCP server does not mark read-only, held in control's proxy
 //   command       a risky shell command: only in chats from before control held repo access
-export const ApprovalKind = z.enum(["push", "pull-request", "tool", "command"]);
+export const ApprovalKind = z.enum(["push", "pull-request", "tool", "connector", "command"]);
 export type ApprovalKind = z.infer<typeof ApprovalKind>;
 
 // What happens during one turn, as the worker reports it. The worker turns

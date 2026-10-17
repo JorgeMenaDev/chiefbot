@@ -130,7 +130,20 @@ export function Connectors({ workspace }: { workspace: Workspace }) {
                 {connector.server.kind === "remote" ? connector.server.url : [connector.server.command, ...connector.server.args].join(" ")} ·{" "}
                 {authText[connector.auth]}
                 {connector.auth === "workspace-secret" && (connector.hasWorkspaceSecret ? " (set)" : " (not set)")}
+                {connector.server.kind === "remote" &&
+                  (connector.writesWithoutApproval ? " · tools that may write run without asking" : " · tools that may write ask the member first")}
               </span>
+              {owner && connector.server.kind === "remote" && (
+                <label className="muted">
+                  <input
+                    type="checkbox"
+                    checked={connector.writesWithoutApproval}
+                    disabled={busy}
+                    onChange={(event) => void run(() => api.setWritesWithoutApproval(workspace.id, connector.name, event.target.checked))}
+                  />{" "}
+                  Writes allowed without approval
+                </label>
+              )}
               {owner && connector.auth === "workspace-secret" && connector.hasWorkspaceSecret && (
                 <TokenForm placeholder="Replace the service token" busy={busy} onSave={(token) => run(() => api.setSecret(workspace.id, connector.name, token))} />
               )}

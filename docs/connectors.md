@@ -17,6 +17,7 @@ Control gives each agent session only those connectors, and only the ones ready 
 | `server` | `remote`: a Streamable HTTP MCP server at `url`. `command`: a stdio MCP server the agent's computer starts (`command`, `args`, `env`). |
 | `auth` | `none`, `workspace-secret` (one service credential the workspace owner sets) or `personal-oauth` (each member's own account). A `command` connector takes only `none`: control refuses any other with `400 invalid_connector`. |
 | `scope` | The OAuth scope a personal sign-in asks for. Empty asks for the server's default. |
+| `writesWithoutApproval` | Default `false`: each call to a tool that may write waits for the member's approval (below). The owner can turn it on for a connector they trust, from the connector's row or `PUT /workspaces/:id/connectors/:name/approval`. |
 
 The workspace owner adds, deletes and sets the secrets of connectors. Members connect their own accounts. Secrets go through control's `SecretStore` (encrypted in SQLite locally, Secret Manager on GCP) and never appear in an API answer.
 
@@ -25,6 +26,12 @@ The workspace owner adds, deletes and sets the secrets of connectors. Members co
 - **Remote connectors** are reached only through control: each agent session gets `<control>/coordinator/<project>/mcp/<name>` (a project's worker: `<control>/task-worker/<worker>/mcp/<name>`, running as the member who asked for it) as the server's URL, with the computer's own credential. For each request control picks the identity (no credential, the workspace secret, or the member's own token), adds it as `Authorization: Bearer …` and forwards the request. Tokens never reach a computer. The member is always the one whose turn control is running for that agent (the coordinator's scheduled turn, or the worker's task), never one a request names, and outside a turn control refuses every request (`409 no_turn`).
 - **Command connectors** run on the agent's computer with no credential. A credential on a computer could be read by the agent and used without control seeing it, so a connector with one must be remote. Their `env` is plain configuration that members and agents can read: put no secret in it.
 - A member's OAuth sign-in is refreshed by control shortly before it expires.
+
+## Approvals
+
+Before control's proxy forwards a call to a remote connector's tool, it checks the server's own `tools/list`: a tool is read-only only when its `annotations.readOnlyHint` is `true`. Any other call waits, held in control, until the member whose turn makes it approves it. The card shows in that member's chat with the coordinator (**Connector approval**, with the connector's title and the tool), or under the task for a worker, like a push. Declined, the agent gets `403 declined`; if the turn ends first, `409 no_turn`. A connector the owner marked `writesWithoutApproval` skips this. Control keeps each server's list of read-only tools for ten minutes.
+
+A command connector runs on the agent's computer, so control cannot hold its calls: a worker asks the member itself before a tool that may write, and a coordinator has no shell or files for such a tool to touch.
 
 ## The call log
 
@@ -46,8 +53,8 @@ Presets are data (`connectorPresets` in `packages/contracts/src/connectors.ts`),
 
 | Name | Server | Notes |
 | --- | --- | --- |
-| `github` | `https://api.githubcopilot.com/mcp/` | GitHub's official remote MCP server. GitHub offers no dynamic client registration, so members paste a fine-grained personal access token. |
-| `github-actions` | `https://api.githubcopilot.com/mcp/x/actions` | The same server limited to its Actions toolset: workflows, runs and logs. |
+| `github` | `https://api.githubcopilot.com/mcp/readonly` | GitHub's official remote MCP server, in read-only mode: agents push and open pull requests only through control's git proxy and pull request tool, which ask first. GitHub offers no dynamic client registration, so members paste a fine-grained personal access token. |
+| `github-actions` | `https://api.githubcopilot.com/mcp/x/actions/readonly` | The same server limited to its Actions toolset (workflows, runs and logs), read-only too. |
 | `jira` | `https://mcp.atlassian.com/v1/mcp` | Atlassian's remote MCP server (Jira and Confluence), with OAuth 2.1 sign-in. |
 
 ## More examples

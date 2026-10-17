@@ -27,6 +27,9 @@ export function createConnectors({ controlUrl, session }: ConnectorsOptions) {
     define: async (workspaceId: WorkspaceId, input: ConnectorInput) =>
       Connector.parse(await (await call("POST", base(workspaceId), input)).json()),
     remove: async (workspaceId: WorkspaceId, name: string) => void (await call("DELETE", `${base(workspaceId)}/${name}`)),
+    // The owner only: whether the connector's tools that may write run without the member's approval.
+    setWritesWithoutApproval: async (workspaceId: WorkspaceId, name: string, writesWithoutApproval: boolean) =>
+      Connector.parse(await (await call("PUT", `${base(workspaceId)}/${name}/approval`, { writesWithoutApproval })).json()),
     // The workspace's credential (owner only), or the user's own token.
     setSecret: async (workspaceId: WorkspaceId, name: string, token: string) =>
       void (await call("PUT", `${base(workspaceId)}/${name}/secret`, { token })),

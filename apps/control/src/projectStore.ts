@@ -1,11 +1,13 @@
 import type { Database } from "bun:sqlite";
 import {
+  ApprovalId,
   ChatEvent,
   Project,
   ProjectId,
   Task,
   TurnId,
   UserId,
+  type ApprovalKind,
   type CopilotPayer,
   type CreateTaskArgs,
   type ProjectFile,
@@ -68,6 +70,13 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     event TEXT NOT NULL
   )`);
   db.run("CREATE INDEX IF NOT EXISTS coordinator_events_by_chat ON coordinator_events (project_id, user_id, seq)");
+  // What control asked the member of a coordinator turn to approve (a connector
+  // call, connectors.ts), and the answer (NULL while pending).
+  db.run(`CREATE TABLE IF NOT EXISTS coordinator_approvals (
+    id TEXT PRIMARY KEY,
+    turn_id TEXT NOT NULL REFERENCES coordinator_turns(id) ON DELETE CASCADE,
+    approved INTEGER
+  )`);
 
   type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string };
   const toProject = (row: ProjectRow): Project =>
@@ -308,6 +317,29 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         .get(turnId, projectId, index, event.type === "done" ? "done" : "running");
       if (!updated) return null;
       return { userId: userOfTurn(turnId), event: append(turnId, event) };
+    }),
+
+    // An approval control asks for in the project's running turn (a connector
+    // call), recorded in its member's chat. Null when no turn is running.
+    requestApproval: db.transaction((projectId: ProjectId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): MemberEvent | null => {
+      const turn = db.query<{ id: string }, [string]>("SELECT id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'").get(projectId);
+      if (!turn) return null;
+      const turnId = TurnId.parse(turn.id);
+      db.query("INSERT INTO coordinator_approvals (id, turn_id) VALUES (?1, ?2)").run(ask.approvalId, turnId);
+      return { userId: userOfTurn(turnId), event: append(turnId, { type: "approval-request", ...ask }) };
+    }),
+
+    // Records the member's answer to a pending approval of their running turn.
+    // Null, storing nothing, when there is no such pending approval for them.
+    answerApproval: db.transaction((projectId: ProjectId, userId: UserId, approvalId: string, approved: boolean): MemberEvent | null => {
+      const row = db
+        .query<{ id: string; turn_id: string }, [string, string, string, number]>(
+          `UPDATE coordinator_approvals SET approved = ?4 WHERE id = ?1 AND approved IS NULL AND turn_id IN
+             (SELECT id FROM coordinator_turns WHERE project_id = ?2 AND user_id = ?3 AND state = 'running') RETURNING id, turn_id`,
+        )
+        .get(approvalId, projectId, userId, approved ? 1 : 0);
+      if (!row) return null;
+      return { userId, event: append(TurnId.parse(row.turn_id), { type: "approval-answer", approvalId: ApprovalId.parse(row.id), approved }) };
     }),
 
     // Ends the project's running turn unless it is `keep`: the coordinator lost it.

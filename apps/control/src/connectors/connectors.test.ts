@@ -17,6 +17,7 @@ import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk } from "@chiefbot/worker/fake-copilot";
 import type { SecretStore } from "../secrets/secretStore.ts";
 import { atCleanUp, cleanUp, doneCount, startTestControl, type TestUser } from "../testControl.ts";
+import type { z } from "zod";
 import { startFakeMcpServer } from "./fakeMcpServer.ts";
 
 afterEach(cleanUp);
@@ -52,7 +53,7 @@ async function team() {
     control.github.createRepo(repo, { "chiefbot.project.yaml": `connectors: [${connectors.join(", ")}]\n` });
     return Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo })).json());
   };
-  const define = async (input: ConnectorInput) => {
+  const define = async (input: z.input<typeof ConnectorInput>) => {
     const res = await owner.api("POST", path, input);
     if (res.status !== 201) throw new Error(`define failed: ${res.status} ${await res.text()}`);
     return Connector.parse(await res.json());
@@ -77,6 +78,7 @@ test("the owner defines connectors from presets or by hand; members see them, ne
     server: { kind: "remote", url: "https://ci.example.com/mcp" },
     auth: "workspace-secret",
     scope: "",
+    writesWithoutApproval: false,
   };
 
   await define(preset("github"));
@@ -229,7 +231,7 @@ test("each connector call runs as the right identity and is logged with who aske
   const { owner, guest, path, define, createProject, copilot, signIn } = await team();
   const upstream = startFakeMcpServer();
   atCleanUp(upstream.stop);
-  const remote = (name: string, auth: ConnectorInput["auth"]): ConnectorInput => ({ name, title: name, server: { kind: "remote", url: upstream.url }, auth, scope: "" });
+  const remote = (name: string, auth: ConnectorInput["auth"]): z.input<typeof ConnectorInput> => ({ name, title: name, server: { kind: "remote", url: upstream.url }, auth, scope: "" });
   await define(remote("tracker", "personal-oauth"));
   await define(remote("ci", "workspace-secret"));
   await define({ name: "lint", title: "Lint", server: { kind: "command", command: "lint-mcp", args: [], env: {} }, auth: "none", scope: "" });
@@ -299,7 +301,53 @@ test("every proxied MCP request runs as the member whose turn control is running
 
   expect(upstream.calls).toEqual([{ tool: "list_issues", authorization: "Bearer tracker-guest" }]);
   for (const res of outside) expect([res.status, ApiError.parse(await res.json()).error]).toEqual([409, "no_turn"]);
-  expect(upstream.methods).toEqual(["tools/call"]);
+  // Besides the call, only control's own session reached the server, to see which tools only read.
+  expect(upstream.methods).toEqual(["initialize", "notifications/initialized", "tools/list", "tools/call"]);
+});
+
+test("a connector tool not marked read-only waits for the member's approval in their chat; read-only tools, and connectors the owner lets write, go straight through", async () => {
+  const { owner, guest, path, define, createProject, copilot } = await team();
+  const upstream = startFakeMcpServer({ writes: ["create_issue"] });
+  atCleanUp(upstream.stop);
+  await define({ name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
+  const project = await createProject("octo-org/shop", ["tracker"]);
+  await guest.api("PUT", `${path}/tracker/token`, { token: "tracker-guest" });
+  const statuses: Array<number | null> = [];
+  copilot.script = async function* (_prompt, runtime) {
+    await runtime.callMcp("tracker", "list_issues");
+    statuses.push((await runtime.callMcp("tracker", "create_issue")).status);
+    yield sdk.idle();
+  };
+  const chat = guest.watchProjectChat(project.id);
+  const asked = (n: number) => async () => {
+    const events = await chat.until((all) => all.filter(({ event }) => event.type === "approval-request").length >= n);
+    const request = events.filter(({ event }) => event.type === "approval-request").at(-1)?.event;
+    if (request?.type !== "approval-request") throw new Error("unreachable");
+    return request;
+  };
+  const answer = (member: TestUser, approvalId: string, approved: boolean) =>
+    member.api("POST", `/projects/${project.id}/approvals/${approvalId}`, { approved });
+
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "File the bug" });
+  const first = await asked(1)();
+  const held = upstream.calls.map(({ tool }) => tool);
+  const byOwner = await answer(owner, first.approvalId, true);
+  const approved = await answer(guest, first.approvalId, true);
+  await chat.until(doneCount(1));
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "File another" });
+  const second = await asked(2)();
+  await answer(guest, second.approvalId, false);
+  await chat.until(doneCount(2));
+  const setWrites = await guest.api("PUT", `${path}/tracker/approval`, { writesWithoutApproval: true });
+  await owner.api("PUT", `${path}/tracker/approval`, { writesWithoutApproval: true });
+  await askAndWait(guest, project.id, "And one more", 3);
+
+  expect(first).toMatchObject({ kind: "connector", detail: "Tracker: create_issue" });
+  expect(held).toEqual(["list_issues"]);
+  expect([byOwner.status, approved.status, setWrites.status]).toEqual([409, 204, 403]);
+  expect(statuses).toEqual([200, 403, 200]);
+  expect(upstream.calls.map(({ tool }) => tool)).toEqual(["list_issues", "create_issue", "list_issues", "list_issues", "create_issue"]);
+  expect(chat.events.filter(({ event }) => event.type === "approval-request")).toHaveLength(2);
 });
 
 test("a member connects with the MCP server's own OAuth sign-in when it offers one, and a token otherwise", async () => {

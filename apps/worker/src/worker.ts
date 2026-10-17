@@ -156,14 +156,22 @@ export function startWorker({
   // A task worker's session, set up by its task: on the Copilot `payer` control
   // named (the requester's seat, or the organization's installation tokens) and
   // with the project's `connectors` for the member who asked. Control logs remote
-  // connectors' calls in its proxy; a command connector's call runs here, so it
-  // is reported. A failed report does not stop the call.
+  // connectors' calls in its proxy, and asks the member about those that may
+  // write, so this does not ask again; a command connector's call runs here, so
+  // it is reported. A failed report does not stop the call.
   function taskSession(
     options: Omit<Parameters<Copilot["openSession"]>[0], "auth">,
     { payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
   ) {
+    const remote = new Set(connectors.flatMap(({ kind, name }) => (kind === "remote" ? [name] : [])));
+    const askUnlessControlDoes: PermissionHandler = async (request, invocation) => {
+      if (request.kind !== "mcp" || !remote.has(request.serverName)) return options.onPermissionRequest(request, invocation);
+      await agentHasScreen();
+      return { kind: "approve-once" };
+    };
     const withConnectors = {
       ...options,
+      onPermissionRequest: askUnlessControlDoes,
       mcpServers: connectorServers(connectors, { base, credential: token }),
       onMcpCall: async (serverName: string, toolName: string) => {
         if (!connectors.some(({ name, kind }: AgentConnector) => name === serverName && kind === "command")) return;

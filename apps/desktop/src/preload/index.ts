@@ -76,6 +76,9 @@ const api = {
     // { projectId, tasks } whenever a project's task ledger changes.
     onTasks: (listener: (ledger: unknown) => void) => subscribe("projects:tasks", listener),
     workers: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:workers", id),
+    // Answers what control asked in the user's running turn with the coordinator.
+    answerChat: (id: string, approvalId: string, approved: boolean): Promise<void> =>
+      ipcRenderer.invoke("projects:answer-chat", id, approvalId, approved),
     // Answers a pending push or pull request of a worker the user asked for.
     answer: (id: string, workerId: string, approvalId: string, approved: boolean): Promise<void> =>
       ipcRenderer.invoke("projects:answer", id, workerId, approvalId, approved),
@@ -87,6 +90,9 @@ const api = {
     define: (workspaceId: string, input: ConnectorInput): Promise<unknown> => ipcRenderer.invoke("connectors:define", workspaceId, input),
     // Asks first; resolves true once deleted.
     remove: (workspaceId: string, name: string): Promise<boolean> => ipcRenderer.invoke("connectors:delete", workspaceId, name),
+    // The owner only: let the connector's tools that may write run without asking, or not.
+    setWritesWithoutApproval: (workspaceId: string, name: string, allowed: boolean): Promise<unknown> =>
+      ipcRenderer.invoke("connectors:set-writes", workspaceId, name, allowed),
     setSecret: (workspaceId: string, name: string, token: string): Promise<void> =>
       ipcRenderer.invoke("connectors:set-secret", workspaceId, name, token),
     setToken: (workspaceId: string, name: string, token: string): Promise<void> =>

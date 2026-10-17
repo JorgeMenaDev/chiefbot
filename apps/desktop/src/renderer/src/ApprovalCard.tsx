@@ -8,6 +8,7 @@ const approvalLabel: Record<ApprovalItem["request"], string> = {
   command: "Command approval",
   "pull-request": "Pull request approval",
   tool: "GitHub tool approval",
+  connector: "Connector approval",
 };
 
 const approvalOutcome: Record<Exclude<ApprovalItem["state"], "pending">, string> = {

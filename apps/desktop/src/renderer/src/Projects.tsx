@@ -194,7 +194,7 @@ function CoordinatorChat({ project }: { project: Project }) {
             <p className="muted empty">Ask the coordinator to plan work on {project.name}. It tracks it as tasks every member sees.</p>
           )}
           {view.items.map((item) => (
-            <ChatRow key={item.id} item={item} />
+            <ChatRow key={item.id} project={project} item={item} />
           ))}
           {working && <p className="working">{view.working || "Waiting for the coordinator"}…</p>}
           <div ref={end} />
@@ -219,9 +219,10 @@ function CoordinatorChat({ project }: { project: Project }) {
   );
 }
 
-// The coordinator asks for no approvals and gets no handoff notices, so those
-// never show. Each turn starts with who pays for its Copilot.
-function ChatRow({ item }: { item: ChatItem }) {
+// The coordinator gets no handoff notices, so those never show. Its approvals
+// are control's, for connector calls that may write. Each turn starts with who
+// pays for its Copilot.
+function ChatRow({ project, item }: { project: Project; item: ChatItem }) {
   switch (item.kind) {
     case "user":
       return <div className="message user">{item.text}</div>;
@@ -234,6 +235,7 @@ function ChatRow({ item }: { item: ChatItem }) {
     case "payer":
       return <p className="muted payer">{payerText(item.payer)}</p>;
     case "approval":
+      return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
     case "notice":
       return null;
   }

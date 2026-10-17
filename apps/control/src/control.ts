@@ -232,7 +232,12 @@ export function startControl({
   // Who pays for each agent run's Copilot (copilotIdentity.ts).
   const payerOf = copilotIdentity({ store, broker, mint: copilotTokens });
   // Connectors, the access checklist, and the MCP proxy agents reach them through (connectors/connectors.ts).
-  const connectors = connectorHost({ store, secrets, publicUrl: () => publicUrl ?? server.url.origin });
+  const connectors = connectorHost({
+    store,
+    secrets,
+    publicUrl: () => publicUrl ?? server.url.origin,
+    ask: { coordinator: (...args) => projects.ask(...args), taskWorker: (...args) => taskWorkers.ask(...args) },
+  });
   // The handoffs watcher: tells chiefs when their task needs input or is done.
   const watchHandoffs = (projectId: ProjectId) => {
     for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
@@ -260,6 +265,7 @@ export function startControl({
     computers,
     context,
     workers: taskWorkers,
+    approvals,
     githubApiUrl,
     repoReadToken: repos.readToken,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,

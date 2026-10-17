@@ -14,10 +14,14 @@ const ToolResult = z.object({
   isError: z.boolean().optional(),
 });
 
-const ToolList = z.object({ tools: z.array(z.object({ name: z.string() })) });
+// One page of tools/list. A tool that may only read says so in annotations.readOnlyHint.
+const ToolList = z.object({
+  tools: z.array(z.object({ name: z.string(), annotations: z.object({ readOnlyHint: z.boolean().optional() }).optional() })),
+  nextCursor: z.string().optional(),
+});
 
 // A minimal MCP client over Streamable HTTP, for control's own calls (subscription
-// polls): initialize, then tools/list and tools/call. `token`, if any, goes in
+// polls, and which tools may only read): initialize, then tools/list and tools/call. `token`, if any, goes in
 // as `Authorization: Bearer …`. Answers may be JSON or an event stream. Throws
 // with what went wrong: the subscription shows it as its last error.
 export async function openMcpSession(url: string, token: string | null) {
@@ -53,9 +57,23 @@ export async function openMcpSession(url: string, token: string | null) {
   protocolVersion = init.protocolVersion;
   await send("notifications/initialized", {}, true);
 
+  // Every page of the server's tools.
+  async function tools() {
+    const all: z.infer<typeof ToolList>["tools"] = [];
+    let cursor: string | undefined;
+    do {
+      const page = ToolList.parse(await send("tools/list", cursor === undefined ? {} : { cursor }));
+      all.push(...page.tools);
+      cursor = page.nextCursor;
+    } while (cursor !== undefined);
+    return all;
+  }
+
   return {
     // The names of the server's tools.
-    listTools: async () => ToolList.parse(await send("tools/list", {})).tools.map(({ name }) => name),
+    listTools: async () => (await tools()).map(({ name }) => name),
+    // The names of the tools the server marks read-only.
+    readOnlyTools: async () => new Set((await tools()).filter(({ annotations }) => annotations?.readOnlyHint === true).map(({ name }) => name)),
     // The tool's result as data: its structured content, or its text read as JSON.
     async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
       const result = ToolResult.parse(await send("tools/call", { name, arguments: args }));

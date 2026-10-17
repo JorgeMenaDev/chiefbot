@@ -9,6 +9,7 @@ import { Connector, ConnectorCall, UserId, type CallIdentity, type ConnectorInpu
 export function connectorStore(db: Database) {
   // A workspace's connector. `server` is its ConnectorServer as JSON. has_secret:
   // the owner has put the workspace credential in the SecretStore.
+  // writes_without_approval: its tools that may write run without asking.
   db.run(`CREATE TABLE IF NOT EXISTS connectors (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
@@ -17,6 +18,7 @@ export function connectorStore(db: Database) {
     auth TEXT NOT NULL CHECK (auth IN ('none', 'workspace-secret', 'personal-oauth')),
     scope TEXT NOT NULL,
     has_secret INTEGER NOT NULL DEFAULT 0,
+    writes_without_approval INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, name)
   )`);
@@ -42,7 +44,16 @@ export function connectorStore(db: Database) {
     at INTEGER NOT NULL
   )`);
 
-  type ConnectorRow = { workspace_id: string; name: string; title: string; server: string; auth: string; scope: string; has_secret: number };
+  type ConnectorRow = {
+    workspace_id: string;
+    name: string;
+    title: string;
+    server: string;
+    auth: string;
+    scope: string;
+    has_secret: number;
+    writes_without_approval: number;
+  };
   const toConnector = (row: ConnectorRow): Connector =>
     Connector.parse({
       workspaceId: row.workspace_id,
@@ -51,18 +62,19 @@ export function connectorStore(db: Database) {
       server: JSON.parse(row.server),
       auth: row.auth,
       scope: row.scope,
+      writesWithoutApproval: row.writes_without_approval === 1,
       hasWorkspaceSecret: row.has_secret === 1,
     });
 
   return {
     // A new connector, or "exists" when the workspace has one of that name.
-    create(workspaceId: WorkspaceId, { name, title, server, auth, scope }: ConnectorInput): Connector | "exists" {
+    create(workspaceId: WorkspaceId, { name, title, server, auth, scope, writesWithoutApproval }: ConnectorInput): Connector | "exists" {
       const row = db
-        .query<ConnectorRow, [string, string, string, string, string, string, number]>(
-          `INSERT INTO connectors (workspace_id, name, title, server, auth, scope, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-           ON CONFLICT DO NOTHING RETURNING *`,
+        .query<ConnectorRow, [string, string, string, string, string, string, number, number]>(
+          `INSERT INTO connectors (workspace_id, name, title, server, auth, scope, writes_without_approval, created_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT DO NOTHING RETURNING *`,
         )
-        .get(workspaceId, name, title, JSON.stringify(server), auth, scope, Date.now());
+        .get(workspaceId, name, title, JSON.stringify(server), auth, scope, writesWithoutApproval ? 1 : 0, Date.now());
       return row ? toConnector(row) : "exists";
     },
 
@@ -89,6 +101,10 @@ export function connectorStore(db: Database) {
       db.query("DELETE FROM connectors WHERE workspace_id = ?1 AND name = ?2").run(workspaceId, name);
       return linked;
     }),
+
+    setWritesWithoutApproval(workspaceId: WorkspaceId, name: string, allowed: boolean) {
+      db.query("UPDATE connectors SET writes_without_approval = ?3 WHERE workspace_id = ?1 AND name = ?2").run(workspaceId, name, allowed ? 1 : 0);
+    },
 
     setHasSecret(workspaceId: WorkspaceId, name: string, hasSecret: boolean) {
       db.query("UPDATE connectors SET has_secret = ?3 WHERE workspace_id = ?1 AND name = ?2").run(workspaceId, name, hasSecret ? 1 : 0);

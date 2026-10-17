@@ -1,9 +1,11 @@
 import {
+  AnswerApprovalRequest,
   CoordinatorToControl,
   CoordinatorToolCall,
   CreateProjectRequest,
   SendMessageRequest,
   type AgentConnector,
+  type ApprovalKind,
   type ChatEvent,
   type ClientEvent,
   type ContextFile,
@@ -17,6 +19,7 @@ import {
   type User,
   type UserId,
 } from "@chiefbot/contracts";
+import type { ApprovalOutcome, controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
@@ -43,6 +46,8 @@ export type ProjectHostOptions = {
   context: ContextStore;
   // The projects' task workers (taskWorkers.ts): the coordinator's worker tools.
   workers: ReturnType<typeof taskWorkerHost>;
+  // Approvals control asks for in a coordinator turn (a connector call).
+  approvals: ReturnType<typeof controlApprovals>;
   githubApiUrl: string;
   // A token to read a repo for a user, or why not (repos.ts readToken).
   repoReadToken: ReturnType<typeof repoAccess>["readToken"];
@@ -80,6 +85,9 @@ export type ProjectHostOptions = {
 //                                    ledger, chats and context go
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
+//   POST   /projects/:id/approvals/:approvalId  body AnswerApprovalRequest → 204: the member answers
+//                                    what control asked in their running turn (409 not_pending when it
+//                                    is answered, unknown, another member's or its turn ended)
 //   POST   /projects/:id/messages    body SendMessageRequest → 202 SendMessageResponse: queued for the
 //                                    coordinator (409 turn_running while the member's last one is unfinished)
 //   WS     /projects/:id/chat        ?after=<seq> → each ChatEvent of the member's own chat after seq, then live ones
@@ -97,6 +105,7 @@ export function projectHost({
   computers,
   context,
   workers,
+  approvals,
   githubApiUrl,
   repoReadToken,
   controlUrlForComputers,
@@ -294,6 +303,18 @@ export function projectHost({
         Response.json(projects.tasks(project.id) satisfies Task[]),
       ),
     },
+    // The answer is stored first, then wakes the call control holds.
+    "/projects/:id/approvals/:approvalId": {
+      POST: member(async (user, { project }, req: Bun.BunRequest<"/projects/:id/approvals/:approvalId">) => {
+        const body = AnswerApprovalRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_answer");
+        const answer = projects.answerApproval(project.id, user.id, req.params.approvalId, body.data.approved);
+        if (answer?.event.event.type !== "approval-answer") return apiError(409, "not_pending");
+        publishChat(project.id, answer);
+        approvals.answered(answer.event.event.approvalId, body.data.approved);
+        return new Response(null, { status: 204 });
+      }),
+    },
     "/projects/:id/messages": {
       POST: member(async (user, { project }, req: Bun.BunRequest<"/projects/:id/messages">) => {
         const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
@@ -372,6 +393,16 @@ export function projectHost({
       wake(projectId);
     },
 
+    // Asks the member of the project's running turn to approve `detail`, in their
+    // chat, and resolves with their answer ("no_turn" when no turn runs).
+    ask(projectId: ProjectId, kind: ApprovalKind, detail: string, signal: AbortSignal): Promise<ApprovalOutcome> {
+      return approvals.ask((approvalId) => {
+        const asked = projects.requestApproval(projectId, { approvalId, kind, detail });
+        if (asked) publishChat(projectId, asked);
+        return asked?.event ?? null;
+      }, signal);
+    },
+
     // Call after changing the project's ledger outside a coordinator tool call:
     // members see it, and the handoffs linked to its tasks are checked.
     ledgerChanged: publishTasks,
@@ -422,11 +453,15 @@ export function projectHost({
         if (!stored) return;
         onActivity(projectId);
         publishChat(projectId, stored);
-        if (message.event.type === "done") schedule(projectId);
+        if (message.event.type === "done") {
+          approvals.turnEnded(message.turnId);
+          schedule(projectId);
+        }
         return;
       }
       // The coordinator lost the running turn unless it says it still runs it.
       for (const lost of projects.abandonRunningTurn(projectId, message.activeTurnId, "The coordinator restarted before it finished this message.")) {
+        approvals.turnEnded(lost.event.turnId);
         publishChat(projectId, lost);
       }
       greeted.add(projectId);

@@ -18,10 +18,11 @@ export type FakeRuntime = {
   // with whether the permission handler let it run. It does nothing else.
   mcp(serverName: string, toolTitle: string, readOnly: boolean): Promise<boolean>;
   // Calls `toolName` on one of the session's MCP servers as the runtime does:
-  // permission first, then the session's onMcpCall hook, then, for an http
-  // server, a JSON-RPC tools/call POSTed to its url with its headers. Resolves
-  // with the HTTP status and JSON answer (null for a local server, which it does not start).
-  callMcp(serverName: string, toolName: string): Promise<{ approved: boolean; status: number | null; body: unknown }>;
+  // permission first (a read-only tool unless `readOnly` is false), then the
+  // session's onMcpCall hook, then, for an http server, a JSON-RPC tools/call
+  // POSTed to its url with its headers. Resolves with the HTTP status and JSON
+  // answer (null for a local server, which it does not start).
+  callMcp(serverName: string, toolName: string, readOnly?: boolean): Promise<{ approved: boolean; status: number | null; body: unknown }>;
 };
 
 // What every session's model listing returns. The default is Copilot Free with an empty catalog.
@@ -80,10 +81,10 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           return { approved: true, result };
         },
         mcp: (serverName, toolTitle, readOnly) => allowed(fakeRequest.mcp(serverName, toolTitle, readOnly)),
-        async callMcp(serverName, toolName) {
+        async callMcp(serverName, toolName, readOnly = true) {
           const server = servers[serverName];
           if (!server) throw new Error(`no MCP server ${serverName}`);
-          if (!(await allowed(fakeRequest.mcp(serverName, toolName, true)))) return { approved: false, status: null, body: null };
+          if (!(await allowed(fakeRequest.mcp(serverName, toolName, readOnly)))) return { approved: false, status: null, body: null };
           await onMcpCall?.(serverName, toolName);
           if (server.type !== "http") return { approved: true, status: null, body: null };
           const res = await fetch(server.url, {

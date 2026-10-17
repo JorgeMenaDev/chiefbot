@@ -3,6 +3,7 @@ import {
   PullRequestArgs,
   WorkerToControl,
   type AgentConnector,
+  type ApprovalKind,
   type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
@@ -312,6 +313,11 @@ export function taskWorkerHost({
 
   return {
     routes,
+
+    // Asks the member who asked for the worker to approve `detail` in its task
+    // (a connector call), as its pushes are asked.
+    ask: (own: { workerId: TaskWorkerId; projectId: ProjectId; userId: UserId }, kind: ApprovalKind, detail: string, signal: AbortSignal) =>
+      agentOf(own).ask(kind, detail, signal),
 
     // For the git proxy: the worker a credential belongs to, as a repo agent.
     agentFor(credential: string): RepoAgent | null {

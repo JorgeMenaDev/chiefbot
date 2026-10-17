@@ -1,8 +1,10 @@
 import {
+  ConnectorApprovalRequest,
   ConnectorInput,
   ConnectorTokenRequest,
   ReportedConnectorCall,
   type AgentConnector,
+  type ApprovalKind,
   type CallIdentity,
   type ChecklistItem,
   type ConnectStart,
@@ -10,6 +12,7 @@ import {
   type ConnectorCall,
   type ProjectId,
   type ProjectMember,
+  type TaskWorkerId,
   type TurnId,
   type User,
   type UserId,
@@ -17,6 +20,7 @@ import {
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { z } from "zod";
+import type { ApprovalOutcome } from "../approvals.ts";
 import { apiError, bearer, unauthorized } from "../http.ts";
 import type { SecretStore } from "../secrets/secretStore.ts";
 import { openMcpSession } from "./mcpClient.ts";
@@ -28,7 +32,21 @@ export type ConnectorHostOptions = {
   secrets: SecretStore;
   // Control's URL as the member's browser reaches it: OAuth sign-ins come back to its callback.
   publicUrl: () => string;
+  // Asks the member of the turn running for a coordinator (projects.ts) or a task
+  // worker (taskWorkers.ts) to approve a connector call, in that turn.
+  ask: {
+    coordinator: (projectId: ProjectId, kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
+    taskWorker: (
+      own: { workerId: TaskWorkerId; projectId: ProjectId; userId: UserId },
+      kind: ApprovalKind,
+      detail: string,
+      signal: AbortSignal,
+    ) => Promise<ApprovalOutcome>;
+  };
 };
+
+// How long control trusts a connector server's list of read-only tools.
+const readOnlyListMs = 10 * 60_000;
 
 
 // SecretStore names: the workspace's credential, and each member's own.
@@ -43,6 +61,8 @@ const personalSecretName = (workspaceId: WorkspaceId, name: string, userId: User
 //   POST   /workspaces/:id/connectors              body ConnectorInput → 201 Connector (owner only;
 //                                                  409 connector_exists)
 //   DELETE /workspaces/:id/connectors/:name        → 204 (owner only); its secrets go too
+//   PUT    /workspaces/:id/connectors/:name/approval body ConnectorApprovalRequest → Connector (owner
+//                                                  only): whether its tools that may write run without asking
 //   PUT    /workspaces/:id/connectors/:name/secret body ConnectorTokenRequest → 204: the workspace
 //                                                  credential of a workspace-secret connector (owner only)
 //   PUT    /workspaces/:id/connectors/:name/token  body ConnectorTokenRequest → 204: the member's own
@@ -61,13 +81,16 @@ const personalSecretName = (workspaceId: WorkspaceId, name: string, userId: User
 //                    whose turn control is running on the coordinator, never as anyone the request
 //                    names: control adds that member's identity (403 connector_not_ready without one)
 //                    and logs each tools/call. Outside a turn it refuses all of them (409 no_turn).
+//                    A tools/call of a tool the server does not mark read-only waits until that
+//                    member approves it in their turn (403 declined; 409 no_turn when the turn ends
+//                    first), unless the owner lets the connector write without approval.
 //   POST   /coordinator/:projectId/connector-calls  body ReportedConnectorCall → 204: a command
 //                    connector's call, logged for the running turn (409 no_turn without one)
 // Task worker routes (bearer: the task worker's credential; 403 for another worker's), the same
 // for a project's worker, whose requests run as the member who asked for it while its task runs:
 //   GET|POST|DELETE /task-worker/:workerId/mcp/:name
 //   POST   /task-worker/:workerId/connector-calls
-export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOptions) {
+export function connectorHost({ store, secrets, publicUrl, ask }: ConnectorHostOptions) {
   const { connectors, workspaces, projects } = store;
   // Sign-ins waiting for their callback, by state, for ten minutes. In memory:
   // a control restart means the member clicks Connect again.
@@ -85,6 +108,22 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
       if (!workspace) return apiError(404, "not_found");
       return handle(user, workspace, req);
     };
+
+  // The tools each remote connector's server marks read-only, by server URL, for
+  // readOnlyListMs. A listing that fails is not kept: every tool needs approval until one works.
+  const readOnly = new Map<string, { until: number; tools: Promise<Set<string>> }>();
+  function readOnlyTools(url: string, token: string | null) {
+    const cached = readOnly.get(url);
+    if (cached && cached.until > Date.now()) return cached.tools;
+    const tools = openMcpSession(url, token)
+      .then((session) => session.readOnlyTools())
+      .catch(() => {
+        readOnly.delete(url);
+        return new Set<string>();
+      });
+    readOnly.set(url, { until: Date.now() + readOnlyListMs, tools });
+    return tools;
+  }
 
   // The connector :name of the workspace, or a 404.
   const found = (workspace: Workspace, name: string) => connectors.get(workspace.id, name) ?? apiError(404, "not_found");
@@ -160,8 +199,12 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
   // running for it now with the member it runs for, or null outside one. A
   // coordinator's turn is the one its scheduler gave it; a task worker's is its
   // task while it works, for the member who asked for it. Only control's own
-  // records name the member, never the request.
-  type Caller = { projectId: ProjectId; running: { turnId: TurnId; member: ProjectMember } | null };
+  // records name the member, never the request. `ask` asks that member in that turn.
+  type Caller = {
+    projectId: ProjectId;
+    running: { turnId: TurnId; member: ProjectMember } | null;
+    ask: (detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
+  };
   const runningAs = (projectId: ProjectId, turn: { turnId: TurnId; userId: UserId } | null) => {
     const member = turn && projects.member(projectId, { userId: turn.userId });
     return turn && member ? { turnId: turn.turnId, member } : null;
@@ -169,14 +212,22 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
   const coordinatorCaller = (req: Request & { params: { projectId: string } }): Caller | Response => {
     const projectId = ownCoordinator(req);
     if (projectId instanceof Response) return projectId;
-    return { projectId, running: runningAs(projectId, projects.runningTurn(projectId)) };
+    return {
+      projectId,
+      running: runningAs(projectId, projects.runningTurn(projectId)),
+      ask: (detail, signal) => ask.coordinator(projectId, "connector", detail, signal),
+    };
   };
   const taskWorkerCaller = (req: Request & { params: { workerId: string } }): Caller | Response => {
     const own = store.taskWorkers.forToken(bearer(req));
     if (!own) return unauthorized();
     if (own.workerId !== req.params.workerId) return apiError(403, "wrong_bot");
     const working = store.taskWorkers.worker(own.workerId)?.state === "working";
-    return { projectId: own.projectId, running: working ? runningAs(own.projectId, own) : null };
+    return {
+      projectId: own.projectId,
+      running: working ? runningAs(own.projectId, own) : null,
+      ask: (detail, signal) => ask.taskWorker(own, "connector", detail, signal),
+    };
   };
 
   // The proxy to a remote connector (see the route list above).
@@ -191,13 +242,21 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
     const tools = body === null ? [] : toolCallsIn(body);
     const credential = await credentialFor(connector, member.userId);
     if (!credential) return apiError(403, "connector_not_ready", `${member.login} has no ${connector.name} credential: see the checklist`);
+    // A GET is the server's event stream: it stays open. An approval waits however long it takes.
+    server.timeout(req, 0);
+    if (tools.length > 0 && !connector.writesWithoutApproval) {
+      const readOnlyNow = await readOnlyTools(connector.server.url, credential.token);
+      for (const tool of tools.filter((name) => !readOnlyNow.has(name))) {
+        const outcome = await caller.ask(`${connector.title}: ${tool}`, req.signal);
+        if (outcome === "declined") return apiError(403, "declined", `${member.login} declined ${connector.title}: ${tool}`);
+        if (outcome !== "approved") return apiError(409, "no_turn", `The turn ended before ${member.login} answered`);
+      }
+    }
     for (const tool of tools) {
       connectors.logCall(projectId, { connector: connector.name, tool, requester: member.login, identity: credential.identity, run: running.turnId });
     }
     const headers = pick(req.headers, ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]);
     if (credential.token !== null) headers.set("authorization", `Bearer ${credential.token}`);
-    // A GET is the server's event stream: it stays open.
-    server.timeout(req, 0);
     const upstream = await fetch(connector.server.url, { method: req.method, headers, body, signal: req.signal });
     if (upstream.status === 401) {
       return apiError(403, "connector_not_ready", `${connector.name} refused ${member.login}'s credential: connect again`);
@@ -282,6 +341,17 @@ export function connectorHost({ store, secrets, publicUrl }: ConnectorHostOption
         await secrets.delete(workspaceSecretName(workspace.id, connector.name));
         for (const userId of linked) await secrets.delete(personalSecretName(workspace.id, connector.name, userId));
         return new Response(null, { status: 204 });
+      }),
+    },
+    "/workspaces/:id/connectors/:name/approval": {
+      PUT: member(async (_user, workspace, req: Bun.BunRequest<"/workspaces/:id/connectors/:name/approval">) => {
+        if (workspace.role !== "owner") return apiError(403, "owner_only");
+        const connector = found(workspace, req.params.name);
+        if (connector instanceof Response) return connector;
+        const body = ConnectorApprovalRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_connector", "expected { writesWithoutApproval }");
+        connectors.setWritesWithoutApproval(workspace.id, connector.name, body.data.writesWithoutApproval);
+        return Response.json({ ...connector, ...body.data } satisfies Connector);
       }),
     },
     "/workspaces/:id/connectors/:name/secret": {
