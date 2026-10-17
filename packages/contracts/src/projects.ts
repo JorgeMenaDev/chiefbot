@@ -1,9 +1,7 @@
 import { z } from "zod";
 import { ChatItem, TurnEventMessage, TurnHello } from "./chat.ts";
 import { ProjectId, TurnId, UserId, WorkspaceId } from "./ids.ts";
-
-// A GitHub repository as owner/name.
-export const RepoFullName = z.string().trim().regex(/^[\w.-]+\/[\w.-]+$/, "expected owner/name");
+import { RepoFullName } from "./repos.ts";
 
 // The repo's chiefbot.project.yaml, at its root on the default branch. Control
 // reads it when the project is created. Unknown keys are errors, so a typo is

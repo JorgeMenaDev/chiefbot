@@ -15,3 +15,12 @@ export type GitHubAppConfig = z.infer<typeof GitHubAppConfig>;
 
 export const LocalConfig = z.object({ githubApp: GitHubAppConfig });
 export type LocalConfig = z.infer<typeof LocalConfig>;
+
+// github-app-secrets.json beside config.json: what GitHub handed setup once.
+// Control signs the app's JWTs with privateKey (PEM) to mint installation tokens.
+export const GitHubAppSecrets = z.object({
+  clientSecret: z.string(),
+  webhookSecret: z.string().nullable(),
+  privateKey: z.string().min(1),
+});
+export type GitHubAppSecrets = z.infer<typeof GitHubAppSecrets>;

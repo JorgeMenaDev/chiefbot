@@ -23,7 +23,7 @@ test("a member creates a project from a repo, chats with its coordinator and see
     },
   });
   const computers = fakeComputers({ copilot });
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", computers: computers.provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {

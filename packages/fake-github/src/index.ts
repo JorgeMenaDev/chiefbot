@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { createVerify, generateKeyPairSync } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -6,8 +7,10 @@ import { createBareRepo, git, gitHttpBackend } from "./git.ts";
 
 // A fake github.com + api.github.com for tests: the OAuth device flow, the
 // refresh grant, the API reads control makes, private git repos over smart
-// HTTP, opening pull requests, and registering a GitHub App from a manifest
-// (what `bun run setup` does). One origin serves both hosts' paths.
+// HTTP, opening pull requests, registering a GitHub App from a manifest (what
+// `bun run setup` does), and the deployer's GitHub App: its installations on
+// repos and the installation tokens control mints with its private key. One
+// origin serves both hosts' paths.
 
 export type FakeGitHubUser = {
   id: number;
@@ -43,8 +46,36 @@ const AppManifest = z.object({
 });
 export type FakeAppManifest = z.infer<typeof AppManifest>;
 
-export type FakePullRequest = { repository: string; number: number; head: string; base: string; title: string; body: string };
+// Who opened a pull request or pushed: a user's login, or "app" for an installation token.
+export type FakePullRequest = {
+  repository: string;
+  number: number;
+  head: string;
+  base: string;
+  title: string;
+  body: string;
+  by: string;
+};
 
+// What a user may do on a repo, like GitHub's read and write roles.
+export type FakeRepoAccess = "read" | "write";
+
+export type FakeRepoOptions = {
+  // Each login's access. Default: the fake's user may write.
+  access?: Record<string, FakeRepoAccess>;
+  // Whether the deployer's GitHub App is installed on it. Default true.
+  installed?: boolean;
+};
+
+// The deployer's GitHub App (what `bun run setup` saved): one key pair for every fake.
+const appKeys = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  publicKeyEncoding: { type: "spki", format: "pem" },
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+});
+const fakeApp = { id: 777, privateKey: appKeys.privateKey };
+
+const AccessTokensBody = z.object({ repositories: z.array(z.string()), permissions: z.record(z.string(), z.string()) });
 export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], deviceFlowDisabled = false }: FakeGitHubOptions = {}) {
   const deviceCode = "fake-device-code";
   const userCode = "ABCD-1234";
@@ -59,7 +90,14 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
   // Bare repos live here as <owner>/<name>.git.
   const repoRoot = mkdtempSync(join(tmpdir(), "fake-github-repos-"));
   const pullRequests: FakePullRequest[] = [];
+  // Every push GitHub accepted, and who sent it.
+  const pushes: Array<{ repository: string; by: string }> = [];
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
+  const repos = new Map<string, { installed: boolean; access: Record<string, FakeRepoAccess> }>();
+  // Each installation token and the repos it may write to.
+  const installationTokens = new Map<string, Set<string>>();
+  // One installation per account the app is installed on: its id is the index here.
+  const installations: string[] = [];
   // Every manifest posted to the "new GitHub App" page, and the apps waiting for
   // their one-time code to be converted.
   const manifests: FakeAppManifest[] = [];
@@ -159,12 +197,12 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
       },
       // A file at the root of the repo's default branch, raw (what Accept:
       // application/vnd.github.raw+json asks for). Like GitHub, 404 for a missing
-      // file and for a repo the token cannot see.
+      // file and for a repo the token's user cannot see.
       "/repos/:owner/:repo/contents/:path": {
         GET: (req) => {
-          if (!authorized(req)) return Response.json({ message: "Bad credentials" }, { status: 401 });
           const repository = `${req.params.owner}/${req.params.repo}`;
-          if (!existsSync(bareRepo(repository))) return Response.json({ message: "Not Found" }, { status: 404 });
+          const user = authorized(req);
+          if (!user || !repos.get(repository)?.access[user.login]) return Response.json({ message: "Not Found" }, { status: 404 });
           try {
             return new Response(git(bareRepo(repository), ["show", `HEAD:${req.params.path}`]) + "\n");
           } catch {
@@ -172,33 +210,104 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
           }
         },
       },
+      // What the token's user may do on the repo; 404 when they cannot see it.
+      "/repos/:owner/:repo": {
+        GET: (req) => {
+          const repository = `${req.params.owner}/${req.params.repo}`;
+          const user = authorized(req);
+          const access = user && repos.get(repository)?.access[user.login];
+          if (!access) return Response.json({ message: "Not Found" }, { status: 404 });
+          return Response.json({ full_name: repository, permissions: { pull: true, push: access === "write" } });
+        },
+      },
+      // The app's installation on the repo's account, with the app's JWT.
+      "/repos/:owner/:repo/installation": {
+        GET: (req) => {
+          if (!appAuthorized(req)) return Response.json({ message: "A JSON web token could not be decoded" }, { status: 401 });
+          if (!repos.get(`${req.params.owner}/${req.params.repo}`)?.installed) {
+            return Response.json({ message: "Not Found" }, { status: 404 });
+          }
+          if (!installations.includes(req.params.owner)) installations.push(req.params.owner);
+          return Response.json({ id: installations.indexOf(req.params.owner) + 1, account: { login: req.params.owner } });
+        },
+      },
+      // An installation token for some of the installation's repos (names without the owner).
+      "/app/installations/:id/access_tokens": {
+        POST: async (req) => {
+          if (!appAuthorized(req)) return Response.json({ message: "A JSON web token could not be decoded" }, { status: 401 });
+          const owner = installations[Number(req.params.id) - 1];
+          if (!owner) return Response.json({ message: "Not Found" }, { status: 404 });
+          const { repositories, permissions } = AccessTokensBody.parse(await req.json());
+          const scope = repositories.map((name) => `${owner}/${name}`);
+          if (!scope.every((repository) => repos.get(repository)?.installed)) {
+            return Response.json({ message: "There is at least one repository that does not exist or is not accessible" }, { status: 422 });
+          }
+          const token = `ghs_fake_${installationTokens.size + 1}`;
+          installationTokens.set(token, new Set(scope));
+          return Response.json({ token, expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions }, { status: 201 });
+        },
+      },
       // Like GitHub: 422 unless the head branch exists in the repo.
       "/repos/:owner/:repo/pulls": {
         POST: async (req) => {
-          if (!authorized(req)) return Response.json({ message: "Bad credentials" }, { status: 401 });
           const repository = `${req.params.owner}/${req.params.repo}`;
-          if (!existsSync(bareRepo(repository))) return Response.json({ message: "Not Found" }, { status: 404 });
+          const by = writer(bearerToken(req), repository);
+          if (!by) return Response.json({ message: "Not Found" }, { status: 404 });
           const { head, base, title, body } = PullRequestBody.parse(await req.json());
           const branches = git(bareRepo(repository), ["branch", "--format=%(refname:short)"]).split("\n");
           if (!branches.includes(head)) return Response.json({ message: "Validation Failed" }, { status: 422 });
-          const pr = { repository, number: pullRequests.length + 1, head, base, title, body };
+          const pr = { repository, number: pullRequests.length + 1, head, base, title, body, by };
           pullRequests.push(pr);
           return Response.json({ number: pr.number, html_url: `${new URL(req.url).origin}/${repository}/pull/${pr.number}` }, { status: 201 });
         },
       },
     },
-    // Every repo is private: git gets 401 until it sends a valid access token as
-    // the Basic auth password (what a credential helper supplies).
-    fetch(req) {
-      if (!/^\/[^/]+\/[^/]+\.git\//.test(new URL(req.url).pathname)) return new Response("Not Found", { status: 404 });
+    // Every repo is private: git gets 401 until it sends a token as the Basic
+    // auth password, then 404 unless the token may read the repo. A push needs a
+    // user who may write, or an installation token for the repo.
+    async fetch(req) {
+      const url = new URL(req.url);
+      const repository = url.pathname.match(/^\/([^/]+\/[^/]+)\.git\//)?.[1];
+      if (!repository) return new Response("Not Found", { status: 404 });
       const basic = req.headers.get("authorization")?.match(/^Basic (.+)$/)?.[1];
       const password = basic ? atob(basic).split(":").slice(1).join(":") : "";
-      if (!validAccessTokens.has(password)) {
+      if (!validAccessTokens.has(password) && !installationTokens.has(password)) {
         return new Response("Unauthorized", { status: 401, headers: { "www-authenticate": 'Basic realm="GitHub"' } });
       }
-      return gitHttpBackend(req, repoRoot);
+      const push = url.pathname.endsWith("/git-receive-pack") || url.searchParams.get("service") === "git-receive-pack";
+      const by = push ? writer(password, repository) : reader(password, repository);
+      if (!by) return new Response("Repository not found.", { status: push ? 403 : 404 });
+      const res = await gitHttpBackend(req, repoRoot);
+      if (push && req.method === "POST" && res.ok) pushes.push({ repository, by });
+      return res;
     },
   });
+
+  // Who a token acts as on a repo when it may read it (a login, or "app"), else null.
+  function reader(token: string, repository: string) {
+    if (installationTokens.get(token)?.has(repository)) return "app";
+    const user = validAccessTokens.get(token);
+    return user && repos.get(repository)?.access[user.login] ? user.login : null;
+  }
+
+  // The same, for writing.
+  function writer(token: string, repository: string) {
+    if (installationTokens.get(token)?.has(repository)) return "app";
+    const user = validAccessTokens.get(token);
+    return user && repos.get(repository)?.access[user.login] === "write" ? user.login : null;
+  }
+
+  // Whether the request carries a JWT signed with the app's private key, unexpired, for the app.
+  function appAuthorized(req: Request) {
+    const [header = "", payload = "", signature = ""] = bearerToken(req).split(".");
+    const verify = createVerify("RSA-SHA256");
+    verify.update(`${header}.${payload}`);
+    if (!verify.verify(appKeys.publicKey, Buffer.from(signature, "base64url"))) return false;
+    const claims = z.object({ iss: z.union([z.string(), z.number()]), exp: z.number() }).parse(
+      JSON.parse(Buffer.from(payload, "base64url").toString()),
+    );
+    return String(claims.iss) === String(fakeApp.id) && claims.exp * 1000 > Date.now();
+  }
 
   // Mints a token pair GitHub accepts, as if `as` (default: the fake's user)
   // finished the device flow.
@@ -230,10 +339,11 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
     validRefreshTokens.delete(refreshToken);
   }
 
+  const bearerToken = (req: Request) => req.headers.get("authorization")?.replace(/^(Bearer|token) /, "") ?? "";
+
   // The user a request's token belongs to, or undefined.
   function authorized(req: Request) {
-    const token = req.headers.get("authorization")?.replace(/^(Bearer|token) /, "");
-    return token === undefined ? undefined : validAccessTokens.get(token);
+    return validAccessTokens.get(bearerToken(req));
   }
 
   return {
@@ -245,10 +355,16 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
     issueTokens,
     revoke,
     pullRequests,
+    pushes,
+    // The deployer's GitHub App: control signs its JWTs with this key.
+    app: fakeApp,
     // Manifests posted to the "new GitHub App" page, oldest first.
     manifests,
     // A private repo at <url>/<fullName>.git with one commit on main.
-    createRepo: (fullName: string, files: Record<string, string>) => void createBareRepo(repoRoot, fullName, files),
+    createRepo(fullName: string, files: Record<string, string>, { access = { [user.login]: "write" }, installed = true }: FakeRepoOptions = {}) {
+      createBareRepo(repoRoot, fullName, files);
+      repos.set(fullName, { installed, access });
+    },
     // Runs git in the repo's bare copy, e.g. to read what a push left there.
     git: (fullName: string, ...args: string[]) => git(bareRepo(fullName), args),
     stop: () => {

@@ -8,6 +8,7 @@ import {
   BotToken,
   CreateBotRequest,
   GitHubTokens,
+  PullRequestArgs,
   RoutineInput,
   SendMessageRequest,
   SessionToken,
@@ -18,6 +19,7 @@ import {
   type ClientEvent,
   type ControlToWorker,
   type ModelOption,
+  type OpenedPullRequest,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
@@ -25,11 +27,13 @@ import {
   type UserId,
 } from "@chiefbot/contracts";
 import { systemClock, type Clock } from "./clock.ts";
+import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
-import { fetchIdentity, GitHubAuthError, refreshGitHubTokens } from "./github.ts";
+import { fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
+import { repoAccess } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
@@ -53,6 +57,9 @@ export type ControlOptions = {
   // Client ID of the deployer's GitHub App (`bun run setup`). The desktop signs
   // in with it; refreshes must use the same one.
   githubClientId: string;
+  // The same app's ID and private key: control mints its installation tokens to
+  // reach repos for bots (repos.ts), and never hands them to a bot computer.
+  githubApp: GitHubAppKey;
   // Where users' refresh tokens live. Defaults to an encrypted store in dbPath
   // whose key lasts only this process: fine for tests; index.ts passes a lasting one.
   secrets?: SecretStore;
@@ -114,11 +121,18 @@ type SocketData =
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
 //                             (403 BrokerRefusal when the owner must sign in again)
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//   POST   /worker/:botId/pull-requests  same token, body PullRequestArgs → 201 OpenedPullRequest once the
+//                             owner approves (403 declined, 409 no_turn, 404 repo_not_found, 403 repo_read_only
+//                             or app_not_installed, 502 github_failed)
+//   GET    /git/:owner/:repo/info/refs, POST /git/:owner/:repo/git-upload-pack|git-receive-pack
+//                             git's smart HTTP, Basic auth with a bot token as the password: control's git
+//                             proxy to GitHub. A push waits for the owner's approval (repos.ts). Errors are
+//                             text/plain for git to print, not ApiErrors.
 //   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
 //   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
 //                             task ledgers and chats (projects.ts)
 //
-// Every error body is an ApiError (packages/contracts errors.ts).
+// Every other error body is an ApiError (packages/contracts errors.ts).
 //
 // The screen never listens beyond the computer's loopback: for each viewer,
 // control asks the worker to dial back and pipe x11vnc, and joins the two sockets.
@@ -129,6 +143,7 @@ export function startControl({
   githubApiUrl,
   githubUrl = githubApiUrl,
   githubClientId,
+  githubApp,
   secrets = localSecretStore({ dbPath, key: crypto.getRandomValues(new Uint8Array(32)) }),
   computers,
   workerControlUrl,
@@ -161,7 +176,20 @@ export function startControl({
     workerOf: (botId) => workers.get(botId),
     humanHasScreen: (botId) => screens.controlOf(botId) === "human",
     stopping: (botId) => stopping.has(botId),
-    onActivity: (botId) => idle.touch(botId),
+    onEvent: (botId, event) => {
+      idle.touch(botId);
+      if (event.event.type === "done") approvals.turnEnded(event.turnId);
+    },
+  });
+  // Approvals control asks for itself, and the repo access they guard.
+  const approvals = controlApprovals({ store, publishChat: turns.publishChat });
+  const repos = repoAccess({
+    githubUrl,
+    githubApiUrl,
+    app: githubApp,
+    userToken: async (userId) => (await broker.accessToken(userId))?.accessToken ?? null,
+    botFor: (credential) => store.botForToken(credential),
+    ask: approvals.ask,
   });
 
   // Projects, their coordinators and the coordinators' scheduler (projects.ts).
@@ -232,6 +260,7 @@ export function startControl({
     req:
       | Bun.BunRequest<"/worker/:botId">
       | Bun.BunRequest<"/worker/:botId/github-token">
+      | Bun.BunRequest<"/worker/:botId/pull-requests">
       | Bun.BunRequest<"/worker/:botId/screen/:streamId">,
   ) => {
     const bot = store.botForToken(bearer(req));
@@ -320,7 +349,6 @@ export function startControl({
                 CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin,
                 CHIEFBOT_BOT_ID: id,
                 CHIEFBOT_BOT_TOKEN: botToken,
-                CHIEFBOT_GITHUB_API_URL: githubApiUrl,
               },
             });
             await computers.start(id);
@@ -397,6 +425,7 @@ export function startControl({
           const answer = approvalId.success ? store.answerApproval(botId, approvalId.data, body.data.approved) : null;
           if (!answer || !approvalId.success) return apiError(409, "not_pending");
           turns.publishChat(botId, answer);
+          approvals.answered(approvalId.data, body.data.approved);
           workers.get(botId)?.send(
             JSON.stringify({
               type: "approval-answer",
@@ -465,6 +494,22 @@ export function startControl({
           return apiError(403, "reauth_needed");
         },
       },
+      // The bot's create_pull_request tool. Waits, however long, for the owner's answer.
+      "/worker/:botId/pull-requests": {
+        POST: async (req, server) => {
+          const bot = ownWorker(req);
+          if (bot instanceof Response) return bot;
+          const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
+          if (!args.success) return apiError(400, "invalid_pull_request");
+          server.timeout(req, 0);
+          const opened = await repos.pullRequest(bot, args.data, req.signal);
+          if ("error" in opened) return apiError(opened.status, opened.error, opened.message);
+          return Response.json(opened satisfies OpenedPullRequest, { status: 201 });
+        },
+      },
+      "/git/:owner/:repo/info/refs": { GET: (req, server) => repos.git(req, server, req.params) },
+      "/git/:owner/:repo/git-upload-pack": { POST: (req, server) => repos.git(req, server, req.params) },
+      "/git/:owner/:repo/git-receive-pack": { POST: (req, server) => repos.git(req, server, req.params) },
       // Only a stream control opened for this bot, and only once.
       "/worker/:botId/screen/:streamId": {
         GET: (req, server) => {

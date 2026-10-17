@@ -21,7 +21,7 @@ export function chatTurns({
   workerOf,
   humanHasScreen,
   stopping,
-  onActivity,
+  onEvent,
 }: {
   store: ReturnType<typeof openStore>;
   // Publishes to a WebSocket topic.
@@ -32,7 +32,7 @@ export function chatTurns({
   // Whether control is stopping the bot's computer: a turn sent now would die with it.
   stopping: (botId: BotId) => boolean;
   // A chat event was stored for the bot.
-  onActivity: (botId: BotId) => void;
+  onEvent: (botId: BotId, event: ChatEvent) => void;
 }) {
   // Bots whose connected worker has said hello, so it may be sent a turn. Who
   // waits for that, and who waits for a turn to end (with its error, if any).
@@ -45,7 +45,7 @@ export function chatTurns({
   // Every stored chat event passes here.
   const publishChat = (botId: BotId, event: ChatEvent | null) => {
     if (!event) return;
-    onActivity(botId);
+    onEvent(botId, event);
     publish(chatTopic(botId), JSON.stringify(event satisfies ChatEvent));
     const watcher = turnWatchers.get(event.turnId);
     if (watcher && event.event.type === "error") watcher.error = event.event.message;

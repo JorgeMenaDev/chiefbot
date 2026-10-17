@@ -2,10 +2,11 @@ import { z } from "zod";
 import { ApprovalId, BotId, TurnId } from "./ids.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
-//   command       a shell command on the risky list, such as git push
-//   pull-request  opening a pull request with the bot's create_pull_request tool
+//   push          a git push, which control holds in its git proxy until the answer
+//   pull-request  opening a pull request with the bot's create_pull_request tool (control opens it)
 //   tool          a GitHub tool that writes
-export const ApprovalKind = z.enum(["command", "pull-request", "tool"]);
+//   command       a risky shell command: only in chats from before control held repo access
+export const ApprovalKind = z.enum(["push", "pull-request", "tool", "command"]);
 export type ApprovalKind = z.infer<typeof ApprovalKind>;
 
 // What happens during one turn, as the worker reports it. The worker turns
@@ -15,7 +16,8 @@ export type ApprovalKind = z.infer<typeof ApprovalKind>;
 //   status      what the bot says it is doing now ("Reading the repo")
 //   error       the turn failed; `done` follows
 //   approval-request  the bot waits until the user approves or declines this
-//               (POST /bots/:id/approvals/:approvalId). Control records it.
+//               (POST /bots/:id/approvals/:approvalId). Control records it. Control
+//               adds its own for pushes and pull requests, outside the worker's numbering.
 export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text-delta"), messageId: z.string(), text: z.string() }),
   z.object({

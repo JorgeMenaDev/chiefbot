@@ -279,6 +279,8 @@ resource "google_compute_instance" "control" {
         CHIEFBOT_COMPUTER_IMAGE     = local.computer_image
         CHIEFBOT_WORKER_CONTROL_URL = local.worker_control_url
         CHIEFBOT_GITHUB_CLIENT_ID   = var.github_client_id
+        # The GitHub App's config and private key, copied there after apply (docs/deploy-gcp.md step 4).
+        CHIEFBOT_HOME = "/data/chiefbot"
       }
     })
   }

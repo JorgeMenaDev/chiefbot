@@ -8,7 +8,7 @@ import { z } from "zod";
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
-//   invalid_after, invalid_workspace, invalid_invite
+//   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request
 //                         the body or query failed its schema (400)
 //   invalid_schedule      a routine's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
@@ -18,6 +18,12 @@ import { z } from "zod";
 //                         turn_running also when a member's last message to a coordinator is unanswered);
 //                         bot_stopping also refuses a screen viewer: the computer is stopping
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
+//   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
+//   repo_read_only        the bot owner may not push to the repo (403)
+//   app_not_installed     the deployer's GitHub App is not installed on the repo (403)
+//   no_turn               a push or pull request outside a turn: nobody can approve it (409)
+//   declined              the user declined the push or pull request (403)
+//   github_failed         GitHub refused what control forwarded; `message` says why (502)
 //   owner_only            only the workspace's owner may do that (403)
 //   already_member        the invited login is a member already (409)
 //   owner_cannot_leave    the workspace's owner cannot leave or be removed (409)
@@ -39,6 +45,7 @@ export const ApiErrorCode = z.enum([
   "invalid_answer",
   "invalid_routine",
   "invalid_after",
+  "invalid_pull_request",
   "invalid_workspace",
   "invalid_invite",
   "invalid_schedule",
@@ -50,6 +57,12 @@ export const ApiErrorCode = z.enum([
   "turn_running",
   "human_has_screen",
   "not_pending",
+  "repo_not_found",
+  "repo_read_only",
+  "app_not_installed",
+  "no_turn",
+  "declined",
+  "github_failed",
   "owner_only",
   "already_member",
   "owner_cannot_leave",

@@ -4,6 +4,7 @@ import { useState } from "react";
 type ApprovalItem = Extract<ChatItem, { kind: "approval" }>;
 
 const approvalLabel: Record<ApprovalItem["request"], string> = {
+  push: "Push approval",
   command: "Command approval",
   "pull-request": "Pull request approval",
   tool: "GitHub tool approval",

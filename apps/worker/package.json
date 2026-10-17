@@ -5,7 +5,8 @@
   "exports": {
     ".": "./src/worker.ts",
     "./coordinator": "./src/coordinator.ts",
-    "./fake-copilot": "./src/fakeCopilot.ts"
+    "./fake-copilot": "./src/fakeCopilot.ts",
+    "./git-proxy": "./src/gitProxy.ts"
   },
   "scripts": {
     "typecheck": "tsc -p ."

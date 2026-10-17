@@ -13,7 +13,7 @@ afterEach(() => {
 test("an owner invites a login; once it signs in it accepts, and the owner can remove it", async () => {
   const github = startFakeGitHub();
   const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", computers: computers.provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   // The desktop of `as` (default: the fake's user), signed in to control.
   const desktop = async (as?: FakeGitHubUser) => {

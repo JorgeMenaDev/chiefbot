@@ -14,6 +14,9 @@ export type FakeRuntime = {
   shell(command: string): Promise<{ approved: boolean; exitCode: number; output: string }>;
   // Calls one of the session's custom tools once the permission handler approves it.
   tool(name: string, args: JsonValue): Promise<{ approved: boolean; result: unknown }>;
+  // An MCP server's tool (a GitHub tool that writes, unless readOnly): resolves
+  // with whether the permission handler let it run. It does nothing else.
+  mcp(serverName: string, toolTitle: string, readOnly: boolean): Promise<boolean>;
 };
 
 // What every session's model listing returns. The default is Copilot Free with an empty catalog.
@@ -61,6 +64,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           const result = await tool.handler(args, { sessionId, toolCallId: `call-${name}`, toolName: name, arguments: args });
           return { approved: true, result };
         },
+        mcp: (serverName, toolTitle, readOnly) => allowed(fakeRequest.mcp(serverName, toolTitle, readOnly)),
       };
       async function runShell(command: string, toolCallId: string) {
         if (!(await allowed(fakeRequest.shell(command, toolCallId)))) return { approved: false, exitCode: -1, output: "" };

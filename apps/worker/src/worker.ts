@@ -14,7 +14,6 @@ import {
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
-import { PrePushRequest } from "./gitSocket.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
@@ -31,10 +30,8 @@ export type WorkerOptions = {
   copilot: Copilot;
   // The computer's VNC server. Default: x11vnc on 127.0.0.1:5900.
   screen?: ScreenAddress;
-  // api.github.com in a bot computer; a fake in tests. The pull request tool calls it.
-  githubApiUrl?: string;
   // Unix socket where git's credential helper (gitCredential.ts) asks for the
-  // owner's token and its pre-push hook (prePush.ts) asks to push. No socket when unset.
+  // bot's credential for control's git proxy. No socket when unset.
   gitSocket?: string;
   // Wait between reconnects after the connection drops.
   retryMs?: number;
@@ -52,12 +49,12 @@ export type WorkerOptions = {
 // On `screen-open` it pipes the screen to a viewer through control (screen.ts).
 // While the human has the screen (take-over), every tool call waits for hand-back.
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
+// Pushes and pull requests go through control, which asks the user itself.
 export function startWorker({
   controlUrl,
   botId,
   botToken,
   copilot,
-  githubApiUrl = "https://api.github.com",
   gitSocket,
   screen = { hostname: "127.0.0.1", port: 5900 },
   retryMs = 2000,
@@ -85,9 +82,6 @@ export function startWorker({
   let active: ({ turnId: TurnId } & TurnStream) | null = null;
   // Approvals the session waits on, each resolved by the user's answer.
   const waiting = new Map<ApprovalId, (approved: boolean) => void>();
-  // Shell commands the user approved that are still running, by tool call id. While
-  // one runs, its pushes pass the pre-push hook without asking a second time.
-  const approvedCommands = new Set<string>();
 
   function send(message: WorkerToControl) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
@@ -97,10 +91,7 @@ export function startWorker({
     if (latest?.turnId !== turnId) latest = { turnId, events: [] };
     latest.events.push(event);
     send({ type: "turn-event", turnId, index: latest.events.length - 1, event });
-    if (event.type === "done" && active?.turnId === turnId) {
-      active = null;
-      approvedCommands.clear();
-    }
+    if (event.type === "done" && active?.turnId === turnId) active = null;
   }
 
   // Short-lived GitHub access token for the SDK, from control's broker. The
@@ -138,37 +129,14 @@ export function startWorker({
     if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside a turn." };
     if (!approved) return { kind: "reject", feedback: "The user declined this." };
     await agentHasScreen();
-    // Without a tool call id it counts as running until the turn ends.
-    if (request.kind === "shell") approvedCommands.add(request.toolCallId ?? crypto.randomUUID());
     return { kind: "approve-once", approvedInteractively: true };
   };
-
-  // The pre-push hook's question. Every push asks, unless a command the user
-  // approved (which showed the push) is running it. The answer's last line is
-  // "approved" or why not. The user may take hours, and Bun closes a unix-socket
-  // request that sends nothing for 10 seconds, so a newline goes out every 5.
-  function approvePush(push: PrePushRequest) {
-    const verdict = async () => {
-      if (approvedCommands.size > 0) return "approved";
-      const approved = await askUser({ kind: "command", detail: pushDetail(push) });
-      if (approved === null) return "No turn is running, so nobody can approve this push.";
-      return approved ? "approved" : "The user declined this push.";
-    };
-    const body = new ReadableStream<string>({
-      async start(controller) {
-        const heartbeat = setInterval(() => controller.enqueue("\n"), 5000);
-        controller.enqueue(await verdict().finally(() => clearInterval(heartbeat)));
-        controller.close();
-      },
-    });
-    return new Response(body);
-  }
 
   // The bot's one Copilot session, opened by reportModels when the worker first
   // binds (or by the next turn, if that open failed). Its id is the bot id, so
   // after a restart the worker resumes the same conversation.
   function openSession() {
-    const tools = [pullRequestTool({ githubApiUrl, token: async () => (await gitHubToken()).accessToken })];
+    const tools = [pullRequestTool({ controlUrl, botId, botToken })];
     session ??= copilot.openSession({ sessionId: BotId.parse(botId), gitHubTokenProvider: gitHubToken, onPermissionRequest, tools }).then((opened) => {
       opened.on(onSessionEvent);
       return opened;
@@ -183,7 +151,6 @@ export function startWorker({
   // Maps the SDK's session events to TurnEvents for the active turn. Sub-agent
   // events (agentId set) are left out: the chat shows the main agent's work.
   function onSessionEvent(event: SessionEvent) {
-    if (event.type === "tool.execution_complete") approvedCommands.delete(event.data.toolCallId);
     if (!active || event.agentId) return;
     const { turnId } = active;
     for (const turnEvent of toTurnEvents(event, active)) emit(turnId, turnEvent);
@@ -262,23 +229,13 @@ export function startWorker({
   }
   connect();
 
-  // Git's credential helper asks here, so the token is never written to disk, and
-  // so does its pre-push hook. A stopped container keeps /tmp, so a stale socket
-  // file is removed first.
+  // Git's credential helper asks here for the bot's credential, which control's
+  // git proxy takes (never a GitHub token), so it is never written to disk. A
+  // stopped container keeps /tmp, so a stale socket file is removed first.
   let git: Bun.Server<undefined> | null = null;
   if (gitSocket) {
     rmSync(gitSocket, { force: true });
-    git = Bun.serve({
-      unix: gitSocket,
-      fetch: async (req) => {
-        if (new URL(req.url).pathname === "/pre-push") return approvePush(PrePushRequest.parse(await req.json()));
-        try {
-          return new Response(`username=x-access-token\npassword=${(await gitHubToken()).accessToken}\n`);
-        } catch (error) {
-          return new Response(String(error), { status: 502 });
-        }
-      },
-    });
+    git = Bun.serve({ unix: gitSocket, fetch: () => new Response(`username=chiefbot\npassword=${botToken}\n`) });
   }
 
   return {
@@ -292,13 +249,4 @@ export function startWorker({
       if (gitSocket) rmSync(gitSocket, { force: true });
     },
   };
-}
-
-// The approval card's text for a push: where to (without any credentials in the
-// URL) and which branches.
-function pushDetail({ url, updates }: PrePushRequest) {
-  const refs = updates.map(
-    ({ localRef, remoteRef }) => remoteRef.replace(/^refs\/heads\//, "") + (localRef === "(delete)" ? " (delete)" : ""),
-  );
-  return `git push to ${url.replace(/\/\/[^/@]*@/, "//")}: ${refs.join(", ")}`;
 }

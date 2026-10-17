@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Bot, SignInResponse } from "@chiefbot/contracts";
 import { startFakeGitHub } from "@chiefbot/fake-github";
+import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { startControl } from "../control.ts";
@@ -16,7 +17,7 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
   async () => {
     const github = startFakeGitHub();
     const computers = dockerProvider({ socketPath, image });
-    const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", computers });
+    const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers });
     const port = new URL(control.url).port;
     // Restart control with the URL containers reach it on, now that the port is known.
     control.stop();
@@ -25,6 +26,7 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
       dbPath: ":memory:",
       githubApiUrl: github.url,
       githubClientId: "test-client",
+      githubApp: github.app,
       computers,
       workerControlUrl: `http://host.docker.internal:${port}`,
     });
@@ -47,6 +49,29 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
       expect(await computers.status(bot.id)).toBe("running");
       for (let i = 0; i < 100 && (await listBots())[0]?.status !== "online"; i++) await Bun.sleep(200);
       expect((await listBots())[0]?.status).toBe("online");
+
+      // Git inside the computer, set up as the worker sets up the agent's shell,
+      // clones github.com through control's proxy with the image's credential
+      // helper. A push outside a turn fails in control: nobody can approve it.
+      github.createRepo("octo/demo", { "README.md": "# Demo\n" });
+      const gitEnv = Object.entries(gitProxyConfig({ controlUrl: `http://host.docker.internal:${port}` })).flatMap(
+        ([name, value]) => ["-e", `${name}=${value}`],
+      );
+      const inBot = async (script: string) => {
+        const proc = Bun.spawn(["docker", "-H", `unix://${socketPath}`, "exec", ...gitEnv, `chiefbot-${bot.id}`, "sh", "-c", `${script} 2>&1`], {
+          stdout: "pipe",
+        });
+        const [code, out] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
+        return { code, out: out.trim() };
+      };
+      expect(await inBot("cd /tmp && git clone -q https://github.com/octo/demo.git demo && git -C demo log --format=%s")).toEqual({
+        code: 0,
+        out: "Initial commit",
+      });
+      const push = await inBot("cd /tmp/demo && git commit -q --allow-empty -m x && git push -q origin HEAD:main");
+      expect(push.code).not.toBe(0);
+      expect(push.out).toContain("No turn is running, so nobody can approve this push.");
+      expect(github.pushes).toEqual([]);
 
       // Its screen's VNC server greets a viewer through control (Xvfb and x11vnc are up).
       const viewer = new WebSocket(`${live.url.replace("http", "ws")}/bots/${bot.id}/screen`, { headers: auth });

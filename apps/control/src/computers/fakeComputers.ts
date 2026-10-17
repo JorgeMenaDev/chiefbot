@@ -10,8 +10,8 @@ import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 // dials control → bot online) without Docker. Every worker and coordinator runs
 // turns on the same fake Copilot. Its screen is a fake VNC
 // server on TCP: it greets like one and records what it receives. With
-// gitSocket, the workers serve git's credential helper and pre-push hook there
-// (one bot at a time: they share the path).
+// gitSocket, the workers serve git's credential helper there (one bot at a
+// time: they share the path).
 export function fakeComputers({ copilot = fakeCopilot(), gitSocket }: { copilot?: FakeCopilot; gitSocket?: string } = {}) {
   type FakeComputer = {
     spec: ComputerSpec;
@@ -75,7 +75,7 @@ export function fakeComputers({ copilot = fakeCopilot(), gitSocket }: { copilot?
         });
         return;
       }
-      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN, CHIEFBOT_GITHUB_API_URL } = env;
+      const { CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID, CHIEFBOT_BOT_TOKEN } = env;
       if (!CHIEFBOT_BOT_ID || !CHIEFBOT_BOT_TOKEN) throw new Error("worker env missing");
       computer.screen = fakeScreen(computer.spec.id);
       computer.worker = startWorker({
@@ -84,7 +84,6 @@ export function fakeComputers({ copilot = fakeCopilot(), gitSocket }: { copilot?
         botToken: CHIEFBOT_BOT_TOKEN,
         copilot: copilot.copilot,
         screen: { hostname: "127.0.0.1", port: computer.screen.port },
-        ...(CHIEFBOT_GITHUB_API_URL === undefined ? {} : { githubApiUrl: CHIEFBOT_GITHUB_API_URL }),
         ...(gitSocket === undefined ? {} : { gitSocket }),
         retryMs: 20,
       });

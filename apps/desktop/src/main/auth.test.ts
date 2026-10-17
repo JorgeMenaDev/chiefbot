@@ -12,7 +12,7 @@ afterEach(() => {
 
 function setup() {
   const github = startFakeGitHub({ pollErrors: ["authorization_pending"] });
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", computers: fakeComputers().provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: fakeComputers().provider });
   stops.push(github.stop, control.stop);
   let saved: string | null = null;
   const store: SessionStore = {

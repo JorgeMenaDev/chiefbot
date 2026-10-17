@@ -17,7 +17,7 @@ infra/        Bot computer Docker image; Terraform for GCP (written, NOT applied
 ```
 
 - **Bot computer** = one Docker image (Xvfb + Chromium + x11vnc on loopback + git + worker) with one volume per bot. It runs locally under Docker now and on GCP later, one Compute Engine VM per bot. Both sit behind one `ComputerProvider` interface (`create / start / stop / destroy / status`): `DockerProvider` (local) and `GceProvider` (GCP). The screen opens no port: for each viewer the worker dials control and pipes x11vnc, and control checks the viewer owns the bot.
-- **Tokens:** the desktop does device-flow sign-in with the deployer's GitHub App, then hands the tokens to control. The refresh token never leaves control. Workers fetch short-lived access tokens from control's broker through the SDK's `gitHubTokenProvider`.
+- **Tokens:** the desktop does device-flow sign-in with the deployer's GitHub App, then hands the tokens to control. The refresh token never leaves control. Workers fetch short-lived access tokens from control's broker through the SDK's `gitHubTokenProvider`. Repo writes go only through control: its git proxy and pull request route ask the owner first, then use the app's installation tokens, which never reach a bot computer (`docs/isolation.md`).
 - **Durable state lives in control,** never only in a bot computer. Bots keep working when the desktop app is closed.
 - **Multi-user data model** from day one: every row is owned by a `UserId`.
 

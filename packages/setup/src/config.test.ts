@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chiefbotHome, configuredGitHubClientId, writeLocalConfig } from "./config.ts";
+import { chiefbotHome, configuredGitHubApp, configuredGitHubClientId, writeLocalConfig, writeOwnerOnly } from "./config.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -35,4 +35,14 @@ test("CHIEFBOT_GITHUB_CLIENT_ID wins over the config file", () => {
   const home = tempHome();
   writeLocalConfig(home, { githubApp: app });
   expect(configuredGitHubClientId({ CHIEFBOT_HOME: home, CHIEFBOT_GITHUB_CLIENT_ID: "Iv-from-env" }, home)).toBe("Iv-from-env");
+});
+
+test("control reads the app's ID and the private key setup saved beside it", () => {
+  const home = tempHome();
+  expect(configuredGitHubApp({ CHIEFBOT_HOME: home }, home)).toBeNull();
+
+  writeLocalConfig(home, { githubApp: app });
+  writeOwnerOnly(home, "github-app-secrets.json", JSON.stringify({ clientSecret: "s", webhookSecret: null, privateKey: "-----PEM-----" }));
+
+  expect(configuredGitHubApp({ CHIEFBOT_HOME: home }, home)).toEqual({ id: 7, privateKey: "-----PEM-----" });
 });
