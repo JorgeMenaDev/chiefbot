@@ -664,3 +664,15 @@ body {
 .invite-row button {
   padding: 4px 10px;
 }
+
+/* A project's sidebar rows sit above the bots; its task ledger beside the coordinator chat. */
+.bot-list.projects {
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1f1f23;
+}
+.ledger {
+  width: 34%;
+  min-width: 280px;
+  overflow-y: auto;
+}

@@ -1,4 +1,4 @@
-import { Bot, ClientEvent, ModelOption, type BotId, type User } from "@chiefbot/contracts";
+import { Bot, ClientEvent, ModelOption, type BotId, type ProjectId, type Task, type User } from "@chiefbot/contracts";
 import { z } from "zod";
 import { controlCaller } from "./controlApi.ts";
 
@@ -9,13 +9,16 @@ export type BotsOptions = {
   onChange: (bots: Bot[]) => void;
   // The signed-in user changed on control, e.g. their GitHub sign-in was lost.
   onUser?: (user: User) => void;
+  // A project of one of the user's workspaces has a new task ledger.
+  onTasks?: (projectId: ProjectId, tasks: Task[]) => void;
   // Wait between reconnects after the events socket drops.
   retryMs?: number;
 };
 
 // The signed-in user's bots, owned by Electron main. A WebSocket to control's
-// /events keeps the list live; actions are plain HTTP calls to control.
-export function createBots({ controlUrl, session, onChange, onUser, retryMs = 2000 }: BotsOptions) {
+// /events keeps the list live (and passes on project ledgers); actions are
+// plain HTTP calls to control.
+export function createBots({ controlUrl, session, onChange, onUser, onTasks, retryMs = 2000 }: BotsOptions) {
   let bots: Bot[] = [];
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
@@ -35,7 +38,8 @@ export function createBots({ controlUrl, session, onChange, onUser, retryMs = 20
     socket.onmessage = (event) => {
       const message = ClientEvent.parse(JSON.parse(String(event.data)));
       if (message.type === "bots") set(message.bots);
-      else onUser?.(message.user);
+      else if (message.type === "user") onUser?.(message.user);
+      else onTasks?.(message.projectId, message.tasks);
     };
     socket.onclose = () => {
       if (connected) retry = setTimeout(open, retryMs);

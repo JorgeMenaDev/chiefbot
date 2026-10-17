@@ -91,3 +91,12 @@ export const ChatView = z.object({
   working: z.string().nullable(),
 });
 export type ChatView = z.infer<typeof ChatView>;
+
+// What an agent's runtime (a bot's worker or a project's coordinator) sends control about its turns.
+//   turn-event  event number `index` (0, 1, 2…) of a turn
+//   hello       the turn it is still running, if any. Sent on every (re)connect,
+//               after it has resent every event of its latest turn. Control stores
+//               each index once, so resends are harmless, then ends every other
+//               unfinished turn: the runtime lost it.
+export const TurnEventMessage = z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent });
+export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable() });

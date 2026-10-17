@@ -57,8 +57,8 @@ test("delete removes the bot and its computer, keeping its data unless asked to 
 
   await events.until((bots) => bots.length === 0);
   expect(computers.destroyed).toEqual([
-    { botId: kept.id, deleteData: false },
-    { botId: wiped.id, deleteData: true },
+    { id: kept.id, deleteData: false },
+    { id: wiped.id, deleteData: true },
   ]);
   expect((await api("POST", `/bots/${kept.id}/start`)).status).toBe(404);
 });

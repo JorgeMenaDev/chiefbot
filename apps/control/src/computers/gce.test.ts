@@ -22,7 +22,7 @@ function setup() {
 const botId = BotId.parse("bot_3f2b6c1e-9a4d-4e8f-b2a1-0c9d8e7f6a5b");
 const vmName = "chiefbot-bot-3f2b6c1e-9a4d-4e8f-b2a1-0c9d8e7f6a5b";
 const diskName = `${vmName}-home`;
-const spec = { botId, env: { CHIEFBOT_BOT_TOKEN: "bot-secret" } };
+const spec = { id: botId, env: { CHIEFBOT_BOT_TOKEN: "bot-secret" } };
 
 test("create boots a VM from the template with the bot's own home disk, kept when the VM goes", async () => {
   const { compute, computers } = setup();

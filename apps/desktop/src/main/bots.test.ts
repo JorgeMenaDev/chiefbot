@@ -51,7 +51,7 @@ test("the bot list follows control live: a new bot goes starting → online, and
   expect(seen.map((list) => list.map(({ name, status }) => `${name}:${status}`))).toEqual(
     expect.arrayContaining([[], ["Ada:online"]]),
   );
-  expect(computers.destroyed).toEqual([{ botId: bot.id, deleteData: true }]);
+  expect(computers.destroyed).toEqual([{ id: bot.id, deleteData: true }]);
 });
 
 test("take over and hand back show in the live list", async () => {

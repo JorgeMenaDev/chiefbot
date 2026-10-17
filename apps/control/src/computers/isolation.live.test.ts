@@ -49,7 +49,7 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
     });
     try {
       for (const botId of [a, b]) {
-        await computers.create({ botId, env: env(botId) });
+        await computers.create({ id: botId, env: env(botId) });
         await computers.start(botId);
       }
 

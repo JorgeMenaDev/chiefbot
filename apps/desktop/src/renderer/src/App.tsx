@@ -4,6 +4,7 @@ import { z } from "zod";
 import { Chat } from "./Chat.tsx";
 import { Routines } from "./Routines.tsx";
 import { ScreenPane } from "./LiveScreen.tsx";
+import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
 import { Members, useWorkspaces, WorkspaceSwitcher } from "./Workspaces.tsx";
 
 const BotList = z.array(Bot);
@@ -66,8 +67,9 @@ function useBots() {
 const currentWorkspaceKey = "chiefbot.workspace";
 
 // T3 Code's layout: a sidebar of bots on the left, the selected bot on the right.
-// The switcher on top picks the current workspace, whose members screen opens
-// from the sidebar. Bots are personal, so the bot list is the same in every workspace.
+// The switcher on top picks the current workspace, whose members screen and
+// projects open from the sidebar. Bots are personal, so the bot list is the same
+// in every workspace.
 function Workspace({ user }: { user: User }) {
   const bots = useBots();
   const teams = useWorkspaces();
@@ -76,7 +78,9 @@ function Workspace({ user }: { user: User }) {
   // Bumped by each click on Members, which remounts (reloads) the screen: control sends no member events.
   const [membersVisit, setMembersVisit] = useState(0);
   const current = teams.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const { projects, reload: reloadProjects } = useProjects(current);
   const showMembers = current !== null && selectedId === "members";
+  const project = projects.find(({ id }) => id === selectedId);
   const selected = bots.find((bot) => bot.id === selectedId) ?? bots[0];
 
   const selectWorkspace = (id: string | null) => {
@@ -102,12 +106,29 @@ function Workspace({ user }: { user: User }) {
             <span className="bot-status">{current.role}</span>
           </button>
         )}
+        {current && (
+          <nav className="bot-list projects">
+            {projects.map(({ id, name, repo }) => (
+              <button key={id} className={id === project?.id ? "bot-row selected" : "bot-row"} onClick={() => setSelectedId(id)}>
+                <span className="bot-name">{name}</span>
+                <span className="bot-status">{repo.split("/")[0]}</span>
+              </button>
+            ))}
+            <NewProject
+              workspace={current}
+              onCreated={(created) => {
+                void reloadProjects();
+                setSelectedId(created.id);
+              }}
+            />
+          </nav>
+        )}
         <NewBot onCreated={setSelectedId} />
         <nav className="bot-list">
           {bots.map((bot) => (
             <button
               key={bot.id}
-              className={!showMembers && bot.id === selected?.id ? "bot-row selected" : "bot-row"}
+              className={!showMembers && !project && bot.id === selected?.id ? "bot-row selected" : "bot-row"}
               onClick={() => setSelectedId(bot.id)}
             >
               <StatusDot status={bot.status} />
@@ -150,6 +171,16 @@ function Workspace({ user }: { user: User }) {
             onLeft={() => {
               selectWorkspace(null);
               void teams.reload();
+            }}
+          />
+        ) : project && current ? (
+          <ProjectPane
+            key={project.id}
+            project={project}
+            workspace={current}
+            onDeleted={() => {
+              setSelectedId(null);
+              void reloadProjects();
             }}
           />
         ) : selected ? (

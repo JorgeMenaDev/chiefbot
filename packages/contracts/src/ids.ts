@@ -26,3 +26,7 @@ export type WorkspaceId = z.infer<typeof WorkspaceId>;
 // A pending invitation of one GitHub login to one workspace.
 export const InviteId = z.string().min(1).brand<"InviteId">();
 export type InviteId = z.infer<typeof InviteId>;
+
+// A project: one repo of a workspace, with its coordinator, shared context and task ledger.
+export const ProjectId = z.string().min(1).brand<"ProjectId">();
+export type ProjectId = z.infer<typeof ProjectId>;

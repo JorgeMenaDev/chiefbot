@@ -1,24 +1,46 @@
-import { copilotSdk } from "./copilotSdk.ts";
+import { startCoordinator } from "./coordinator.ts";
+import { coordinatorSdk, copilotSdk } from "./copilotSdk.ts";
 import { defaultGitSocket, gitProxyConfig } from "./gitProxy.ts";
 import { startWorker } from "./worker.ts";
 
-// Entry point inside a bot computer. Env (set by the ComputerProvider at start):
+// Entry point inside a computer. Env (set by the ComputerProvider at start):
 //   CHIEFBOT_CONTROL_URL  control as seen from the computer
+// A bot's computer:
 //   CHIEFBOT_BOT_ID       the bot this computer belongs to
 //   CHIEFBOT_BOT_TOKEN    this bot's credential, valid for that bot only
-const { CHIEFBOT_CONTROL_URL: controlUrl, CHIEFBOT_BOT_ID: botId, CHIEFBOT_BOT_TOKEN: botToken } = process.env;
-if (!controlUrl || !botId || !botToken) {
-  throw new Error("CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID and CHIEFBOT_BOT_TOKEN must be set");
-}
+// A project's computer, which runs the project's coordinator instead:
+//   CHIEFBOT_PROJECT_ID     the project this computer belongs to
+//   CHIEFBOT_PROJECT_TOKEN  this project's credential, valid for that project only
+const {
+  CHIEFBOT_CONTROL_URL: controlUrl,
+  CHIEFBOT_BOT_ID: botId,
+  CHIEFBOT_BOT_TOKEN: botToken,
+  CHIEFBOT_PROJECT_ID: projectId,
+  CHIEFBOT_PROJECT_TOKEN: projectToken,
+} = process.env;
 
-startWorker({
-  controlUrl,
-  botId,
-  botToken,
-  // The bot's workspace on its own disk (the image's WORKDIR). Git in the agent's
-  // shell reaches github.com only through control's git proxy.
-  copilot: copilotSdk({ workingDirectory: "/home/bot/workspace", gitConfig: gitProxyConfig({ controlUrl }) }),
-  gitSocket: defaultGitSocket,
-  onBound: (botId) => console.log(`worker connected to ${controlUrl} as ${botId}`),
-  onModelsError: (error) => console.error("could not list Copilot models:", error),
-});
+if (controlUrl && projectId && projectToken) {
+  startCoordinator({
+    controlUrl,
+    projectId,
+    projectToken,
+    // Session history on the computer's own disk.
+    copilot: coordinatorSdk({ baseDirectory: "/home/bot/.copilot" }),
+    onBound: (project) => console.log(`coordinator connected to ${controlUrl} for ${project.repo}`),
+  });
+} else {
+  if (!controlUrl || !botId || !botToken) {
+    throw new Error("CHIEFBOT_CONTROL_URL, CHIEFBOT_BOT_ID and CHIEFBOT_BOT_TOKEN must be set");
+  }
+  startWorker({
+    controlUrl,
+    botId,
+    botToken,
+    // The bot's workspace on its own disk (the image's WORKDIR). Git in the agent's
+    // shell reaches github.com only through control's git proxy.
+    copilot: copilotSdk({ workingDirectory: "/home/bot/workspace", gitConfig: gitProxyConfig({ controlUrl }) }),
+    gitSocket: defaultGitSocket,
+    onBound: (botId) => console.log(`worker connected to ${controlUrl} as ${botId}`),
+    onModelsError: (error) => console.error("could not list Copilot models:", error),
+  });
+}

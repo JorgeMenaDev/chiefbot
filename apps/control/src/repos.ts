@@ -71,6 +71,10 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, botFor, a
   }
 
   return {
+    // A token that may read the repo for the user (null: ask GitHub without one,
+    // which works only for a public repo the app is not installed on), or why not.
+    readToken: (userId: UserId, fullName: string) => grant(userId, fullName, "read"),
+
     // GET /git/:owner/:repo/info/refs, POST /git/:owner/:repo/git-upload-pack and
     // POST /git/:owner/:repo/git-receive-pack: git's smart HTTP protocol, with the
     // bot credential as the Basic auth password. Errors are text/plain, which git

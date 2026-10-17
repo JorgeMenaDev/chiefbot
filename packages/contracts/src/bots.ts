@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { User } from "./auth.ts";
-import { TurnEvent } from "./chat.ts";
-import { ApprovalId, BotId, TurnId } from "./ids.ts";
+import { TurnEventMessage, TurnHello } from "./chat.ts";
+import { ApprovalId, BotId, ProjectId, TurnId } from "./ids.ts";
 import { ModelReport } from "./models.ts";
+import { Task } from "./projects.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
 // hands it to the computer at start and keeps only its hash. It is not a GitHub token.
@@ -31,11 +32,13 @@ export const CreateBotRequest = z.object({ name: z.string().trim().min(1).max(60
 export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 
 // Control → desktop on the /events WebSocket.
-//   bots  the user's bots; sent on connect and on every change
-//   user  the user changed: their GitHub sign-in was lost or restored
+//   bots   the user's bots; sent on connect and on every change
+//   user   the user changed: their GitHub sign-in was lost or restored
+//   tasks  the whole task ledger of one of the user's projects; sent on every change
 export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bots"), bots: z.array(Bot) }),
   z.object({ type: z.literal("user"), user: User }),
+  z.object({ type: z.literal("tasks"), projectId: ProjectId, tasks: z.array(Task) }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 
@@ -57,15 +60,11 @@ export const ControlToWorker = z.discriminatedUnion("type", [
 export type ControlToWorker = z.infer<typeof ControlToWorker>;
 
 // Worker → control on the /worker WebSocket.
-//   turn-event  event number `index` (0, 1, 2…) of a turn
-//   hello       the turn the worker is still running, if any. Sent on every
-//               (re)connect, after the worker has resent every event of its
-//               latest turn. Control stores each index once, so resends are
-//               harmless, then ends every other unfinished turn: the worker lost it.
+//   turn-event, hello  see chat.ts
 //   models      the models the bot owner's Copilot plan offers; sent after every bind
 export const WorkerToControl = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent }),
-  z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable() }),
+  TurnEventMessage,
+  TurnHello,
   z.object({ type: z.literal("models"), report: ModelReport }),
 ]);
 export type WorkerToControl = z.infer<typeof WorkerToControl>;

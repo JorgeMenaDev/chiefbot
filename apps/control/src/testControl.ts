@@ -1,4 +1,4 @@
-import { Bot, ChatEvent, ClientEvent, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
+import { Bot, ChatEvent, ClientEvent, SendMessageResponse, SignInResponse, type BotId, type ProjectId } from "@chiefbot/contracts";
 import { startFakeGitHub, type FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
@@ -127,7 +127,9 @@ function userApi(url: string, sessionToken: string) {
     api,
     createBot,
     watchBots,
-    watchChat: (botId: BotId, after = 0) => watchChat(url, auth, botId, after),
+    watchChat: (botId: BotId, after = 0) => watchChat(url, auth, `/bots/${botId}/chat?after=${after}`),
+    // The user's own chat with a project's coordinator.
+    watchProjectChat: (projectId: ProjectId, after = 0) => watchChat(url, auth, `/projects/${projectId}/chat?after=${after}`),
     // A new bot, once its worker is connected.
     async onlineBot(name: string) {
       const bot = await createBot(name);
@@ -144,7 +146,7 @@ function userApi(url: string, sessionToken: string) {
     bots: () => watchBots().until(() => true),
     statusOf: async (botId: BotId) => (await watchBots().until(() => true)).find((bot) => bot.id === botId)?.status,
     // The bot's whole chat history right now.
-    chat: async (botId: BotId) => (await watchChat(url, auth, botId).settled()).map(({ event }) => event),
+    chat: async (botId: BotId) => (await watchChat(url, auth, `/bots/${botId}/chat`).settled()).map(({ event }) => event),
   };
 }
 
@@ -169,9 +171,10 @@ function watchBotList(url: string, headers: Record<string, string>) {
   };
 }
 
-// The desktop's view of one bot's chat: every ChatEvent the chat socket sent after `after`.
-function watchChat(url: string, headers: Record<string, string>, botId: BotId, after = 0) {
-  const socket = new WebSocket(`${url.replace("http", "ws")}/bots/${botId}/chat?after=${after}`, { headers });
+// The desktop's view of one chat (a bot's, or the user's with a project's
+// coordinator): every ChatEvent the chat socket at `path` sent.
+function watchChat(url: string, headers: Record<string, string>, path: string) {
+  const socket = new WebSocket(`${url.replace("http", "ws")}${path}`, { headers });
   stops.push(() => socket.close());
   const opened = new Promise((resolve) => (socket.onopen = resolve));
   const events: ChatEvent[] = [];

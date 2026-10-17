@@ -17,6 +17,7 @@ import type { BotSession, Copilot } from "./copilot.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
+import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 
 export type WorkerOptions = {
   // Control's base URL as seen from the computer, e.g. http://host.docker.internal:7410.
@@ -78,7 +79,7 @@ export function startWorker({
   // The model set on the open session, or null before the first turn sets one.
   let sessionModel: string | null = null;
   // The turn the session is running, and what it has streamed so far.
-  let active: { turnId: TurnId; deltaMessageIds: Set<string>; toolNames: Map<string, string> } | null = null;
+  let active: ({ turnId: TurnId } & TurnStream) | null = null;
   // Approvals the session waits on, each resolved by the user's answer.
   const waiting = new Map<ApprovalId, (approved: boolean) => void>();
 
@@ -151,35 +152,8 @@ export function startWorker({
   // events (agentId set) are left out: the chat shows the main agent's work.
   function onSessionEvent(event: SessionEvent) {
     if (!active || event.agentId) return;
-    const { turnId, deltaMessageIds, toolNames } = active;
-    switch (event.type) {
-      case "assistant.intent":
-        return emit(turnId, { type: "status", text: event.data.intent });
-      case "assistant.message_delta":
-        deltaMessageIds.add(event.data.messageId);
-        return emit(turnId, { type: "text-delta", messageId: event.data.messageId, text: event.data.deltaContent });
-      // The whole message. Sent as one chunk only when it did not stream.
-      case "assistant.message":
-        if (deltaMessageIds.has(event.data.messageId) || !event.data.content) return;
-        return emit(turnId, { type: "text-delta", messageId: event.data.messageId, text: event.data.content });
-      case "tool.execution_start": {
-        const name = event.data.toolTitle ?? event.data.toolName;
-        toolNames.set(event.data.toolCallId, name);
-        return emit(turnId, { type: "tool-call", toolCallId: event.data.toolCallId, name, status: "running" });
-      }
-      case "tool.execution_complete":
-        return emit(turnId, {
-          type: "tool-call",
-          toolCallId: event.data.toolCallId,
-          name: toolNames.get(event.data.toolCallId) ?? "tool",
-          status: event.data.success ? "succeeded" : "failed",
-        });
-      case "session.error":
-        emit(turnId, { type: "error", message: event.data.message });
-        return emit(turnId, { type: "done" });
-      case "session.idle":
-        return emit(turnId, { type: "done" });
-    }
+    const { turnId } = active;
+    for (const turnEvent of toTurnEvents(event, active)) emit(turnId, turnEvent);
   }
 
   // Lists the plan's models on the bot's session (it opens it, so the first turn
@@ -196,7 +170,7 @@ export function startWorker({
   // Control sends a turn only once the previous one is done. A changed model is
   // set on the session first, so switching mid-conversation keeps the history.
   async function runTurn(turnId: TurnId, text: string, model: string) {
-    active = { turnId, deltaMessageIds: new Set(), toolNames: new Map() };
+    active = { turnId, ...newTurnStream() };
     try {
       const opened = await openSession();
       if (sessionModel !== model) {

@@ -1,15 +1,18 @@
 import type { GitHubTokenProvider, PermissionHandler, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 
-// The slice of the Copilot SDK the worker uses: one long-lived session per bot.
-// copilotSdk() (copilotSdk.ts) is the real SDK; tests use fakeCopilot().
+// The slice of the Copilot SDK the worker uses: one long-lived session per bot,
+// or one per member's chat on a project's coordinator. copilotSdk() and
+// coordinatorSdk() (copilotSdk.ts) are the real SDK; tests use fakeCopilot().
 export type Copilot = {
-  // Opens the bot's session, resuming its history when it already exists on disk.
-  // Every tool call goes through onPermissionRequest; `tools` are the worker's custom tools.
+  // Opens a session, resuming its history when it already exists on disk.
+  // Every tool call goes through onPermissionRequest; `tools` are the worker's
+  // custom tools. `instructions` are added to the system message.
   openSession(options: {
     sessionId: string;
     gitHubTokenProvider: GitHubTokenProvider;
     onPermissionRequest: PermissionHandler;
     tools: NonNullable<SessionConfig["tools"]>;
+    instructions?: string;
   }): Promise<BotSession>;
 };
 

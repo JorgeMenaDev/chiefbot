@@ -34,3 +34,38 @@ const withheld = ["GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_ENTERP
 export function agentEnv(env: Record<string, string | undefined>) {
   return Object.fromEntries(Object.entries(env).filter(([name]) => !withheld.includes(name)));
 }
+
+// The real Copilot SDK in empty mode, for a project's coordinator: no shell, no
+// files, no ambient config or skills. Each session can use only the custom tools
+// it is opened with. Session history lives under `baseDirectory`.
+export function coordinatorSdk({ baseDirectory }: { baseDirectory: string }): Copilot {
+  const client = new CopilotClient({ mode: "empty", baseDirectory, useLoggedInUser: false });
+  return {
+    async openSession(options) {
+      const config = coordinatorSessionConfig(options);
+      await client.start();
+      const existing = await client.getSessionMetadata(options.sessionId);
+      return existing
+        ? client.resumeSession(options.sessionId, config)
+        : client.createSession({ ...config, sessionId: options.sessionId });
+    },
+  };
+}
+
+// A coordinator session's config: its tools are the only ones it may use, and
+// its instructions follow the SDK's own system message.
+export function coordinatorSessionConfig({
+  gitHubTokenProvider,
+  onPermissionRequest,
+  tools,
+  instructions,
+}: Parameters<Copilot["openSession"]>[0]) {
+  return {
+    gitHubTokenProvider,
+    onPermissionRequest,
+    tools,
+    streaming: true,
+    availableTools: tools.map(({ name }) => `custom:${name}`),
+    ...(instructions === undefined ? {} : { systemMessage: { mode: "append" as const, content: instructions } }),
+  };
+}

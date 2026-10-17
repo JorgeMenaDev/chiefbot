@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { atCleanUp, cleanUp, startTestControl, type TestUser } from "./testControl.ts";
 
 // Repo work end to end: control, a fake GitHub with private repos and the
-// deployer's GitHub App, and a bot whose fake Copilot runs real git in a temp
+// deployer's repo app, and a bot whose fake Copilot runs real git in a temp
 // workspace. As in the bot computer, git reaches GitHub only through control's
 // git proxy, with the bot's credential from the worker's credential helper.
 
@@ -88,7 +88,7 @@ test("the bot clones through control, and its push waits in control until the us
   expect(answer.status).toBe(204);
   expect(results.at(-1)).toMatchObject({ approved: true, exitCode: 0 });
   expect(github.git("octo/demo", "show", "fix-typo:README.md")).toBe("# Demo\nThe demo.");
-  // Control pushed with the GitHub App's installation token, not the user's token.
+  // Control pushed with the repo app's installation token, not the user's token.
   expect(github.pushes).toEqual([{ repository: "octo/demo", by: "app" }]);
 });
 

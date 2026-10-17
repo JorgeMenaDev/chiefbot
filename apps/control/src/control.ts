@@ -1,4 +1,7 @@
 import type { ServerWebSocket } from "bun";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   AnswerApprovalRequest,
   ApprovalId,
@@ -34,6 +37,8 @@ import { repoAccess } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
+import { localContextStore, type ContextStore } from "./contextStore.ts";
+import { projectHost, type ProjectSocketData } from "./projects.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
@@ -68,17 +73,22 @@ export type ControlOptions = {
   // A running bot's computer stops after this long with no running turn, no
   // pending approval, no screen viewer and no routine run in progress. Default 30.
   idleStopMinutes?: number;
+  // Where projects' shared context files live. Defaults to a context folder
+  // next to dbPath (a fresh temporary one for an in-memory database).
+  context?: ContextStore;
 };
 
 // What a WebSocket connection is bound to: a desktop client of one user, one
 // bot's chat from `after` on, the worker of exactly one bot, or one end of a
 // screen stream: the owner's viewer, or the bot's worker piping its VNC server.
+// Or a project's: its coordinator, or a member's chat with it (projects.ts).
 type SocketData =
   | { kind: "client"; userId: UserId }
   | { kind: "chat"; botId: BotId; after: number }
   | { kind: "worker"; userId: UserId; botId: BotId }
   | { kind: "viewer"; botId: BotId; streamId: string }
-  | { kind: "screen"; streamId: string };
+  | { kind: "screen"; streamId: string }
+  | ProjectSocketData;
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -120,6 +130,8 @@ type SocketData =
 //                             proxy to GitHub. A push waits for the owner's approval (repos.ts). Errors are
 //                             text/plain for git to print, not ApiErrors.
 //   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
+//   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
+//                             task ledgers and chats (projects.ts)
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //
@@ -138,8 +150,12 @@ export function startControl({
   workerControlUrl,
   clock = systemClock,
   idleStopMinutes = 30,
+  context,
 }: ControlOptions) {
   const store = openStore(dbPath);
+  // An in-memory database gets a temporary context folder, removed on stop.
+  const tempContext = context || dbPath !== ":memory:" ? null : mkdtempSync(join(tmpdir(), "chiefbot-context-"));
+  context ??= localContextStore(tempContext ?? join(dirname(dbPath), "context"));
   const broker = tokenBroker({
     store,
     secrets,
@@ -175,6 +191,20 @@ export function startControl({
     ownerLogin: async (userId) => ((await broker.accessToken(userId)) ? (store.user(userId)?.login ?? null) : null),
     botFor: (credential) => store.botForToken(credential),
     ask: approvals.ask,
+  });
+
+  // Projects, their coordinators and the coordinators' scheduler (projects.ts).
+  const projects = projectHost({
+    store,
+    broker,
+    computers,
+    context,
+    githubApiUrl,
+    repoReadToken: repos.readToken,
+    controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
+    publish: (topic, message) => server.publish(topic, message),
+    publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
+    upgrade: (req, data) => upgrade(server, req, data),
   });
 
   const botsOf = (userId: UserId): Bot[] =>
@@ -264,6 +294,7 @@ export function startControl({
     hostname,
     routes: {
       ...workspaceRoutes(store),
+      ...projects.routes,
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));
@@ -315,7 +346,7 @@ export function startControl({
           const { id } = store.createBot(user.id, body.data.name, botToken);
           try {
             await computers.create({
-              botId: id,
+              id,
               env: {
                 CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin,
                 CHIEFBOT_BOT_ID: id,
@@ -495,6 +526,7 @@ export function startControl({
       // Bun's documented way to type ws.data.
       data: {} as SocketData,
       open(ws) {
+        if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.open(ws, ws.data);
         if (ws.data.kind === "viewer") {
           const worker = workers.get(ws.data.botId);
           if (!worker) return ws.close();
@@ -527,6 +559,7 @@ export function startControl({
         publish(ws.data.userId);
       },
       close(ws) {
+        if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.close(ws, ws.data);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.end(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
@@ -534,6 +567,7 @@ export function startControl({
         publish(ws.data.userId);
       },
       message(ws, raw) {
+        if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.message(ws.data, raw);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.relay(ws.data.streamId, ws.data.kind, raw);
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));
@@ -573,6 +607,7 @@ export function startControl({
       scheduler.stop();
       server.stop(true);
       store.close();
+      if (tempContext) rmSync(tempContext, { recursive: true, force: true });
     },
   };
 }

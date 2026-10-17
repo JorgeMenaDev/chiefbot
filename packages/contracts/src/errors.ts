@@ -1,19 +1,21 @@
 import { z } from "zod";
 
 // Every error code control answers with. Each error body is an ApiError.
-//   unauthorized          no session or bot token, or an unknown one (401)
-//   wrong_bot             a bot token used for another bot (403)
-//   not_found             no such bot or routine for this user, no such workspace among
-//                         theirs, or no such invite for them (404)
-//   reauth_needed         the bot owner must sign in to GitHub again (403, BrokerRefusal)
+//   unauthorized          no session, bot token or project credential, or an unknown one (401)
+//   wrong_bot             a bot token used for another bot, or a project's credential for another project (403)
+//   not_found             no such bot or routine for this user, no such workspace or project among
+//                         theirs, no such invite for them, or no such task (404)
+//   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
+//                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
 //   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request
 //                         the body or query failed its schema (400)
 //   invalid_schedule      a routine's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
 //   github_rejected_token GitHub refused the sign-in's access token (401)
-//   computer_failed       the bot's computer could not be made or started; `message` says why (502)
-//   bot_offline, bot_stopping, turn_running, human_has_screen  a turn was refused (409, TurnRefusal);
+//   computer_failed       the bot's (or project's) computer could not be made or started; `message` says why (502)
+//   bot_offline, bot_stopping, turn_running, human_has_screen  a turn was refused (409, TurnRefusal;
+//                         turn_running also when a member's last message to a coordinator is unanswered);
 //                         bot_stopping also refuses a screen viewer: the computer is stopping
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
 //   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
@@ -25,6 +27,12 @@ import { z } from "zod";
 //   owner_only            only the workspace's owner may do that (403)
 //   already_member        the invited login is a member already (409)
 //   owner_cannot_leave    the workspace's owner cannot leave or be removed (409)
+//   invalid_project       the body of POST /workspaces/:id/projects failed its schema (400)
+//   invalid_project_file  the repo's chiefbot.project.yaml is missing, unreadable, not YAML or
+//                         not a valid project file; `message` says which and where (400)
+//   project_exists        the workspace already has a project for that repo (409)
+//   invalid_tool_call     a coordinator tool call failed its schema or its rules; `message` says why (400),
+//                         or no coordinator turn is running (409)
 //   expected_websocket    a WebSocket route got a plain request (400)
 export const ApiErrorCode = z.enum([
   "unauthorized",
@@ -58,6 +66,10 @@ export const ApiErrorCode = z.enum([
   "owner_only",
   "already_member",
   "owner_cannot_leave",
+  "invalid_project",
+  "invalid_project_file",
+  "project_exists",
+  "invalid_tool_call",
   "expected_websocket",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;
