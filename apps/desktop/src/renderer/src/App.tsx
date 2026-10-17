@@ -176,6 +176,7 @@ function Workspace({ user }: { user: User }) {
         ) : project && current ? (
           <ProjectPane
             key={project.id}
+            login={user.login}
             project={project}
             workspace={current}
             onDeleted={() => {

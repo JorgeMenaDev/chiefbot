@@ -4,16 +4,21 @@ import {
   ProjectChatView,
   ProjectId,
   Task,
+  TaskWorker,
   type ChatItem,
   type TaskStatus,
+  type TaskWorkerState,
   type Workspace,
 } from "@chiefbot/contracts";
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { z } from "zod";
+import { ApprovalCard } from "./ApprovalCard.tsx";
 
 const ProjectList = z.array(Project);
 const TaskList = z.array(Task);
 const Ledger = z.object({ projectId: ProjectId, tasks: TaskList });
+const WorkerList = z.array(TaskWorker);
+const Workers = z.object({ projectId: ProjectId, workers: WorkerList });
 
 // The current workspace's projects. Control sends no project events, so `reload`
 // runs when the workspace changes and after a project is made.
@@ -76,8 +81,18 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
 }
 
 // A project: the user's chat with its coordinator, and the task ledger beside it.
-// The workspace owner can delete it; `onDeleted` runs once it is gone.
-export function ProjectPane({ project, workspace, onDeleted }: { project: Project; workspace: Workspace; onDeleted: () => void }) {
+// The workspace owner can delete it; `onDeleted` runs once it is gone. `login` is the signed-in user's.
+export function ProjectPane({
+  project,
+  workspace,
+  login,
+  onDeleted,
+}: {
+  project: Project;
+  workspace: Workspace;
+  login: string;
+  onDeleted: () => void;
+}) {
   const { commands } = project.file;
   const [error, setError] = useState<string | null>(null);
   async function remove() {
@@ -110,7 +125,7 @@ export function ProjectPane({ project, workspace, onDeleted }: { project: Projec
       </header>
       <div className="bot-body">
         <CoordinatorChat project={project} />
-        <TaskLedger project={project} />
+        <TaskLedger project={project} login={login} />
       </div>
     </div>
   );
@@ -211,16 +226,26 @@ function ChatRow({ item }: { item: ChatItem }) {
   }
 }
 
-// The project's task ledger: fetched once, then kept live by the ledgers control sends on /events.
-function TaskLedger({ project }: { project: Project }) {
+// The project's task ledger and each task's workers: fetched once, then kept
+// live by the ledgers and worker lists control sends on /events.
+function TaskLedger({ project, login }: { project: Project; login: string }) {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [workers, setWorkers] = useState<TaskWorker[]>([]);
   useEffect(() => {
-    const unsubscribe = window.chiefbot.projects.onTasks((next) => {
+    const unsubscribeTasks = window.chiefbot.projects.onTasks((next) => {
       const ledger = Ledger.parse(next);
       if (ledger.projectId === project.id) setTasks(ledger.tasks);
     });
+    const unsubscribeWorkers = window.chiefbot.projects.onWorkers((next) => {
+      const list = Workers.parse(next);
+      if (list.projectId === project.id) setWorkers(list.workers);
+    });
     void window.chiefbot.projects.tasks(project.id).then((next) => setTasks(TaskList.parse(next)));
-    return unsubscribe;
+    void window.chiefbot.projects.workers(project.id).then((next) => setWorkers(WorkerList.parse(next)));
+    return () => {
+      unsubscribeTasks();
+      unsubscribeWorkers();
+    };
   }, [project.id]);
 
   return (
@@ -231,7 +256,7 @@ function TaskLedger({ project }: { project: Project }) {
       </header>
       {tasks.length === 0 && <p className="muted">No tasks yet. The coordinator adds them as members ask for work.</p>}
       {tasks.map((task) => (
-        <div key={task.number} className="routine-row">
+        <div key={task.number} className="ledger-task">
           <div className="routine-text">
             <strong>
               #{task.number} {task.title}
@@ -241,11 +266,57 @@ function TaskLedger({ project }: { project: Project }) {
               {task.owner && ` · owner ${task.owner}`} · asked by {task.requestedBy}
             </span>
           </div>
+          {workers
+            .filter(({ taskNumber }) => taskNumber === task.number)
+            .map((worker) => (
+              <WorkerRow key={worker.id} project={project} worker={worker} login={login} />
+            ))}
         </div>
       ))}
     </aside>
   );
 }
+
+// One worker of a task: its state, its pull request and what it waits on. Only
+// the member who asked for it answers its approvals; the others see who must.
+function WorkerRow({ project, worker, login }: { project: Project; worker: TaskWorker; login: string }) {
+  return (
+    <div className="worker-row">
+      <span className="muted">
+        Worker: {workerStateText[worker.state]}
+        {worker.pullRequest && (
+          <>
+            {" · "}
+            <a href={worker.pullRequest} target="_blank" rel="noreferrer">
+              pull request
+            </a>
+          </>
+        )}
+      </span>
+      {worker.pendingApprovals.map(({ approvalId, kind, detail }) =>
+        worker.requestedBy === login ? (
+          <ApprovalCard
+            key={approvalId}
+            item={{ kind: "approval", id: approvalId, approvalId, request: kind, detail, state: "pending" }}
+            onAnswer={(approved) => window.chiefbot.projects.answer(project.id, worker.id, approvalId, approved)}
+          />
+        ) : (
+          <span key={approvalId} className="muted">
+            Waiting for {worker.requestedBy} to approve: {detail.split("\n")[0]}
+          </span>
+        ),
+      )}
+    </div>
+  );
+}
+
+const workerStateText: Record<TaskWorkerState, string> = {
+  launching: "starting its computer",
+  working: "working",
+  finished: "finished",
+  failed: "failed",
+  stopped: "stopped",
+};
 
 const statusText: Record<TaskStatus, string> = {
   open: "Open",

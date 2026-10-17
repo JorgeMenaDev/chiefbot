@@ -107,7 +107,7 @@ function Message({ botId, item }: { botId: BotId; item: ChatItem }) {
     case "error":
       return <div className="message error">{item.message}</div>;
     case "approval":
-      return <ApprovalCard botId={botId} item={item} />;
+      return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.chat.answer(botId, item.approvalId, approved)} />;
   }
 }
 
