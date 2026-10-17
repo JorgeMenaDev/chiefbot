@@ -20,6 +20,9 @@ export type ApprovalKind = z.infer<typeof ApprovalKind>;
 //   approval-request  the bot waits until the user approves or declines this
 //               (POST /bots/:id/approvals/:approvalId). Control records it. Control
 //               adds its own for pushes and pull requests, outside the worker's numbering.
+//   approval-withdrawn  the agent no longer waits on that approval-request, which can
+//               no longer be answered: a task worker's runtime was cut short to renew
+//               its token, or the request control held for it went away.
 export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text-delta"), messageId: z.string(), text: z.string() }),
   z.object({
@@ -31,6 +34,7 @@ export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("status"), text: z.string() }),
   z.object({ type: z.literal("error"), message: z.string() }),
   z.object({ type: z.literal("approval-request"), approvalId: ApprovalId, kind: ApprovalKind, detail: z.string() }),
+  z.object({ type: z.literal("approval-withdrawn"), approvalId: ApprovalId }),
   z.object({ type: z.literal("done") }),
 ]);
 export type TurnEvent = z.infer<typeof TurnEvent>;
@@ -101,13 +105,14 @@ export const ChatItem = z.discriminatedUnion("kind", [
   // Who pays for the turn that follows.
   z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer }),
   // expired: the turn ended before anyone answered (its worker restarted).
+  // withdrawn: the agent stopped waiting on it (approval-withdrawn); the turn goes on.
   z.object({
     kind: z.literal("approval"),
     id: z.string(),
     approvalId: ApprovalId,
     request: ApprovalKind,
     detail: z.string(),
-    state: z.enum(["pending", "approved", "declined", "expired"]),
+    state: z.enum(["pending", "approved", "declined", "expired", "withdrawn"]),
   }),
 ]);
 export type ChatItem = z.infer<typeof ChatItem>;

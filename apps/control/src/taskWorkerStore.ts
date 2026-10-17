@@ -243,6 +243,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       if (!acceptEvent(db, "task_workers", "id = ?1 AND turn_id = ?2 AND state = 'working'", [workerId, turnId], index)) return null;
       touch(workerId);
       if (event.type === "approval-request") approvals.record(workerId, turnId, event, now);
+      if (event.type === "approval-withdrawn") approvals.withdraw(workerId, event.approvalId);
       const stored = append(workerId, event);
       if (event.type === "done") {
         const { state, result } = outcome(transcript(workerId));
@@ -337,6 +338,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         return append(workerId, { type: "approval-request", ...ask });
       },
     ),
+
+    // Withdraws an approval control asked for the worker whose request went away
+    // (approval-withdrawn in its turn). Null when it was not pending.
+    withdrawApproval: db.transaction((workerId: TaskWorkerId, approvalId: ApprovalId): ChatEvent | null => {
+      if (!approvals.withdraw(workerId, approvalId)) return null;
+      touch(workerId);
+      return append(workerId, { type: "approval-withdrawn", approvalId });
+    }),
 
     // Records the requester's answer to one of the working worker's pending
     // approvals. Null, storing nothing, when there is no such pending approval.

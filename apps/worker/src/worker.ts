@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
 import { connectorServers } from "./connectorServers.ts";
+import type { Clock } from "./clock.ts";
 import { controlLink } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { modelReport } from "./models.ts";
@@ -30,6 +31,8 @@ export type WorkerOptions = {
   // Wait between reconnects after the connection drops.
   retryMs?: number;
   onBound?: () => void;
+  // Times an organization's token renewals (installationSession.ts). Default: the system clock.
+  clock?: Clock;
   // Listing the plan's models failed; control keeps its last report.
   onModelsError?: (error: unknown) => void;
 };
@@ -56,6 +59,7 @@ export function startWorker({
   retryMs = 2000,
   onBound,
   onModelsError,
+  clock,
 }: WorkerOptions) {
   // Every control route of this computer starts here.
   const base = `${controlUrl}/${route}/${id}`;
@@ -98,6 +102,18 @@ export function startWorker({
     return { kind: "approve-once", approvedInteractively: true };
   };
 
+  // A task worker's turn was cut short to renew the organization's token
+  // (installationSession.ts): the permission requests its runtime waited on are
+  // gone, so their approvals are withdrawn. Continuing, the agent asks again if it still needs them.
+  function withdrawApprovals() {
+    const turnId = link.activeTurnId();
+    for (const [approvalId, answer] of waiting) {
+      if (turnId) link.emit(turnId, { type: "approval-withdrawn", approvalId });
+      answer(false);
+    }
+    waiting.clear();
+  }
+
   // A task worker's session, set up by its task: on the Copilot `payer` control
   // named (the requester's seat, or the organization's installation tokens) and
   // with the project's `connectors` for the member who asked. Control logs remote
@@ -121,6 +137,7 @@ export function startWorker({
         onPermissionRequest: askUnlessControlDoes,
         mcpServers: connectorServers(connectors, { base, credential: token }),
         onMcpCall: link.reportCalls(connectors),
+        onCut: withdrawApprovals,
       },
       "/github-token",
     );
@@ -178,6 +195,7 @@ export function startWorker({
     base,
     token,
     retryMs,
+    ...(clock === undefined ? {} : { clock }),
     parse: (json) => ControlToWorker.parse(json),
     onMessage(message) {
       switch (message.type) {

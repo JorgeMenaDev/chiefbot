@@ -554,6 +554,73 @@ test("a worker waiting on an approval longer than the limit stops, keeping its d
   expect(computers.destroyed).toEqual([]);
 });
 
+test("an organization's worker whose turn is cut to renew its token withdraws the approval it waited on, so that approval's wait limit never stops it", async () => {
+  const time = fakeClock(Date.now());
+  let minted = 0;
+  const control = await teamProject({
+    clock: time.clock,
+    copilotTokens: async (repo) => ({ token: `ghs_org_${++minted}`, expiresAt: time.clock.now() + 60 * 60_000, account: repo.split("/")[0] ?? repo }),
+  });
+  const { owner, workspace, project, copilot } = control;
+  await owner.api("PUT", `/workspaces/${workspace.id}/copilot-mode`, { mode: "org" });
+  // The task asks to write; continued on a new token, the agent asks again and waits.
+  const asksToWrite: FakeScript = async function* (_prompt, runtime) {
+    await runtime.mcp("github", "Create issue", false);
+    yield sdk.idle();
+  };
+  const { tool } = await heldTurn(control, asksToWrite);
+  const coordinatorOrTask = copilot.script;
+  copilot.script = (prompt, runtime) => (prompt === "continue" ? asksToWrite(prompt, runtime) : coordinatorOrTask(prompt, runtime));
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  const [first] = (await workerWhen(owner, project, id, ({ pendingApprovals }) => pendingApprovals.length === 1)).pendingApprovals;
+
+  // Five minutes before the token expires, the turn is cut and continues on a new one.
+  time.advance(56 * 60_000);
+  const [second] = (
+    await workerWhen(owner, project, id, ({ pendingApprovals }) => pendingApprovals.length === 1 && pendingApprovals[0]?.approvalId !== first?.approvalId)
+  ).pendingApprovals;
+  // Past the first approval's wait limit, not the second's.
+  time.advance(10 * 60_000);
+  await Bun.sleep(20);
+
+  expect(copilot.sends.filter(({ sessionId }) => sessionId === id).map(({ prompt }) => (isWorker(prompt) ? "the task" : prompt))).toEqual(["the task", "continue"]);
+  expect((await workersOf(owner, project)).find((worker) => worker.id === id)).toMatchObject({ state: "working", pendingApprovals: [second] });
+  expect((await owner.api("POST", `/projects/${project.id}/workers/${id}/approvals/${first?.approvalId}`, { approved: true })).status).toBe(409);
+});
+
+test("an approval control holds for a worker's request is withdrawn when that request goes away, as when its runtime is cut, so its wait limit never stops the worker", async () => {
+  const upstream = startFakeMcpServer({ writes: ["create_issue"] });
+  atCleanUp(upstream.stop);
+  const time = fakeClock(Date.now());
+  const control = await teamProject({ clock: time.clock }, "connectors: [tracker]\n");
+  const { url, owner, workspace, project, computers } = control;
+  const connectors = `/workspaces/${workspace.id}/connectors`;
+  await owner.api("POST", connectors, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
+  await owner.api("PUT", `${connectors}/tracker/token`, { token: "tracker-owner" });
+  const { tool } = await heldTurn(control);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "working");
+  // The worker's runtime calls a tool that may write, then goes away before the answer.
+  const hangUp = new AbortController();
+  const call = fetch(`${url}/task-worker/${id}/mcp/tracker`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${computers.computers.get(id)?.spec.env.CHIEFBOT_TASK_WORKER_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_issue" } }),
+    signal: hangUp.signal,
+  }).catch(() => null);
+  const [asked] = (await workerWhen(owner, project, id, ({ pendingApprovals }) => pendingApprovals.length === 1)).pendingApprovals;
+  hangUp.abort();
+  await call;
+
+  await workerWhen(owner, project, id, ({ pendingApprovals }) => pendingApprovals.length === 0);
+  time.advance(61 * 60_000);
+  await Bun.sleep(20);
+
+  expect((await workersOf(owner, project)).find((worker) => worker.id === id)?.state).toBe("working");
+  expect((await owner.api("POST", `/projects/${project.id}/workers/${id}/approvals/${asked?.approvalId}`, { approved: true })).status).toBe(409);
+  expect(upstream.calls).toEqual([]);
+});
+
 test("when the organization pays, a worker runs on its installation token", async () => {
   let minted = 0;
   const control = await teamProject({

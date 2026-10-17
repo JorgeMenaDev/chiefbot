@@ -11,6 +11,7 @@ import {
   type TurnId,
   type WorkerToControl,
 } from "@chiefbot/contracts";
+import type { Clock } from "./clock.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { installationSession } from "./installationSession.ts";
 import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
@@ -31,12 +32,15 @@ export function controlLink<Message>({
   base,
   token,
   retryMs,
+  clock,
   parse,
   onMessage,
 }: {
   base: string;
   token: string;
   retryMs: number;
+  // Times an organization's token renewals. Default: the system clock.
+  clock?: Clock;
   // Reads one message from control's WebSocket.
   parse: (json: unknown) => Message;
   onMessage: (message: Message) => void;
@@ -124,10 +128,17 @@ export function controlLink<Message>({
 
     // Opens a session on `payer`'s Copilot: a seat's, with tokens from control's
     // broker at `seatPath`, or the organization's, on installation tokens control
-    // mints, on a runtime of its own (installationSession.ts).
-    openSession(copilot: Copilot, payer: CopilotPayer["kind"], options: Omit<Parameters<Copilot["openSession"]>[0], "auth">, seatPath: string): Promise<BotSession> {
+    // mints, on a runtime of its own (installationSession.ts), whose turns may be
+    // cut short for a new token (`onCut`).
+    openSession(
+      copilot: Copilot,
+      payer: CopilotPayer["kind"],
+      { onCut, ...options }: Omit<Parameters<Copilot["openSession"]>[0], "auth"> & { onCut?: () => void },
+      seatPath: string,
+    ): Promise<BotSession> {
+      const token = async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json());
       return payer === "org"
-        ? installationSession({ ...options, copilot, token: async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json()) })
+        ? installationSession({ ...options, copilot, token, ...(clock === undefined ? {} : { clock }), ...(onCut === undefined ? {} : { onCut }) })
         : copilot.openSession({ ...options, auth: { kind: "seat", gitHubTokenProvider: () => seatToken(seatPath) } });
     },
 

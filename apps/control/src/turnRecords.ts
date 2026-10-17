@@ -59,6 +59,12 @@ export function approvalRecords(db: Database, { table, owner, liveTurns }: { tab
       return row ? { approvalId: ApprovalId.parse(row.id), turnId: TurnId.parse(row.turn_id) } : null;
     },
 
+    // The owner's agent no longer waits on the pending approval: it is no longer
+    // pending, and can no longer be answered. False when it was not pending.
+    withdraw(ownerId: string, approvalId: ApprovalId): boolean {
+      return db.query(`DELETE FROM ${table} WHERE id = ?1 AND ${owner} = ?2 AND approved IS NULL RETURNING id`).get(approvalId, ownerId) !== null;
+    },
+
     // What the owner's running turns wait on, oldest first.
     pending(ownerId: string): Ask[] {
       return db

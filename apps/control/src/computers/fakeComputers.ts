@@ -1,6 +1,7 @@
 import type { TCPSocketListener } from "bun";
 import { startWorker } from "@chiefbot/worker";
 import { startCoordinator } from "@chiefbot/worker/coordinator";
+import type { Clock } from "@chiefbot/worker/clock";
 import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 
@@ -11,8 +12,8 @@ import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 // turns on the same fake Copilot. Its screen is a fake VNC
 // server on TCP: it greets like one and records what it receives. With
 // gitSocket, the workers serve git's credential helper there (one bot at a
-// time: they share the path).
-export function fakeComputers({ copilot = fakeCopilot(), gitSocket }: { copilot?: FakeCopilot; gitSocket?: string } = {}) {
+// time: they share the path). Workers renew organizations' tokens on `clock`.
+export function fakeComputers({ copilot = fakeCopilot(), gitSocket, clock }: { copilot?: FakeCopilot; gitSocket?: string; clock?: Clock } = {}) {
   type FakeComputer = {
     spec: ComputerSpec;
     worker: ReturnType<typeof startWorker> | null;
@@ -90,6 +91,7 @@ export function fakeComputers({ copilot = fakeCopilot(), gitSocket }: { copilot?
         copilot: copilot.copilot,
         screen: { hostname: "127.0.0.1", port: computer.screen.port },
         ...(gitSocket === undefined ? {} : { gitSocket }),
+        ...(clock === undefined ? {} : { clock }),
         retryMs: 20,
       });
     },

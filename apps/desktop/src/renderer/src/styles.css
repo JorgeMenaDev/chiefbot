@@ -573,7 +573,8 @@ body {
   color: #3fb950;
 }
 .approval-row.declined,
-.approval-row.expired {
+.approval-row.expired,
+.approval-row.withdrawn {
   color: #ff7b72;
 }
 

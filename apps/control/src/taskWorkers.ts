@@ -127,19 +127,29 @@ export function taskWorkerHost({
   const send = (workerId: TaskWorkerId, message: ControlToWorker) => sockets.get(workerId)?.send(JSON.stringify(message));
   const refused = (message: string, status = 400) => apiError(status, "invalid_tool_call", message);
 
-  // What a worker credential acts as for repo access: the member who asked, asked in the worker's turn.
+  // What a worker credential acts as for repo access: the member who asked, asked
+  // in the worker's turn. An approval whose request goes away first (the worker's
+  // runtime stopped, as when its turn is cut to renew its token) is withdrawn.
   const agentOf = ({ workerId, projectId, userId }: { workerId: TaskWorkerId; projectId: ProjectId; userId: UserId }): RepoAgent => ({
     userId,
-    ask: (kind, detail, signal) =>
-      approvals.ask((approvalId) => {
+    async ask(kind, detail, signal) {
+      let asked: ApprovalId | null = null;
+      const outcome = await approvals.ask((approvalId) => {
         const now = clock.now();
         const event = workers.requestApproval(workerId, { approvalId, kind, detail }, now);
         if (event) {
+          asked = approvalId;
           limitWait(workerId, approvalId, now);
           publish(projectId);
         }
         return event;
-      }, signal),
+      }, signal);
+      if (asked && signal.aborted && workers.withdrawApproval(workerId, asked)) {
+        stopWaitLimit(asked);
+        publish(projectId);
+      }
+      return outcome;
+    },
   });
 
   // A worker still waiting on the approval approvalWaitMinutes after `requestedAt`
@@ -162,6 +172,12 @@ export function taskWorkerHost({
       }, Math.max(0, due)),
     );
   }
+
+  // The approval no longer waits: its wait limit is cancelled.
+  const stopWaitLimit = (approvalId: ApprovalId) => {
+    waitLimits.get(approvalId)?.();
+    waitLimits.delete(approvalId);
+  };
 
   // Makes the worker's computer. A failure fails the worker and removes what was made.
   async function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
@@ -250,8 +266,7 @@ export function taskWorkerHost({
         const answer = workers.answerApproval(worker.id, req.params.approvalId, body.data.approved);
         if (!answer || answer.event.type !== "approval-answer") return apiError(409, "not_pending");
         const { approvalId, approved } = answer.event;
-        waitLimits.get(approvalId)?.();
-        waitLimits.delete(approvalId);
+        stopWaitLimit(approvalId);
         approvals.answered(approvalId, approved);
         send(worker.id, { type: "approval-answer", approvalId, approved });
         publish(worker.projectId);
@@ -464,8 +479,9 @@ export function taskWorkerHost({
         const stored = workers.appendTurnEvent(workerId, message.turnId, message.index, message.event, now);
         if (!stored) return;
         if (message.event.type === "approval-request") limitWait(workerId, message.event.approvalId, now);
+        if (message.event.type === "approval-withdrawn") stopWaitLimit(message.event.approvalId);
         if (message.event.type === "done") turnOver(workerId, message.turnId);
-        if (message.event.type === "done" || message.event.type === "approval-request") publish(worker.projectId);
+        if (["done", "approval-request", "approval-withdrawn"].includes(message.event.type)) publish(worker.projectId);
         return;
       }
       // The models report is for a bot's model picker; a task worker has none.
@@ -509,6 +525,9 @@ function transcriptLines(events: ChatEvent[]): string[] {
         break;
       case "approval-answer":
         lines.push(event.approved ? "approved" : "declined");
+        break;
+      case "approval-withdrawn":
+        lines.push("approval withdrawn");
         break;
       case "error":
         lines.push(`error: ${event.message}`);

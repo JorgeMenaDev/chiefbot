@@ -18,18 +18,22 @@ const continuePrompt = "continue";
 // listing) on a token with under 20 minutes left, and in the middle of a turn
 // that would outlive its token: five minutes before it expires, the turn is cut
 // short and continues on the new runtime with "continue". The agent sees one
-// turn: the cut-short turn's own end never reaches it. A renewal that fails
-// mid-turn ends the turn with a session.error.
+// turn: the cut-short turn's own end never reaches it. What the cut runtime
+// waited on (a permission request) is gone with it: `onCut` hears of each cut,
+// before the turn continues. A renewal that fails mid-turn ends the turn with a session.error.
 export async function installationSession({
   copilot,
   token,
   clock = systemClock,
+  onCut,
   ...options
 }: Omit<Parameters<Copilot["openSession"]>[0], "auth"> & {
   copilot: Copilot;
   // A new installation token from control.
   token: () => Promise<CopilotInstallationToken>;
   clock?: Clock;
+  // The running turn was cut short; its runtime is stopped.
+  onCut?: () => void;
 }): Promise<BotSession> {
   const handlers = new Set<Parameters<BotSession["on"]>[0]>();
   const publish: Parameters<BotSession["on"]>[0] = (event) => {
@@ -98,6 +102,7 @@ export async function installationSession({
         cut?.unsubscribe();
         await cut?.session.abort();
         await cut?.session.disconnect();
+        onCut?.();
         await start(await open(), continuePrompt);
       } catch (error) {
         const message = `Could not renew the organization's Copilot token mid-task: ${error instanceof Error ? error.message : String(error)}`;

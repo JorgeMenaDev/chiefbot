@@ -151,6 +151,13 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       );
       return { ...view, working: "", items };
     }
+    // A withdrawn approval can no longer be answered. The turn goes on.
+    case "approval-withdrawn": {
+      const items = view.items.map(
+        (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state: "withdrawn" } : item),
+      );
+      return { ...view, working: "", items };
+    }
     // Approvals left pending when a turn ends can no longer be answered.
     case "done": {
       const items = view.items.map(

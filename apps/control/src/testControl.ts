@@ -66,7 +66,7 @@ export async function startTestControl({
   refreshTokenLeftMs = 180 * 24 * hour,
 }: TestControlOptions = {}) {
   const github = startFakeGitHub(githubUser ? { user: githubUser } : {});
-  const computers = fakeComputers({ copilot, ...(gitSocket === undefined ? {} : { gitSocket }) });
+  const computers = fakeComputers({ copilot, ...(gitSocket === undefined ? {} : { gitSocket }), ...(clock === undefined ? {} : { clock }) });
   const options = {
     port: 0,
     dbPath: persistent ? join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite") : ":memory:",

@@ -15,6 +15,7 @@ const approvalOutcome: Record<Exclude<ApprovalItem["state"], "pending">, string>
   approved: "Approved",
   declined: "Declined",
   expired: "Expired: the bot restarted before you answered",
+  withdrawn: "Withdrawn: the agent stopped waiting, and asks again if it still needs this",
 };
 
 // What the bot waits on, after T3 Code's ComposerPendingApprovalPanel and
