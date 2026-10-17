@@ -2,7 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { Handoff, Project, Task, User, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk } from "@chiefbot/worker/fake-copilot";
-import { cleanUp, doneCount, eventually, startTestControl, type TestUser } from "./testControl.ts";
+import { Database } from "bun:sqlite";
+import { cleanUp, doneCount, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 // A person's chief of staff (their personal bot) hands work to a project of
 // their workspace and watches it. End to end: control, a fake GitHub, the
@@ -14,8 +15,8 @@ const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan
 
 // Control with a workspace owned by the signed-in user (octo-user), octo-friend
 // as its member, a project for octo-org/shop, and the owner's chief online.
-async function setup() {
-  const control = await startTestControl();
+async function setup(options: TestControlOptions = {}) {
+  const control = await startTestControl(options);
   const owner = control.user;
   const workspace = Workspace.parse(await (await owner.api("POST", "/workspaces", { name: "Platform team" })).json());
   await owner.api("POST", `/workspaces/${workspace.id}/invites`, { login: friend.login });
@@ -140,6 +141,27 @@ test("the chief is told once per transition when its task needs input or is done
   expect(notices(chiefChat.events).map(({ status, text }) => [status, text])).toEqual(expected);
   // They are stored in the chief's chat history, so a desktop that was closed sees them too.
   expect(notices((await owner.watchChat(chief.id).settled())).map(({ status, text }) => [status, text])).toEqual(expected);
+});
+
+test("a notice a crash kept from the chief reaches it when control starts again", async () => {
+  const { owner, project, chief, copilot, dbPath, stopControl, startControl } = await setup({ persistent: true });
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "hand off the checkout") await runtime.tool("send_to_project", checkout(project));
+    yield sdk.idle();
+  };
+  await owner.send(chief.id, "hand off the checkout");
+  await owner.watchChat(chief.id).until(doneCount(1));
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+
+  // Control stops right after storing the task's move to done, before telling the chief.
+  stopControl();
+  const db = new Database(dbPath);
+  db.run("UPDATE project_tasks SET status = 'done' WHERE number = 1");
+  db.close();
+  startControl();
+
+  const chat = await owner.watchChat(chief.id).until((events) => notices(events).length > 0);
+  expect(notices(chat).map(({ status, text }) => [status, text])).toEqual([["done", 'shop finished "Add a checkout page" (task #1).']]);
 });
 
 test("a chief sees and reaches only projects of its owner's workspaces", async () => {

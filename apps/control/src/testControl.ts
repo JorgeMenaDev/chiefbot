@@ -105,6 +105,8 @@ export async function startTestControl({
     computers,
     copilot,
     url,
+    // Control's SQLite file, for a test that changes it while control is stopped.
+    dbPath: options.dbPath,
     user: await signIn(),
     signIn,
     stopControl,

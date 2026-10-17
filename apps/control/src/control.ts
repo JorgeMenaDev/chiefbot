@@ -239,7 +239,8 @@ export function startControl({
     ask: { coordinator: (...args) => projects.ask(...args), taskWorker: (...args) => taskWorkers.ask(...args) },
   });
   // The handoffs watcher: tells chiefs when their task needs input or is done.
-  const watchHandoffs = (projectId: ProjectId) => {
+  // Without a project, it looks at every one.
+  const watchHandoffs = (projectId?: ProjectId) => {
     for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
   };
 
@@ -696,6 +697,9 @@ export function startControl({
     busy: projects.busy,
     stop: ({ id }) => projects.sleep(id),
   });
+
+  // A ledger change whose notice a crash kept from its chief is told now.
+  watchHandoffs();
 
   return {
     url: server.url.origin,

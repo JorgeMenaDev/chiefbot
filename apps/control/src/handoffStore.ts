@@ -96,19 +96,21 @@ export function handoffStore(
       },
     ),
 
-    // The watcher, run after every change to the project's ledger: each handoff
-    // whose task's status changed since it last looked, and became needs_input
-    // or done, gets one notice in its chief's chat. A repeat of the same status
-    // changes nothing, so it posts nothing. Returns the notices, to publish.
-    watch: db.transaction((projectId: ProjectId): Array<{ botId: BotId; event: ChatEvent }> => {
+    // The watcher, run after every change to the project's ledger, and for every
+    // project (no `projectId`) when control starts, for a change whose watch a
+    // crash cut short: each handoff whose task's status changed since it last
+    // looked, and became needs_input or done, gets one notice in its chief's
+    // chat. A repeat of the same status changes nothing, so it posts nothing.
+    // Returns the notices, to publish.
+    watch: db.transaction((projectId?: ProjectId): Array<{ botId: BotId; event: ChatEvent }> => {
       const changed = db
-        .query<{ id: string; bot_id: string }, [string]>(
+        .query<{ id: string; bot_id: string }, [string | null]>(
           `UPDATE handoffs SET watched_status = project_tasks.status FROM project_tasks
-           WHERE handoffs.project_id = ?1 AND project_tasks.project_id = handoffs.project_id
+           WHERE (?1 IS NULL OR handoffs.project_id = ?1) AND project_tasks.project_id = handoffs.project_id
              AND project_tasks.number = handoffs.task_number AND project_tasks.status != handoffs.watched_status
            RETURNING handoffs.id, handoffs.bot_id`,
         )
-        .all(projectId);
+        .all(projectId ?? null);
       return changed.flatMap(({ id, bot_id }) => {
         // Null once the owner has left the project's workspace: their chief hears no more.
         const handoff = byId(id);
