@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { addColumn } from "./addColumn.ts";
 import {
   CopilotMode,
   UserId,
@@ -20,10 +21,8 @@ export function workspaceStore(db: Database) {
     created_at INTEGER NOT NULL
   )`);
   // copilot_mode: who pays for the Copilot requests of the workspace's project
-  // agents (CopilotMode). Added after the table first shipped, so added in place too.
-  if (!db.query<{ name: string }, []>("PRAGMA table_info(workspaces)").all().some(({ name }) => name === "copilot_mode")) {
-    db.run("ALTER TABLE workspaces ADD COLUMN copilot_mode TEXT NOT NULL DEFAULT 'personal'");
-  }
+  // agents (CopilotMode). Added after the table first shipped.
+  addColumn(db, "workspaces", "copilot_mode", "TEXT NOT NULL DEFAULT 'personal'");
   db.run(`CREATE TABLE IF NOT EXISTS workspace_members (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

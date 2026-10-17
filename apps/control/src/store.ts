@@ -20,6 +20,7 @@ import {
   type SessionToken,
   type User,
 } from "@chiefbot/contracts";
+import { addColumn } from "./addColumn.ts";
 import type { GitHubIdentity } from "./github.ts";
 import { handoffStore } from "./handoffStore.ts";
 import { nextDueAt } from "./schedule.ts";
@@ -100,15 +101,11 @@ export function openStore(path: string) {
     approved INTEGER
   )`);
 
-  // Columns added after the tables first shipped, added in place so existing databases keep working.
-  const addColumn = (table: string, column: string, definition: string) => {
-    const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
-    if (!columns.some(({ name }) => name === column)) db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  };
+  // Columns added after the tables first shipped.
   // The bot's Copilot model id.
-  addColumn("bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
+  addColumn(db, "bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
   // The latest ModelReport (JSON) a worker of the user's bots sent: control's cache of their plan's models.
-  addColumn("users", "copilot_models", "TEXT");
+  addColumn(db, "users", "copilot_models", "TEXT");
 
   // A bot's routines: a prompt run on a cron schedule. next_due_at is the next
   // time it runs, epoch milliseconds.
