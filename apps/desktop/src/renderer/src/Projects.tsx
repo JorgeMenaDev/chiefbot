@@ -5,6 +5,7 @@ import {
   ProjectId,
   Task,
   type ChatItem,
+  type CopilotPayer,
   type TaskStatus,
   type Workspace,
 } from "@chiefbot/contracts";
@@ -195,7 +196,8 @@ function CoordinatorChat({ project }: { project: Project }) {
   );
 }
 
-// The coordinator asks for no approvals, so those never show.
+// The coordinator asks for no approvals, so those never show. Each turn starts
+// with who pays for its Copilot.
 function ChatRow({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
@@ -206,6 +208,8 @@ function ChatRow({ item }: { item: ChatItem }) {
       return <div className={`tool-row ${item.status}`}>{item.name}</div>;
     case "error":
       return <div className="message error">{item.message}</div>;
+    case "payer":
+      return <p className="muted payer">{payerText(item.payer)}</p>;
     case "approval":
       return null;
   }
@@ -245,6 +249,11 @@ function TaskLedger({ project }: { project: Project }) {
       ))}
     </aside>
   );
+}
+
+// Who pays for a run, in a line.
+function payerText(payer: CopilotPayer) {
+  return payer.kind === "seat" ? `On ${payer.login}'s Copilot seat` : `Billed to ${payer.account}'s Copilot (organization)`;
 }
 
 const statusText: Record<TaskStatus, string> = {

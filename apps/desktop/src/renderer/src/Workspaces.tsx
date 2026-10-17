@@ -1,4 +1,4 @@
-import { InviteRequest, Workspace, WorkspaceDetail, WorkspaceInvite, type User } from "@chiefbot/contracts";
+import { CopilotMode, InviteRequest, Workspace, WorkspaceDetail, WorkspaceInvite, type User } from "@chiefbot/contracts";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 
@@ -200,6 +200,24 @@ export function Members({ workspace, user, onLeft }: { workspace: Workspace; use
             )}
           </div>
         ))}
+        {detail && (
+          <div className="routine-row">
+            <div className="routine-text">
+              <strong>Copilot for projects</strong>
+              <span className="muted">{copilotModeText[detail.copilotMode]} Chiefs always run on their owner's seat.</span>
+            </div>
+            {owner && (
+              <select
+                value={detail.copilotMode}
+                disabled={busy}
+                onChange={(event) => void run(() => api.setCopilotMode(workspace.id, CopilotMode.parse(event.target.value)))}
+              >
+                <option value="personal">Each member's seat</option>
+                <option value="org">The organization</option>
+              </select>
+            )}
+          </div>
+        )}
         {owner && (
           <form className="routine-schedule" onSubmit={(event) => void invite(event)}>
             <input placeholder="GitHub login" value={login} disabled={busy} onChange={(event) => setLogin(event.target.value)} />
@@ -213,3 +231,9 @@ export function Members({ workspace, user, onLeft }: { workspace: Workspace; use
     </div>
   );
 }
+
+// What each mode means for the workspace's project agents (coordinators and workers).
+const copilotModeText: Record<CopilotMode, string> = {
+  personal: "Project agents run on the Copilot seat of the member who asked.",
+  org: "Project agents run on the organization's Copilot: Chiefbot's repo app, installed on the project repo's owner, pays.",
+};
