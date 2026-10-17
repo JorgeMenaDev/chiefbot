@@ -10,14 +10,14 @@ import {
   type ChatEvent,
   type CopilotPayer,
   type CreateTaskArgs,
-  type ProjectFile,
+  ProjectFile,
   type ProjectMember,
   type TaskStatus,
   type TurnEvent,
   type UpdateTaskArgs,
   type WorkspaceId,
 } from "@chiefbot/contracts";
-import type { z } from "zod";
+import { z } from "zod";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 
 // Projects, their task ledgers and their members' chats with the coordinator,
@@ -89,8 +89,11 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   });
 
   type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string };
+  // A stored project file. Projects created before `environments` left the
+  // project file (it was never used) still carry it: it is dropped.
+  const StoredProjectFile = ProjectFile.extend({ environments: z.unknown().optional() }).transform(({ environments: _, ...file }) => file);
   const toProject = (row: ProjectRow): Project =>
-    Project.parse({ id: row.id, workspaceId: row.workspace_id, name: row.name, repo: row.repo, file: JSON.parse(row.file) });
+    Project.parse({ id: row.id, workspaceId: row.workspace_id, name: row.name, repo: row.repo, file: StoredProjectFile.parse(JSON.parse(row.file)) });
   const projectColumns = "projects.id, projects.workspace_id, projects.name, projects.repo, projects.file";
 
   type TaskRow = {

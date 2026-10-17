@@ -13,6 +13,7 @@ import {
   type TurnEvent,
   type WorkspaceId,
 } from "@chiefbot/contracts";
+import { addColumn } from "./addColumn.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 
 // A project's task workers in control's SQLite: each one's launch record, the
@@ -68,6 +69,11 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     requested_at INTEGER NOT NULL,
     approved INTEGER
   )`);
+  // Columns added after the table first shipped. A worker has one turn, so an
+  // older approval's turn is its worker's.
+  addColumn(db, "task_worker_approvals", "turn_id", "TEXT NOT NULL DEFAULT ''");
+  addColumn(db, "task_worker_approvals", "requested_at", "INTEGER NOT NULL DEFAULT 0");
+  db.run(`UPDATE task_worker_approvals SET turn_id = (SELECT turn_id FROM task_workers WHERE task_workers.id = worker_id) WHERE turn_id = ''`);
   // Approvals wait only while the worker works: a pending one of an ended turn can never be answered.
   const approvals = approvalRecords(db, {
     table: "task_worker_approvals",

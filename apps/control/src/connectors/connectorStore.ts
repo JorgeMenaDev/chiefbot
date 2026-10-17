@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { addColumn } from "../addColumn.ts";
 import { Connector, ConnectorCall, UserId, type CallIdentity, type ConnectorInput, type ProjectId, type WorkspaceId } from "@chiefbot/contracts";
 
 // Connectors, who has connected them and every call made through them, in
@@ -22,6 +23,8 @@ export function connectorStore(db: Database) {
     created_at INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, name)
   )`);
+  // Columns added after the table first shipped.
+  addColumn(db, "connectors", "writes_without_approval", "INTEGER NOT NULL DEFAULT 0");
   // A member's own connection to a personal-oauth connector: an OAuth sign-in or a pasted token.
   db.run(`CREATE TABLE IF NOT EXISTS connector_links (
     workspace_id TEXT NOT NULL,
