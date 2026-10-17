@@ -62,6 +62,8 @@ commands:
 
 Each project gets one computer from the `ComputerProvider` (`chiefbot-<project id>`), which runs the project's **coordinator** instead of a bot worker. The coordinator plans and tracks work and never writes code: it runs the Copilot SDK in `mode: "empty"` (no shell, no files, no ambient config) with five tools only, all served by control: `create_task`, `update_task`, `list_tasks`, `read_context` and `write_context`. The **task ledger** in control's SQLite is the only record of task state (open, in progress, needs input, done, abandoned; an owner, who asked, and links to pull requests, context files or pages). **Shared context** is a set of Markdown files every agent of the project reads and adds to (`notes.md`, `docs/`, `plans/`), kept by control in a `ContextStore`: a `context` folder next to the database now, a bucket later. Each member has their own chat with the coordinator, which runs on that member's Copilot seat: control brokers a token only for the member whose turn is running. One scheduler per project runs the coordinator's turns one at a time across all members' chats, oldest first, so each turn sees the tasks the turns before it made, and two members asking for the same thing get one task. The desktop shows the ledger beside the chat and updates it live. Workers that carry out tasks come next.
 
+**Handoffs.** Your own bot is also your chief of staff: it can hand work to a project of any workspace you belong to, and it never sees other projects. It has three tools, served by control (`POST /worker/<bot id>/chief-tools`): `list_projects`, `send_to_project` (a title, the request and an acceptance condition: how you will know it is done) and `handoff_status`. Sending creates a handoff record in control (who asked, the project, the request, the acceptance condition, the linked task) and a task in the project's ledger, asked by you. The coordinator gets it as a message in your own chat with it, through the project's scheduler, so it runs on your Copilot seat like any message of yours, queued behind one you already sent. The chief only starts and watches: the coordinator plans the work and manages its workers. A handoff's status is its task's status in the ledger. Whenever that task becomes **needs input** or **done**, control posts one notice in the chief's chat ("shop needs your input on … Answer in the project's chat", or "shop finished …" with the task's links). A repeat of the same status posts nothing; a task that goes back to in progress and needs input again posts again. If you leave the workspace, your chief sees and hears nothing more of its handoffs there.
+
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
 `bun run dev` starts both apps. To run them apart: `bun run --cwd apps/control dev` and `bun run --cwd apps/desktop dev`.
@@ -226,6 +228,18 @@ Tests use a fake Copilot. This check makes 3 live Copilot calls on the real GitH
 6. Start a second desktop as the member (`bun run --cwd apps/desktop dev -- --user-data-dir=/tmp/chiefbot-second`), open the project and send: "Can we get dark mode in the settings page?" The coordinator answers that task #1 already covers it. The ledger still shows one task in both desktops.
 7. In the second desktop send: "Mark the dark mode task as in progress." Both desktops show #1 **In progress** without a reload.
 8. In the second desktop the project has no **Delete** button: only the owner deletes. In the first desktop click **Delete** and confirm. The project leaves the sidebar and `docker ps -a` no longer lists `chiefbot-project_…`. Clean up: `rm -rf /tmp/chiefbot-second`.
+
+## Manual check: a chief of staff hands work to a project
+
+Tests use a fake Copilot. This check makes 5 live Copilot calls on the real GitHub with one account. It needs Docker and the computer image rebuilt with this code (`bun run computer:build`).
+
+1. Set up a workspace and a project from a repo with a valid `chiefbot.project.yaml`, as in the check above (steps 1, 2 and 4). Create a bot and wait until it is **online**.
+2. In the bot's chat send: "Hand the <project name> project this: add a dark mode toggle to the settings page. It is done when a pull request adds the toggle." The chat shows `send_to_project` succeeding (it may call `list_projects` first) and a reply naming the task number, say #1.
+3. Open the project. Your chat with the coordinator shows a message from your chief of staff about task #1 with "Done when: …", and the coordinator's reply. **Tasks** shows #1, asked by you.
+4. In the project chat send: "Set task #1 to needs input: ask me which settings page." Back in the bot's chat a notice says the project needs your input on task #1. It appears even if the bot was mid-reply or stopped.
+5. In the project chat send: "Mark task #1 done." The bot's chat shows a second notice: the project finished task #1.
+6. In the bot's chat send: "How is the dark mode handoff going?" The chat shows `handoff_status` and a reply saying it is done.
+7. Restart control and the desktop. Both notices are still in the bot's chat. Clean up: delete the project and the bot.
 
 ## Manual check: invite a second GitHub account to a workspace
 
