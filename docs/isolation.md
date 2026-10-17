@@ -15,6 +15,8 @@ Each bot is separate from every other bot, including other bots of the same user
 
 User routes (`/bots/:id/...`) check that the signed-in user owns the bot. Another user's bot reads as 404.
 
+A project's task worker gets the same boundaries on its own throwaway computer (`chiefbot-worker_<id>`, with its own volume and network) and its own credential, `CHIEFBOT_TASK_WORKER_TOKEN`, valid only on `/task-worker/<its id>` and for control's git proxy. It acts for the member who asked for it: their GitHub access bounds what it may clone and push, and only they approve its pushes and pull requests. Proof: `taskWorkers.test.ts`.
+
 Proof:
 
 - `bun test` (fakes): `bots.test.ts` "a worker credential works only for its own bot", and `docker.test.ts` "each bot is locked down…".
