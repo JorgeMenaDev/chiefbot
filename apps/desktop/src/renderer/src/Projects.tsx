@@ -195,7 +195,7 @@ function CoordinatorChat({ project }: { project: Project }) {
   );
 }
 
-// The coordinator asks for no approvals, so those never show.
+// The coordinator asks for no approvals and gets no handoff notices, so those never show.
 function ChatRow({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
@@ -207,6 +207,7 @@ function ChatRow({ item }: { item: ChatItem }) {
     case "error":
       return <div className="message error">{item.message}</div>;
     case "approval":
+    case "notice":
       return null;
   }
 }
