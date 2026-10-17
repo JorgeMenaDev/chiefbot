@@ -34,3 +34,6 @@ export type ProjectId = z.infer<typeof ProjectId>;
 // A project's worker: one task on one throwaway computer.
 export const TaskWorkerId = z.string().min(1).brand<"TaskWorkerId">();
 export type TaskWorkerId = z.infer<typeof TaskWorkerId>;
+// One request a person's chief of staff handed to a project.
+export const HandoffId = z.string().min(1).brand<"HandoffId">();
+export type HandoffId = z.infer<typeof HandoffId>;

@@ -238,12 +238,13 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     }),
 
     // Queues a member's message for the coordinator. Null, storing nothing, while
-    // their previous message is still queued or running.
-    queueTurn: db.transaction((projectId: ProjectId, userId: UserId, text: string): ChatEvent | null => {
+    // their previous message is still queued or running, unless `whileBusy`: a
+    // handoff from the member's chief of staff queues behind it instead.
+    queueTurn: db.transaction((projectId: ProjectId, userId: UserId, text: string, whileBusy = false): ChatEvent | null => {
       const unfinished = db
         .query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND user_id = ?2 AND state != 'done'")
         .get(projectId, userId);
-      if (unfinished) return null;
+      if (unfinished && !whileBusy) return null;
       const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
       db.query(
         "INSERT INTO coordinator_turns (id, project_id, user_id, text, state, created_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
@@ -275,6 +276,14 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         .query<{ user_id: string }, [string]>("SELECT user_id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'")
         .get(projectId);
       return row ? UserId.parse(row.user_id) : null;
+    },
+
+    // The project's running coordinator turn and the member it runs for, if any.
+    runningTurn(projectId: ProjectId): { turnId: TurnId; userId: UserId } | null {
+      const row = db
+        .query<{ id: string; user_id: string }, [string]>("SELECT id, user_id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'")
+        .get(projectId);
+      return row ? { turnId: TurnId.parse(row.id), userId: UserId.parse(row.user_id) } : null;
     },
 
     // Adds the coordinator's event number `index` to the project's running turn;

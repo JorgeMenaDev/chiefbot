@@ -1,4 +1,4 @@
-import { CopilotClient } from "@github/copilot-sdk";
+import { CopilotClient, type SessionHooks } from "@github/copilot-sdk";
 import type { Copilot } from "./copilot.ts";
 
 // The real Copilot SDK in copilot-cli mode: the bundled runtime runs in the bot
@@ -52,20 +52,25 @@ export function coordinatorSdk({ baseDirectory }: { baseDirectory: string }): Co
   };
 }
 
-// A coordinator session's config: its tools are the only ones it may use, and
-// its instructions follow the SDK's own system message.
+// A coordinator session's config: its tools and its MCP servers' tools are the
+// only ones it may use, and its instructions follow the SDK's own system message.
 export function coordinatorSessionConfig({
   gitHubTokenProvider,
   onPermissionRequest,
   tools,
   instructions,
+  mcpServers = {},
+  onMcpCall,
 }: Parameters<Copilot["openSession"]>[0]) {
+  const hasMcp = Object.keys(mcpServers).length > 0;
   return {
     gitHubTokenProvider,
     onPermissionRequest,
     tools,
     streaming: true,
-    availableTools: tools.map(({ name }) => `custom:${name}`),
+    availableTools: [...tools.map(({ name }) => `custom:${name}`), ...(hasMcp ? ["mcp:*"] : [])],
+    ...(hasMcp ? { mcpServers } : {}),
+    ...(onMcpCall ? { hooks: { onPreMcpToolCall: async ({ serverName, toolName }) => void (await onMcpCall(serverName, toolName)) } satisfies SessionHooks } : {}),
     ...(instructions === undefined ? {} : { systemMessage: { mode: "append" as const, content: instructions } }),
   };
 }

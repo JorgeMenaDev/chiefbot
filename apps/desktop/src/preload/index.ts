@@ -1,4 +1,4 @@
-import type { RoutineInput } from "@chiefbot/contracts";
+import type { ConnectorInput, RoutineInput } from "@chiefbot/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 // Subscribes to one main → renderer channel; returns the unsubscribe.
@@ -75,6 +75,21 @@ const api = {
       ipcRenderer.invoke("projects:answer", id, workerId, approvalId, approved),
     // { projectId, workers } whenever one of a project's workers changes.
     onWorkers: (listener: (workers: unknown) => void) => subscribe("projects:workers", listener),
+  },
+  connectors: {
+    list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("connectors:list", workspaceId),
+    define: (workspaceId: string, input: ConnectorInput): Promise<unknown> => ipcRenderer.invoke("connectors:define", workspaceId, input),
+    // Asks first; resolves true once deleted.
+    remove: (workspaceId: string, name: string): Promise<boolean> => ipcRenderer.invoke("connectors:delete", workspaceId, name),
+    setSecret: (workspaceId: string, name: string, token: string): Promise<void> =>
+      ipcRenderer.invoke("connectors:set-secret", workspaceId, name, token),
+    setToken: (workspaceId: string, name: string, token: string): Promise<void> =>
+      ipcRenderer.invoke("connectors:set-token", workspaceId, name, token),
+    // Opens the OAuth sign-in in the browser when there is one; resolves with the ConnectStart.
+    connect: (workspaceId: string, name: string): Promise<unknown> => ipcRenderer.invoke("connectors:connect", workspaceId, name),
+    checklist: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("connectors:checklist", workspaceId),
+    // A project's connector call log.
+    calls: (projectId: string): Promise<unknown> => ipcRenderer.invoke("connectors:calls", projectId),
   },
 };
 

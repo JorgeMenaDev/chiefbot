@@ -2,6 +2,9 @@ import {
   AnswerApprovalRequest,
   ApprovalId,
   BotId,
+  ConnectorInput,
+  ConnectorName,
+  ConnectorTokenRequest,
   CreateBotRequest,
   CreateProjectRequest,
   CreateWorkspaceRequest,
@@ -17,13 +20,14 @@ import {
   WorkspaceId,
 } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
-import { configuredGitHubClientId, setupNeeded } from "@chiefbot/setup";
+import { configuredSignIn, setupNeeded } from "@chiefbot/setup";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
 import { createChats } from "./chat.ts";
+import { createConnectors } from "./connectors.ts";
 import { createProjects } from "./projects.ts";
 import { createRoutines } from "./routines.ts";
 import { createWorkspaces } from "./workspaces.ts";
@@ -31,12 +35,12 @@ import { createWorkspaces } from "./workspaces.ts";
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
 //   CHIEFBOT_GITHUB_URL       default https://github.com
-//   CHIEFBOT_GITHUB_CLIENT_ID default: the GitHub App `bun run setup` registered (~/.chiefbot/config.json)
+//   CHIEFBOT_GITHUB_CLIENT_ID default: the sign-in app `bun run setup` recorded (~/.chiefbot/config.json)
 //   CHIEFBOT_HOME             default ~/.chiefbot
 const controlUrl = process.env.CHIEFBOT_CONTROL_URL ?? "http://127.0.0.1:7410";
 const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
-const clientId = configuredGitHubClientId(process.env, homedir());
-if (clientId === null) {
+const signIn = configuredSignIn(process.env, homedir());
+if (signIn === null) {
   console.error(setupNeeded);
   dialog.showErrorBox("Chiefbot is not set up", setupNeeded);
   process.exit(1);
@@ -79,6 +83,8 @@ const routines = createRoutines({ controlUrl, session: sessionStore.load });
 
 const workspaces = createWorkspaces({ controlUrl, session: sessionStore.load });
 
+const connectors = createConnectors({ controlUrl, session: sessionStore.load });
+
 const projects = createProjects({
   controlUrl,
   session: sessionStore.load,
@@ -87,7 +93,7 @@ const projects = createProjects({
 
 const auth = createAuth({
   controlUrl,
-  deviceFlow: { githubUrl, clientId },
+  deviceFlow: { githubUrl, ...signIn },
   store: sessionStore,
   onChange: (state) => {
     window?.webContents.send("auth:state", state);
@@ -188,6 +194,39 @@ ipcMain.handle("projects:open-chat", (_event, id: unknown) => {
 ipcMain.handle("projects:send", (_event, id: unknown, text: unknown) =>
   projects.send(ProjectId.parse(id), SendMessageRequest.parse({ text }).text),
 );
+ipcMain.handle("connectors:list", (_event, workspaceId: unknown) => connectors.list(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("connectors:define", (_event, workspaceId: unknown, input: unknown) =>
+  connectors.define(WorkspaceId.parse(workspaceId), ConnectorInput.parse(input)),
+);
+ipcMain.handle("connectors:set-secret", (_event, workspaceId: unknown, name: unknown, token: unknown) =>
+  connectors.setSecret(WorkspaceId.parse(workspaceId), ConnectorName.parse(name), ConnectorTokenRequest.parse({ token }).token),
+);
+ipcMain.handle("connectors:set-token", (_event, workspaceId: unknown, name: unknown, token: unknown) =>
+  connectors.setToken(WorkspaceId.parse(workspaceId), ConnectorName.parse(name), ConnectorTokenRequest.parse({ token }).token),
+);
+// An OAuth sign-in opens in the default browser; control finishes it on its callback.
+ipcMain.handle("connectors:connect", async (_event, workspaceId: unknown, name: unknown) => {
+  const start = await connectors.connect(WorkspaceId.parse(workspaceId), ConnectorName.parse(name));
+  if (start.kind === "oauth") await shell.openExternal(start.authorizeUrl);
+  return start;
+});
+ipcMain.handle("connectors:checklist", (_event, workspaceId: unknown) => connectors.checklist(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("connectors:calls", (_event, projectId: unknown) => connectors.calls(ProjectId.parse(projectId)));
+// Asks first: every member's connection to it goes too. Resolves true once deleted.
+ipcMain.handle("connectors:delete", async (_event, workspaceId: unknown, name: unknown) => {
+  if (!window) return false;
+  const { response } = await dialog.showMessageBox(window, {
+    type: "warning",
+    message: `Delete the connector ${ConnectorName.parse(name)}?`,
+    detail: "Its workspace secret and every member's connection to it are deleted. Projects that declare it lose it.",
+    buttons: ["Delete", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+  await connectors.remove(WorkspaceId.parse(workspaceId), ConnectorName.parse(name));
+  return true;
+});
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {
   const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));

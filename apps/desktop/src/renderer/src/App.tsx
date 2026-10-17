@@ -2,6 +2,7 @@ import { AuthState, Bot, type BotStatus, type User } from "@chiefbot/contracts";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { Chat } from "./Chat.tsx";
+import { Connectors } from "./Connectors.tsx";
 import { Routines } from "./Routines.tsx";
 import { ScreenPane } from "./LiveScreen.tsx";
 import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
@@ -75,11 +76,13 @@ function Workspace({ user }: { user: User }) {
   const teams = useWorkspaces();
   const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem(currentWorkspaceKey));
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Bumped by each click on Members, which remounts (reloads) the screen: control sends no member events.
+  // Bumped by each click on Members or Connectors, which remounts (reloads) the
+  // screen: control sends no member or connector events.
   const [membersVisit, setMembersVisit] = useState(0);
   const current = teams.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const { projects, reload: reloadProjects } = useProjects(current);
   const showMembers = current !== null && selectedId === "members";
+  const showConnectors = current !== null && selectedId === "connectors";
   const project = projects.find(({ id }) => id === selectedId);
   const selected = bots.find((bot) => bot.id === selectedId) ?? bots[0];
 
@@ -107,6 +110,18 @@ function Workspace({ user }: { user: User }) {
           </button>
         )}
         {current && (
+          <button
+            className={showConnectors ? "bot-row selected" : "bot-row"}
+            onClick={() => {
+              setSelectedId("connectors");
+              setMembersVisit(membersVisit + 1);
+            }}
+          >
+            <span className="bot-name">Connectors</span>
+            <span className="bot-status">checklist</span>
+          </button>
+        )}
+        {current && (
           <nav className="bot-list projects">
             {projects.map(({ id, name, repo }) => (
               <button key={id} className={id === project?.id ? "bot-row selected" : "bot-row"} onClick={() => setSelectedId(id)}>
@@ -128,7 +143,7 @@ function Workspace({ user }: { user: User }) {
           {bots.map((bot) => (
             <button
               key={bot.id}
-              className={!showMembers && !project && bot.id === selected?.id ? "bot-row selected" : "bot-row"}
+              className={!showMembers && !showConnectors && !project && bot.id === selected?.id ? "bot-row selected" : "bot-row"}
               onClick={() => setSelectedId(bot.id)}
             >
               <StatusDot status={bot.status} />
@@ -173,6 +188,8 @@ function Workspace({ user }: { user: User }) {
               void teams.reload();
             }}
           />
+        ) : showConnectors ? (
+          <Connectors key={`${current.id}:${membersVisit}`} workspace={current} />
         ) : project && current ? (
           <ProjectPane
             key={project.id}

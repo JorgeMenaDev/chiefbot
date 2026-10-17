@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
+import { ConnectorCalls } from "./Connectors.tsx";
 
 const ProjectList = z.array(Project);
 const TaskList = z.array(Task);
@@ -95,6 +96,7 @@ export function ProjectPane({
 }) {
   const { commands } = project.file;
   const [error, setError] = useState<string | null>(null);
+  const [showCalls, setShowCalls] = useState(false);
   async function remove() {
     setError(null);
     try {
@@ -115,14 +117,16 @@ export function ProjectPane({
           </p>
           {error && <p className="error">{error}</p>}
         </div>
-        {workspace.role === "owner" && (
-          <div className="actions">
+        <div className="actions">
+          <button onClick={() => setShowCalls(!showCalls)}>{showCalls ? "Hide connector calls" : "Connector calls"}</button>
+          {workspace.role === "owner" && (
             <button className="danger" onClick={() => void remove()}>
               Delete
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </header>
+      {showCalls && <ConnectorCalls project={project} />}
       <div className="bot-body">
         <CoordinatorChat project={project} />
         <TaskLedger project={project} login={login} />
@@ -210,7 +214,7 @@ function CoordinatorChat({ project }: { project: Project }) {
   );
 }
 
-// The coordinator asks for no approvals, so those never show.
+// The coordinator asks for no approvals and gets no handoff notices, so those never show.
 function ChatRow({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
@@ -222,6 +226,7 @@ function ChatRow({ item }: { item: ChatItem }) {
     case "error":
       return <div className="message error">{item.message}</div>;
     case "approval":
+    case "notice":
       return null;
   }
 }

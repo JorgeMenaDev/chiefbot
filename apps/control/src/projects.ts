@@ -3,6 +3,7 @@ import {
   CoordinatorToolCall,
   CreateProjectRequest,
   SendMessageRequest,
+  type AgentConnector,
   type ChatEvent,
   type ClientEvent,
   type ContextFile,
@@ -19,6 +20,7 @@ import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { readProjectFile } from "./projectFile.ts";
+import type { repoAccess } from "./repos.ts";
 import type { openStore } from "./store.ts";
 import type { taskWorkerHost } from "./taskWorkers.ts";
 import type { tokenBroker } from "./tokens.ts";
@@ -40,6 +42,8 @@ export type ProjectHostOptions = {
   // The projects' task workers (taskWorkers.ts): the coordinator's worker tools.
   workers: ReturnType<typeof taskWorkerHost>;
   githubApiUrl: string;
+  // A token to read a repo for a user, or why not (repos.ts readToken).
+  repoReadToken: ReturnType<typeof repoAccess>["readToken"];
   // Control's URL as a computer reaches it.
   controlUrlForComputers: () => string;
   // Publishes to a WebSocket topic.
@@ -48,6 +52,10 @@ export type ProjectHostOptions = {
   publishToUser: (userId: UserId, event: ClientEvent) => void;
   // Upgrades the request to a project WebSocket; undefined once upgraded.
   upgrade: (req: Request, data: ProjectSocketData) => Response | undefined;
+  // The connectors a member's coordinator session gets for a turn (connectors/connectors.ts).
+  connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
+  // The project's task ledger changed.
+  onLedgerChange: (projectId: ProjectId) => void;
 };
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
@@ -59,7 +67,7 @@ export type ProjectHostOptions = {
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET    /workspaces/:id/projects  → Project[]
 //   POST   /workspaces/:id/projects  body CreateProjectRequest → 201 Project. Control reads the repo's
-//                                    chiefbot.project.yaml with the user's GitHub token (400
+//                                    chiefbot.project.yaml through the repo app, if the user may read it (400
 //                                    invalid_project_file says what is wrong; 409 project_exists;
 //                                    403 reauth_needed), then starts the coordinator's computer.
 //   GET    /projects/:id             → Project
@@ -82,10 +90,13 @@ export function projectHost({
   context,
   workers,
   githubApiUrl,
+  repoReadToken,
   controlUrlForComputers,
   publish,
   publishToUser,
   upgrade,
+  connectorsFor,
+  onLedgerChange,
 }: ProjectHostOptions) {
   const { projects } = store;
   // Each project's connected coordinator, and the projects whose coordinator has said hello.
@@ -98,16 +109,22 @@ export function projectHost({
   const publishTasks = (projectId: ProjectId) => {
     const tasks = projects.tasks(projectId);
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, { type: "tasks", projectId, tasks });
+    onLedgerChange(projectId);
   };
   const toCoordinator = (projectId: ProjectId, message: ControlToCoordinator) =>
     coordinators.get(projectId)?.send(JSON.stringify(message));
 
   // The project's scheduler: once its coordinator is ready, hands it the oldest
-  // queued turn, unless a turn is running (the store's claim refuses then).
+  // queued turn, unless a turn is running (the store's claim refuses then), with
+  // the connectors ready for that turn's member. If those cannot be read, the
+  // turn runs without connectors.
   const schedule = (projectId: ProjectId) => {
     if (!greeted.has(projectId)) return;
     const next = projects.claimNextTurn(projectId);
-    if (next) toCoordinator(projectId, { type: "run-turn", ...next });
+    if (!next) return;
+    void connectorsFor(projectId, next.member.userId)
+      .catch(() => [])
+      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, connectors }));
   };
 
   // Runs a /projects/:id route for a signed-in member of the project's workspace; 401 or 404 otherwise.
@@ -202,9 +219,11 @@ export function projectHost({
         if (!workspace) return apiError(404, "not_found");
         const body = CreateProjectRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "invalid_project");
-        const token = await broker.accessToken(user.id);
-        if (!token) return apiError(403, "reauth_needed");
-        const file = await readProjectFile(githubApiUrl, token.accessToken, body.data.repo);
+        const access = await repoReadToken(user.id, body.data.repo);
+        if ("error" in access) {
+          return access.error === "reauth_needed" ? apiError(403, "reauth_needed") : apiError(400, "invalid_project_file", access.message);
+        }
+        const file = await readProjectFile(githubApiUrl, access.token, body.data.repo);
         if ("error" in file) return apiError(400, "invalid_project_file", file.error);
         const projectToken = crypto.randomUUID() + crypto.randomUUID();
         const project = projects.create(workspace.id, body.data.repo, file, projectToken);
@@ -290,6 +309,18 @@ export function projectHost({
 
   return {
     routes,
+
+    // Call after changing the project's ledger outside a coordinator tool call:
+    // members see it, and the handoffs linked to its tasks are checked.
+    ledgerChanged: publishTasks,
+
+    // Queues `text` in the member's chat with the coordinator, behind their own
+    // unanswered message if there is one (a handoff from their chief of staff).
+    deliver(projectId: ProjectId, userId: UserId, text: string) {
+      const queued = projects.queueTurn(projectId, userId, text, true);
+      if (queued) publishChat(projectId, { userId, event: queued });
+      schedule(projectId);
+    },
 
     open(ws: Socket, data: ProjectSocketData) {
       if (data.kind === "project-chat") {

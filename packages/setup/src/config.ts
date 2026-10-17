@@ -1,16 +1,16 @@
-import { GitHubAppSecrets, LocalConfig } from "@chiefbot/contracts";
+import { GitHubAppSecrets, LocalConfig, type SignInConfig } from "@chiefbot/contracts";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // The per-user Chiefbot home that `bun run setup` fills: config.json (the
-// deployer's GitHub App), github-app-secrets.json and control's secret.key.
+// deployer's repo app and sign-in app), github-app-secrets.json and control's secret.key.
 // Everything in it is owner-only (folder 700, files 600) and outside the repo.
 
 type Env = Record<string, string | undefined>;
 
-// What control and the desktop print when there is no GitHub App to sign in with.
+// What control and the desktop print when there is no app to sign in with or no repo app.
 export const setupNeeded =
-  "Chiefbot has no GitHub App yet. Run `bun run setup`: it registers your own GitHub App and writes its client ID to ~/.chiefbot/config.json and its private key to github-app-secrets.json beside it (or in $CHIEFBOT_HOME).";
+  "Chiefbot is not set up, or was set up before it had a separate sign-in app. Run `bun run setup`: it registers your own two GitHub Apps (one to sign in, one for repos) and writes them to ~/.chiefbot/config.json, with the repo app's private key in github-app-secrets.json beside it (or in $CHIEFBOT_HOME).";
 
 // CHIEFBOT_HOME, default ~/.chiefbot.
 export function chiefbotHome(env: Env, homeDir: string): string {
@@ -37,14 +37,17 @@ export function writeOwnerOnly(dir: string, name: string, contents: string): voi
   chmodSync(path, 0o600);
 }
 
-// The OAuth client ID the desktop signs in with and control refreshes with:
-// CHIEFBOT_GITHUB_CLIENT_ID (the GCP control VM sets it), else the app setup
-// registered. Null when neither exists: print `setupNeeded`.
-export function configuredGitHubClientId(env: Env, homeDir: string): string | null {
-  return env.CHIEFBOT_GITHUB_CLIENT_ID ?? readLocalConfig(chiefbotHome(env, homeDir))?.githubApp.clientId ?? null;
+// The sign-in app: the desktop signs in with its client ID and control refreshes
+// with it. CHIEFBOT_GITHUB_CLIENT_ID (the GCP control VM sets it) overrides the
+// client ID; the kind comes from the config, else github-app. Null when neither
+// exists: print `setupNeeded`.
+export function configuredSignIn(env: Env, homeDir: string): { kind: SignInConfig["kind"]; clientId: string } | null {
+  const signIn = readLocalConfig(chiefbotHome(env, homeDir))?.signIn;
+  const clientId = env.CHIEFBOT_GITHUB_CLIENT_ID ?? (signIn?.kind === "github-app" ? signIn.app.clientId : signIn?.clientId);
+  return clientId === undefined ? null : { kind: signIn?.kind ?? "github-app", clientId };
 }
 
-// The app's ID and private key, from config.json and github-app-secrets.json:
+// The repo app's ID and private key, from config.json and github-app-secrets.json:
 // control signs the app's JWTs with them to reach repos for bots. Null until
 // setup has saved both.
 export function configuredGitHubApp(env: Env, homeDir: string): { id: number; privateKey: string } | null {
