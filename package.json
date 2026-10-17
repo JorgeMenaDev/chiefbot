@@ -12,7 +12,6 @@
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun test",
     "check": "bun run typecheck && bun test && bash scripts/check-public.sh",
-    "computer:dist": "bun infra/computer/build.ts --dist-only",
     "computer:build": "bun infra/computer/build.ts"
   },
   "devDependencies": {
