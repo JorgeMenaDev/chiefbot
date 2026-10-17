@@ -47,7 +47,20 @@ Creating a bot needs Docker and the `chiefbot-computer:dev` image. Each bot is a
 
 **Repo work and approvals.** A bot clones, branches, edits and commits in its workspace without asking. Before it pushes or opens a pull request, it asks you: the chat shows an approval card (after T3 Code's) with the exact command or pull request, and the bot waits until you click **Approve** or **Decline**, however long that takes. The worker's permission handler decides what asks (`apps/worker/src/approvals.ts`): shell commands that mention `git … push`, `gh pr create|merge`, `gh repo delete`, a `gh api` write to `/pulls` or a way to skip git hooks, the bot's `create_pull_request` tool, and GitHub tools that write. Every push also asks through git's pre-push hook, however the command was spelled, unless it is the push command you just approved. Approvals guard against model mistakes, not a hostile bot: `docs/isolation.md`. Control stores each request and answer (`POST /bots/<id>/approvals/<approval id>`), so a pending card survives a restart of the desktop or control and you can answer later; if the bot's computer restarts first, the turn ends and the card shows **Expired**. A routine's turn waits for approvals the same way: if its 30-minute limit passes first, the run is marked failed, but the card stays answerable and the bot's computer stays running until the turn ends. Git gets the owner's token from control's broker on each use: the image configures a credential helper for github.com that asks the worker over a unix socket (`apps/worker/src/gitCredential.ts`), so no token is written to the bot's disk or into a remote URL. Pull requests go through the GitHub API from the worker (`CHIEFBOT_GITHUB_API_URL`, passed on by control). The token reaches only repositories where your GitHub App is installed.
 
-**Workspaces.** A workspace is a team. Anyone signed in can create one and is its owner. The owner invites people by GitHub login; an invite waits until someone with that login signs in to Chiefbot and accepts it from the workspace switcher at the top of the sidebar. The **Members** screen lists members and pending invites: the owner invites, withdraws invites and removes members, and a member can leave. There are two roles, owner and member, and the owner cannot leave. Every workspace route answers 404 to anyone who is not a member, so outsiders cannot tell a workspace exists. Projects, connectors and tasks will belong to a workspace; bots stay personal.
+**Workspaces.** A workspace is a team. Anyone signed in can create one and is its owner. The owner invites people by GitHub login; an invite waits until someone with that login signs in to Chiefbot and accepts it from the workspace switcher at the top of the sidebar. The **Members** screen lists members and pending invites: the owner invites, withdraws invites and removes members, and a member can leave. There are two roles, owner and member, and the owner cannot leave. Every workspace route answers 404 to anyone who is not a member, so outsiders cannot tell a workspace exists. Projects belong to a workspace, and connectors will too; bots stay personal.
+
+**Projects.** A project binds one GitHub repo to a workspace. Any member creates one from the sidebar (**+ New project**, `owner/repo`). Control reads the repo's `chiefbot.project.yaml` from its default branch through the GitHub API with that member's token, so your GitHub App must be installed on the repo. The file is checked with a Zod schema (`ProjectFile` in `packages/contracts/src/projects.ts`); unknown keys are errors, and a missing or invalid file is refused with what is wrong and where:
+
+```yaml
+connectors: [github, jira]   # the connectors (MCP servers) its agents need, by name
+environments:                # where its workers run; image defaults to the bot computer image
+  - name: web
+commands:
+  build: bun run build
+  test: bun test
+```
+
+Each project gets one computer from the `ComputerProvider` (`chiefbot-<project id>`), which runs the project's **coordinator** instead of a bot worker. The coordinator plans and tracks work and never writes code: it runs the Copilot SDK in `mode: "empty"` (no shell, no files, no ambient config) with five tools only, all served by control: `create_task`, `update_task`, `list_tasks`, `read_context` and `write_context`. The **task ledger** in control's SQLite is the only record of task state (open, in progress, needs input, done, abandoned; an owner, who asked, and links to pull requests, context files or pages). **Shared context** is a set of Markdown files every agent of the project reads and adds to (`notes.md`, `docs/`, `plans/`), kept by control in a `ContextStore`: a `context` folder next to the database now, a bucket later. Each member has their own chat with the coordinator, which runs on that member's Copilot seat: control brokers a token only for the member whose turn is running. One scheduler per project runs the coordinator's turns one at a time across all members' chats, oldest first, so each turn sees the tasks the turns before it made, and two members asking for the same thing get one task. The desktop shows the ledger beside the chat and updates it live. Workers that carry out tasks come next.
 
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
@@ -199,6 +212,19 @@ Tests use a fake GitHub with a real git remote. This check uses the real GitHub 
 9. Send: `Add a second line to README.md, commit and push.` Click **Decline** on the card. The bot says the push was declined, and github.com shows no new commit.
 10. If a card turns **Expired** while the bot was still running, the Copilot runtime gave up waiting: note how long it waited. If git says `lost your GitHub sign-in`, control needs a new sign-in: click **Sign in again**. If the push fails with 403, your GitHub App is not installed on the repo.
 11. Clean up: `gh repo delete <your login>/chiefbot-scratch --yes` (it removes the pull request too).
+
+## Manual check: two members ask a project's coordinator for the same thing
+
+Tests use a fake Copilot. This check makes 3 live Copilot calls on the real GitHub with two accounts in one workspace (as in the workspace check below). It needs Docker and the computer image rebuilt with this code (`bun run computer:build`).
+
+1. In a repo your GitHub App is installed on, commit a `chiefbot.project.yaml` at the root with `commands: { test: bun test }`. In a second repo, commit one with a typo: `conectors: [github]`.
+2. Run control and the desktop apart (`bun run --cwd apps/control dev`, `bun run --cwd apps/desktop dev`) and sign in as the workspace owner. Pick the workspace in the switcher.
+3. Click **+ New project** and type the second repo as `owner/repo`. The form shows `invalid_project_file` with `Unrecognized key: "conectors"`, and no project appears.
+4. Create a project from the first repo. It opens with its build and test commands under its name, an empty chat and **Tasks: 0 open**.
+5. Send: "We need a dark mode toggle in settings. Track it as a task." The reply comes back and the task appears under **Tasks** as #1, asked by you.
+6. Start a second desktop as the member (`bun run --cwd apps/desktop dev -- --user-data-dir=/tmp/chiefbot-second`), open the project and send: "Can we get dark mode in the settings page?" The coordinator answers that task #1 already covers it. The ledger still shows one task in both desktops.
+7. In the second desktop send: "Mark the dark mode task as in progress." Both desktops show #1 **In progress** without a reload.
+8. In the second desktop the project has no **Delete** button: only the owner deletes. In the first desktop click **Delete** and confirm. The project leaves the sidebar and `docker ps -a` no longer lists `chiefbot-project_…`. Clean up: `rm -rf /tmp/chiefbot-second`.
 
 ## Manual check: invite a second GitHub account to a workspace
 
