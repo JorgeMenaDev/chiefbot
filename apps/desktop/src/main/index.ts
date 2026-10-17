@@ -3,10 +3,15 @@ import {
   ApprovalId,
   BotId,
   CreateBotRequest,
+  CreateWorkspaceRequest,
+  InviteId,
+  InviteRequest,
   RoutineId,
   RoutineInput,
   SendMessageRequest,
   SetBotModelRequest,
+  UserId,
+  WorkspaceId,
 } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
 import { configuredGitHubClientId, setupNeeded } from "@chiefbot/setup";
@@ -17,6 +22,7 @@ import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
 import { createChats } from "./chat.ts";
 import { createRoutines } from "./routines.ts";
+import { createWorkspaces } from "./workspaces.ts";
 
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
@@ -64,6 +70,8 @@ const chats = createChats({
 });
 
 const routines = createRoutines({ controlUrl, session: sessionStore.load });
+
+const workspaces = createWorkspaces({ controlUrl, session: sessionStore.load });
 
 const auth = createAuth({
   controlUrl,
@@ -120,6 +128,20 @@ ipcMain.handle("routines:update", (_event, botId: unknown, routineId: unknown, i
 ipcMain.handle("routines:delete", (_event, botId: unknown, routineId: unknown) =>
   routines.remove(BotId.parse(botId), RoutineId.parse(routineId)),
 );
+ipcMain.handle("workspaces:list", () => workspaces.list());
+ipcMain.handle("workspaces:create", (_event, name: unknown) => workspaces.create(CreateWorkspaceRequest.parse({ name }).name));
+ipcMain.handle("workspaces:detail", (_event, id: unknown) => workspaces.detail(WorkspaceId.parse(id)));
+ipcMain.handle("workspaces:invite", (_event, id: unknown, login: unknown) =>
+  workspaces.invite(WorkspaceId.parse(id), InviteRequest.parse({ login }).login),
+);
+ipcMain.handle("workspaces:revoke-invite", (_event, id: unknown, inviteId: unknown) =>
+  workspaces.revokeInvite(WorkspaceId.parse(id), InviteId.parse(inviteId)),
+);
+ipcMain.handle("workspaces:remove-member", (_event, id: unknown, userId: unknown) =>
+  workspaces.removeMember(WorkspaceId.parse(id), UserId.parse(userId)),
+);
+ipcMain.handle("workspaces:invites", () => workspaces.invites());
+ipcMain.handle("workspaces:accept", (_event, inviteId: unknown) => workspaces.accept(InviteId.parse(inviteId)));
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {
   const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));

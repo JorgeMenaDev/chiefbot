@@ -18,3 +18,11 @@ export type ApprovalId = z.infer<typeof ApprovalId>;
 // A prompt a bot runs on a schedule.
 export const RoutineId = z.string().min(1).brand<"RoutineId">();
 export type RoutineId = z.infer<typeof RoutineId>;
+
+// A team: its members share projects, connectors and tasks. Personal bots stay with their owner.
+export const WorkspaceId = z.string().min(1).brand<"WorkspaceId">();
+export type WorkspaceId = z.infer<typeof WorkspaceId>;
+
+// A pending invitation of one GitHub login to one workspace.
+export const InviteId = z.string().min(1).brand<"InviteId">();
+export type InviteId = z.infer<typeof InviteId>;

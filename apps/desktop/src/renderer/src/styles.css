@@ -606,3 +606,61 @@ body {
 .routines .link-button {
   justify-self: start;
 }
+
+/* Workspace switcher at the top of the sidebar, and its menu. */
+.switcher {
+  position: relative;
+}
+.switcher-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  background: #1a1a1d;
+  border: 1px solid #2c2c31;
+  border-radius: 6px;
+  color: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+.switcher-menu {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: #151517;
+  border: 1px solid #2c2c31;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+}
+.switcher-menu .new-bot-form {
+  margin-top: 4px;
+}
+.switcher-menu .error {
+  margin: 4px;
+  font-size: 12px;
+}
+.badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #1f6feb;
+  color: #fff;
+  font-size: 11px;
+}
+.invite-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.invite-row button {
+  padding: 4px 10px;
+}

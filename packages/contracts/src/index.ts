@@ -9,3 +9,4 @@ export * from "./errors.ts";
 export * from "./models.ts";
 export * from "./repos.ts";
 export * from "./routines.ts";
+export * from "./workspaces.ts";

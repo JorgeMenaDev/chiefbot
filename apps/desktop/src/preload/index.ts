@@ -46,6 +46,17 @@ const api = {
       ipcRenderer.invoke("routines:update", botId, routineId, input),
     remove: (botId: string, routineId: string): Promise<void> => ipcRenderer.invoke("routines:delete", botId, routineId),
   },
+  workspaces: {
+    list: (): Promise<unknown> => ipcRenderer.invoke("workspaces:list"),
+    create: (name: string): Promise<unknown> => ipcRenderer.invoke("workspaces:create", name),
+    detail: (id: string): Promise<unknown> => ipcRenderer.invoke("workspaces:detail", id),
+    invite: (id: string, login: string): Promise<unknown> => ipcRenderer.invoke("workspaces:invite", id, login),
+    revokeInvite: (id: string, inviteId: string): Promise<void> => ipcRenderer.invoke("workspaces:revoke-invite", id, inviteId),
+    // The owner removes a member; with the user's own id, they leave.
+    removeMember: (id: string, userId: string): Promise<void> => ipcRenderer.invoke("workspaces:remove-member", id, userId),
+    invites: (): Promise<unknown> => ipcRenderer.invoke("workspaces:invites"),
+    accept: (inviteId: string): Promise<unknown> => ipcRenderer.invoke("workspaces:accept", inviteId),
+  },
 };
 
 export type ChiefbotApi = typeof api;

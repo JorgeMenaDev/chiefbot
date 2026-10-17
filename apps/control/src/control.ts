@@ -12,8 +12,6 @@ import {
   SetBotModelRequest,
   WorkerToControl,
   type Bot,
-  type ApiError,
-  type ApiErrorCode,
   type BotId,
   type ClientEvent,
   type ControlToWorker,
@@ -29,6 +27,7 @@ import { systemClock, type Clock } from "./clock.ts";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
+import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
 import { repoAccess } from "./repos.ts";
@@ -39,6 +38,7 @@ import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
 import { chatTurns } from "./turns.ts";
+import { workspaceRoutes } from "./workspaces.ts";
 
 export type ControlOptions = {
   port: number;
@@ -118,6 +118,7 @@ type SocketData =
 //                             git's smart HTTP, Basic auth with a bot token as the password: control's git
 //                             proxy to GitHub. A push waits for the owner's approval (repos.ts). Errors are
 //                             text/plain for git to print, not ApiErrors.
+//   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //
@@ -261,6 +262,7 @@ export function startControl({
     port,
     hostname,
     routes: {
+      ...workspaceRoutes(store),
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));
@@ -581,17 +583,4 @@ function upgrade(server: Bun.Server<SocketData>, req: Request, data: SocketData)
 
 function randomToken() {
   return crypto.randomUUID() + crypto.randomUUID();
-}
-
-function bearer(req: Request) {
-  return req.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
-}
-
-function unauthorized() {
-  return apiError(401, "unauthorized");
-}
-
-// Every error body control sends: an ApiError.
-function apiError(status: number, error: ApiErrorCode, message?: string) {
-  return Response.json((message === undefined ? { error } : { error, message }) satisfies ApiError, { status });
 }
