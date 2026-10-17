@@ -39,6 +39,7 @@ import { repoAccess } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
+import { connectorHost } from "./connectors/connectors.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
@@ -78,6 +79,8 @@ export type ControlOptions = {
   // Mints the installation tokens an organization pays for Copilot with.
   // Defaults to the repo app's (github.ts copilotRequestsToken); a fake in tests.
   copilotTokens?: CopilotTokenMinter;
+  // Control's URL as users' browsers reach it, for OAuth callbacks. Defaults to the URL control listens on.
+  publicUrl?: string;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -137,6 +140,9 @@ type SocketData =
 //   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
 //   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
 //                             task ledgers and chats (projects.ts)
+//   …      /workspaces/:id/connectors, /workspaces/:id/checklist, /connectors/oauth/callback,
+//          /coordinator/:projectId/mcp  connectors, the access checklist and the MCP proxy
+//                             (connectors/connectors.ts)
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff: handing work to
 //                             projects and watching it (handoffs.ts)
 //
@@ -159,6 +165,7 @@ export function startControl({
   idleStopMinutes = 30,
   context,
   copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
+  publicUrl,
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -203,6 +210,8 @@ export function startControl({
 
   // Who pays for each agent run's Copilot (copilotIdentity.ts).
   const payerOf = copilotIdentity({ store, broker, mint: copilotTokens });
+  // Connectors, the access checklist, and the MCP proxy agents reach them through (connectors/connectors.ts).
+  const connectors = connectorHost({ store, secrets, publicUrl: () => publicUrl ?? server.url.origin });
 
   // Projects, their coordinators and the coordinators' scheduler (projects.ts).
   const projects = projectHost({
@@ -216,6 +225,7 @@ export function startControl({
     publish: (topic, message) => server.publish(topic, message),
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     upgrade: (req, data) => upgrade(server, req, data),
+    connectorsFor: connectors.agentConnectors,
     // The handoffs watcher: tells chiefs when their task needs input or is done.
     onLedgerChange: (projectId) => {
       for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
@@ -312,6 +322,7 @@ export function startControl({
     routes: {
       ...workspaceRoutes(store),
       ...projects.routes,
+      ...connectors.routes,
       ...chiefs.routes,
       "/sessions": {
         POST: async (req) => {

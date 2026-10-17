@@ -2,6 +2,9 @@ import {
   AnswerApprovalRequest,
   ApprovalId,
   BotId,
+  ConnectorInput,
+  ConnectorName,
+  ConnectorTokenRequest,
   CreateBotRequest,
   CreateProjectRequest,
   CreateWorkspaceRequest,
@@ -24,6 +27,7 @@ import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
 import { createChats } from "./chat.ts";
+import { createConnectors } from "./connectors.ts";
 import { createProjects } from "./projects.ts";
 import { createRoutines } from "./routines.ts";
 import { createWorkspaces } from "./workspaces.ts";
@@ -77,6 +81,8 @@ const chats = createChats({
 const routines = createRoutines({ controlUrl, session: sessionStore.load });
 
 const workspaces = createWorkspaces({ controlUrl, session: sessionStore.load });
+
+const connectors = createConnectors({ controlUrl, session: sessionStore.load });
 
 const projects = createProjects({
   controlUrl,
@@ -186,6 +192,39 @@ ipcMain.handle("projects:open-chat", (_event, id: unknown) => {
 ipcMain.handle("projects:send", (_event, id: unknown, text: unknown) =>
   projects.send(ProjectId.parse(id), SendMessageRequest.parse({ text }).text),
 );
+ipcMain.handle("connectors:list", (_event, workspaceId: unknown) => connectors.list(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("connectors:define", (_event, workspaceId: unknown, input: unknown) =>
+  connectors.define(WorkspaceId.parse(workspaceId), ConnectorInput.parse(input)),
+);
+ipcMain.handle("connectors:set-secret", (_event, workspaceId: unknown, name: unknown, token: unknown) =>
+  connectors.setSecret(WorkspaceId.parse(workspaceId), ConnectorName.parse(name), ConnectorTokenRequest.parse({ token }).token),
+);
+ipcMain.handle("connectors:set-token", (_event, workspaceId: unknown, name: unknown, token: unknown) =>
+  connectors.setToken(WorkspaceId.parse(workspaceId), ConnectorName.parse(name), ConnectorTokenRequest.parse({ token }).token),
+);
+// An OAuth sign-in opens in the default browser; control finishes it on its callback.
+ipcMain.handle("connectors:connect", async (_event, workspaceId: unknown, name: unknown) => {
+  const start = await connectors.connect(WorkspaceId.parse(workspaceId), ConnectorName.parse(name));
+  if (start.kind === "oauth") await shell.openExternal(start.authorizeUrl);
+  return start;
+});
+ipcMain.handle("connectors:checklist", (_event, workspaceId: unknown) => connectors.checklist(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("connectors:calls", (_event, projectId: unknown) => connectors.calls(ProjectId.parse(projectId)));
+// Asks first: every member's connection to it goes too. Resolves true once deleted.
+ipcMain.handle("connectors:delete", async (_event, workspaceId: unknown, name: unknown) => {
+  if (!window) return false;
+  const { response } = await dialog.showMessageBox(window, {
+    type: "warning",
+    message: `Delete the connector ${ConnectorName.parse(name)}?`,
+    detail: "Its workspace secret and every member's connection to it are deleted. Projects that declare it lose it.",
+    buttons: ["Delete", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+  await connectors.remove(WorkspaceId.parse(workspaceId), ConnectorName.parse(name));
+  return true;
+});
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {
   const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ChatItem, TurnEventMessage, TurnHello } from "./chat.ts";
+import { AgentConnector } from "./connectors.ts";
 import { ProjectId, TurnId, UserId, WorkspaceId } from "./ids.ts";
 import { RepoFullName } from "./repos.ts";
 import { CopilotPayer } from "./workspaces.ts";
@@ -123,10 +124,21 @@ export type ProjectMember = z.infer<typeof ProjectMember>;
 //   run-turn  run one turn in `member`'s chat, on `payer`'s Copilot: the member's
 //             seat (GET …/github-token/:userId) or the organization's
 //             (GET …/installation-token). Control's scheduler sends one at a time
-//             per project, across all members' chats.
+//             per project, across all members' chats. `connectors` are the MCP
+//             servers the member's session gets: those the project file declares
+//             that are defined in the workspace and ready for this member. They
+//             act as the member (or the workspace, for a shared connector)
+//             whoever pays for Copilot.
 export const ControlToCoordinator = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), project: Project }),
-  z.object({ type: z.literal("run-turn"), turnId: TurnId, member: ProjectMember, text: z.string(), payer: CopilotPayer }),
+  z.object({
+    type: z.literal("run-turn"),
+    turnId: TurnId,
+    member: ProjectMember,
+    text: z.string(),
+    payer: CopilotPayer,
+    connectors: z.array(AgentConnector).default([]),
+  }),
 ]);
 export type ControlToCoordinator = z.infer<typeof ControlToCoordinator>;
 

@@ -23,6 +23,7 @@ import {
 import type { GitHubIdentity } from "./github.ts";
 import { handoffStore } from "./handoffStore.ts";
 import { nextDueAt } from "./schedule.ts";
+import { connectorStore } from "./connectors/connectorStore.ts";
 import { projectStore } from "./projectStore.ts";
 import { workspaceStore } from "./workspaceStore.ts";
 
@@ -199,6 +200,7 @@ export function openStore(path: string) {
 
   const workspaces = workspaceStore(db);
   const projects = projectStore(db, hash);
+  const connectors = connectorStore(db);
   // A note from control in a bot's chat, in a turn of its own that is done already.
   const postNotice = (botId: BotId, notice: HandoffUpdate) => {
     const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
@@ -212,6 +214,8 @@ export function openStore(path: string) {
     workspaces,
     // Projects, task ledgers and coordinator chats (projectStore.ts).
     projects,
+    // Connectors, members' connections and the call log (connectors/connectorStore.ts).
+    connectors,
     // What chiefs of staff handed to projects (handoffStore.ts).
     handoffs,
 

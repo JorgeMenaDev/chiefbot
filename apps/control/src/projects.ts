@@ -3,6 +3,7 @@ import {
   CoordinatorToolCall,
   CreateProjectRequest,
   SendMessageRequest,
+  type AgentConnector,
   type ChatEvent,
   type ClientEvent,
   type ContextFile,
@@ -49,6 +50,8 @@ export type ProjectHostOptions = {
   publishToUser: (userId: UserId, event: ClientEvent) => void;
   // Upgrades the request to a project WebSocket; undefined once upgraded.
   upgrade: (req: Request, data: ProjectSocketData) => Response | undefined;
+  // The connectors a member's coordinator session gets for a turn (connectors/connectors.ts).
+  connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
   // The project's task ledger changed.
   onLedgerChange: (projectId: ProjectId) => void;
 };
@@ -91,6 +94,7 @@ export function projectHost({
   publish,
   publishToUser,
   upgrade,
+  connectorsFor,
   onLedgerChange,
 }: ProjectHostOptions) {
   const { projects } = store;
@@ -110,15 +114,20 @@ export function projectHost({
     coordinators.get(projectId)?.send(JSON.stringify(message));
 
   // The project's scheduler: once its coordinator is ready, hands it the oldest
-  // queued turn, unless a turn is running (the store's claim refuses then).
-  // The turn's chat says who pays for it.
+  // queued turn, unless a turn is running (the store's claim refuses then), with
+  // who pays for its Copilot and the connectors ready for that turn's member.
+  // The turn's chat says who pays. Connectors act as the member (or the
+  // workspace, for a shared one) whoever pays: org billing changes only
+  // Copilot's identity. If they cannot be read, the turn runs without connectors.
   const schedule = (projectId: ProjectId) => {
     if (!greeted.has(projectId)) return;
     const next = projects.claimNextTurn(projectId);
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
     if (!next || !run) return;
     publishChat(projectId, projects.addPayer(next.turnId, run.payer));
-    toCoordinator(projectId, { type: "run-turn", ...next, payer: run.payer });
+    void connectorsFor(projectId, next.member.userId)
+      .catch(() => [])
+      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, payer: run.payer, connectors }));
   };
 
   // The running turn's token for the coordinator, if its payer is of `kind` (and,

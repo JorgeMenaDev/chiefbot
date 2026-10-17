@@ -1,9 +1,10 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
-import { Project, User, Workspace, WorkspaceInvite, type ChatEvent, type CopilotMode } from "@chiefbot/contracts";
+import { ConnectorCall, Project, User, Workspace, WorkspaceInvite, type ChatEvent, type CopilotMode } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk } from "@chiefbot/worker/fake-copilot";
+import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
-import { cleanUp, doneCount, startTestControl, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, doneCount, startTestControl, type TestUser } from "./testControl.ts";
 
 afterEach(() => {
   cleanUp();
@@ -26,8 +27,9 @@ function fakeMinter({ refusal }: { refusal?: string } = {}) {
 }
 
 // A workspace in `mode` owned by the signed-in user, with octo-friend as a
-// member and a project for octo-org/shop whose coordinator is online.
-async function team(mode: CopilotMode, minter = fakeMinter()) {
+// member and a project for octo-org/shop whose coordinator is online. The
+// workspace's connectors are defined by `before`, ahead of the project.
+async function team(mode: CopilotMode, minter = fakeMinter(), { projectFile = "", before = async (_owner: TestUser, _workspace: Workspace) => {} } = {}) {
   const control = await startTestControl({ copilotTokens: minter.mint });
   const owner = control.user;
   const workspace = Workspace.parse(await (await owner.api("POST", "/workspaces", { name: "Platform team" })).json());
@@ -36,7 +38,8 @@ async function team(mode: CopilotMode, minter = fakeMinter()) {
   const guest = await control.signIn(friend);
   const [invite] = WorkspaceInvite.array().parse(await (await guest.api("GET", "/invites")).json());
   await guest.api("POST", `/invites/${invite?.id}/accept`);
-  control.github.createRepo("octo-org/shop", { "chiefbot.project.yaml": "" });
+  await before(owner, workspace);
+  control.github.createRepo("octo-org/shop", { "chiefbot.project.yaml": projectFile });
   const project = Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo: "octo-org/shop" })).json());
   const coordinatorAuth = { authorization: `Bearer ${control.computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN}` };
   return { ...control, owner, guest, workspace, project, minter, coordinatorAuth };
@@ -135,4 +138,38 @@ test("when GitHub will not mint the organization's token, the turn fails with wh
     { type: "error", message: "Chiefbot's repo app needs the Copilot Requests permission" },
   ]);
   expect(copilot.sends).toEqual([]);
+});
+
+test("with org billing, a member's personal connector still acts as that member, also after the token renews", async () => {
+  const upstream = startFakeMcpServer();
+  atCleanUp(upstream.stop);
+  const { guest, project, copilot } = await team("org", fakeMinter(), {
+    projectFile: "connectors: [tracker]\n",
+    before: async (owner, workspace) => {
+      const tracker = { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" };
+      await owner.api("POST", `/workspaces/${workspace.id}/connectors`, tracker);
+    },
+  });
+  await guest.api("PUT", `/workspaces/${project.workspaceId}/connectors/tracker/token`, { token: "tracker-guest" });
+  copilot.script = async function* (_prompt, runtime) {
+    await runtime.callMcp("tracker", "list_issues");
+    yield sdk.idle();
+  };
+
+  await ask(guest, project, "status?");
+  setSystemTime(Date.now() + 50 * minute);
+  await ask(guest, project, "status again?", 2);
+
+  // Copilot ran on the organization's tokens, renewed once; the tracker on the member's own.
+  expect(copilot.tokens).toEqual(["ghs_org_1", "ghs_org_2"]);
+  expect(copilot.mcpServers.map((servers) => Object.keys(servers ?? {}))).toEqual([["tracker"], ["tracker"]]);
+  expect(upstream.calls).toEqual([
+    { tool: "list_issues", authorization: "Bearer tracker-guest" },
+    { tool: "list_issues", authorization: "Bearer tracker-guest" },
+  ]);
+  const log = ConnectorCall.array().parse(await (await guest.api("GET", `/projects/${project.id}/connector-calls`)).json());
+  expect(log.map(({ requester, identity }) => [requester, identity])).toEqual([
+    ["octo-friend", "personal"],
+    ["octo-friend", "personal"],
+  ]);
 });

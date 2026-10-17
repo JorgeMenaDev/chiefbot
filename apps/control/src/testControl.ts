@@ -9,6 +9,7 @@ import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
 import { startControl } from "./control.ts";
+import type { SecretStore } from "./secrets/secretStore.ts";
 
 // Shared fixtures for control's tests: control with a fake GitHub and fake bot
 // computers (their workers run a fake Copilot), a signed-in user acting through
@@ -42,6 +43,8 @@ export type TestControlOptions = {
   idleStopMinutes?: number;
   // Mints organizations' Copilot tokens. Default: the repo app's, against the fake GitHub.
   copilotTokens?: CopilotTokenMinter;
+  // Where control keeps secrets. Default: control's own encrypted store.
+  secrets?: SecretStore;
   // How long the signed-in user's GitHub tokens have left.
   accessTokenLeftMs?: number;
   refreshTokenLeftMs?: number;
@@ -58,6 +61,7 @@ export async function startTestControl({
   clock,
   idleStopMinutes,
   copilotTokens,
+  secrets,
   accessTokenLeftMs = 8 * hour,
   refreshTokenLeftMs = 180 * 24 * hour,
 }: TestControlOptions = {}) {
@@ -73,6 +77,7 @@ export async function startTestControl({
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),
     ...(copilotTokens === undefined ? {} : { copilotTokens }),
+    ...(secrets === undefined ? {} : { secrets }),
   };
   let control = startControl(options);
   const url = control.url;

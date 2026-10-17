@@ -22,7 +22,8 @@ import { z } from "zod";
 //   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
 //   repo_read_only        the bot owner may not push to the repo (403)
 //   app_not_installed     the deployer's repo app is not installed on the repo (403)
-//   no_turn               a push or pull request outside a turn: nobody can approve it (409)
+//   no_turn               a push or pull request outside a turn: nobody can approve it, or a
+//                         connector call outside a turn of the member it runs for (409)
 //   declined              the user declined the push or pull request (403)
 //   github_failed         GitHub refused what control forwarded; `message` says why (502)
 //   owner_only            only the workspace's owner may do that (403)
@@ -36,6 +37,11 @@ import { z } from "zod";
 //                         says why (400), or no coordinator turn is running (409)
 //   copilot_token_failed  GitHub would not mint the organization's Copilot token, e.g. the repo app
 //                         lacks Copilot Requests or is not installed on the repo's owner; `message` says why (502)
+//   invalid_connector     a connector definition, token or connect request failed its schema or its
+//                         connector's auth type; `message` says why (400)
+//   connector_exists      the workspace already has a connector of that name (409)
+//   connector_not_ready   a connector call has no credential: the workspace secret is unset, or the
+//                         member has not connected (403)
 //   expected_websocket    a WebSocket route got a plain request (400)
 export const ApiErrorCode = z.enum([
   "unauthorized",
@@ -75,6 +81,9 @@ export const ApiErrorCode = z.enum([
   "project_exists",
   "invalid_tool_call",
   "copilot_token_failed",
+  "invalid_connector",
+  "connector_exists",
+  "connector_not_ready",
   "expected_websocket",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;

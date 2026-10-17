@@ -24,7 +24,8 @@ export function useWorkspaces() {
 
 // Runs one change against control, then `after` (by default the hook's).
 // Resolves with the change's value, or null after showing control's refusal.
-function useAction(reload: () => Promise<void>) {
+// Connectors.tsx uses it too.
+export function useAction(reload: () => Promise<void>) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const run = async <T,>(change: () => Promise<T>, after = reload): Promise<{ value: T } | null> => {
