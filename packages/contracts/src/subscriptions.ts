@@ -42,6 +42,10 @@ export const SubscriptionInput = z.discriminatedUnion("kind", [
 ]);
 export type SubscriptionInput = z.infer<typeof SubscriptionInput>;
 
+// The kinds of subscription, as the desktop's form picks one.
+export const SubscriptionKind = z.enum(SubscriptionInput.options.map(({ shape }) => shape.kind.value));
+export type SubscriptionKind = z.infer<typeof SubscriptionKind>;
+
 // A project's subscription. `addedBy` is the login of the member who added it:
 // events go to their chat with the coordinator, and a personal connector is
 // polled as them. `identity` is whose credential the last poll used (null before

@@ -4,8 +4,8 @@ import { TurnEventMessage, TurnHello } from "./chat.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, TurnId } from "./ids.ts";
 import { ModelReport } from "./models.ts";
-import { Task } from "./projects.ts";
-import { TaskWorker } from "./taskWorkers.ts";
+import { ProjectTasks } from "./projects.ts";
+import { ProjectWorkers } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
@@ -42,8 +42,8 @@ export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bots"), bots: z.array(Bot) }),
   z.object({ type: z.literal("user"), user: User }),
-  z.object({ type: z.literal("tasks"), projectId: ProjectId, tasks: z.array(Task) }),
-  z.object({ type: z.literal("workers"), projectId: ProjectId, workers: z.array(TaskWorker) }),
+  ProjectTasks.extend({ type: z.literal("tasks") }),
+  ProjectWorkers.extend({ type: z.literal("workers") }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 

@@ -1,9 +1,8 @@
-import { DEFAULT_POLL_SECONDS, MIN_POLL_SECONDS, Subscription, type Project, type SubscriptionInput } from "@chiefbot/contracts";
+import { DEFAULT_POLL_SECONDS, MIN_POLL_SECONDS, Subscription, SubscriptionKind, type Project, type SubscriptionInput } from "@chiefbot/contracts";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 
 const SubscriptionList = z.array(Subscription);
-type Kind = SubscriptionInput["kind"];
 
 // What a project listens to: CI runs on a branch and issue queries, which control
 // polls through the project's connectors, and schedules. Each event becomes one
@@ -87,7 +86,7 @@ function status({ source, addedBy, identity, lastPolledAt, lastError, nextDueAt,
 // connector the project does not declare or a schedule it cannot run.
 function SubscriptionForm({ project, onSave, onCancel }: { project: Project; onSave: (input: SubscriptionInput) => Promise<void>; onCancel: () => void }) {
   const declared = project.file.connectors;
-  const [kind, setKind] = useState<Kind>("ci-status");
+  const [kind, setKind] = useState<SubscriptionKind>("ci-status");
   const [fields, setFields] = useState({
     connector: declared.includes("github-actions") ? "github-actions" : (declared[0] ?? ""),
     branch: "main",
@@ -124,7 +123,7 @@ function SubscriptionForm({ project, onSave, onCancel }: { project: Project; onS
   return (
     <form className="routine-form" onSubmit={(event) => void submit(event)}>
       <div className="routine-schedule">
-        <select value={kind} disabled={busy} onChange={(event) => setKind(z.enum(["ci-status", "issue-query", "schedule"]).parse(event.target.value))}>
+        <select value={kind} disabled={busy} onChange={(event) => setKind(SubscriptionKind.parse(event.target.value))}>
           <option value="ci-status">CI failures on a branch</option>
           <option value="issue-query">An issue query</option>
           <option value="schedule">A schedule</option>

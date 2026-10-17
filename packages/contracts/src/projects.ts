@@ -8,13 +8,10 @@ import { CopilotPayer } from "./workspaces.ts";
 // The repo's chiefbot.project.yaml, at its root on the default branch. Control
 // reads it when the project is created. Unknown keys are errors, so a typo is
 // caught instead of ignored.
-//   connectors    the connectors (MCP servers) the project's agents need, by name
-//   environments  where the project's workers run; `image` is a computer image
-//                 (default: the standard bot computer)
-//   commands      how to build and test the repo
+//   connectors  the connectors (MCP servers) the project's agents need, by name
+//   commands    how to build and test the repo, which the coordinator and its workers are told
 export const ProjectFile = z.strictObject({
   connectors: z.array(z.string().trim().min(1)).default([]),
-  environments: z.array(z.strictObject({ name: z.string().trim().min(1), image: z.string().trim().min(1).optional() })).default([]),
   commands: z.strictObject({ build: z.string().trim().min(1).optional(), test: z.string().trim().min(1).optional() }).default({}),
 });
 export type ProjectFile = z.infer<typeof ProjectFile>;
@@ -77,6 +74,11 @@ export const Task = z.object({
   updatedAt: z.number(),
 });
 export type Task = z.infer<typeof Task>;
+
+// A project's whole task ledger: what /events sends on every change (a `tasks`
+// ClientEvent), and what Electron main hands the renderer.
+export const ProjectTasks = z.object({ projectId: ProjectId, tasks: z.array(Task) });
+export type ProjectTasks = z.infer<typeof ProjectTasks>;
 
 // The coordinator's tools, by name. Each argument schema is also what the model sees.
 export const CreateTaskArgs = z.object({

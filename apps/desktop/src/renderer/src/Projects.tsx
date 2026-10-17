@@ -2,11 +2,13 @@ import {
   CreateProjectRequest,
   Project,
   ProjectChatView,
-  ProjectId,
+  ProjectTasks,
+  ProjectWorkers,
   Task,
   TaskWorker,
   type ChatItem,
   type CopilotPayer,
+  type ProjectId,
   type TaskStatus,
   type TaskWorkerState,
   type Workspace,
@@ -19,9 +21,7 @@ import { ListeningTo } from "./Subscriptions.tsx";
 
 const ProjectList = z.array(Project);
 const TaskList = z.array(Task);
-const Ledger = z.object({ projectId: ProjectId, tasks: TaskList });
 const WorkerList = z.array(TaskWorker);
-const Workers = z.object({ projectId: ProjectId, workers: WorkerList });
 
 // The current workspace's projects. Control sends no project events, so `reload`
 // runs when the workspace changes and after a project is made.
@@ -248,11 +248,11 @@ function TaskLedger({ project, login }: { project: Project; login: string }) {
   const [workers, setWorkers] = useState<TaskWorker[]>([]);
   useEffect(() => {
     const unsubscribeTasks = window.chiefbot.projects.onTasks((next) => {
-      const ledger = Ledger.parse(next);
+      const ledger = ProjectTasks.parse(next);
       if (ledger.projectId === project.id) setTasks(ledger.tasks);
     });
     const unsubscribeWorkers = window.chiefbot.projects.onWorkers((next) => {
-      const list = Workers.parse(next);
+      const list = ProjectWorkers.parse(next);
       if (list.projectId === project.id) setWorkers(list.workers);
     });
     void window.chiefbot.projects.tasks(project.id).then((next) => setTasks(TaskList.parse(next)));

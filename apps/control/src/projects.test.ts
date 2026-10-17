@@ -11,8 +11,6 @@ const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan
 
 const projectFile = `# How agents build and test this repo
 connectors: [github, jira]
-environments:
-  - name: web
 commands:
   build: bun run build
   test: bun test
@@ -44,7 +42,7 @@ test("a member creates a project from a repo: control reads its project file, an
     workspaceId: workspace.id,
     name: "shop",
     repo: "octo-org/shop",
-    file: { connectors: ["github", "jira"], environments: [{ name: "web" }], commands: { build: "bun run build", test: "bun test" } },
+    file: { connectors: ["github", "jira"], commands: { build: "bun run build", test: "bun test" } },
   });
   expect(await computers.provider.status(project.id)).toBe("running");
   // Every member sees it; anyone else gets 404.

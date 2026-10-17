@@ -36,6 +36,11 @@ export const TaskWorker = z.object({
 });
 export type TaskWorker = z.infer<typeof TaskWorker>;
 
+// Every worker of a project: what /events sends on every change (a `workers`
+// ClientEvent), and what Electron main hands the renderer.
+export const ProjectWorkers = z.object({ projectId: ProjectId, workers: z.array(TaskWorker) });
+export type ProjectWorkers = z.infer<typeof ProjectWorkers>;
+
 // The answer of the coordinator's worker_transcript tool: what the worker did, one line per
 // message, tool call, approval or error, oldest first. `truncated` when older lines were left out.
 export const WorkerTranscript = z.object({ worker: TaskWorkerId, lines: z.array(z.string()), truncated: z.boolean() });

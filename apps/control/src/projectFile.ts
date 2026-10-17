@@ -17,7 +17,7 @@ export async function readProjectFile(githubApiUrl: string, token: string | null
   return parseProjectFile(await res.text());
 }
 
-// An empty file is a project with no connectors, environments or commands.
+// An empty file is a project with no connectors or commands.
 export function parseProjectFile(text: string): ProjectFile | { error: string } {
   let yaml: unknown;
   try {
