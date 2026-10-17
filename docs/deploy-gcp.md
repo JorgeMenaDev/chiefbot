@@ -39,7 +39,7 @@ Research figure for comparison (us-central1): e2-standard-2 ≈ $0.074 per activ
 
 ## Steps
 
-You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (`brew install hashicorp/tap/terraform`), Colima with Docker buildx, and the billing account ID.
+You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (`brew install hashicorp/tap/terraform`), Docker with buildx, and the billing account ID.
 
 1. **Create the project and link billing.** Pick a project ID, for example `chiefbot-poc-2611`.
 
@@ -52,10 +52,11 @@ You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (
    gcloud config set project chiefbot-poc-2611
    ```
 
-2. **Fill in the Terraform variables.** Create `infra/gcp/terraform.tfvars` (git-ignored). Set `budget_currency` to the billing account's currency (shown in the Console under Billing): a budget in the wrong currency fails.
+2. **Fill in the Terraform variables.** Create `infra/gcp/terraform.tfvars` (git-ignored). Set `budget_currency` to the billing account's currency (shown in the Console under Billing): a budget in the wrong currency fails. `github_client_id` is your GitHub App's client ID: run `bun run setup` first (README quickstart) and copy `githubApp.clientId` from `~/.chiefbot/config.json`.
 
    ```hcl
    project_id         = "chiefbot-poc-2611"
+   github_client_id   = "<YOUR_GITHUB_APP_CLIENT_ID>"
    billing_account_id = "<BILLING_ACCOUNT_ID>"
    budget_currency    = "GBP"
    monthly_budget     = 80

@@ -19,7 +19,7 @@ async function setup() {
   const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-desktop-")), "control.sqlite");
   const github = startFakeGitHub();
   const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath, githubApiUrl: github.url, computers: computers.provider });
+  const control = startControl({ port: 0, dbPath, githubApiUrl: github.url, githubClientId: "test-client", computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {
@@ -40,7 +40,7 @@ async function setup() {
   });
   const restartControl = () => {
     control.stop();
-    const restarted = startControl({ port: Number(new URL(control.url).port), dbPath, githubApiUrl: github.url, computers: computers.provider });
+    const restarted = startControl({ port: Number(new URL(control.url).port), dbPath, githubApiUrl: github.url, githubClientId: "test-client", computers: computers.provider });
     stops.push(restarted.stop);
   };
   return { control, computers, sessionToken, botId: bot.id, restartControl };

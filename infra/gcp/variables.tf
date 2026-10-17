@@ -3,6 +3,11 @@ variable "project_id" {
   type        = string
 }
 
+variable "github_client_id" {
+  description = "Client ID of your GitHub App: `bun run setup` writes it to ~/.chiefbot/config.json (githubApp.clientId). The desktop signs in with the same app."
+  type        = string
+}
+
 variable "billing_account_id" {
   description = "Billing account for the budget alert, e.g. 012345-6789AB-CDEF01."
   type        = string

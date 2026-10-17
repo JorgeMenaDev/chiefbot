@@ -1,4 +1,4 @@
-import { defaultGitHubClientId } from "@chiefbot/contracts";
+import { chiefbotHome, configuredGitHubClientId, setupNeeded } from "@chiefbot/setup";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -16,7 +16,9 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 //   CHIEFBOT_DB_PATH             default .data/control.sqlite (relative to apps/control)
 //   CHIEFBOT_GITHUB_API_URL      default https://api.github.com
 //   CHIEFBOT_GITHUB_URL          default https://github.com (the refresh grant)
-//   CHIEFBOT_GITHUB_CLIENT_ID    default Chartpilot's public OAuth App; must match the desktop's
+//   CHIEFBOT_GITHUB_CLIENT_ID    default: the GitHub App `bun run setup` registered (~/.chiefbot/config.json);
+//                                must match the desktop's
+//   CHIEFBOT_HOME                default ~/.chiefbot: setup's config and secrets, and the secret key
 //   CHIEFBOT_SECRET_KEY_FILE     default ~/.chiefbot/secret.key: the key that encrypts refresh
 //                                tokens in the SQLite file. Made on first run. Not used with gce,
 //                                which keeps refresh tokens in Secret Manager in CHIEFBOT_GCP_PROJECT.
@@ -26,6 +28,11 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 const port = Number(process.env.CHIEFBOT_CONTROL_PORT ?? 7410);
 const idleStopMinutes = Number(process.env.CHIEFBOT_IDLE_STOP_MINUTES ?? 30);
 if (!(idleStopMinutes > 0)) throw new Error("CHIEFBOT_IDLE_STOP_MINUTES must be a positive number of minutes");
+const githubClientId = configuredGitHubClientId(process.env, homedir());
+if (githubClientId === null) {
+  console.error(setupNeeded);
+  process.exit(1);
+}
 const dbPath = process.env.CHIEFBOT_DB_PATH ?? ".data/control.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
 
@@ -36,13 +43,13 @@ const control = startControl({
   dbPath,
   githubApiUrl: process.env.CHIEFBOT_GITHUB_API_URL ?? "https://api.github.com",
   githubUrl: process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com",
-  githubClientId: process.env.CHIEFBOT_GITHUB_CLIENT_ID ?? defaultGitHubClientId,
+  githubClientId,
   secrets:
     config.provider === "gce"
       ? secretManagerStore(googleSecretManager(config))
       : localSecretStore({
           dbPath,
-          key: secretKeyFile(process.env.CHIEFBOT_SECRET_KEY_FILE ?? join(homedir(), ".chiefbot", "secret.key")),
+          key: secretKeyFile(process.env.CHIEFBOT_SECRET_KEY_FILE ?? join(chiefbotHome(process.env, homedir()), "secret.key")),
         }),
   computers:
     config.provider === "gce"

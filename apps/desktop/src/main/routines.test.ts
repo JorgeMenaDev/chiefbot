@@ -13,7 +13,7 @@ afterEach(() => {
 test("a bot's routines are created, edited and deleted through control, and a bad schedule fails with control's reason", async () => {
   const github = startFakeGitHub();
   const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {

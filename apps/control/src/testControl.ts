@@ -63,6 +63,7 @@ export async function startTestControl({
     port: 0,
     dbPath: persistent ? join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite") : ":memory:",
     githubApiUrl: github.url,
+    githubClientId: "test-client",
     computers: provider ? provider(computers.provider) : computers.provider,
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),

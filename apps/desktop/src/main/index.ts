@@ -3,14 +3,15 @@ import {
   ApprovalId,
   BotId,
   CreateBotRequest,
-  defaultGitHubClientId,
   RoutineId,
   RoutineInput,
   SendMessageRequest,
   SetBotModelRequest,
 } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { configuredGitHubClientId, setupNeeded } from "@chiefbot/setup";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
@@ -20,10 +21,16 @@ import { createRoutines } from "./routines.ts";
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
 //   CHIEFBOT_GITHUB_URL       default https://github.com
-//   CHIEFBOT_GITHUB_CLIENT_ID default Chartpilot's public OAuth App (device flow, no secret)
+//   CHIEFBOT_GITHUB_CLIENT_ID default: the GitHub App `bun run setup` registered (~/.chiefbot/config.json)
+//   CHIEFBOT_HOME             default ~/.chiefbot
 const controlUrl = process.env.CHIEFBOT_CONTROL_URL ?? "http://127.0.0.1:7410";
 const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
-const clientId = process.env.CHIEFBOT_GITHUB_CLIENT_ID ?? defaultGitHubClientId;
+const clientId = configuredGitHubClientId(process.env, homedir());
+if (clientId === null) {
+  console.error(setupNeeded);
+  dialog.showErrorBox("Chiefbot is not set up", setupNeeded);
+  process.exit(1);
+}
 
 // The control session token, kept in the app's user-data folder.
 function fileSessionStore(path: string): SessionStore {

@@ -4,7 +4,6 @@ import {
   ApprovalId,
   BotToken,
   CreateBotRequest,
-  defaultGitHubClientId,
   GitHubTokens,
   RoutineInput,
   SendMessageRequest,
@@ -46,8 +45,9 @@ export type ControlOptions = {
   githubApiUrl: string;
   // github.com, for the refresh grant. Defaults to githubApiUrl: the fake serves both.
   githubUrl?: string;
-  // The OAuth App the desktop signs in with. Refreshes must use the same one.
-  githubClientId?: string;
+  // Client ID of the deployer's GitHub App (`bun run setup`). The desktop signs
+  // in with it; refreshes must use the same one.
+  githubClientId: string;
   // Where users' refresh tokens live. Defaults to an encrypted store in dbPath
   // whose key lasts only this process: fine for tests; index.ts passes a lasting one.
   secrets?: SecretStore;
@@ -115,7 +115,7 @@ export function startControl({
   dbPath,
   githubApiUrl,
   githubUrl = githubApiUrl,
-  githubClientId = defaultGitHubClientId,
+  githubClientId,
   secrets = localSecretStore({ dbPath, key: crypto.getRandomValues(new Uint8Array(32)) }),
   computers,
   workerControlUrl,

@@ -1,16 +1,20 @@
 import { z } from "zod";
 import type { GitHubTokens } from "@chiefbot/contracts";
 
-// GitHub's OAuth device flow (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow).
-// Runs in Electron main. The OAuth App has no client secret and issues expiring
-// tokens, so the token response carries a refresh token.
+// GitHub's device flow for the deployer's GitHub App (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token).
+// Runs in Electron main. It needs no client secret, and the app issues expiring
+// tokens, so the token response carries a refresh token. The token gets the app's
+// permissions on the repositories it is installed on: no scopes.
 
-const DeviceCodeResponse = z.object({
-  device_code: z.string(),
-  user_code: z.string(),
-  verification_uri: z.string(),
-  interval: z.number(),
-});
+const DeviceCodeResponse = z.union([
+  z.object({
+    device_code: z.string(),
+    user_code: z.string(),
+    verification_uri: z.string(),
+    interval: z.number(),
+  }),
+  z.object({ error: z.string() }),
+]);
 
 const TokenResponse = z.union([
   z.object({
@@ -40,10 +44,15 @@ export async function runDeviceFlow({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = Date.now,
 }: DeviceFlowOptions): Promise<GitHubTokens> {
-  // repo: bots clone private repos, push and open pull requests with this token.
-  const device = DeviceCodeResponse.parse(
-    await postForm(`${githubUrl}/login/device/code`, { client_id: clientId, scope: "read:user repo" }),
-  );
+  const device = DeviceCodeResponse.parse(await postForm(`${githubUrl}/login/device/code`, { client_id: clientId }));
+  if ("error" in device) {
+    if (device.error === "device_flow_disabled") {
+      throw new Error(
+        "Your GitHub App has Device Flow off. Open its settings on github.com (`bun run setup` printed the link), tick Enable Device Flow and save.",
+      );
+    }
+    throw new Error(`GitHub sign-in failed: ${device.error}`);
+  }
   onCode({ userCode: device.user_code, verificationUri: device.verification_uri });
 
   let intervalSeconds = device.interval;
@@ -74,12 +83,16 @@ export async function runDeviceFlow({
   }
 }
 
+// GitHub answers OAuth errors as JSON { error }, some with a 4xx status.
+const OAuthError = z.object({ error: z.string() });
+
 async function postForm(url: string, form: Record<string, string>): Promise<unknown> {
   const res = await fetch(url, {
     method: "POST",
     headers: { accept: "application/json", "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(form),
   });
-  if (!res.ok) throw new Error(`GitHub ${new URL(url).pathname} failed: ${res.status}`);
-  return res.json();
+  const body: unknown = await res.json().catch(() => null);
+  if (!res.ok && !OAuthError.safeParse(body).success) throw new Error(`GitHub ${new URL(url).pathname} failed: ${res.status}`);
+  return body;
 }

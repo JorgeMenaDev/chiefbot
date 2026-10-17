@@ -12,7 +12,7 @@ afterEach(() => {
 
 function setup() {
   const github = startFakeGitHub({ pollErrors: ["authorization_pending"] });
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: fakeComputers().provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", computers: fakeComputers().provider });
   stops.push(github.stop, control.stop);
   let saved: string | null = null;
   const store: SessionStore = {
@@ -47,7 +47,7 @@ test("sign-in shows the code, then the login and Copilot plan; sign-out clears t
       status: "signed-in",
       user: {
         id: expect.any(String),
-        login: "octo-jorge",
+        login: "octo-user",
         copilotPlan: { plan: "individual", sku: "free_limited_copilot" },
         needsGitHubSignIn: false,
       },
@@ -66,7 +66,7 @@ test("the next launch restores the signed-in user from the saved session", async
   const { auth } = launch();
   await auth.restore();
 
-  expect(auth.state()).toMatchObject({ status: "signed-in", user: { login: "octo-jorge" } });
+  expect(auth.state()).toMatchObject({ status: "signed-in", user: { login: "octo-user" } });
 });
 
 test("disconnecting GitHub keeps the session and asks for sign-in; signing in again restores GitHub", async () => {

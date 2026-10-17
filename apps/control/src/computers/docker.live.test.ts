@@ -16,7 +16,7 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
   async () => {
     const github = startFakeGitHub();
     const computers = dockerProvider({ socketPath, image });
-    const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers });
+    const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", computers });
     const port = new URL(control.url).port;
     // Restart control with the URL containers reach it on, now that the port is known.
     control.stop();
@@ -24,6 +24,7 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
       port: Number(port),
       dbPath: ":memory:",
       githubApiUrl: github.url,
+      githubClientId: "test-client",
       computers,
       workerControlUrl: `http://host.docker.internal:${port}`,
     });

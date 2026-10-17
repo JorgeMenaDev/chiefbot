@@ -33,7 +33,7 @@ test("sign-in answers with the GitHub login and Copilot plan, never the refresh 
 
   expect(res.status).toBe(200);
   const body = SignInResponse.parse(JSON.parse(text));
-  expect(body.user.login).toBe("octo-jorge");
+  expect(body.user.login).toBe("octo-user");
   expect(body.user.copilotPlan).toEqual({ plan: "individual", sku: "free_limited_copilot" });
   expect(typeof body.sessionToken).toBe("string");
   expect(text).not.toContain(tokens.refreshToken);
@@ -47,7 +47,7 @@ test("a session reads its user until it signs out", async () => {
 
   const me = await fetch(`${url}/me`, { headers: auth });
   expect(me.status).toBe(200);
-  expect(User.parse(await me.json()).login).toBe("octo-jorge");
+  expect(User.parse(await me.json()).login).toBe("octo-user");
 
   const signOut = await fetch(`${url}/sessions/current`, { method: "DELETE", headers: auth });
   expect(signOut.status).toBe(204);

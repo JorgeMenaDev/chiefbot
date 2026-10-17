@@ -1,6 +1,6 @@
 # Chiefbot on GCP: network, registry, service accounts, the bot VM template and
-# the control-plane VM. Written, NOT applied: `terraform apply` waits for Jorge's
-# approval of the spend (docs/deploy-gcp.md). Bot VMs are not in here: control
+# the control-plane VM. Written, NOT applied: `terraform apply` waits for the
+# deployer's approval of the spend (docs/deploy-gcp.md). Bot VMs are not in here: control
 # creates one per bot from the chiefbot-computer template (GceProvider).
 
 terraform {
@@ -278,6 +278,7 @@ resource "google_compute_instance" "control" {
         CHIEFBOT_GCP_ZONE           = var.zone
         CHIEFBOT_COMPUTER_IMAGE     = local.computer_image
         CHIEFBOT_WORKER_CONTROL_URL = local.worker_control_url
+        CHIEFBOT_GITHUB_CLIENT_ID   = var.github_client_id
       }
     })
   }

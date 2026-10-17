@@ -4,14 +4,19 @@ import { computersConfig } from "./config.ts";
 const home = "/Users/ada";
 
 test("bots run on local Docker unless configured otherwise", () => {
-  expect(computersConfig({}, home)).toEqual({
+  const colima = "/Users/ada/.colima/default/docker.sock";
+  expect(computersConfig({}, home, (path) => path === colima)).toEqual({
     provider: "docker",
-    socketPath: "/Users/ada/.colima/default/docker.sock",
+    socketPath: colima,
     image: "chiefbot-computer:dev",
   });
-  expect(computersConfig({ DOCKER_HOST: "unix:///var/run/docker.sock" }, home)).toMatchObject({
-    socketPath: "/var/run/docker.sock",
+  expect(computersConfig({ DOCKER_HOST: "unix:///run/user/501/docker.sock" }, home, () => true)).toMatchObject({
+    socketPath: "/run/user/501/docker.sock",
   });
+});
+
+test("without Colima, control uses the standard Docker socket (Docker Desktop, OrbStack, Linux)", () => {
+  expect(computersConfig({}, home, () => false)).toMatchObject({ socketPath: "/var/run/docker.sock" });
 });
 
 test("CHIEFBOT_COMPUTERS=gce runs bots on Compute Engine, in London unless a zone is given", () => {

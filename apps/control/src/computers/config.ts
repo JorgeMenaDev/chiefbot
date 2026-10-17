@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 
@@ -5,6 +6,7 @@ import { z } from "zod";
 //   CHIEFBOT_COMPUTERS        docker (default) | gce
 //   CHIEFBOT_COMPUTER_IMAGE   the bot computer image; default chiefbot-computer:dev for docker, required for gce
 //   docker: CHIEFBOT_DOCKER_SOCKET, default DOCKER_HOST's unix socket, else Colima's ~/.colima/default/docker.sock
+//           when it exists, else /var/run/docker.sock (Docker Desktop, OrbStack, Linux)
 //   gce:    CHIEFBOT_GCP_PROJECT (required), CHIEFBOT_GCP_ZONE (default europe-west2-a, London).
 //           VMs come from the instance template chiefbot-computer that infra/gcp creates.
 const Env = z.discriminatedUnion("CHIEFBOT_COMPUTERS", [
@@ -38,11 +40,12 @@ const Env = z.discriminatedUnion("CHIEFBOT_COMPUTERS", [
     })),
 ]);
 
-// Throws with every missing or invalid variable named.
-export function computersConfig(env: Record<string, string | undefined>, homeDir: string) {
+// Throws with every missing or invalid variable named. `exists` checks for Colima's socket.
+export function computersConfig(env: Record<string, string | undefined>, homeDir: string, exists = existsSync) {
   const parsed = Env.safeParse({ ...env, CHIEFBOT_COMPUTERS: env.CHIEFBOT_COMPUTERS ?? "docker" });
   if (!parsed.success) throw new Error(`Invalid computers config:\n${z.prettifyError(parsed.error)}`);
   const config = parsed.data;
   if (config.provider === "gce") return config;
-  return { ...config, socketPath: config.socketPath ?? join(homeDir, ".colima/default/docker.sock") };
+  const colima = join(homeDir, ".colima/default/docker.sock");
+  return { ...config, socketPath: config.socketPath ?? (exists(colima) ? colima : "/var/run/docker.sock") };
 }

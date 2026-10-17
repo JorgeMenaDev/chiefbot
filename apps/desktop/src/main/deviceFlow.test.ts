@@ -48,3 +48,12 @@ test("device flow fails when the user denies access", async () => {
 
   await expect(run).rejects.toThrow("access_denied");
 });
+
+test("device flow names the setting to turn on when the GitHub App has Device Flow off", async () => {
+  const github = startFakeGitHub({ deviceFlowDisabled: true });
+  stops.push(github.stop);
+
+  const run = runDeviceFlow({ githubUrl: github.url, clientId: "test-client", onCode: () => {}, sleep: async () => {} });
+
+  await expect(run).rejects.toThrow(/Enable Device Flow/);
+});
