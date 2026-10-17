@@ -3,9 +3,11 @@ import {
   ApprovalId,
   BotId,
   CreateBotRequest,
+  CreateProjectRequest,
   CreateWorkspaceRequest,
   InviteId,
   InviteRequest,
+  ProjectId,
   RoutineId,
   RoutineInput,
   SendMessageRequest,
@@ -21,6 +23,7 @@ import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
 import { createChats } from "./chat.ts";
+import { createProjects } from "./projects.ts";
 import { createRoutines } from "./routines.ts";
 import { createWorkspaces } from "./workspaces.ts";
 
@@ -61,6 +64,7 @@ const bots = createBots({
   session: sessionStore.load,
   onChange: (list) => window?.webContents.send("bots:state", list),
   onUser: (user) => auth.userChanged(user),
+  onTasks: (projectId, tasks) => window?.webContents.send("projects:tasks", { projectId, tasks }),
 });
 
 const chats = createChats({
@@ -73,6 +77,12 @@ const routines = createRoutines({ controlUrl, session: sessionStore.load });
 
 const workspaces = createWorkspaces({ controlUrl, session: sessionStore.load });
 
+const projects = createProjects({
+  controlUrl,
+  session: sessionStore.load,
+  onChat: (view) => window?.webContents.send("projects:chat", view),
+});
+
 const auth = createAuth({
   controlUrl,
   deviceFlow: { githubUrl, clientId },
@@ -83,6 +93,7 @@ const auth = createAuth({
     else {
       bots.disconnect();
       chats.disconnect();
+      projects.disconnect();
     }
   },
 });
@@ -142,6 +153,20 @@ ipcMain.handle("workspaces:remove-member", (_event, id: unknown, userId: unknown
 );
 ipcMain.handle("workspaces:invites", () => workspaces.invites());
 ipcMain.handle("workspaces:accept", (_event, inviteId: unknown) => workspaces.accept(InviteId.parse(inviteId)));
+ipcMain.handle("projects:list", (_event, workspaceId: unknown) => projects.list(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) =>
+  projects.create(WorkspaceId.parse(workspaceId), CreateProjectRequest.parse({ repo }).repo),
+);
+ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
+// Opening a project's chat answers with what main has so far; the rest follows on projects:chat.
+ipcMain.handle("projects:open-chat", (_event, id: unknown) => {
+  const projectId = ProjectId.parse(id);
+  projects.openChat(projectId);
+  return projects.chatView(projectId);
+});
+ipcMain.handle("projects:send", (_event, id: unknown, text: unknown) =>
+  projects.send(ProjectId.parse(id), SendMessageRequest.parse({ text }).text),
+);
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {
   const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));

@@ -57,6 +57,17 @@ const api = {
     invites: (): Promise<unknown> => ipcRenderer.invoke("workspaces:invites"),
     accept: (inviteId: string): Promise<unknown> => ipcRenderer.invoke("workspaces:accept", inviteId),
   },
+  projects: {
+    list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("projects:list", workspaceId),
+    create: (workspaceId: string, repo: string): Promise<unknown> => ipcRenderer.invoke("projects:create", workspaceId, repo),
+    tasks: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:tasks", id),
+    // The user's own chat with the project's coordinator.
+    openChat: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:open-chat", id),
+    send: (id: string, text: string): Promise<unknown> => ipcRenderer.invoke("projects:send", id, text),
+    onChat: (listener: (view: unknown) => void) => subscribe("projects:chat", listener),
+    // { projectId, tasks } whenever a project's task ledger changes.
+    onTasks: (listener: (ledger: unknown) => void) => subscribe("projects:tasks", listener),
+  },
 };
 
 export type ChiefbotApi = typeof api;
