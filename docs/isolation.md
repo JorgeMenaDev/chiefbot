@@ -54,6 +54,7 @@ Proof: `repo.test.ts` "the GitHub token a bot computer gets can neither push nor
 
 ### What remains
 
+- **An organization's Copilot token sits in the project's computer** when its workspace is org-billed. Control mints it with only `copilot_requests: write`, so it cannot read or write any repo (`github.test.ts`), but a hostile agent that takes it can make Copilot requests billed to the organization until it expires (one hour at most). The coordinator has no shell; a worker's shell will see it in its runtime's environment.
 - **The sign-in token spends the owner's Copilot plan.** A hostile agent that takes it can make Copilot requests on the owner's plan, and read their profile, until it expires (8 hours at most; **Disconnect GitHub** stops new ones, and revoking the sign-in app at github.com/settings/apps/authorizations ends the current one).
 - **Unverified: a GitHub App with no permissions driving Copilot.** GitHub's Copilot SDK docs say GitHub App user tokens (`ghu_`) and OAuth App tokens (`gho_`) both work for user-billed sessions, but not whether the app needs any permission. The README manual check settles it. If the sign-in app's token cannot run Copilot, the OAuth App fallback (`read:user`) is the one known to work.
 - **GitHub tools in the runtime.** The Copilot runtime's built-in GitHub tools act with the sign-in token, so they cannot write to repos either. The worker still asks before one that writes, as a guardrail against mistakes.
