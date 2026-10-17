@@ -32,11 +32,15 @@ test("an owner invites a login; once it signs in it accepts, and the owner can r
 
   const [invite] = await guest.invites();
   if (!invite) throw new Error("no invite");
-  expect(await guest.accept(invite.id)).toEqual({ id: team.id, name: "Platform team", role: "member" });
+  expect(await guest.accept(invite.id)).toEqual({ id: team.id, name: "Platform team", role: "member", copilotMode: "personal" });
   const { members } = await owner.detail(team.id);
   const member = members.find(({ login }) => login === "octo-friend");
   if (!member) throw new Error("not a member");
-  expect(await guest.list()).toEqual([{ id: team.id, name: "Platform team", role: "member" }]);
+  expect(await guest.list()).toEqual([{ id: team.id, name: "Platform team", role: "member", copilotMode: "personal" }]);
+  // The owner moves the projects' agents onto the organization's Copilot; the member sees it.
+  expect(await owner.setCopilotMode(team.id, "org")).toMatchObject({ copilotMode: "org" });
+  await expect(guest.setCopilotMode(team.id, "personal")).rejects.toThrow("owner_only");
+  expect(await guest.list()).toEqual([{ id: team.id, name: "Platform team", role: "member", copilotMode: "org" }]);
 
   await owner.removeMember(team.id, member.userId);
 

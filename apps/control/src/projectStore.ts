@@ -6,6 +6,7 @@ import {
   Task,
   TurnId,
   UserId,
+  type CopilotPayer,
   type CreateTaskArgs,
   type ProjectFile,
   type ProjectMember,
@@ -268,6 +269,11 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         ? { turnId: TurnId.parse(row.id), text: row.text, member: { userId: UserId.parse(row.user_id), login: row.login } }
         : null;
     }),
+
+    // Says in the turn's chat who pays for it. Outside the coordinator's numbering.
+    addPayer(turnId: TurnId, payer: CopilotPayer): MemberEvent {
+      return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer }) };
+    },
 
     // The member whose turn is running on the project's coordinator, if any.
     runningMember(projectId: ProjectId): UserId | null {

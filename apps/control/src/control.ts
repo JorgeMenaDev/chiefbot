@@ -29,7 +29,8 @@ import {
 import { systemClock, type Clock } from "./clock.ts";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
-import { fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
+import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
+import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
@@ -73,6 +74,9 @@ export type ControlOptions = {
   // A running bot's computer stops after this long with no running turn, no
   // pending approval, no screen viewer and no routine run in progress. Default 30.
   idleStopMinutes?: number;
+  // Mints the installation tokens an organization pays for Copilot with.
+  // Defaults to the repo app's (github.ts copilotRequestsToken); a fake in tests.
+  copilotTokens?: CopilotTokenMinter;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -151,6 +155,7 @@ export function startControl({
   clock = systemClock,
   idleStopMinutes = 30,
   context,
+  copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -193,10 +198,13 @@ export function startControl({
     ask: approvals.ask,
   });
 
+  // Who pays for each agent run's Copilot (copilotIdentity.ts).
+  const identity = copilotIdentity({ store, broker, mint: copilotTokens });
+
   // Projects, their coordinators and the coordinators' scheduler (projects.ts).
   const projects = projectHost({
     store,
-    broker,
+    identity,
     computers,
     context,
     githubApiUrl,
@@ -486,13 +494,14 @@ export function startControl({
           return bot instanceof Response ? bot : upgrade(server, req, { kind: "worker", ...bot });
         },
       },
-      // The token broker: the owner's access token, never a refresh token.
+      // The token broker: a chief always runs on its owner's seat, so the owner's
+      // access token, never a refresh token.
       "/worker/:botId/github-token": {
         GET: async (req) => {
           const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          const token = await broker.accessToken(bot.userId);
-          if (token) return Response.json(token);
+          const token = await identity({ kind: "chief", ownerId: bot.userId })?.token();
+          if (token && "kind" in token && token.kind === "seat") return Response.json(token.token);
           return apiError(403, "reauth_needed");
         },
       },

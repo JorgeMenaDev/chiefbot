@@ -1,5 +1,13 @@
 import type { GitHubTokenProvider, PermissionHandler, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 
+// How a session's runtime signs in to Copilot, and so who pays:
+//   seat          a person's Copilot seat: user tokens from the session's gitHubTokenProvider
+//   installation  an organization's: an installation token with Copilot Requests. GitHub
+//                 wants it in the runtime's COPILOT_GITHUB_TOKEN, never through
+//                 gitHubTokenProvider, so the session gets a runtime of its own,
+//                 started with this token (installationSession.ts renews it).
+export type CopilotAuth = { kind: "seat"; gitHubTokenProvider: GitHubTokenProvider } | { kind: "installation"; token: string };
+
 // The slice of the Copilot SDK the worker uses: one long-lived session per bot,
 // or one per member's chat on a project's coordinator. copilotSdk() and
 // coordinatorSdk() (copilotSdk.ts) are the real SDK; tests use fakeCopilot().
@@ -9,7 +17,7 @@ export type Copilot = {
   // custom tools. `instructions` are added to the system message.
   openSession(options: {
     sessionId: string;
-    gitHubTokenProvider: GitHubTokenProvider;
+    auth: CopilotAuth;
     onPermissionRequest: PermissionHandler;
     tools: NonNullable<SessionConfig["tools"]>;
     instructions?: string;
@@ -30,4 +38,7 @@ export type BotSession = {
   setModel(model: string): Promise<void>;
   // Lists models with the session's own auth, so for the bot owner's plan.
   rpc: { model: { list(): Promise<SdkModelList> } };
+  // Closes the session; its history stays on disk to resume. An installation
+  // session's runtime stops with it.
+  disconnect(): Promise<void>;
 };

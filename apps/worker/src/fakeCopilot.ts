@@ -30,17 +30,23 @@ export type FakeCopilotOptions = {
 };
 
 export function fakeCopilot({ script = echo, models = { list: [] }, shell }: FakeCopilotOptions = {}) {
-  // The access token each opened session got from its gitHubTokenProvider.
+  // The token each opened session ran on: a seat's access token from its
+  // gitHubTokenProvider, or an installation token its runtime started with.
   const tokens: string[] = [];
+  // Ids of every session disconnected, in order.
+  const closed: string[] = [];
   // Ids of every session opened, in order (a resume counts again).
   const sessionIds: string[] = [];
   // Every turn started, with the model its session was on ("default" before any setModel).
   const sends: Array<{ sessionId: string; prompt: string; model: string }> = [];
 
   const copilot: Copilot = {
-    async openSession({ sessionId, gitHubTokenProvider, onPermissionRequest, tools }) {
-      const token = await gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
-      if (token.kind === "token") tokens.push(token.accessToken);
+    async openSession({ sessionId, auth, onPermissionRequest, tools }) {
+      if (auth.kind === "installation") tokens.push(auth.token);
+      else {
+        const token = await auth.gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
+        if (token.kind === "token") tokens.push(token.accessToken);
+      }
       sessionIds.push(sessionId);
       const handlers = new Set<(event: SessionEvent) => void>();
       const allowed = async (request: PermissionRequest) =>
@@ -95,12 +101,16 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           model = next;
         },
         rpc: { model: { list: async () => models } },
+        async disconnect() {
+          handlers.clear();
+          closed.push(sessionId);
+        },
       };
       return session;
     },
   };
 
-  const fake = { copilot, tokens, sessionIds, sends, script, shell };
+  const fake = { copilot, tokens, closed, sessionIds, sends, script, shell };
   return fake;
 }
 

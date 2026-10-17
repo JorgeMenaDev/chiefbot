@@ -1,28 +1,21 @@
-import { CopilotClient } from "@github/copilot-sdk";
-import type { Copilot } from "./copilot.ts";
+import { CopilotClient, type CopilotClientOptions, type ResumeSessionConfig } from "@github/copilot-sdk";
+import type { BotSession, Copilot } from "./copilot.ts";
 
 // The real Copilot SDK in copilot-cli mode: the bundled runtime runs in the bot
 // computer with its full tool set (shell, files, git), working in `workingDirectory`.
 // Session history lives under ~/.copilot, on the bot's own disk.
-// GitHub identity comes only from each session's gitHubTokenProvider, never from
-// a logged-in user or an env token. The runtime's shell inherits agentEnv() plus
-// `gitConfig`, the GIT_CONFIG_* variables that send git to control's proxy.
+// GitHub identity comes only from each session's auth (copilot.ts), never from a
+// logged-in user or an ambient env token. The runtime's shell inherits agentEnv()
+// plus `gitConfig`, the GIT_CONFIG_* variables that send git to control's proxy.
+// An organization's installation token is the exception: GitHub wants it in the
+// runtime's own environment, so that runtime's shell sees it. It may only make
+// Copilot requests, never read or write a repo.
 export function copilotSdk({ workingDirectory, gitConfig }: { workingDirectory: string; gitConfig: Record<string, string> }): Copilot {
-  const client = new CopilotClient({
-    mode: "copilot-cli",
-    workingDirectory,
-    useLoggedInUser: false,
-    env: { ...agentEnv(process.env), ...gitConfig },
-  });
-  return {
-    async openSession({ sessionId, gitHubTokenProvider, onPermissionRequest, tools }) {
-      // No model here: the worker sets the bot's model before each turn that needs it.
-      const config = { gitHubTokenProvider, workingDirectory, streaming: true, onPermissionRequest, tools };
-      await client.start();
-      const existing = await client.getSessionMetadata(sessionId);
-      return existing ? client.resumeSession(sessionId, config) : client.createSession({ ...config, sessionId });
-    },
-  };
+  return sdkCopilot(
+    { mode: "copilot-cli", workingDirectory, useLoggedInUser: false, env: { ...agentEnv(process.env), ...gitConfig } },
+    // No model here: the worker sets the bot's model before each turn that needs it.
+    ({ onPermissionRequest, tools }) => ({ workingDirectory, streaming: true, onPermissionRequest, tools }),
+  );
 }
 
 // Tokens the agent's shell is not handed: a GitHub token would let gh or curl
@@ -39,33 +32,58 @@ export function agentEnv(env: Record<string, string | undefined>) {
 // files, no ambient config or skills. Each session can use only the custom tools
 // it is opened with. Session history lives under `baseDirectory`.
 export function coordinatorSdk({ baseDirectory }: { baseDirectory: string }): Copilot {
-  const client = new CopilotClient({ mode: "empty", baseDirectory, useLoggedInUser: false });
-  return {
-    async openSession(options) {
-      const config = coordinatorSessionConfig(options);
-      await client.start();
-      const existing = await client.getSessionMetadata(options.sessionId);
-      return existing
-        ? client.resumeSession(options.sessionId, config)
-        : client.createSession({ ...config, sessionId: options.sessionId });
-    },
-  };
+  return sdkCopilot({ mode: "empty", baseDirectory, useLoggedInUser: false, env: agentEnv(process.env) }, coordinatorSessionConfig);
 }
 
 // A coordinator session's config: its tools are the only ones it may use, and
 // its instructions follow the SDK's own system message.
-export function coordinatorSessionConfig({
-  gitHubTokenProvider,
-  onPermissionRequest,
-  tools,
-  instructions,
-}: Parameters<Copilot["openSession"]>[0]) {
+export function coordinatorSessionConfig({ onPermissionRequest, tools, instructions }: Parameters<Copilot["openSession"]>[0]) {
   return {
-    gitHubTokenProvider,
     onPermissionRequest,
     tools,
     streaming: true,
     availableTools: tools.map(({ name }) => `custom:${name}`),
     ...(instructions === undefined ? {} : { systemMessage: { mode: "append" as const, content: instructions } }),
+  };
+}
+
+// A Copilot on the SDK with `clientOptions`. Seat sessions share one runtime
+// and get their tokens from gitHubTokenProvider. An installation session gets a
+// runtime of its own, started with its token in COPILOT_GITHUB_TOKEN, which
+// stops when the session disconnects. Either resumes the session's history
+// when it exists on disk.
+function sdkCopilot(
+  clientOptions: CopilotClientOptions & { env: Record<string, string | undefined> },
+  sessionConfig: (options: Parameters<Copilot["openSession"]>[0]) => ResumeSessionConfig,
+): Copilot {
+  const shared = new CopilotClient(clientOptions);
+  return {
+    async openSession(options) {
+      const config = sessionConfig(options);
+      if (options.auth.kind === "seat") {
+        const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
+        return { ...bound(session), disconnect: () => session.disconnect() };
+      }
+      const own = new CopilotClient({ ...clientOptions, env: { ...clientOptions.env, COPILOT_GITHUB_TOKEN: options.auth.token } });
+      const session = await openOn(own, options.sessionId, config);
+      return { ...bound(session), disconnect: async () => void (await own.stop()) };
+    },
+  };
+}
+
+// Starts the client and resumes the session, or creates it the first time.
+async function openOn(client: CopilotClient, sessionId: string, config: ResumeSessionConfig) {
+  await client.start();
+  const existing = await client.getSessionMetadata(sessionId);
+  return existing ? client.resumeSession(sessionId, config) : client.createSession({ ...config, sessionId });
+}
+
+// The session's methods a BotSession uses, bound to it.
+function bound(session: Awaited<ReturnType<typeof openOn>>): Omit<BotSession, "disconnect"> {
+  return {
+    on: (handler) => session.on(handler),
+    send: (prompt) => session.send(prompt),
+    setModel: (model) => session.setModel(model),
+    rpc: session.rpc,
   };
 }

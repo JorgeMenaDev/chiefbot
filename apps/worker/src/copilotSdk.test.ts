@@ -23,7 +23,7 @@ test("a coordinator session may use only its task and context tools: no shell, n
 
   const config = coordinatorSessionConfig({
     sessionId: "project_1-user_1",
-    gitHubTokenProvider: async () => ({ kind: "token", accessToken: "gho_a", expiresIn: 3600 }),
+    auth: { kind: "seat", gitHubTokenProvider: async () => ({ kind: "token", accessToken: "gho_a", expiresIn: 3600 }) },
     onPermissionRequest: async () => ({ kind: "reject" }),
     tools,
     instructions: "Coordinate.",

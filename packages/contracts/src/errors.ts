@@ -8,7 +8,7 @@ import { z } from "zod";
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
-//   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request
+//   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request, invalid_copilot_mode
 //                         the body or query failed its schema (400)
 //   invalid_schedule      a routine's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
@@ -33,6 +33,8 @@ import { z } from "zod";
 //   project_exists        the workspace already has a project for that repo (409)
 //   invalid_tool_call     a coordinator tool call failed its schema or its rules; `message` says why (400),
 //                         or no coordinator turn is running (409)
+//   copilot_token_failed  GitHub would not mint the organization's Copilot token, e.g. the repo app
+//                         lacks Copilot Requests or is not installed on the repo's owner; `message` says why (502)
 //   expected_websocket    a WebSocket route got a plain request (400)
 export const ApiErrorCode = z.enum([
   "unauthorized",
@@ -48,6 +50,7 @@ export const ApiErrorCode = z.enum([
   "invalid_pull_request",
   "invalid_workspace",
   "invalid_invite",
+  "invalid_copilot_mode",
   "invalid_schedule",
   "model_unavailable",
   "github_rejected_token",
@@ -70,6 +73,7 @@ export const ApiErrorCode = z.enum([
   "invalid_project_file",
   "project_exists",
   "invalid_tool_call",
+  "copilot_token_failed",
   "expected_websocket",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;
