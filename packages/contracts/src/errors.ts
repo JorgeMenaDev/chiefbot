@@ -21,7 +21,7 @@ import { z } from "zod";
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
 //   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
 //   repo_read_only        the bot owner may not push to the repo (403)
-//   app_not_installed     the deployer's GitHub App is not installed on the repo (403)
+//   app_not_installed     the deployer's repo app is not installed on the repo (403)
 //   no_turn               a push or pull request outside a turn: nobody can approve it (409)
 //   declined              the user declined the push or pull request (403)
 //   github_failed         GitHub refused what control forwarded; `message` says why (502)

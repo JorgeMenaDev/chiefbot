@@ -1,10 +1,12 @@
 import { z } from "zod";
-import type { GitHubTokens } from "@chiefbot/contracts";
+import type { GitHubTokens, SignInConfig } from "@chiefbot/contracts";
 
-// GitHub's device flow for the deployer's GitHub App (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token).
-// Runs in Electron main. It needs no client secret, and the app issues expiring
-// tokens, so the token response carries a refresh token. The token gets the app's
-// permissions on the repositories it is installed on: no scopes.
+// GitHub's device flow for the deployer's sign-in app (`bun run setup`), which
+// has no repository permissions. Runs in Electron main and needs no client secret.
+// A GitHub App (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token)
+// takes no scopes and issues expiring tokens. An OAuth App (https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow)
+// is asked for read:user only, plus offline_access so its tokens expire too.
+// Either way the token response carries a refresh token.
 
 const DeviceCodeResponse = z.union([
   z.object({
@@ -29,6 +31,7 @@ const TokenResponse = z.union([
 export type DeviceFlowOptions = {
   // https://github.com in production; a fake in tests.
   githubUrl: string;
+  kind: SignInConfig["kind"];
   clientId: string;
   // Called once with the code the user types at the verification page.
   onCode: (code: { userCode: string; verificationUri: string }) => void;
@@ -39,16 +42,18 @@ export type DeviceFlowOptions = {
 // Resolves with the tokens once the user approves; rejects if they deny or the code expires.
 export async function runDeviceFlow({
   githubUrl,
+  kind,
   clientId,
   onCode,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = Date.now,
 }: DeviceFlowOptions): Promise<GitHubTokens> {
-  const device = DeviceCodeResponse.parse(await postForm(`${githubUrl}/login/device/code`, { client_id: clientId }));
+  const scope = kind === "oauth-app" ? { scope: "read:user offline_access" } : {};
+  const device = DeviceCodeResponse.parse(await postForm(`${githubUrl}/login/device/code`, { client_id: clientId, ...scope }));
   if ("error" in device) {
     if (device.error === "device_flow_disabled") {
       throw new Error(
-        "Your GitHub App has Device Flow off. Open its settings on github.com (`bun run setup` printed the link), tick Enable Device Flow and save.",
+        "Your Chiefbot sign-in app has Device Flow off. Open its settings on github.com (`bun run setup` printed the link), tick Enable Device Flow and save.",
       );
     }
     throw new Error(`GitHub sign-in failed: ${device.error}`);

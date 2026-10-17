@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fails when a tracked file names a person, a company behind the project, a
 # hard-coded GitHub OAuth client ID or a link to a private repository. Chiefbot
-# is open source and generic: deployers bring their own GitHub App (`bun run setup`).
+# is open source and generic: deployers bring their own GitHub Apps (`bun run setup`).
 # Runs in `bun run check`, so CI runs it too. Add a term here when one slips in.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"

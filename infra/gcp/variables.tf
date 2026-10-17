@@ -4,7 +4,7 @@ variable "project_id" {
 }
 
 variable "github_client_id" {
-  description = "Client ID of your GitHub App: `bun run setup` writes it to ~/.chiefbot/config.json (githubApp.clientId). The desktop signs in with the same app."
+  description = "Client ID of your sign-in app: `bun run setup` writes it to ~/.chiefbot/config.json (signIn.app.clientId, or signIn.clientId for an OAuth App). The desktop signs in with the same app."
   type        = string
 }
 

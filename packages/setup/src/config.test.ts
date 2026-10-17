@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { chiefbotHome, configuredGitHubApp, configuredGitHubClientId, writeLocalConfig, writeOwnerOnly } from "./config.ts";
+import { chiefbotHome, configuredGitHubApp, configuredSignIn, writeLocalConfig, writeOwnerOnly } from "./config.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -21,20 +21,37 @@ test("the Chiefbot home is ~/.chiefbot unless CHIEFBOT_HOME says otherwise", () 
   expect(chiefbotHome({ CHIEFBOT_HOME: "/srv/chiefbot" }, "/home/ada")).toBe("/srv/chiefbot");
 });
 
-test("control and the desktop read the client ID that setup wrote", () => {
+const signInApp = { id: 8, slug: "chiefbot-sign-in-abc123", clientId: "Iv-sign-in-client", owner: "octo-user", htmlUrl: "https://github.com/apps/chiefbot-sign-in-abc123" };
+
+test("control and the desktop sign in with the sign-in app setup wrote, never the repo app", () => {
   const home = tempHome();
   const env = { CHIEFBOT_HOME: join(home, "nested") };
-  expect(configuredGitHubClientId(env, home)).toBeNull();
+  expect(configuredSignIn(env, home)).toBeNull();
 
-  writeLocalConfig(env.CHIEFBOT_HOME, { githubApp: app });
+  writeLocalConfig(env.CHIEFBOT_HOME, { githubApp: app, signIn: { kind: "github-app", app: signInApp } });
 
-  expect(configuredGitHubClientId(env, home)).toBe("Iv-test-client");
+  expect(configuredSignIn(env, home)).toEqual({ kind: "github-app", clientId: "Iv-sign-in-client" });
 });
 
-test("CHIEFBOT_GITHUB_CLIENT_ID wins over the config file", () => {
+test("the sign-in app may be an OAuth App instead", () => {
+  const home = tempHome();
+  writeLocalConfig(home, { githubApp: app, signIn: { kind: "oauth-app", clientId: "oauth-client" } });
+
+  expect(configuredSignIn({ CHIEFBOT_HOME: home }, home)).toEqual({ kind: "oauth-app", clientId: "oauth-client" });
+});
+
+test("a config from before the sign-in app has no sign-in: setup must add it", () => {
   const home = tempHome();
   writeLocalConfig(home, { githubApp: app });
-  expect(configuredGitHubClientId({ CHIEFBOT_HOME: home, CHIEFBOT_GITHUB_CLIENT_ID: "Iv-from-env" }, home)).toBe("Iv-from-env");
+
+  expect(configuredSignIn({ CHIEFBOT_HOME: home }, home)).toBeNull();
+});
+
+test("CHIEFBOT_GITHUB_CLIENT_ID wins over the config file's sign-in client ID", () => {
+  const home = tempHome();
+  writeLocalConfig(home, { githubApp: app, signIn: { kind: "oauth-app", clientId: "oauth-client" } });
+  expect(configuredSignIn({ CHIEFBOT_HOME: home, CHIEFBOT_GITHUB_CLIENT_ID: "from-env" }, home)).toEqual({ kind: "oauth-app", clientId: "from-env" });
+  expect(configuredSignIn({ CHIEFBOT_GITHUB_CLIENT_ID: "Iv-from-env" }, tempHome())).toEqual({ kind: "github-app", clientId: "Iv-from-env" });
 });
 
 test("control reads the app's ID and the private key setup saved beside it", () => {

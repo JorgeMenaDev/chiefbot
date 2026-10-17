@@ -18,6 +18,7 @@ import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { readProjectFile } from "./projectFile.ts";
+import type { repoAccess } from "./repos.ts";
 import type { openStore } from "./store.ts";
 import type { tokenBroker } from "./tokens.ts";
 
@@ -36,6 +37,8 @@ export type ProjectHostOptions = {
   computers: ComputerProvider;
   context: ContextStore;
   githubApiUrl: string;
+  // A token to read a repo for a user, or why not (repos.ts readToken).
+  repoReadToken: ReturnType<typeof repoAccess>["readToken"];
   // Control's URL as a computer reaches it.
   controlUrlForComputers: () => string;
   // Publishes to a WebSocket topic.
@@ -57,7 +60,7 @@ export type ProjectHostOptions = {
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET    /workspaces/:id/projects  → Project[]
 //   POST   /workspaces/:id/projects  body CreateProjectRequest → 201 Project. Control reads the repo's
-//                                    chiefbot.project.yaml with the user's GitHub token (400
+//                                    chiefbot.project.yaml through the repo app, if the user may read it (400
 //                                    invalid_project_file says what is wrong; 409 project_exists;
 //                                    403 reauth_needed), then starts the coordinator's computer.
 //   GET    /projects/:id             → Project
@@ -78,6 +81,7 @@ export function projectHost({
   computers,
   context,
   githubApiUrl,
+  repoReadToken,
   controlUrlForComputers,
   publish,
   publishToUser,
@@ -193,9 +197,11 @@ export function projectHost({
         if (!workspace) return apiError(404, "not_found");
         const body = CreateProjectRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "invalid_project");
-        const token = await broker.accessToken(user.id);
-        if (!token) return apiError(403, "reauth_needed");
-        const file = await readProjectFile(githubApiUrl, token.accessToken, body.data.repo);
+        const access = await repoReadToken(user.id, body.data.repo);
+        if ("error" in access) {
+          return access.error === "reauth_needed" ? apiError(403, "reauth_needed") : apiError(400, "invalid_project_file", access.message);
+        }
+        const file = await readProjectFile(githubApiUrl, access.token, body.data.repo);
         if ("error" in file) return apiError(400, "invalid_project_file", file.error);
         const projectToken = crypto.randomUUID() + crypto.randomUUID();
         const project = projects.create(workspace.id, body.data.repo, file, projectToken);

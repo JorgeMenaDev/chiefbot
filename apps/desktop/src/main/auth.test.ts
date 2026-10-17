@@ -24,7 +24,7 @@ function setup() {
     const states: AuthState[] = [];
     const auth = createAuth({
       controlUrl: control.url,
-      deviceFlow: { githubUrl: github.url, clientId: "test-client", sleep: async () => {} },
+      deviceFlow: { githubUrl: github.url, kind: "github-app", clientId: "test-client", sleep: async () => {} },
       store,
       onChange: (state) => states.push(state),
     });

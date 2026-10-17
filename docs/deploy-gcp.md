@@ -52,11 +52,11 @@ You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (
    gcloud config set project chiefbot-poc-2611
    ```
 
-2. **Fill in the Terraform variables.** Create `infra/gcp/terraform.tfvars` (git-ignored). Set `budget_currency` to the billing account's currency (shown in the Console under Billing): a budget in the wrong currency fails. `github_client_id` is your GitHub App's client ID: run `bun run setup` first (README quickstart) and copy `githubApp.clientId` from `~/.chiefbot/config.json`.
+2. **Fill in the Terraform variables.** Create `infra/gcp/terraform.tfvars` (git-ignored). Set `budget_currency` to the billing account's currency (shown in the Console under Billing): a budget in the wrong currency fails. `github_client_id` is your sign-in app's client ID: run `bun run setup` first (README quickstart) and copy `signIn.app.clientId` from `~/.chiefbot/config.json` (`signIn.clientId` for the OAuth App fallback).
 
    ```hcl
    project_id         = "chiefbot-poc-2611"
-   github_client_id   = "<YOUR_GITHUB_APP_CLIENT_ID>"
+   github_client_id   = "<YOUR_SIGN_IN_APP_CLIENT_ID>"
    billing_account_id = "<BILLING_ACCOUNT_ID>"
    budget_currency    = "GBP"
    monthly_budget     = 80
@@ -77,7 +77,7 @@ You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (
 
    The control VM boots and retries its image every 10 seconds until step 5 pushes it.
 
-   Then copy your GitHub App's config and private key to control's data disk, where control reads them (`CHIEFBOT_HOME=/data/chiefbot`). Control mints the app's installation tokens with the key to reach repos for bots. Without them control stops with "Run `bun run setup`".
+   Then copy your apps' config and the repo app's private key to control's data disk, where control reads them (`CHIEFBOT_HOME=/data/chiefbot`). Control mints the repo app's installation tokens with the key to reach repos for bots. Without them control stops with "Run `bun run setup`".
 
    ```bash
    gcloud compute scp ~/.chiefbot/config.json ~/.chiefbot/github-app-secrets.json chiefbot-control:/tmp/ --zone=europe-west2-a --tunnel-through-iap
@@ -134,4 +134,4 @@ Makes no Copilot calls. Each bot costs about $0.09 per running hour.
 - GitHub refresh tokens are in Secret Manager, one secret `github-refresh-token-<user id>` each, with only the latest version enabled. Access tokens (8 hours) and expiry times stay in control's SQLite on the data disk.
 - The bot's credential (`CHIEFBOT_BOT_TOKEN`) stays in its VM's metadata (decided in ticket #8). Project members who can read VMs can read it. It gets only that one bot's owner's access token (8 hours at most, never a refresh token) and control's git proxy for repos that owner may use, where every push waits for the owner's approval. It stops working when the bot is deleted. Anyone with SSH to the VM (Owner, Editor, Compute Admin) could read it from the VM anyway. Moving it to Secret Manager needs a host-side fetch on Container-Optimized OS (no `gcloud` or `jq`), a secret per bot, and an IAM grant to the shared `chiefbot-computer` account that lets every bot VM read every bot's secret unless each bot gets its own service account. Revisit when the project gets members with read-only roles such as Compute Viewer.
 - No snapshot schedule backs up the control data disk.
-- The GitHub App's private key sits on the control VM's data disk (owner-only, root). Anyone with SSH to the control VM can read it. Moving it to Secret Manager is a later step.
+- The repo app's private key sits on the control VM's data disk (owner-only, root). Anyone with SSH to the control VM can read it. Moving it to Secret Manager is a later step.

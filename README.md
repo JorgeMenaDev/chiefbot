@@ -11,17 +11,29 @@ You need a Mac, [Bun](https://bun.sh) 1.4 or later, Docker (Docker Desktop, OrbS
 ```bash
 git clone https://github.com/JorgeMenaDev/chiefbot.git && cd chiefbot
 bun install
-bun run setup           # registers your own GitHub App, then two clicks on github.com (below)
+bun run setup           # registers your own two GitHub Apps, then two clicks on github.com (below)
 bun run computer:build  # builds the bot computer image chiefbot-computer:dev
 bun run dev             # control on http://127.0.0.1:7410 and the desktop app
 ```
 
-`bun run setup` opens github.com with a ready-made GitHub App (GitHub's App Manifest flow). Click **Create GitHub App** and it returns to setup, which saves the app in `~/.chiefbot/` (folder 700, files 600, outside the repo): `config.json` with the app's ID and client ID, and `github-app-secrets.json` with its client secret and private key. Setup then prints two links:
+`bun run setup` registers two GitHub Apps with GitHub's App Manifest flow, one after the other:
 
-1. The app's settings: tick **Enable Device Flow** and click **Save changes**. A manifest cannot set it, and the desktop signs in with it.
-2. The app's install page: install it on the repositories your bots may work on. Control reaches only those for your bots.
+- **The repo app** (`Chiefbot <6 hex digits>`) asks for repository contents (write) and pull requests (write), and for nothing else. Only control uses it, to reach repos for your bots.
+- **The sign-in app** (`Chiefbot sign-in <6 hex digits>`) asks for no permissions. The desktop signs in with it, and its tokens are the ones your bots get for Copilot, so a token taken from a bot's computer cannot write to any repo (`docs/isolation.md`).
 
-The app asks for repository contents (write) and pull requests (write), and for nothing else. To own the app in an organization, run `bun run setup --org <organization>`. To start over, delete the app on github.com and `~/.chiefbot/config.json`, then run setup again. Without a config, control and the desktop stop with "Run `bun run setup`".
+For each, github.com opens with the app filled in. Click **Create GitHub App** and it returns to setup. Setup saves both in `~/.chiefbot/` (folder 700, files 600, outside the repo): `config.json` with each app's ID and client ID, and `github-app-secrets.json` with the repo app's client secret and private key. Setup then prints two links:
+
+1. The sign-in app's settings: tick **Enable Device Flow** and click **Save changes**. A manifest cannot set it, and the desktop signs in with it.
+2. The repo app's install page: install it on the repositories your bots may work on. Control reaches only those for your bots.
+
+To own the apps in an organization, run `bun run setup --org <organization>`. Both apps are private, so only the account that owns them can sign in, or, for an organization, its members. Set up before the sign-in app existed? Run `bun run setup` again: it adds only the sign-in app; then sign in again in the desktop. To start over, delete the apps on github.com and `~/.chiefbot/config.json`, then run setup again. Without a config, control and the desktop stop with "Run `bun run setup`".
+
+**Fallback: an OAuth App to sign in.** If the sign-in app's tokens cannot run Copilot (manual check "the sign-in token cannot write, and drives Copilot"), sign in with an OAuth App instead, which asks only for `read:user`:
+
+1. Open github.com/settings/applications/new (for an organization: its **Settings → Developer settings → OAuth Apps → New OAuth App**).
+2. Fill in any name, `https://github.com/JorgeMenaDev/chiefbot` as the homepage URL and `http://127.0.0.1/` as the callback URL (the device flow does not use it).
+3. Tick **Enable Device Flow** and click **Register application**. Copy the **Client ID**. No client secret is needed.
+4. Run `bun run setup --oauth-client-id <client ID>`. It keeps your repo app (or registers it first) and records the OAuth App as the sign-in app. Sign in again in the desktop: it asks GitHub for `read:user` and `offline_access`, so tokens expire after 8 hours and refresh like the sign-in app's.
 
 In the desktop app, click **Sign in with GitHub**, then **+ New bot**.
 
@@ -37,7 +49,7 @@ Creating a bot needs Docker and the `chiefbot-computer:dev` image. Each bot is a
 
 **Chat.** A message to a bot goes to control, which stores it and forwards it to the bot's worker. The worker runs the turn on the Copilot SDK (`@github/copilot-sdk`, pinned exactly in `apps/worker/package.json`) in `copilot-cli` mode, working in `/home/bot/workspace`. The bot has one conversation; the SDK keeps it under `/home/bot/.copilot`, so it resumes after the computer restarts. The SDK gets the user's GitHub access token from control's broker (`GET /worker/<bot id>/github-token`) through `gitHubTokenProvider`. Reply text, tool calls and status stream back to the desktop and are stored in control, so history survives a restart of any process. The image carries the SDK's bundled Linux runtime (about 170 MB of the image).
 
-**Tokens.** The desktop signs in with your GitHub App's device flow, so its tokens (`ghu_…`) carry the app's permissions on the repositories it is installed on. The broker hands a bot only its owner's access token, for the Copilot SDK, with more than two hours left, never the refresh token. Being a token of the same app, it could also write to the repos the app is installed on: `docs/isolation.md`, "What remains". When less is left it refreshes with GitHub's refresh grant (device-flow tokens need no client secret), one refresh at a time per user: a refresh invalidates the old pair, so concurrent requests share it. The refresh token sits in a `SecretStore`: locally encrypted (AES-256-GCM) in control's SQLite under the key in `CHIEFBOT_SECRET_KEY_FILE`; on GCP in Secret Manager. When GitHub refuses the refresh token (expired after 6 months unused, or the app's authorization was revoked on github.com), or the user clicks **Disconnect GitHub**, control forgets the sign-in: bots get a typed `reauth_needed` refusal, their turns end with "Sign in again", and the desktop shows a **Sign in again** notice. Disconnect does not revoke the app at GitHub: an access token already handed out works until it expires, at most 8 hours, unless you revoke the app's authorization at github.com/settings/apps/authorizations.
+**Tokens.** The desktop signs in with your sign-in app's device flow. That app has no repository permissions, so its tokens (`ghu_…`, or `gho_…` from an OAuth App) can read who you are and your Copilot plan, and cannot write to any repo. The broker hands a bot only its owner's access token, for the Copilot SDK, with more than two hours left, never the refresh token. When less is left it refreshes with GitHub's refresh grant (device-flow tokens need no client secret), one refresh at a time per user: a refresh invalidates the old pair, so concurrent requests share it. The refresh token sits in a `SecretStore`: locally encrypted (AES-256-GCM) in control's SQLite under the key in `CHIEFBOT_SECRET_KEY_FILE`; on GCP in Secret Manager. When GitHub refuses the refresh token (expired after 6 months unused, or the app's authorization was revoked on github.com), or the user clicks **Disconnect GitHub**, control forgets the sign-in: bots get a typed `reauth_needed` refusal, their turns end with "Sign in again", and the desktop shows a **Sign in again** notice. Disconnect does not revoke the app at GitHub: an access token already handed out works until it expires, at most 8 hours, unless you revoke the sign-in app's authorization at github.com/settings/apps/authorizations.
 
 **Model per bot.** Each bot has its own Copilot model, chosen in the composer's model picker. Once a bot's worker connects, it lists the models the owner's Copilot plan offers on the bot's SDK session and reports them to control. Control keeps the latest list per user in SQLite (`GET /models`). Picking a model saves it on the bot (`PUT /bots/:id/model`). Every turn carries the bot's model, and the worker switches the session before the turn, so the conversation is kept. On Copilot Free only Auto can be picked: the SDK accepts a switch but every turn still runs on Auto, so the other models in Copilot's catalog show as locked rows with "Needs a paid Copilot plan". On a paid plan, models a Copilot policy turns off show locked too.
 
@@ -45,11 +57,11 @@ Creating a bot needs Docker and the `chiefbot-computer:dev` image. Each bot is a
 
 **Idle stop.** Control stops a bot's computer after 30 minutes (`CHIEFBOT_IDLE_STOP_MINUTES`) with no running turn, no pending approval, no screen viewer and no routine run in progress, with Docker and on GCP alike. **Start** in the app or a due routine starts it again.
 
-**Repo work and approvals.** A bot clones, branches, edits and commits in its workspace without asking. Before it pushes or opens a pull request, you approve it: the chat shows an approval card (after T3 Code's) with the repo and branches or the pull request, and the bot waits until you click **Approve** or **Decline**, however long that takes. Control holds repo access, so the approval is checked outside the bot's computer (`apps/control/src/repos.ts`). Git in the bot computer reaches github.com only through control's git proxy (`/git/<owner>/<repo>.git`): the worker points the agent's git there (`apps/worker/src/gitProxy.ts`) and its credential helper hands git the bot's credential, never a GitHub token. Control checks with your own GitHub token that you may read the repo (or push to it), lets fetches through, and holds each push until you approve it; then it forwards exactly that push with a one-hour installation token of your GitHub App, scoped to that one repo. The bot's `create_pull_request` tool asks control, which opens the pull request with the same kind of token after you approve. Neither token ever reaches the bot. A repo your GitHub App is not installed on can be cloned only if it is public, and never pushed to. Control stores each request and answer (`POST /bots/<id>/approvals/<approval id>`), so a pending card survives a restart of the desktop and you can answer later. If control restarts while a push waits, git fails and the bot can push again (a new card); the old card stays until the turn ends and does nothing. If the bot's computer restarts first, the turn ends and the card shows **Expired**. A routine's turn waits for approvals the same way: if its 30-minute limit passes first, the run is marked failed, but the card stays answerable and the bot's computer stays running until the turn ends. Inside the computer, the worker still asks before a GitHub tool that writes (`apps/worker/src/approvals.ts`). What approvals do and do not stop: `docs/isolation.md`.
+**Repo work and approvals.** A bot clones, branches, edits and commits in its workspace without asking. Before it pushes or opens a pull request, you approve it: the chat shows an approval card (after T3 Code's) with the repo and branches or the pull request, and the bot waits until you click **Approve** or **Decline**, however long that takes. Control holds repo access, so the approval is checked outside the bot's computer (`apps/control/src/repos.ts`). Git in the bot computer reaches github.com only through control's git proxy (`/git/<owner>/<repo>.git`): the worker points the agent's git there (`apps/worker/src/gitProxy.ts`) and its credential helper hands git the bot's credential, never a GitHub token. Control checks, through your repo app, that your GitHub account may read the repo (or push to it), lets fetches through, and holds each push until you approve it; then it forwards exactly that push with a one-hour installation token of your repo app, scoped to that one repo. The bot's `create_pull_request` tool asks control, which opens the pull request with the same kind of token after you approve. Neither token ever reaches the bot. A repo your repo app is not installed on can be cloned only if it is public, and never pushed to. Control stores each request and answer (`POST /bots/<id>/approvals/<approval id>`), so a pending card survives a restart of the desktop and you can answer later. If control restarts while a push waits, git fails and the bot can push again (a new card); the old card stays until the turn ends and does nothing. If the bot's computer restarts first, the turn ends and the card shows **Expired**. A routine's turn waits for approvals the same way: if its 30-minute limit passes first, the run is marked failed, but the card stays answerable and the bot's computer stays running until the turn ends. Inside the computer, the worker still asks before a GitHub tool that writes (`apps/worker/src/approvals.ts`). What approvals do and do not stop: `docs/isolation.md`.
 
 **Workspaces.** A workspace is a team. Anyone signed in can create one and is its owner. The owner invites people by GitHub login; an invite waits until someone with that login signs in to Chiefbot and accepts it from the workspace switcher at the top of the sidebar. The **Members** screen lists members and pending invites: the owner invites, withdraws invites and removes members, and a member can leave. There are two roles, owner and member, and the owner cannot leave. Every workspace route answers 404 to anyone who is not a member, so outsiders cannot tell a workspace exists. Projects belong to a workspace, and connectors will too; bots stay personal.
 
-**Projects.** A project binds one GitHub repo to a workspace. Any member creates one from the sidebar (**+ New project**, `owner/repo`). Control reads the repo's `chiefbot.project.yaml` from its default branch through the GitHub API with that member's token, so your GitHub App must be installed on the repo. The file is checked with a Zod schema (`ProjectFile` in `packages/contracts/src/projects.ts`); unknown keys are errors, and a missing or invalid file is refused with what is wrong and where:
+**Projects.** A project binds one GitHub repo to a workspace. Any member creates one from the sidebar (**+ New project**, `owner/repo`). Control reads the repo's `chiefbot.project.yaml` from its default branch through the GitHub API with your repo app, once it shows that member may read the repo, so the repo app must be installed on the repo (a public repo also works without it). The file is checked with a Zod schema (`ProjectFile` in `packages/contracts/src/projects.ts`); unknown keys are errors, and a missing or invalid file is refused with what is wrong and where:
 
 ```yaml
 connectors: [github, jira]   # the connectors (MCP servers) its agents need, by name
@@ -79,8 +91,8 @@ The desktop dev script unsets `ELECTRON_RUN_AS_NODE`. Shells started by T3 Code 
 | `CHIEFBOT_DB_PATH` | control | `.data/control.sqlite` (in `apps/control`) |
 | `CHIEFBOT_GITHUB_API_URL` | control | `https://api.github.com` |
 | `CHIEFBOT_GITHUB_URL` | control | `https://github.com` (the refresh grant) |
-| `CHIEFBOT_GITHUB_CLIENT_ID` | control | The client ID in `~/.chiefbot/config.json` (`bun run setup`). Must match the desktop's, or refreshes fail. The GCP control VM sets it from Terraform |
-| `CHIEFBOT_HOME` | setup, control, desktop | `~/.chiefbot`: setup's config and secrets (control reads the GitHub App's ID and private key there), and the default secret key |
+| `CHIEFBOT_GITHUB_CLIENT_ID` | control | The sign-in app's client ID in `~/.chiefbot/config.json` (`bun run setup`). Must match the desktop's, or refreshes fail. The GCP control VM sets it from Terraform |
+| `CHIEFBOT_HOME` | setup, control, desktop | `~/.chiefbot`: setup's config and secrets (control reads the repo app's ID and private key there), and the default secret key |
 | `CHIEFBOT_SECRET_KEY_FILE` | control | `~/.chiefbot/secret.key`: the key that encrypts refresh tokens, made (mode 600) on first run. Keep it outside the repo. Losing it means signing in again. Not used with `gce` (Secret Manager) |
 | `CHIEFBOT_DOCKER_SOCKET` | control | `DOCKER_HOST`'s unix socket, else `~/.colima/default/docker.sock` if it exists, else `/var/run/docker.sock` |
 | `CHIEFBOT_COMPUTERS` | control | `docker`; `gce` runs bots as Compute Engine VMs |
@@ -91,20 +103,20 @@ The desktop dev script unsets `ELECTRON_RUN_AS_NODE`. Shells started by T3 Code 
 | `CHIEFBOT_IDLE_STOP_MINUTES` | control | `30`: a bot's computer stops after this long with no running turn, no pending approval, no screen viewer and no routine run |
 | `CHIEFBOT_CONTROL_URL` | desktop | `http://127.0.0.1:7410` |
 | `CHIEFBOT_GITHUB_URL` | desktop | `https://github.com` |
-| `CHIEFBOT_GITHUB_CLIENT_ID` | desktop | The client ID in `~/.chiefbot/config.json` (`bun run setup`): device flow, no secret, 8-hour tokens |
+| `CHIEFBOT_GITHUB_CLIENT_ID` | desktop | The sign-in app's client ID in `~/.chiefbot/config.json` (`bun run setup`): device flow, no secret, 8-hour tokens. Whether it is a GitHub App or an OAuth App comes from the config |
 | `CHIEFBOT_GITHUB_URL`, `CHIEFBOT_GITHUB_API_URL` | setup | `https://github.com`, `https://api.github.com` |
 
 ## Manual check: `bun run setup` on the real GitHub
 
-Tests run setup against a fake GitHub. This check registers a real GitHub App on your account and makes no Copilot calls. Time it.
+Tests run setup against a fake GitHub. This check registers two real GitHub Apps on your account and makes no Copilot calls. Time it.
 
 1. On a fresh clone, run `bun install`, then `bun run setup`. A browser tab opens on github.com's **Create GitHub App** page with the name `Chiefbot <6 hex digits>` filled in. If the name is taken, change it.
-2. Click **Create GitHub App**. The tab returns to `127.0.0.1` and says **Your Chiefbot GitHub App is registered**. The terminal prints the same two links.
-3. `ls -la ~/.chiefbot` shows the folder as `drwx------` and `config.json` and `github-app-secrets.json` as `-rw-------`. `git status` in the clone shows nothing new.
-4. Open the first link, tick **Enable Device Flow**, click **Save changes**. Open the second link and install the app on one repository.
-5. Run `bun run setup` again. It refuses: "already set up with the GitHub App …".
-6. Run `bun run computer:build` and `bun run dev`, then do the next check (sign-in). If the window says **Your GitHub App has Device Flow off**, step 4's box is not saved.
-7. If sign-in fails with `copilot_internal/user failed`, GitHub refuses that read for GitHub App tokens: note the status code for the Copilot ticket.
+2. Click **Create GitHub App**. The tab says **Your Chiefbot repo app is registered** and opens the page again for `Chiefbot sign-in <6 hex digits>`. Under **Permissions**, it has none. Click **Create GitHub App**. The tab returns to `127.0.0.1` and says **Chiefbot is set up**. The terminal prints the same two links.
+3. `ls -la ~/.chiefbot` shows the folder as `drwx------` and `config.json` and `github-app-secrets.json` as `-rw-------`. `config.json` has `githubApp` and `signIn`. `git status` in the clone shows nothing new.
+4. Open the first link (the sign-in app), tick **Enable Device Flow**, click **Save changes**. Open the second link and install the repo app on one repository.
+5. Run `bun run setup` again. It refuses: "already set up with the GitHub App … and a sign-in app".
+6. Run `bun run computer:build` and `bun run dev`, then do the next check (sign-in). On github.com the device page names the sign-in app. If the window says **Your Chiefbot sign-in app has Device Flow off**, step 4's box is not saved.
+7. If sign-in fails with `copilot_internal/user failed`, GitHub refuses that read for the sign-in app's tokens: note the status code, and try the OAuth App fallback (Quickstart).
 8. Write down the minutes from step 1 to a signed-in window.
 
 ## Manual check: real GitHub sign-in
@@ -138,7 +150,7 @@ Uses the real GitHub and makes no Copilot calls. Needs Docker, `sqlite3` and `jq
 3. Make the stored access token look old: `sqlite3 apps/control/.data/control.sqlite "UPDATE github_access SET access_token_expires_at = 0"`. Run `broker` again. It answers `200` with `expiresAt` about 8 hours from now: control refreshed with GitHub, without a client secret.
 4. Click **Disconnect GitHub** in the sidebar. The **Sign in again** notice appears. `broker` answers `{"error":"reauth_needed"} 403`.
 5. Click **Sign in again** and finish the device flow. The notice goes away and `broker` answers `200`.
-6. Revoke your Chiefbot app at github.com/settings/apps/authorizations, then repeat step 3. `broker` answers `403` and the notice appears without a reload.
+6. Revoke your Chiefbot sign-in app at github.com/settings/apps/authorizations, then repeat step 3. `broker` answers `403` and the notice appears without a reload.
 7. Clean up: delete the bot with **Also delete its files**, then `docker rmi chiefbot-computer:dev`.
 
 ## Manual check: a bot gets its own computer
@@ -204,23 +216,46 @@ Tests use a fake Copilot. Listing models makes no Copilot chat calls. Step 5 mak
 Tests use a fake GitHub with a real git remote. This check uses the real GitHub and makes **one** Copilot chat (the agent may take several steps inside it). It creates a repo, a branch and a pull request on your account: delete them at the end.
 
 1. Create a throwaway private repo with a README: `gh repo create chiefbot-scratch --private --add-readme`.
-2. Install your GitHub App on `chiefbot-scratch` (the install link `bun run setup` printed, or github.com/settings/installations). Run `bun run computer:build`, then `bun run dev`, and sign in.
+2. Install your repo app on `chiefbot-scratch` (the install link `bun run setup` printed, or github.com/settings/installations). Run `bun run computer:build`, then `bun run dev`, and sign in.
 3. Pick a bot (or create one) and wait until it is **online**.
 4. Send: `Clone https://github.com/<your login>/chiefbot-scratch, create a branch chiefbot-check, add the line "Hello from Chiefbot" to README.md, commit, push the branch and open a pull request into main with the create_pull_request tool.`
 5. The clone and the commit run without a card. Then a **Push approval** card shows `git push to <your login>/chiefbot-scratch: chiefbot-check`, and the status line says **Waiting for your approval**. On github.com the repo has no `chiefbot-check` branch yet.
 6. Quit the desktop app and start it again. The card is still there and still pending. Click **Approve**. The push runs, and the branch appears on github.com.
-7. A **Pull request approval** card shows `<your login>/chiefbot-scratch: chiefbot-check → main` and the title. Click **Approve**. The bot replies with the pull request's URL. Open it: it has the README change, and GitHub shows it opened by your app's bot account (`<app slug>[bot]`).
+7. A **Pull request approval** card shows `<your login>/chiefbot-scratch: chiefbot-check → main` and the title. Click **Approve**. The bot replies with the pull request's URL. Open it: it has the README change, and GitHub shows it opened by your repo app's bot account (`<app slug>[bot]`).
 8. Check that no GitHub token is on the bot's disk or in its git: `docker exec chiefbot-<bot id> sh -c 'grep -rlE "gh[ousr]_" /home/bot /tmp; git -C /home/bot/workspace/chiefbot-scratch remote get-url origin; git config --system --get-regexp credential'` prints only `https://github.com/<your login>/chiefbot-scratch`.
 9. Send: `Add a second line to README.md, commit and push.` Click **Decline** on the card. The bot says the push was declined (git shows `[remote rejected] … (The user declined this push.)`), and github.com shows no new commit.
-10. Try to push around control, as a hostile agent would, from the bot's computer: `docker exec -w /home/bot/workspace/chiefbot-scratch chiefbot-<bot id> sh -c 'git commit -q --allow-empty -m x; git push https://github.com/<your login>/chiefbot-scratch HEAD:sneaky 2>&1; printf "protocol=https\nhost=github.com\n\n" | GIT_TERMINAL_PROMPT=0 git credential fill 2>&1'`. Both fail: git has no GitHub credential. github.com shows no `sneaky` branch. (What still gets through is in `docs/isolation.md`, "What remains".)
-11. If a card turns **Expired** while the bot was still running, the Copilot runtime gave up waiting: note how long it waited. If git says `lost your GitHub sign-in`, control needs a new sign-in: click **Sign in again**. If git says `Install your Chiefbot GitHub App on …`, the app is not installed on the repo.
+10. Try to push around control, as a hostile agent would, from the bot's computer: `docker exec -w /home/bot/workspace/chiefbot-scratch chiefbot-<bot id> sh -c 'git commit -q --allow-empty -m x; git push https://github.com/<your login>/chiefbot-scratch HEAD:sneaky 2>&1; printf "protocol=https\nhost=github.com\n\n" | GIT_TERMINAL_PROMPT=0 git credential fill 2>&1'`. Both fail: git has no GitHub credential. github.com shows no `sneaky` branch. The bot's own GitHub token cannot push either: the next check. (What still gets through is in `docs/isolation.md`, "What remains".)
+11. If a card turns **Expired** while the bot was still running, the Copilot runtime gave up waiting: note how long it waited. If git says `lost your GitHub sign-in`, control needs a new sign-in: click **Sign in again**. If git says `Install your Chiefbot repo app on …`, the repo app is not installed on the repo.
 12. Clean up: `gh repo delete <your login>/chiefbot-scratch --yes` (it removes the pull request too).
+
+## Manual check: the sign-in token cannot write, and drives Copilot
+
+Tests use a fake GitHub that, like GitHub, limits a user token to its app's permissions, and a fake Copilot. This check uses the real GitHub and makes **one** Copilot chat on your plan. It settles whether a GitHub App with no permissions can run Copilot. It never prints a token. Needs Docker, `jq` and the `chiefbot-scratch` repo from the previous check (steps 1 and 2).
+
+1. Run `bun run computer:build`, then `bun run dev`, and sign in. Create a bot and wait until it is **online**.
+2. Take the token the bot's computer gets, as a hostile agent in it could:
+
+   ```bash
+   BOT=<bot id from docker ps, e.g. bot_…>
+   T=$(docker exec chiefbot-$BOT printenv CHIEFBOT_BOT_TOKEN)
+   GT=$(curl -s -H "authorization: Bearer $T" http://127.0.0.1:7410/worker/$BOT/github-token | jq -r .accessToken)
+   echo "${GT:0:4}"   # ghu_ for the sign-in GitHub App, gho_ for the OAuth App fallback
+   ```
+
+3. It knows who you are: `curl -s -H "authorization: Bearer $GT" https://api.github.com/user | jq -r .login` prints your login.
+4. It cannot read the private repo: `git ls-remote https://x-access-token:$GT@github.com/<your login>/chiefbot-scratch` fails with `Repository not found` (or 403).
+5. It cannot push: `D=$(mktemp -d) && git -C $D init -q && git -C $D -c user.name=x -c user.email=x@example.com commit -q --allow-empty -m x && git -C $D push https://x-access-token:$GT@github.com/<your login>/chiefbot-scratch HEAD:stolen; rm -rf $D` fails, and github.com shows no `stolen` branch.
+6. It cannot open a pull request: `curl -s -o /dev/null -w '%{http_code}\n' -X POST -H "authorization: Bearer $GT" https://api.github.com/repos/<your login>/chiefbot-scratch/pulls -d '{"head":"main","base":"main","title":"stolen"}'` prints `404` or `403`, never `201` or `422`.
+7. `unset T GT`.
+8. It drives Copilot: send the bot `Reply with one short sentence: which directory are you working in?`. The reply names `/home/bot/workspace`.
+9. If step 8 ends in an error about authorization or Copilot access instead (not a `quota` or `rate_limit` one), the sign-in GitHub App's token cannot run Copilot. Note the error, switch to the OAuth App fallback (Quickstart), sign in again and repeat steps 2 to 8: step 2 then prints `gho_`.
+10. Record which sign-in app passed step 8, and the error if one failed, in the ticket.
 
 ## Manual check: two members ask a project's coordinator for the same thing
 
 Tests use a fake Copilot. This check makes 3 live Copilot calls on the real GitHub with two accounts in one workspace (as in the workspace check below). It needs Docker and the computer image rebuilt with this code (`bun run computer:build`).
 
-1. In a repo your GitHub App is installed on, commit a `chiefbot.project.yaml` at the root with `commands: { test: bun test }`. In a second repo, commit one with a typo: `conectors: [github]`.
+1. In a repo your repo app is installed on, commit a `chiefbot.project.yaml` at the root with `commands: { test: bun test }`. In a second repo, commit one with a typo: `conectors: [github]`.
 2. Run control and the desktop apart (`bun run --cwd apps/control dev`, `bun run --cwd apps/desktop dev`) and sign in as the workspace owner. Pick the workspace in the switcher.
 3. Click **+ New project** and type the second repo as `owner/repo`. The form shows `invalid_project_file` with `Unrecognized key: "conectors"`, and no project appears.
 4. Create a project from the first repo. It opens with its build and test commands under its name, an empty chat and **Tasks: 0 open**.
