@@ -52,6 +52,14 @@ test("each bot is locked down: its own network, a non-root user, no capabilities
   });
 });
 
+test("host.docker.internal names the Docker host on every engine, Linux included, so the worker reaches control there", async () => {
+  const { engine, computers } = setup();
+
+  await computers.create(spec);
+
+  expect(engine.containers.get("chiefbot-bot_1")?.config).toMatchObject({ HostConfig: { ExtraHosts: ["host.docker.internal:host-gateway"] } });
+});
+
 test("start runs the computer and stop stops it; repeating either is harmless", async () => {
   const { computers } = setup();
   await computers.create(spec);

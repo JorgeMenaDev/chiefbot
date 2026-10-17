@@ -49,6 +49,11 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
           // The bot's volume is its only mount: never the Docker socket or a host path.
           Mounts: [{ Type: "volume", Source: volume(id), Target: "/home/bot" }],
           NetworkMode: network(id),
+          // Docker Desktop, OrbStack and Colima resolve host.docker.internal on
+          // their own; Docker Engine on Linux only with this. The default worker
+          // URL dials control there (index.ts), so a Linux host needs control
+          // listening beyond 127.0.0.1 (docs/deploy.md).
+          ExtraHosts: ["host.docker.internal:host-gateway"],
           // The bot runs as a plain user: it needs no Linux capabilities, and nothing may gain them.
           CapDrop: ["ALL"],
           SecurityOpt: ["no-new-privileges"],
