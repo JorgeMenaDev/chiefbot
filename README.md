@@ -25,7 +25,7 @@ The app asks for repository contents (write) and pull requests (write), and for 
 
 In the desktop app, click **Sign in with GitHub**, then **+ New bot**.
 
-Timing: on a fresh clone, `bun install` took about 10 s and `bun run computer:build` about 2 minutes (first build, image pulls included) on an M-series Mac. Setup is a minute of clicking.
+Timing, measured on a fresh clone on an Apple-silicon Mac: `bun install` with an empty Bun cache took 5 s and `bun run computer:build` 69 s with the `oven/bun` base image already pulled (allow about 2 minutes without it). Setup is about a minute of clicking on github.com.
 
 Other commands: `bun run check` (typecheck, tests and the public-repo check; no network, Docker or GCP). `CHIEFBOT_COMPUTER_IMAGE` names another image tag.
 
