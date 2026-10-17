@@ -1,4 +1,4 @@
-import type { GitHubTokenProvider, PermissionHandler, SessionConfig, SessionEvent } from "@github/copilot-sdk";
+import type { GitHubTokenProvider, MCPServerConfig, PermissionHandler, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 
 // The slice of the Copilot SDK the worker uses: one long-lived session per bot,
 // or one per member's chat on a project's coordinator. copilotSdk() and
@@ -6,13 +6,17 @@ import type { GitHubTokenProvider, PermissionHandler, SessionConfig, SessionEven
 export type Copilot = {
   // Opens a session, resuming its history when it already exists on disk.
   // Every tool call goes through onPermissionRequest; `tools` are the worker's
-  // custom tools. `instructions` are added to the system message.
+  // custom tools. `instructions` are added to the system message. `mcpServers`
+  // are the session's MCP servers (a project's connectors), by name; `onMcpCall`
+  // runs before each of their tool calls (the SDK's onPreMcpToolCall hook).
   openSession(options: {
     sessionId: string;
     gitHubTokenProvider: GitHubTokenProvider;
     onPermissionRequest: PermissionHandler;
     tools: NonNullable<SessionConfig["tools"]>;
     instructions?: string;
+    mcpServers?: Record<string, MCPServerConfig>;
+    onMcpCall?: (serverName: string, toolName: string) => Promise<void>;
   }): Promise<BotSession>;
 };
 

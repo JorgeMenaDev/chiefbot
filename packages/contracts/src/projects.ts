@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ChatItem, TurnEventMessage, TurnHello } from "./chat.ts";
+import { AgentConnector } from "./connectors.ts";
 import { ProjectId, TurnId, UserId, WorkspaceId } from "./ids.ts";
 import { RepoFullName } from "./repos.ts";
 
@@ -120,10 +121,18 @@ export type ProjectMember = z.infer<typeof ProjectMember>;
 // Control → coordinator on the /coordinator/:projectId WebSocket.
 //   bound     the project this connection belongs to; sent right after control accepts the credential
 //   run-turn  run one turn in `member`'s chat. Control's scheduler sends one at a
-//             time per project, across all members' chats.
+//             time per project, across all members' chats. `connectors` are the
+//             MCP servers the member's session gets: those the project file declares
+//             that are defined in the workspace and ready for this member.
 export const ControlToCoordinator = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), project: Project }),
-  z.object({ type: z.literal("run-turn"), turnId: TurnId, member: ProjectMember, text: z.string() }),
+  z.object({
+    type: z.literal("run-turn"),
+    turnId: TurnId,
+    member: ProjectMember,
+    text: z.string(),
+    connectors: z.array(AgentConnector).default([]),
+  }),
 ]);
 export type ControlToCoordinator = z.infer<typeof ControlToCoordinator>;
 

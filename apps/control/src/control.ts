@@ -37,6 +37,7 @@ import { repoAccess } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
+import { connectorHost } from "./connectors/connectors.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
@@ -72,6 +73,8 @@ export type ControlOptions = {
   // A running bot's computer stops after this long with no running turn, no
   // pending approval, no screen viewer and no routine run in progress. Default 30.
   idleStopMinutes?: number;
+  // Control's URL as users' browsers reach it, for OAuth callbacks. Defaults to the URL control listens on.
+  publicUrl?: string;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -131,6 +134,9 @@ type SocketData =
 //   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
 //   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
 //                             task ledgers and chats (projects.ts)
+//   …      /workspaces/:id/connectors, /workspaces/:id/checklist, /connectors/oauth/callback,
+//          /coordinator/:projectId/mcp  connectors, the access checklist and the MCP proxy
+//                             (connectors/connectors.ts)
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //
@@ -150,6 +156,7 @@ export function startControl({
   clock = systemClock,
   idleStopMinutes = 30,
   context,
+  publicUrl,
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -192,6 +199,9 @@ export function startControl({
     ask: approvals.ask,
   });
 
+  // Connectors, the access checklist, and the MCP proxy agents reach them through (connectors/connectors.ts).
+  const connectors = connectorHost({ store, secrets, publicUrl: () => publicUrl ?? server.url.origin });
+
   // Projects, their coordinators and the coordinators' scheduler (projects.ts).
   const projects = projectHost({
     store,
@@ -203,6 +213,7 @@ export function startControl({
     publish: (topic, message) => server.publish(topic, message),
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     upgrade: (req, data) => upgrade(server, req, data),
+    connectorsFor: connectors.agentConnectors,
   });
 
   const botsOf = (userId: UserId): Bot[] =>
@@ -293,6 +304,7 @@ export function startControl({
     routes: {
       ...workspaceRoutes(store),
       ...projects.routes,
+      ...connectors.routes,
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));

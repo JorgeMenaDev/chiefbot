@@ -3,6 +3,7 @@ import {
   CoordinatorToolCall,
   CreateProjectRequest,
   SendMessageRequest,
+  type AgentConnector,
   type ChatEvent,
   type ClientEvent,
   type ContextFile,
@@ -44,6 +45,8 @@ export type ProjectHostOptions = {
   publishToUser: (userId: UserId, event: ClientEvent) => void;
   // Upgrades the request to a project WebSocket; undefined once upgraded.
   upgrade: (req: Request, data: ProjectSocketData) => Response | undefined;
+  // The connectors a member's coordinator session gets for a turn (connectors/connectors.ts).
+  connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
 };
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
@@ -80,6 +83,7 @@ export function projectHost({
   publish,
   publishToUser,
   upgrade,
+  connectorsFor,
 }: ProjectHostOptions) {
   const { projects } = store;
   // Each project's connected coordinator, and the projects whose coordinator has said hello.
@@ -97,11 +101,16 @@ export function projectHost({
     coordinators.get(projectId)?.send(JSON.stringify(message));
 
   // The project's scheduler: once its coordinator is ready, hands it the oldest
-  // queued turn, unless a turn is running (the store's claim refuses then).
+  // queued turn, unless a turn is running (the store's claim refuses then), with
+  // the connectors ready for that turn's member. If those cannot be read, the
+  // turn runs without connectors.
   const schedule = (projectId: ProjectId) => {
     if (!greeted.has(projectId)) return;
     const next = projects.claimNextTurn(projectId);
-    if (next) toCoordinator(projectId, { type: "run-turn", ...next });
+    if (!next) return;
+    void connectorsFor(projectId, next.member.userId)
+      .catch(() => [])
+      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, connectors }));
   };
 
   // Runs a /projects/:id route for a signed-in member of the project's workspace; 401 or 404 otherwise.

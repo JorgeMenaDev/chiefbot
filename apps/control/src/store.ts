@@ -21,6 +21,7 @@ import {
 } from "@chiefbot/contracts";
 import type { GitHubIdentity } from "./github.ts";
 import { nextDueAt } from "./schedule.ts";
+import { connectorStore } from "./connectors/connectorStore.ts";
 import { projectStore } from "./projectStore.ts";
 import { workspaceStore } from "./workspaceStore.ts";
 
@@ -197,12 +198,15 @@ export function openStore(path: string) {
 
   const workspaces = workspaceStore(db);
   const projects = projectStore(db, hash);
+  const connectors = connectorStore(db);
 
   return {
     // Workspaces, members and invites (workspaceStore.ts).
     workspaces,
     // Projects, task ledgers and coordinator chats (projectStore.ts).
     projects,
+    // Connectors, members' connections and the call log (connectors/connectorStore.ts).
+    connectors,
 
     // Creates or updates the user GitHub identified.
     upsertUser(identity: GitHubIdentity): UserId {

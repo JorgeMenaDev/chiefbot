@@ -277,6 +277,14 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return row ? UserId.parse(row.user_id) : null;
     },
 
+    // The project's running coordinator turn and the member it runs for, if any.
+    runningTurn(projectId: ProjectId): { turnId: TurnId; userId: UserId } | null {
+      const row = db
+        .query<{ id: string; user_id: string }, [string]>("SELECT id, user_id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'")
+        .get(projectId);
+      return row ? { turnId: TurnId.parse(row.id), userId: UserId.parse(row.user_id) } : null;
+    },
+
     // Adds the coordinator's event number `index` to the project's running turn;
     // `done` finishes it. Null, storing nothing, for a repeat or any other turn.
     appendTurnEvent: db.transaction((projectId: ProjectId, turnId: TurnId, index: number, event: TurnEvent): MemberEvent | null => {
