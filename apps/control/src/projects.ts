@@ -8,6 +8,7 @@ import {
   type ClientEvent,
   type ContextFile,
   type ControlToCoordinator,
+  type CopilotPayer,
   type Project,
   type ProjectId,
   type SendMessageResponse,
@@ -21,7 +22,7 @@ import { apiError, bearer, unauthorized } from "./http.ts";
 import { readProjectFile } from "./projectFile.ts";
 import type { repoAccess } from "./repos.ts";
 import type { openStore } from "./store.ts";
-import type { tokenBroker } from "./tokens.ts";
+import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 
 // What a project WebSocket is bound to: a project's coordinator, or one
 // member's chat with it from `after` on.
@@ -34,7 +35,8 @@ type Socket = { send(message: string): unknown; close(code?: number, reason?: st
 
 export type ProjectHostOptions = {
   store: ReturnType<typeof openStore>;
-  broker: ReturnType<typeof tokenBroker>;
+  // Who pays for each coordinator turn (copilotIdentity.ts).
+  payerOf: ReturnType<typeof copilotIdentity>;
   computers: ComputerProvider;
   context: ContextStore;
   githubApiUrl: string;
@@ -76,11 +78,14 @@ export type ProjectHostOptions = {
 // Coordinator routes (bearer: the project's credential; 403 for another project's):
 //   WS     /coordinator/:projectId   ControlToCoordinator; CoordinatorToControl back
 //   GET    /coordinator/:projectId/github-token/:userId  → BrokeredGitHubToken of the member whose turn
-//                                    is running (404 for anyone else; 403 reauth_needed)
+//                                    is running, when their seat pays for it (404 for anyone else, or
+//                                    when the organization pays; 403 reauth_needed)
+//   GET    /coordinator/:projectId/installation-token  → CopilotInstallationToken, when the organization
+//                                    pays for the running turn (404 otherwise; 502 copilot_token_failed)
 //   POST   /coordinator/:projectId/tools  body CoordinatorToolCall → its answer (see projects.ts in contracts)
 export function projectHost({
   store,
-  broker,
+  payerOf,
   computers,
   context,
   githubApiUrl,
@@ -110,15 +115,30 @@ export function projectHost({
 
   // The project's scheduler: once its coordinator is ready, hands it the oldest
   // queued turn, unless a turn is running (the store's claim refuses then), with
-  // the connectors ready for that turn's member. If those cannot be read, the
-  // turn runs without connectors.
+  // who pays for its Copilot and the connectors ready for that turn's member.
+  // The turn's chat says who pays. Connectors act as the member (or the
+  // workspace, for a shared one) whoever pays: org billing changes only
+  // Copilot's identity. If they cannot be read, the turn runs without connectors.
   const schedule = (projectId: ProjectId) => {
     if (!greeted.has(projectId)) return;
     const next = projects.claimNextTurn(projectId);
-    if (!next) return;
+    const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
+    if (!next || !run) return;
+    publishChat(projectId, projects.addPayer(next.turnId, run.payer));
     void connectorsFor(projectId, next.member.userId)
       .catch(() => [])
-      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, connectors }));
+      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, payer: run.payer, connectors }));
+  };
+
+  // The running turn's token for the coordinator, if its payer is of `kind` (and,
+  // for a seat, `userId`'s); 404 otherwise: a coordinator gets no one else's.
+  const runningToken = async (projectId: ProjectId, kind: CopilotPayer["kind"], userId?: string) => {
+    const asker = projects.runningMember(projectId);
+    const run = asker && payerOf({ kind: "project", projectId, askerId: asker });
+    if (!run || run.payer.kind !== kind || (userId !== undefined && asker !== userId)) return apiError(404, "not_found");
+    const token: CopilotToken = await run.token();
+    if ("error" in token) return token.error === "reauth_needed" ? apiError(403, token.error) : apiError(502, token.error, token.message);
+    return Response.json(token.token);
   };
 
   // Runs a /projects/:id route for a signed-in member of the project's workspace; 401 or 404 otherwise.
@@ -267,13 +287,15 @@ export function projectHost({
     },
     // Only the member whose turn is running: a coordinator gets no one else's seat.
     "/coordinator/:projectId/github-token/:userId": {
-      GET: async (req: Bun.BunRequest<"/coordinator/:projectId/github-token/:userId">) => {
+      GET: (req: Bun.BunRequest<"/coordinator/:projectId/github-token/:userId">) => {
         const projectId = ownCoordinator(req);
-        if (projectId instanceof Response) return projectId;
-        const asker = projects.runningMember(projectId);
-        if (asker === null || asker !== req.params.userId) return apiError(404, "not_found");
-        const token = await broker.accessToken(asker);
-        return token ? Response.json(token) : apiError(403, "reauth_needed");
+        return projectId instanceof Response ? projectId : runningToken(projectId, "seat", req.params.userId);
+      },
+    },
+    "/coordinator/:projectId/installation-token": {
+      GET: (req: Bun.BunRequest<"/coordinator/:projectId/installation-token">) => {
+        const projectId = ownCoordinator(req);
+        return projectId instanceof Response ? projectId : runningToken(projectId, "org");
       },
     },
     "/coordinator/:projectId/tools": {

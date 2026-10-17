@@ -66,12 +66,15 @@ test("a member creates a project from a repo, chats with its coordinator and see
 
   projects.openChat(project.id);
   await projects.send(project.id, "Add dark mode");
-  const view = await until(project.id, (view) => view.working === null && view.items.length >= 2);
+  const view = await until(project.id, (view) => view.working === null && view.items.length >= 3);
 
+  // The member's own seat pays for the turn, and the chat says so.
   expect(view.items.map((item) => (item.kind === "user" || item.kind === "assistant" ? item.text : item.kind))).toEqual([
     "Add dark mode",
+    "payer",
     "Filed it.",
   ]);
+  expect(view.items[1]).toMatchObject({ kind: "payer", payer: { kind: "seat", login: "octo-user" } });
   const ledger = await projects.tasks(project.id);
   expect(ledger.map(({ number, title, status }) => [number, title, status])).toEqual([[1, "Add dark mode", "open"]]);
   for (let wait = 0; ledgers.length === 0 && wait < 200; wait++) await Bun.sleep(10);

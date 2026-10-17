@@ -1,5 +1,6 @@
 import {
   CreateWorkspaceRequest,
+  SetCopilotModeRequest,
   InviteRequest,
   type User,
   type Workspace,
@@ -15,6 +16,8 @@ import type { openStore } from "./store.ts";
 //   GET    /workspaces       → Workspace[]: the user's, with their role in each
 //   POST   /workspaces       body CreateWorkspaceRequest → 201 Workspace (the user is its owner)
 //   GET    /workspaces/:id   → WorkspaceDetail: members and pending invites
+//   PUT    /workspaces/:id/copilot-mode  body SetCopilotModeRequest → Workspace (owner only): who pays
+//                             for the Copilot requests of its projects' agents, from their next run on
 //   POST   /workspaces/:id/invites  body InviteRequest → 201 WorkspaceInvite (owner only). Inviting
 //                             a login again returns its pending invite; 409 already_member for a member's login.
 //   DELETE /workspaces/:id/invites/:inviteId  → 204; the owner withdraws a pending invite
@@ -61,6 +64,15 @@ export function workspaceRoutes(store: ReturnType<typeof openStore>) {
           invites: workspaces.invites(workspace.id),
         } satisfies WorkspaceDetail),
       ),
+    },
+    "/workspaces/:id/copilot-mode": {
+      PUT: member(async (_user, workspace, req: Bun.BunRequest<"/workspaces/:id/copilot-mode">) => {
+        if (workspace.role !== "owner") return apiError(403, "owner_only");
+        const body = SetCopilotModeRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_copilot_mode");
+        workspaces.setCopilotMode(workspace.id, body.data.mode);
+        return Response.json({ ...workspace, copilotMode: body.data.mode } satisfies Workspace);
+      }),
     },
     "/workspaces/:id/invites": {
       POST: member(async (user, workspace, req) => {

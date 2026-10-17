@@ -54,6 +54,8 @@ const api = {
     revokeInvite: (id: string, inviteId: string): Promise<void> => ipcRenderer.invoke("workspaces:revoke-invite", id, inviteId),
     // The owner removes a member; with the user's own id, they leave.
     removeMember: (id: string, userId: string): Promise<void> => ipcRenderer.invoke("workspaces:remove-member", id, userId),
+    // The owner only: "personal" or "org" (who pays for the projects' agents).
+    setCopilotMode: (id: string, mode: string): Promise<unknown> => ipcRenderer.invoke("workspaces:set-copilot-mode", id, mode),
     invites: (): Promise<unknown> => ipcRenderer.invoke("workspaces:invites"),
     accept: (inviteId: string): Promise<unknown> => ipcRenderer.invoke("workspaces:accept", inviteId),
   },

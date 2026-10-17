@@ -3,8 +3,10 @@ import {
   ApiError,
   BrokeredGitHubToken,
   ControlToCoordinator,
+  CopilotInstallationToken,
   type AgentConnector,
   type CoordinatorToControl,
+  type CopilotPayer,
   type CoordinatorToolCall,
   type ReportedConnectorCall,
   type Project,
@@ -16,6 +18,7 @@ import {
 import { connectorServers } from "./connectorServers.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
+import { installationSession } from "./installationSession.ts";
 import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 
 export type CoordinatorOptions = {
@@ -34,12 +37,16 @@ export type CoordinatorOptions = {
 
 // A project's coordinator, on the project's computer. Dials out to control's
 // /coordinator/:projectId WebSocket with the project's credential and keeps the
-// connection up. Each member has their own chat, so their own Copilot session,
-// which uses their Copilot seat (a token control brokers for the member whose
-// turn is running). Control's scheduler sends one turn at a time for the whole
-// project. The coordinator plans and tracks work: its tools are the task ledger
-// and the shared context, both kept by control, plus the project's connectors
-// that control sends with each turn. No shell, no files.
+// connection up. Each member has their own chat, so their own Copilot session.
+// Each turn runs on the payer control names: the member's own Copilot seat (a
+// token control brokers for the member whose turn is running), or, when the
+// workspace's organization pays, an installation token control mints, which
+// the session's own runtime is restarted on when it runs low (installationSession.ts).
+// Control's scheduler sends one turn at a time for the whole project. The
+// coordinator plans and tracks work: its tools are the task ledger and the
+// shared context, both kept by control, plus the project's connectors that
+// control sends with each turn, which act as the member whoever pays for
+// Copilot. No shell, no files.
 // Like a bot's worker, it resends its latest turn's events on every reconnect.
 export function startCoordinator({ controlUrl, projectId, projectToken, copilot, retryMs = 2000, onBound }: CoordinatorOptions) {
   const base = `${controlUrl}/coordinator/${projectId}`;
@@ -52,9 +59,9 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
   // The turn running now, whose chat it is, and what it has streamed so far.
   let active: ({ turnId: TurnId; userId: UserId } & TurnStream) | null = null;
-  // Each member's session, opened by their first turn and opened again (resumed)
-  // when their connectors change. `key` identifies the connectors it has;
-  // `unsubscribe` stops its events reaching the chat.
+  // Each member's session, opened by their first turn and opened again (resumed,
+  // keeping its history) when their connectors or the kind of payer change.
+  // `key` identifies both; `unsubscribe` stops its events reaching the chat.
   const sessions = new Map<UserId, { key: string; session: Promise<BotSession>; unsubscribe: () => void }>();
 
   function send(message: CoordinatorToControl) {
@@ -99,35 +106,50 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     await fromControl("/connector-calls", { method: "POST", body: JSON.stringify(call) }).catch(() => {});
   };
 
-  function sessionFor(member: ProjectMember, connectors: AgentConnector[]) {
-    const key = JSON.stringify(connectors);
+  async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[]) {
+    const key = JSON.stringify({ payer: payer.kind, connectors });
     const open = sessions.get(member.userId);
     if (open?.key === key) return open.session;
     if (!project) throw new Error("A turn came before control said which project this is");
-    // The replaced session sends nothing more to the chat.
-    void open?.session.then(
-      () => open.unsubscribe(),
-      () => {},
-    );
+    // The replaced session sends nothing more to the chat, and closes: an
+    // organization's runtime stops with it.
+    if (open) {
+      const replaced = await open.session.catch(() => null);
+      open.unsubscribe();
+      await replaced?.disconnect();
+    }
+    const options = {
+      sessionId: `${projectId}-${member.userId}`,
+      onPermissionRequest: permissionFor(connectors),
+      tools,
+      instructions: instructions(project, member),
+      mcpServers: connectorServers(connectors, { base, credential: projectToken, member: member.userId }),
+      onMcpCall: reportCall(connectors),
+    };
+    const opening =
+      payer.kind === "org"
+        ? // The organization's Copilot, on installation tokens control mints for the running turn.
+          installationSession({
+            ...options,
+            copilot,
+            token: async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json()),
+          })
+        : copilot.openSession({
+            ...options,
+            // The member's own Copilot seat, brokered by control while their turn runs.
+            auth: {
+              kind: "seat",
+              gitHubTokenProvider: async () => {
+                const { accessToken, expiresAt } = BrokeredGitHubToken.parse(await (await fromControl(`/github-token/${member.userId}`)).json());
+                return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
+              },
+            },
+          });
     let stopEvents = () => {};
-    const session = copilot
-      .openSession({
-        sessionId: `${projectId}-${member.userId}`,
-        // The member's own Copilot seat, brokered by control while their turn runs.
-        gitHubTokenProvider: async () => {
-          const { accessToken, expiresAt } = BrokeredGitHubToken.parse(await (await fromControl(`/github-token/${member.userId}`)).json());
-          return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
-        },
-        onPermissionRequest: permissionFor(connectors),
-        tools,
-        instructions: instructions(project, member),
-        mcpServers: connectorServers(connectors, { base, credential: projectToken, member: member.userId }),
-        onMcpCall: reportCall(connectors),
-      })
-      .then((opened) => {
-        stopEvents = opened.on((event) => onSessionEvent(member.userId, event));
-        return opened;
-      });
+    const session = opening.then((opened) => {
+      stopEvents = opened.on((event) => onSessionEvent(member.userId, event));
+      return opened;
+    });
     sessions.set(member.userId, { key, session, unsubscribe: () => stopEvents() });
     session.catch(() => {
       if (sessions.get(member.userId)?.session === session) sessions.delete(member.userId);
@@ -142,10 +164,10 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     for (const turnEvent of toTurnEvents(event, active)) emit(turnId, turnEvent);
   }
 
-  async function runTurn(turnId: TurnId, member: ProjectMember, text: string, connectors: AgentConnector[]) {
+  async function runTurn(turnId: TurnId, member: ProjectMember, text: string, payer: CopilotPayer, connectors: AgentConnector[]) {
     active = { turnId, userId: member.userId, ...newTurnStream() };
     try {
-      await (await sessionFor(member, connectors)).send(text);
+      await (await sessionFor(member, payer, connectors)).send(text);
     } catch (error) {
       emit(turnId, { type: "error", message: error instanceof Error ? error.message : String(error) });
       emit(turnId, { type: "done" });
@@ -166,7 +188,7 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       if (message.type === "bound") {
         project = message.project;
         onBound?.(message.project);
-      } else void runTurn(message.turnId, message.member, message.text, message.connectors);
+      } else void runTurn(message.turnId, message.member, message.text, message.payer, message.connectors);
     };
     socket.onclose = () => {
       if (!stopped) retry = setTimeout(connect, retryMs);

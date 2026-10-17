@@ -29,8 +29,9 @@ import {
 import { systemClock, type Clock } from "./clock.ts";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
+import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
 import { chiefHost } from "./handoffs.ts";
-import { fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
+import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
@@ -76,6 +77,9 @@ export type ControlOptions = {
   // A running bot's computer stops after this long with no running turn, no
   // pending approval, no screen viewer and no routine run in progress. Default 30.
   idleStopMinutes?: number;
+  // Mints the installation tokens an organization pays for Copilot with.
+  // Defaults to the repo app's (github.ts copilotRequestsToken); a fake in tests.
+  copilotTokens?: CopilotTokenMinter;
   // Control's URL as users' browsers reach it, for OAuth callbacks. Defaults to the URL control listens on.
   publicUrl?: string;
   // Where projects' shared context files live. Defaults to a context folder
@@ -163,6 +167,7 @@ export function startControl({
   clock = systemClock,
   idleStopMinutes = 30,
   context,
+  copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
   publicUrl,
 }: ControlOptions) {
   const store = openStore(dbPath);
@@ -206,13 +211,15 @@ export function startControl({
     ask: approvals.ask,
   });
 
+  // Who pays for each agent run's Copilot (copilotIdentity.ts).
+  const payerOf = copilotIdentity({ store, broker, mint: copilotTokens });
   // Connectors, the access checklist, and the MCP proxy agents reach them through (connectors/connectors.ts).
   const connectors = connectorHost({ store, secrets, publicUrl: () => publicUrl ?? server.url.origin });
 
   // Projects, their coordinators and the coordinators' scheduler (projects.ts).
   const projects = projectHost({
     store,
-    broker,
+    payerOf,
     computers,
     context,
     githubApiUrl,
@@ -514,13 +521,14 @@ export function startControl({
           return bot instanceof Response ? bot : upgrade(server, req, { kind: "worker", ...bot });
         },
       },
-      // The token broker: the owner's access token, never a refresh token.
+      // The token broker: a chief always runs on its owner's seat, so the owner's
+      // access token, never a refresh token.
       "/worker/:botId/github-token": {
         GET: async (req) => {
           const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          const token = await broker.accessToken(bot.userId);
-          if (token) return Response.json(token);
+          const token = await payerOf({ kind: "chief", ownerId: bot.userId })?.token();
+          if (token && "kind" in token && token.kind === "seat") return Response.json(token.token);
           return apiError(403, "reauth_needed");
         },
       },

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ApprovalId, BotId, HandoffId, TurnId } from "./ids.ts";
+import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
 //   push          a git push, which control holds in its git proxy until the answer
@@ -40,6 +41,10 @@ export const UserMessage = z.object({ type: z.literal("user-message"), text: z.s
 export const ApprovalAnswer = z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() });
 export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>;
 
+// Who pays for the turn's Copilot requests. Control adds it when a project's
+// coordinator starts the turn, outside the runtime's numbering.
+export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer });
+
 // Body of POST /bots/:id/approvals/:approvalId (204; 409 when it is not pending).
 export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
 export type AnswerApprovalRequest = z.infer<typeof AnswerApprovalRequest>;
@@ -60,7 +65,7 @@ export type HandoffUpdate = z.infer<typeof HandoffUpdate>;
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, HandoffUpdate, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
@@ -76,6 +81,13 @@ export type SendMessageResponse = z.infer<typeof SendMessageResponse>;
 export const BrokeredGitHubToken = z.object({ accessToken: z.string().min(1), expiresAt: z.number().int() });
 export type BrokeredGitHubToken = z.infer<typeof BrokeredGitHubToken>;
 
+// Response of GET /coordinator/:projectId/installation-token: a one-hour
+// installation token of the repo app that may only make Copilot requests, for a
+// turn the organization pays for. The runtime gets it as COPILOT_GITHUB_TOKEN.
+// expiresAt is epoch milliseconds.
+export const CopilotInstallationToken = z.object({ token: z.string().min(1), expiresAt: z.number().int() });
+export type CopilotInstallationToken = z.infer<typeof CopilotInstallationToken>;
+
 // A bot's chat as the desktop window shows it, folded from ChatEvents.
 // Sent from Electron main to the renderer.
 export const ChatItem = z.discriminatedUnion("kind", [
@@ -85,6 +97,8 @@ export const ChatItem = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("error"), id: z.string(), message: z.string() }),
   // Control's note about a handoff (HandoffUpdate).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
+  // Who pays for the turn that follows.
+  z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer }),
   // expired: the turn ended before anyone answered (its worker restarted).
   z.object({
     kind: z.literal("approval"),

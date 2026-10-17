@@ -2,6 +2,7 @@ import {
   Workspace,
   WorkspaceDetail,
   WorkspaceInvite,
+  type CopilotMode,
   type InviteId,
   type UserId,
   type WorkspaceId,
@@ -25,6 +26,9 @@ export function createWorkspaces({ controlUrl, session }: WorkspacesOptions) {
     // Members and pending invites.
     detail: async (workspaceId: WorkspaceId) =>
       WorkspaceDetail.parse(await (await call("GET", `/workspaces/${workspaceId}`)).json()),
+    // The owner only: who pays for the Copilot of the workspace's project agents.
+    setCopilotMode: async (workspaceId: WorkspaceId, mode: CopilotMode) =>
+      Workspace.parse(await (await call("PUT", `/workspaces/${workspaceId}/copilot-mode`, { mode })).json()),
     invite: async (workspaceId: WorkspaceId, login: string) =>
       WorkspaceInvite.parse(await (await call("POST", `/workspaces/${workspaceId}/invites`, { login })).json()),
     revokeInvite: async (workspaceId: WorkspaceId, inviteId: InviteId) =>

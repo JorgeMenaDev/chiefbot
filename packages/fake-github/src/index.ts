@@ -10,8 +10,9 @@ import { createBareRepo, git, gitHttpBackend } from "./git.ts";
 // over smart HTTP, a file in a repo, opening pull requests, registering a GitHub
 // App from a manifest (what `bun run setup` does), and the deployer's repo app:
 // its installations on repos, the installation tokens control mints with its
-// private key, and a user's permission on a repo as such a token reads it. One
-// origin serves both hosts' paths.
+// private key (each with only the permissions asked for, among the app's), and a
+// user's permission on a repo as such a token reads it. One origin serves both
+// hosts' paths.
 //
 // Like GitHub, a user token may act on repos only as far as the app that issued
 // it may (by client ID). Only the repo app has repository permissions, so only
@@ -34,6 +35,8 @@ export type FakeGitHubOptions = {
   pollErrors?: PollError[];
   // The app's Enable Device Flow box is unticked.
   deviceFlowDisabled?: boolean;
+  // The repo app also has the Copilot Requests permission (`bun run setup --org-billed-copilot`).
+  copilotRequests?: boolean;
 };
 
 export const defaultFakeUser: FakeGitHubUser = {
@@ -85,8 +88,20 @@ const fakeApp = { id: 777, privateKey: appKeys.privateKey, clientId: "Iv-fake-re
 // Who a user token belongs to and the client that issued it.
 type FakeUserToken = { user: FakeGitHubUser; clientId: string };
 
-const AccessTokensBody = z.object({ repositories: z.array(z.string()), permissions: z.record(z.string(), z.string()) });
-export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], deviceFlowDisabled = false }: FakeGitHubOptions = {}) {
+// What control asks an installation token for: repos by name or by id, and permissions.
+const AccessTokensBody = z.object({
+  repositories: z.array(z.string()).optional(),
+  repository_ids: z.array(z.number().int()).optional(),
+  permissions: z.record(z.string(), z.string()),
+});
+export type FakeInstallationTokenRequest = z.infer<typeof AccessTokensBody>;
+
+export function startFakeGitHub({
+  user = defaultFakeUser,
+  pollErrors = [],
+  deviceFlowDisabled = false,
+  copilotRequests = false,
+}: FakeGitHubOptions = {}) {
   const deviceCode = "fake-device-code";
   const userCode = "ABCD-1234";
   const pending = [...pollErrors];
@@ -106,9 +121,19 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
   // Every push GitHub accepted, and who sent it.
   const pushes: Array<{ repository: string; by: string }> = [];
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
-  const repos = new Map<string, { installed: boolean; access: Record<string, FakeRepoAccess> }>();
-  // Each installation token and the repos it may write to.
-  const installationTokens = new Map<string, Set<string>>();
+  // Each repo: its id (as GitHub numbers repos), whether the app is installed on it, and who may do what.
+  const repos = new Map<string, { id: number; installed: boolean; access: Record<string, FakeRepoAccess> }>();
+  // What the repo app may grant: an installation token gets only permissions among these.
+  const appPermissions: Record<string, string> = {
+    metadata: "read",
+    contents: "write",
+    pull_requests: "write",
+    ...(copilotRequests ? { copilot_requests: "write" } : {}),
+  };
+  // Each installation token, the repos it covers and its contents permission (none, read or write).
+  const installationTokens = new Map<string, { repos: Set<string>; contents: string | undefined }>();
+  // The body of every installation token request, oldest first.
+  const installationTokenRequests: FakeInstallationTokenRequest[] = [];
   // One installation per account the app is installed on: its id is the index here.
   const installations: string[] = [];
   // Every manifest posted to the "new GitHub App" page, and the apps waiting for
@@ -230,7 +255,7 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
       "/repos/:owner/:repo/collaborators/:username/permission": {
         GET: (req) => {
           const repository = `${req.params.owner}/${req.params.repo}`;
-          if (!installationTokens.get(bearerToken(req))?.has(repository)) return Response.json({ message: "Not Found" }, { status: 404 });
+          if (!installationTokens.get(bearerToken(req))?.repos.has(repository)) return Response.json({ message: "Not Found" }, { status: 404 });
           return Response.json({ permission: repos.get(repository)?.access[req.params.username] ?? "none" });
         },
       },
@@ -251,14 +276,28 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
           if (!appAuthorized(req)) return Response.json({ message: "A JSON web token could not be decoded" }, { status: 401 });
           const owner = installations[Number(req.params.id) - 1];
           if (!owner) return Response.json({ message: "Not Found" }, { status: 404 });
-          const { repositories, permissions } = AccessTokensBody.parse(await req.json());
-          const scope = repositories.map((name) => `${owner}/${name}`);
-          if (!scope.every((repository) => repos.get(repository)?.installed)) {
+          const body = AccessTokensBody.parse(await req.json());
+          installationTokenRequests.push(body);
+          const { repositories = [], repository_ids = [], permissions } = body;
+          const byId = [...repos].filter(([, repo]) => repository_ids.includes(repo.id)).map(([fullName]) => fullName);
+          const scope = [...repositories.map((name) => `${owner}/${name}`), ...byId];
+          if (byId.length < repository_ids.length || !scope.every((repository) => repository.startsWith(`${owner}/`) && repos.get(repository)?.installed)) {
             return Response.json({ message: "There is at least one repository that does not exist or is not accessible" }, { status: 422 });
           }
+          if (Object.entries(permissions).some(([name, level]) => !grants(appPermissions[name], level))) {
+            return Response.json({ message: "The permissions requested are not granted to this installation." }, { status: 422 });
+          }
           const token = `ghs_fake_${installationTokens.size + 1}`;
-          installationTokens.set(token, new Set(scope));
-          return Response.json({ token, expires_at: new Date(Date.now() + 3600_000).toISOString(), permissions }, { status: 201 });
+          installationTokens.set(token, { repos: new Set(scope), contents: permissions.contents });
+          return Response.json(
+            {
+              token,
+              expires_at: new Date(Date.now() + 3600_000).toISOString(),
+              permissions,
+              repositories: scope.map((fullName) => ({ id: repos.get(fullName)?.id, full_name: fullName })),
+            },
+            { status: 201 },
+          );
         },
       },
       // Like GitHub: 422 unless the head branch exists in the repo.
@@ -297,16 +336,22 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
     },
   });
 
+  // Whether an installation token may read (or write) the repo's contents.
+  function installationMay(token: string, repository: string, level: "read" | "write") {
+    const installation = installationTokens.get(token);
+    return installation?.repos.has(repository) === true && grants(installation.contents, level);
+  }
+
   // Who a token acts as on a repo when it may read it (a login, or "app"), else null.
   function reader(token: string, repository: string) {
-    if (installationTokens.get(token)?.has(repository)) return "app";
+    if (installationMay(token, repository, "read")) return "app";
     const user = repoAppUser(token, repository);
     return user && repos.get(repository)?.access[user.login] ? user.login : null;
   }
 
   // The same, for writing.
   function writer(token: string, repository: string) {
-    if (installationTokens.get(token)?.has(repository)) return "app";
+    if (installationMay(token, repository, "write")) return "app";
     const user = repoAppUser(token, repository);
     return user && repos.get(repository)?.access[user.login] === "write" ? user.login : null;
   }
@@ -381,10 +426,13 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
     app: fakeApp,
     // Manifests posted to the "new GitHub App" page, oldest first.
     manifests,
+    installationTokenRequests,
+    // The repo's id, as GitHub numbers repos.
+    repoId: (fullName: string) => repos.get(fullName)?.id,
     // A private repo at <url>/<fullName>.git with one commit on main.
     createRepo(fullName: string, files: Record<string, string>, { access = { [user.login]: "write" }, installed = true }: FakeRepoOptions = {}) {
       createBareRepo(repoRoot, fullName, files);
-      repos.set(fullName, { installed, access });
+      repos.set(fullName, { id: 9000 + repos.size, installed, access });
     },
     // Runs git in the repo's bare copy, e.g. to read what a push left there.
     git: (fullName: string, ...args: string[]) => git(bareRepo(fullName), args),
@@ -393,4 +441,9 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
       rmSync(repoRoot, { recursive: true, force: true });
     },
   };
+}
+
+// Whether a permission level `held` covers `wanted` (write covers read).
+function grants(held: string | undefined, wanted: string) {
+  return held === wanted || (held === "write" && wanted === "read");
 }

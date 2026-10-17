@@ -139,7 +139,8 @@ export function startWorker({
   // after a restart the worker resumes the same conversation.
   function openSession() {
     const tools = [pullRequestTool({ controlUrl, botId, botToken }), ...chiefTools({ controlUrl, botId, botToken })];
-    session ??= copilot.openSession({ sessionId: BotId.parse(botId), gitHubTokenProvider: gitHubToken, onPermissionRequest, tools }).then((opened) => {
+    // A chief always runs on its owner's own Copilot seat.
+    session ??= copilot.openSession({ sessionId: BotId.parse(botId), auth: { kind: "seat", gitHubTokenProvider: gitHubToken }, onPermissionRequest, tools }).then((opened) => {
       opened.on(onSessionEvent);
       return opened;
     });
