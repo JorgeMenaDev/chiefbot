@@ -171,7 +171,7 @@ export function startControl({
     githubUrl,
     githubApiUrl,
     app: githubApp,
-    userToken: async (userId) => (await broker.accessToken(userId))?.accessToken ?? null,
+    ownerLogin: async (userId) => ((await broker.accessToken(userId)) ? (store.user(userId)?.login ?? null) : null),
     botFor: (credential) => store.botForToken(credential),
     ask: approvals.ask,
   });

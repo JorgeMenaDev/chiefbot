@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, ApprovalId, type ChatEvent } from "@chiefbot/contracts";
+import { ApiError, ApprovalId, BrokeredGitHubToken, type ChatEvent } from "@chiefbot/contracts";
 import { fakeCopilot, sdk, type FakeRuntime } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -140,6 +140,40 @@ test("from the agent's shell, git finds no GitHub token: not from the credential
   for (const result of results) expect(result.output).not.toMatch(/gh[ousr]_fake_/);
   expect(approvalIds(chat.events)).toEqual([]);
   expect(github.pushes).toEqual([]);
+});
+
+// What an agent that stole a GitHub token could do with it, straight to GitHub
+// and past control: push a commit to octo/demo (git's exit code) and open a
+// pull request there (GitHub's status).
+async function misuse(githubUrl: string, token: string) {
+  const dir = mkdtempSync(join(tmpdir(), "chiefbot-stolen-"));
+  atCleanUp(() => rmSync(dir, { recursive: true, force: true }));
+  const remote = new URL(`${githubUrl}/octo/demo.git`);
+  remote.username = "x-access-token";
+  remote.password = token;
+  const env = { PATH: process.env.PATH ?? "", HOME: dir, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", REMOTE: remote.href };
+  const script = 'git init -q && git -c user.name=x -c user.email=x@example.com commit -q --allow-empty -m x && git push -q "$REMOTE" HEAD:refs/heads/stolen';
+  // Async: the fake GitHub answers git in this same process.
+  const push = await Bun.spawn(["sh", "-c", script], { cwd: dir, env, stderr: "ignore" }).exited;
+  const pr = await fetch(`${githubUrl}/repos/octo/demo/pulls`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+    body: JSON.stringify({ head: "main", base: "main", title: "Stolen" }),
+  });
+  return { pushed: push === 0, pullRequestStatus: pr.status };
+}
+
+test("the GitHub token a bot computer gets can neither push nor open pull requests, even where its owner may write", async () => {
+  const { github, url, botId, botToken } = await setup();
+  const brokered = await fetch(`${url}/worker/${botId}/github-token`, { headers: { authorization: `Bearer ${botToken(botId)}` } });
+  const { accessToken } = BrokeredGitHubToken.parse(await brokered.json());
+
+  // A user token of the repo app (the v0.1 sign-in) could do both on the same repo.
+  const repoAppToken = github.issueTokens(undefined, github.app.clientId).accessToken;
+
+  expect(await misuse(github.url, accessToken)).toEqual({ pushed: false, pullRequestStatus: 404 });
+  expect(await misuse(github.url, repoAppToken)).toEqual({ pushed: true, pullRequestStatus: 201 });
+  expect(github.pushes).toEqual([{ repository: "octo/demo", by: "octo-user" }]);
 });
 
 test("a push outside a turn fails, even with the bot's credential: nobody can approve it", async () => {

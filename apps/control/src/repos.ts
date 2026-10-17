@@ -11,20 +11,21 @@ import type { ApprovalOutcome } from "./approvals.ts";
 import { createPullRequest, installationToken, repoPermission, type GitHubAppKey } from "./github.ts";
 
 // Control's repo access, the boundary between bots and GitHub. Control holds the
-// only credential that may write (the deployer's GitHub App, through one-repo
-// installation tokens it never hands out). A bot computer reaches repos through
+// only credential that may write (the deployer's repo app, through one-repo
+// installation tokens it never hands out; the owner's sign-in token, which their
+// bots get for Copilot, has no repository permissions). A bot computer reaches repos through
 // control's git proxy with its bot credential: fetches pass through, and every
 // push waits for the owner's approval before control forwards it. Pull requests
-// are opened by control, also after approval. Each request first checks, with
-// the owner's own GitHub token, that the owner may do it themselves.
+// are opened by control, also after approval. Each request first checks that the
+// owner is still signed in and, through the repo app, that they may do it themselves.
 
 export type RepoAccessOptions = {
   // github.com (git) and api.github.com; fakes in tests.
   githubUrl: string;
   githubApiUrl: string;
   app: GitHubAppKey;
-  // The bot owner's GitHub access token from the broker, or null when they must sign in again.
-  userToken: (userId: UserId) => Promise<string | null>;
+  // The bot owner's GitHub login, or null when they must sign in again.
+  ownerLogin: (userId: UserId) => Promise<string | null>;
   // The bot a bot credential belongs to, if any.
   botFor: (credential: string) => { botId: BotId; userId: UserId } | null;
   // Asks the bot's owner in its running turn (approvals.ts).
@@ -47,25 +48,25 @@ const unapproved = {
   },
 };
 
-export function repoAccess({ githubUrl, githubApiUrl, app, userToken, botFor, ask }: RepoAccessOptions) {
-  // A token that may `access` the repo: the app's installation token for it
-  // (null for a read where the app is not installed: GitHub is asked without
-  // one, which works for public repos). Or why not, after checking the bot owner
-  // may do it themselves. Called again after an approval, for a fresh token.
+export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, botFor, ask }: RepoAccessOptions) {
+  // A token that may `access` the repo: the app's installation token for it,
+  // once it shows the bot owner may do it themselves. For a read where the app
+  // is not installed the token is null: GitHub is asked without one, which works
+  // only for public repos. Or why not. Called again after an approval, for a fresh token.
   async function grant(userId: UserId, fullName: string, access: "read" | "write"): Promise<{ token: string | null } | Refusal> {
-    const token = await userToken(userId);
-    if (!token) {
+    const login = await ownerLogin(userId);
+    if (!login) {
       return { error: "reauth_needed", status: 403, message: "Chiefbot has lost your GitHub sign-in. Sign in again in the Chiefbot app." };
     }
-    const permission = await repoPermission(githubApiUrl, token, fullName);
+    const installation = await installationToken(githubApiUrl, app, fullName, access);
+    if (installation === null) return access === "write" ? notInstalled(fullName) : { token: null };
+    const permission = await repoPermission(githubApiUrl, installation, fullName, login);
     if (permission === "none") {
       return { error: "repo_not_found", status: 404, message: `${fullName} was not found, or your GitHub account cannot see it.` };
     }
     if (access === "write" && permission !== "write") {
       return { error: "repo_read_only", status: 403, message: `Your GitHub account cannot push to ${fullName}.` };
     }
-    const installation = await installationToken(githubApiUrl, app, fullName, access);
-    if (installation === null && access === "write") return notInstalled(fullName);
     return { token: installation };
   }
 
