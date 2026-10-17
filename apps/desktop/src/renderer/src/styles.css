@@ -287,6 +287,11 @@ body {
 .tool-row.succeeded .tool-mark {
   color: #3fb950;
 }
+/* Who pays for a project turn's Copilot, above the coordinator's answer. */
+.payer {
+  margin: 0;
+  font-size: 12px;
+}
 .working {
   margin: 0;
   font-size: 12px;

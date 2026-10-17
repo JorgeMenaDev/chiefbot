@@ -268,7 +268,7 @@ function BotPane({ bot }: { bot: Bot }) {
           <h2>
             <StatusDot status={bot.status} /> {bot.name}
           </h2>
-          <p className="muted">{statusText[bot.status]}</p>
+          <p className="muted">{statusText[bot.status]} · runs on your Copilot seat</p>
         </div>
         <div className="actions">
           {bot.status === "stopped" ? (

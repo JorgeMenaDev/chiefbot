@@ -1,12 +1,13 @@
 import {
   AnswerApprovalRequest,
-  AUTO_MODEL,
   PullRequestArgs,
   WorkerToControl,
+  type AgentConnector,
   type ChatEvent,
   type ClientEvent,
   type ControlToWorker,
   type CoordinatorToolCall,
+  type CopilotPayer,
   type OpenedPullRequest,
   type Project,
   type ProjectId,
@@ -19,14 +20,21 @@ import {
   type WorkerTranscript,
 } from "@chiefbot/contracts";
 import type { controlApprovals } from "./approvals.ts";
+import type { Clock } from "./clock.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
+import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import type { repoAccess, RepoAgent } from "./repos.ts";
 import type { openStore } from "./store.ts";
-import type { tokenBroker } from "./tokens.ts";
 
-// A task worker's WebSocket: the worker of exactly one task worker, and the turn it runs.
-export type TaskWorkerSocketData = { kind: "task-worker"; workerId: TaskWorkerId; turnId: TurnId };
+// A task worker's WebSocket: the worker of exactly one task worker, the turn it
+// runs and the member who asked for it.
+export type TaskWorkerSocketData = { kind: "task-worker"; workerId: TaskWorkerId; turnId: TurnId; userId: UserId };
+
+// An organization's installation token lasts an hour and is renewed only between
+// turns, but a task is one turn: control fails a task the organization pays for
+// once it has run this long, before its token runs out mid-turn.
+export const orgTaskLimitMs = 50 * 60_000;
 
 // The coordinator's worker tools.
 export type WorkerToolCall = Extract<CoordinatorToolCall, { tool: "dispatch_worker" | "worker_status" | "worker_transcript" | "stop_worker" }>;
@@ -36,15 +44,22 @@ type Socket = { send(message: string): unknown; close(code?: number, reason?: st
 
 export type TaskWorkerHostOptions = {
   store: ReturnType<typeof openStore>;
-  broker: ReturnType<typeof tokenBroker>;
+  // Who pays for a worker's Copilot: as for the coordinator, the member who asked or their organization.
+  payerOf: ReturnType<typeof copilotIdentity>;
+  // The project's connectors ready for the member who asked (connectors.ts).
+  connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
   computers: ComputerProvider;
   approvals: ReturnType<typeof controlApprovals>;
+  // Times the organization's tasks out (orgTaskLimitMs). A fake in tests.
+  clock: Clock;
   // Opens a pull request after the requester approves it (repos.ts).
   pullRequest: ReturnType<typeof repoAccess>["pullRequest"];
   // Control's URL as a computer reaches it.
   controlUrlForComputers: () => string;
   // Sends a ClientEvent to every /events socket of the user.
   publishToUser: (userId: UserId, event: ClientEvent) => void;
+  // The project's task ledger changed (a worker linked its pull request).
+  onLedgerChange: (projectId: ProjectId) => void;
   // Upgrades the request to the worker's WebSocket; undefined once upgraded.
   upgrade: (req: Request, data: TaskWorkerSocketData) => Response | undefined;
 };
@@ -54,9 +69,11 @@ export type TaskWorkerHostOptions = {
 // writes the launch record first, keyed by the tool call's creation id, then
 // asks for the computer, so a resent call starts no second worker. The worker
 // is a bot's worker (apps/worker) on control's /task-worker routes: it runs the
-// task as one turn on the Copilot seat of the member who asked, clones and
-// pushes through control's git proxy and opens its pull request through control,
-// each push and pull request approved by that member. Its last message is its
+// task as one turn for the member who asked, on the Copilot that pays for it
+// (their seat, or their organization's: copilotIdentity.ts) and with the
+// project's connectors ready for them (through connectors.ts's proxy). It clones
+// and pushes through control's git proxy and opens its pull request through
+// control, each push and pull request approved by that member. Its last message is its
 // result; its pull request is linked on the task. The computer goes once the
 // worker is stopped or its task is done or abandoned; on start, control removes
 // every worker computer that should be gone (`recover`).
@@ -69,18 +86,24 @@ export type TaskWorkerHostOptions = {
 //                                409 not_pending when it is answered, unknown or its turn ended)
 // Worker routes (bearer: the task worker's credential; 403 for another worker's):
 //   WS   /task-worker/:workerId                ControlToWorker; WorkerToControl back
-//   GET  /task-worker/:workerId/github-token   → BrokeredGitHubToken of the member who asked
+//   GET  /task-worker/:workerId/github-token   → BrokeredGitHubToken of the member who asked, while
+//                                its task runs on their seat (404 otherwise; 403 reauth_needed)
+//   GET  /task-worker/:workerId/installation-token  → CopilotInstallationToken, while its task runs
+//                                on the organization's Copilot (404 otherwise; 502 copilot_token_failed)
 //   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest once the
 //                                member who asked approves (errors as a bot's)
 // The git proxy (repos.ts) takes the worker's credential through agentFor.
 export function taskWorkerHost({
   store,
-  broker,
+  payerOf,
+  connectorsFor,
   computers,
   approvals,
+  clock,
   pullRequest,
   controlUrlForComputers,
   publishToUser,
+  onLedgerChange,
   upgrade,
 }: TaskWorkerHostOptions) {
   const { projects, taskWorkers: workers } = store;
@@ -95,6 +118,7 @@ export function taskWorkerHost({
   const publishTasks = (projectId: ProjectId) => {
     const event = { type: "tasks", projectId, tasks: projects.tasks(projectId) } satisfies ClientEvent;
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, event);
+    onLedgerChange(projectId);
   };
   const send = (workerId: TaskWorkerId, message: ControlToWorker) => sockets.get(workerId)?.send(JSON.stringify(message));
   const refused = (message: string, status = 400) => apiError(status, "invalid_tool_call", message);
@@ -199,16 +223,20 @@ export function taskWorkerHost({
     "/task-worker/:workerId": {
       GET: (req: Bun.BunRequest<"/task-worker/:workerId">) => {
         const own = ownWorker(req);
-        return own instanceof Response ? own : upgrade(req, { kind: "task-worker", workerId: own.workerId, turnId: own.turnId });
+        return own instanceof Response ? own : upgrade(req, { kind: "task-worker", workerId: own.workerId, turnId: own.turnId, userId: own.userId });
       },
     },
     // The token broker: the access token of the member who asked, never a refresh token.
     "/task-worker/:workerId/github-token": {
-      GET: async (req: Bun.BunRequest<"/task-worker/:workerId/github-token">) => {
+      GET: (req: Bun.BunRequest<"/task-worker/:workerId/github-token">) => {
         const own = ownWorker(req);
-        if (own instanceof Response) return own;
-        const token = await broker.accessToken(own.userId);
-        return token ? Response.json(token) : apiError(403, "reauth_needed");
+        return own instanceof Response ? own : runningToken(own, "seat");
+      },
+    },
+    "/task-worker/:workerId/installation-token": {
+      GET: (req: Bun.BunRequest<"/task-worker/:workerId/installation-token">) => {
+        const own = ownWorker(req);
+        return own instanceof Response ? own : runningToken(own, "org");
       },
     },
     // The worker's create_pull_request tool. Waits, however long, for the requester's
@@ -236,6 +264,35 @@ export function taskWorkerHost({
       },
     },
   };
+
+  // The token for the worker's running task, if who pays for it is of `kind`; 404 otherwise.
+  async function runningToken(own: { workerId: TaskWorkerId; projectId: ProjectId; userId: UserId }, kind: CopilotPayer["kind"]) {
+    const working = workers.worker(own.workerId)?.state === "working";
+    const run = working ? payerOf({ kind: "project", projectId: own.projectId, askerId: own.userId }) : null;
+    if (!run || run.payer.kind !== kind) return apiError(404, "not_found");
+    const token: CopilotToken = await run.token();
+    if ("error" in token) return token.error === "reauth_needed" ? apiError(403, token.error) : apiError(502, token.error, token.message);
+    return Response.json(token.token);
+  }
+
+  // Starts the worker's task, once: on the Copilot of whoever pays for the
+  // member who asked, with the connectors ready for them. A task the
+  // organization pays for fails after orgTaskLimitMs (not across a control restart).
+  async function startTask(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId) {
+    const run = payerOf({ kind: "project", projectId, askerId: userId });
+    const started = run && workers.startTurn(workerId, run.payer);
+    if (!run || !started) return;
+    publish(projectId);
+    const connectors = await connectorsFor(projectId, userId).catch(() => []);
+    send(workerId, { type: "run-task", turnId: started.turnId, text: started.prompt, member: userId, payer: run.payer, connectors });
+    if (run.payer.kind !== "org") return;
+    clock.setTimeout(() => {
+      const ended = workers.end(workerId, "failed", "The task ran out of time: its organization's one-hour Copilot token cannot be renewed mid-task. Dispatch what is left as a smaller task.");
+      if (ended.length === 0) return;
+      approvals.turnEnded(started.turnId);
+      publish(projectId);
+    }, orgTaskLimitMs);
+  }
 
   // The worker whose credential the request carries, if it is :workerId's; 401 or 403 otherwise.
   function ownWorker(req: Request & { params: { workerId: string } }) {
@@ -342,7 +399,7 @@ export function taskWorkerHost({
       if (sockets.get(workerId) === ws) sockets.delete(workerId);
     },
 
-    message({ workerId, turnId }: TaskWorkerSocketData, raw: string | Buffer) {
+    message({ workerId, turnId, userId }: TaskWorkerSocketData, raw: string | Buffer) {
       const message = WorkerToControl.parse(JSON.parse(String(raw)));
       const worker = workers.worker(workerId);
       if (!worker) return;
@@ -357,10 +414,8 @@ export function taskWorkerHost({
       if (message.type === "models") return;
       // Hello. The first one starts the task; after that, the worker lost the
       // task unless it says it still runs it, and may have missed answers.
-      const started = workers.startTurn(workerId);
-      if (started) {
-        send(workerId, { type: "run-turn", turnId: started.turnId, text: started.prompt, model: AUTO_MODEL });
-        publish(worker.projectId);
+      if (worker.state === "launching") {
+        void startTask(workerId, worker.projectId, userId);
       } else if (worker.state === "working" && message.activeTurnId !== turnId) {
         workers.end(workerId, "failed", "The worker's computer restarted before it finished the task.");
         approvals.turnEnded(turnId);

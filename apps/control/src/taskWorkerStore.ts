@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import {
   ApprovalId,
   ChatEvent,
+  CopilotPayer,
   ProjectId,
   TaskWorker,
   TaskWorkerId,
@@ -23,6 +24,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   // `computer`: wanted while the worker may need it; unwanted once it must go
   // (the worker stopped, or its launch failed); removed once the provider
   // deleted it. A wanted computer of a done or abandoned task must go too.
+  // `payer` is who pays for its Copilot (JSON), set when its task starts.
   // The worker's credential is stored as a SHA-256.
   db.run(`CREATE TABLE IF NOT EXISTS task_workers (
     id TEXT PRIMARY KEY,
@@ -37,6 +39,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     computer TEXT NOT NULL CHECK (computer IN ('wanted', 'unwanted', 'removed')),
     result TEXT,
     pull_request TEXT,
+    payer TEXT,
     next_index INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
@@ -64,6 +67,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     project_id: string;
     task_number: number;
     login: string;
+    payer: string | null;
     state: string;
     computer: string;
     result: string | null;
@@ -71,7 +75,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     created_at: number;
     updated_at: number;
   };
-  const workerColumns = `task_workers.id, task_workers.project_id, task_workers.task_number, users.login, task_workers.state,
+  const workerColumns = `task_workers.id, task_workers.project_id, task_workers.task_number, users.login, task_workers.payer, task_workers.state,
     task_workers.computer, task_workers.result, task_workers.pull_request, task_workers.created_at, task_workers.updated_at
     FROM task_workers JOIN users ON users.id = task_workers.user_id`;
   // Approvals wait only while the worker works: a pending one of an ended turn can never be answered.
@@ -89,6 +93,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       projectId: row.project_id,
       taskNumber: row.task_number,
       requestedBy: row.login,
+      payer: row.payer === null ? null : CopilotPayer.parse(JSON.parse(row.payer)),
       state: row.state,
       result: row.result,
       pullRequest: row.pull_request,
@@ -201,14 +206,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         : null;
     },
 
-    // The worker said hello for the first time: its task starts now. Null when it
-    // already started (or ended), so the task is sent once.
-    startTurn(workerId: TaskWorkerId): { turnId: TurnId; prompt: string } | null {
+    // The worker said hello for the first time: its task starts now, on `payer`'s
+    // Copilot. Null when it already started (or ended), so the task is sent once.
+    startTurn(workerId: TaskWorkerId, payer: CopilotPayer): { turnId: TurnId; prompt: string } | null {
       const row = db
-        .query<{ turn_id: string; prompt: string }, [string, number]>(
-          "UPDATE task_workers SET state = 'working', updated_at = ?2 WHERE id = ?1 AND state = 'launching' RETURNING turn_id, prompt",
+        .query<{ turn_id: string; prompt: string }, [string, string, number]>(
+          "UPDATE task_workers SET state = 'working', payer = ?2, updated_at = ?3 WHERE id = ?1 AND state = 'launching' RETURNING turn_id, prompt",
         )
-        .get(workerId, Date.now());
+        .get(workerId, JSON.stringify(payer), Date.now());
       return row ? { turnId: TurnId.parse(row.turn_id), prompt: row.prompt } : null;
     },
 

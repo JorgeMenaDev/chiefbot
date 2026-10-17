@@ -3,6 +3,7 @@ import { ChatItem, TurnEventMessage, TurnHello } from "./chat.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, UserId, WorkspaceId } from "./ids.ts";
 import { RepoFullName } from "./repos.ts";
+import { CopilotPayer } from "./workspaces.ts";
 
 // The repo's chiefbot.project.yaml, at its root on the default branch. Control
 // reads it when the project is created. Unknown keys are errors, so a typo is
@@ -141,10 +142,14 @@ export type ProjectMember = z.infer<typeof ProjectMember>;
 
 // Control → coordinator on the /coordinator/:projectId WebSocket.
 //   bound     the project this connection belongs to; sent right after control accepts the credential
-//   run-turn  run one turn in `member`'s chat. Control's scheduler sends one at a
-//             time per project, across all members' chats. `connectors` are the
-//             MCP servers the member's session gets: those the project file declares
-//             that are defined in the workspace and ready for this member.
+//   run-turn  run one turn in `member`'s chat, on `payer`'s Copilot: the member's
+//             seat (GET …/github-token/:userId) or the organization's
+//             (GET …/installation-token). Control's scheduler sends one at a time
+//             per project, across all members' chats. `connectors` are the MCP
+//             servers the member's session gets: those the project file declares
+//             that are defined in the workspace and ready for this member. They
+//             act as the member (or the workspace, for a shared connector)
+//             whoever pays for Copilot.
 export const ControlToCoordinator = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), project: Project }),
   z.object({
@@ -152,6 +157,7 @@ export const ControlToCoordinator = z.discriminatedUnion("type", [
     turnId: TurnId,
     member: ProjectMember,
     text: z.string(),
+    payer: CopilotPayer,
     connectors: z.array(AgentConnector).default([]),
   }),
 ]);

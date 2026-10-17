@@ -14,6 +14,7 @@ import {
   RoutineId,
   RoutineInput,
   SendMessageRequest,
+  SetCopilotModeRequest,
   SetBotModelRequest,
   TaskWorkerId,
   UserId,
@@ -158,6 +159,9 @@ ipcMain.handle("workspaces:revoke-invite", (_event, id: unknown, inviteId: unkno
 );
 ipcMain.handle("workspaces:remove-member", (_event, id: unknown, userId: unknown) =>
   workspaces.removeMember(WorkspaceId.parse(id), UserId.parse(userId)),
+);
+ipcMain.handle("workspaces:set-copilot-mode", (_event, id: unknown, mode: unknown) =>
+  workspaces.setCopilotMode(WorkspaceId.parse(id), SetCopilotModeRequest.parse({ mode }).mode),
 );
 ipcMain.handle("workspaces:invites", () => workspaces.invites());
 ipcMain.handle("workspaces:accept", (_event, inviteId: unknown) => workspaces.accept(InviteId.parse(inviteId)));

@@ -6,7 +6,10 @@ import { readLocalConfig, writeLocalConfig, writeOwnerOnly } from "./config.ts";
 // `bun run setup`: registers the deployer's own two GitHub Apps with GitHub's
 // App Manifest flow (https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest):
 //   - the repo app (contents and pull requests write). Only control uses it,
-//     through installation tokens, to reach repos for bots.
+//     through installation tokens, to reach repos for bots. With
+//     --org-billed-copilot it may also make Copilot requests, so the
+//     organization can pay for its projects' agents (control mints tokens with
+//     that permission alone; a workspace owner turns it on).
 //   - the sign-in app, with no repository permissions. The desktop signs in with
 //     it, and its user tokens are what bot computers get for the Copilot SDK, so
 //     a token stolen from a bot computer cannot write to any repo.
@@ -30,6 +33,9 @@ export type SetupOptions = {
   org?: string;
   // Sign in with this OAuth App instead of a sign-in GitHub App.
   oauthClientId?: string;
+  // Give the repo app GitHub's Copilot Requests permission, so `org` can pay
+  // for its projects' agents. Needs `org`.
+  orgBilledCopilot?: boolean;
   // Opens the local page in the deployer's browser.
   open: (url: string) => Promise<void>;
 };
@@ -43,6 +49,8 @@ export type SetupResult = {
   signInSettingsUrl: string | null;
   // Where they install the repo app on the repositories bots may work on.
   installUrl: string;
+  // The organization that pays for its projects' agents' Copilot through the repo app, if any.
+  copilotOrg: string | null;
 };
 
 // What each app is for, and its permissions on the repositories it is installed on.
@@ -55,8 +63,6 @@ const apps = {
   "sign-in": {
     name: "Chiefbot sign-in",
     description: "Signs you in to Chiefbot, whose bots run on your Copilot plan. It has no repository permissions.",
-    // Copilot requests for the SDK go here once ticket #21 settles the name, if
-    // a user token needs it: copilot_requests is not a repository permission.
     permissions: {},
   },
 };
@@ -77,7 +83,9 @@ const Conversion = z.object({
 // Resolves once both apps are registered or recorded and saved. Registers only
 // what the home lacks; refuses when it has both, unless oauthClientId switches
 // the sign-in app. Delete config.json to register new apps.
-export async function runSetup({ githubUrl, githubApiUrl, dir, org, oauthClientId, open }: SetupOptions): Promise<SetupResult> {
+export async function runSetup({ githubUrl, githubApiUrl, dir, org, oauthClientId, orgBilledCopilot = false, open }: SetupOptions): Promise<SetupResult> {
+  if (orgBilledCopilot && org === undefined) throw new Error("--org-billed-copilot needs --org: only an organization can pay for Copilot through the repo app.");
+  const copilotOrg = orgBilledCopilot && org !== undefined ? org : null;
   let config = readLocalConfig(dir);
   if (config?.signIn && oauthClientId === undefined) {
     throw new Error(
@@ -94,7 +102,7 @@ export async function runSetup({ githubUrl, githubApiUrl, dir, org, oauthClientI
     const signIn = oauth ?? config?.signIn;
     if (!app || !signIn) throw new Error("setup finished without both apps");
     if (oauth) writeLocalConfig(dir, { githubApp: app, signIn: oauth });
-    return { app, signIn, signInSettingsUrl, installUrl: `${app.htmlUrl}/installations/new` };
+    return { app, signIn, signInSettingsUrl, installUrl: `${app.htmlUrl}/installations/new`, copilotOrg };
   };
   if (missing.length === 0) return finish();
 
@@ -112,7 +120,8 @@ export async function runSetup({ githubUrl, githubApiUrl, dir, org, oauthClientI
       description: apps[role].description,
       redirect_url: `${server.url.origin}/callback`,
       public: false,
-      default_permissions: apps[role].permissions,
+      // Copilot Requests is a repository permission: the org-wide install covers every repo.
+      default_permissions: { ...apps[role].permissions, ...(role === "repo" && copilotOrg !== null ? { copilot_requests: "write" } : {}) },
     };
     return html(`${before}
       <form id="register" method="post" action="${escape(`${newAppUrl}?state=${state}`)}">
@@ -188,12 +197,14 @@ export async function runSetup({ githubUrl, githubApiUrl, dir, org, oauthClientI
 }
 
 // The clicks left after registering, as setup prints and shows them.
-export function nextSteps({ signInSettingsUrl, installUrl }: SetupResult): string[] {
+export function nextSteps({ signInSettingsUrl, installUrl, copilotOrg }: SetupResult): string[] {
   const steps = [
     ...(signInSettingsUrl === null
       ? []
       : [`Open ${signInSettingsUrl}, tick Enable Device Flow (under Identifying and authorizing users) and click Save changes. The desktop signs in with this app.`]),
-    `Open ${installUrl} and install the repo app on the repositories your bots may work on.`,
+    copilotOrg === null
+      ? `Open ${installUrl} and install the repo app on the repositories your bots may work on.`
+      : `Open ${installUrl}, install the repo app on ${copilotOrg} with All repositories (GitHub bills ${copilotOrg}'s Copilot through it), and turn on ${copilotOrg}'s policy that allows Copilot requests from GitHub App installations.`,
   ];
   return steps.map((step, i) => `${i + 1}. ${step}`);
 }

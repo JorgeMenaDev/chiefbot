@@ -1,11 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, Project, Task, TaskWorker, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ApiError, ConnectorCall, Project, Task, TaskWorker, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fakeClock } from "./clock.ts";
+import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
+import { orgTaskLimitMs } from "./taskWorkers.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 // A project's workers end to end: the coordinator (fake Copilot) dispatches a
@@ -18,8 +21,9 @@ afterEach(cleanUp);
 const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan: "individual", sku: "free_limited_copilot" } };
 
 // Control with a workspace owned by the signed-in user, octo-friend as its
-// member (both may write to the repo), and a project for octo-org/shop whose coordinator is online.
-async function teamProject(options: TestControlOptions = {}) {
+// member (both may write to the repo), and a project for octo-org/shop whose
+// coordinator is online. `projectFile` is the repo's chiefbot.project.yaml.
+async function teamProject(options: TestControlOptions = {}, projectFile = "commands:\n  test: bun test\n") {
   const control = await startTestControl(options);
   const owner = control.user;
   const workspace = Workspace.parse(await (await owner.api("POST", "/workspaces", { name: "Platform team" })).json());
@@ -29,11 +33,11 @@ async function teamProject(options: TestControlOptions = {}) {
   await guest.api("POST", `/invites/${invite?.id}/accept`);
   control.github.createRepo(
     "octo-org/shop",
-    { "chiefbot.project.yaml": "commands:\n  test: bun test\n", "README.md": "# Shop\nTeh shop.\n" },
+    { "chiefbot.project.yaml": projectFile, "README.md": "# Shop\nTeh shop.\n" },
     { access: { "octo-user": "write", "octo-friend": "write" } },
   );
   const project = Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo: "octo-org/shop" })).json());
-  return { ...control, owner, guest, project };
+  return { ...control, owner, guest, workspace, project };
 }
 
 // Sends a member's message to the project's coordinator and waits until it is answered.
@@ -352,4 +356,61 @@ test("a worker whose computer restarts mid-task fails, and deleting the project 
     { id, deleteData: true },
     { id: project.id, deleteData: true },
   ]);
+});
+
+test("a worker gets the project's connectors through control's proxy, and its calls run and are logged as the member who asked", async () => {
+  const upstream = startFakeMcpServer();
+  atCleanUp(upstream.stop);
+  const { owner, guest, workspace, project, copilot } = await teamProject({}, "connectors: [tracker]\n");
+  const connectors = `/workspaces/${workspace.id}/connectors`;
+  await owner.api("POST", connectors, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
+  await guest.api("PUT", `${connectors}/tracker/token`, { token: "tracker-guest" });
+  let dispatched: unknown = null;
+  copilot.script = async function* (prompt, runtime) {
+    if (isWorker(prompt)) {
+      await runtime.callMcp("tracker", "list_issues");
+      yield sdk.idle();
+      return;
+    }
+    await runtime.tool("create_task", { title: "Triage the issues" });
+    dispatched = await answer(runtime.tool("dispatch_worker", { task: 1 }));
+    yield sdk.idle();
+  };
+
+  await ask(guest, project, "Triage the open issues");
+  const { id } = TaskWorker.parse(dispatched);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+
+  // The worker's session reaches the connector through its own route on control.
+  expect(copilot.mcpServers.at(-1)?.tracker).toMatchObject({ type: "http", url: expect.stringContaining(`/task-worker/${id}/mcp/tracker`) });
+  expect(upstream.calls).toEqual([{ tool: "list_issues", authorization: "Bearer tracker-guest" }]);
+  const log = ConnectorCall.array().parse(await (await owner.api("GET", `/projects/${project.id}/connector-calls`)).json());
+  expect(log.map(({ connector, tool, requester, identity }) => [connector, tool, requester, identity])).toEqual([
+    ["tracker", "list_issues", "octo-friend", "personal"],
+  ]);
+});
+
+test("when the organization pays, a worker runs on its installation token and fails before the token's hour runs out", async () => {
+  const time = fakeClock(Date.now());
+  let minted = 0;
+  const control = await teamProject({
+    clock: time.clock,
+    copilotTokens: async (repo) => ({ token: `ghs_org_${++minted}`, expiresAt: Date.now() + 3600_000, account: repo.split("/")[0] ?? repo }),
+  });
+  const { owner, workspace, project, copilot } = control;
+  await owner.api("PUT", `/workspaces/${workspace.id}/copilot-mode`, { mode: "org" });
+  const { tool } = await heldTurn(control);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const working = await workerWhen(owner, project, id, ({ state }) => state === "working");
+  expect(working.payer).toEqual({ kind: "org", account: "octo-org" });
+  await eventually(() => copilot.sends.some(({ sessionId }) => sessionId === id));
+  // The coordinator's session took the first token, the worker's the second.
+  expect(copilot.tokens).toEqual(["ghs_org_1", "ghs_org_2"]);
+
+  time.advance(orgTaskLimitMs);
+
+  expect(await workerWhen(owner, project, id, ({ state }) => state === "failed")).toMatchObject({
+    result: "The task ran out of time: its organization's one-hour Copilot token cannot be renewed mid-task. Dispatch what is left as a smaller task.",
+  });
 });

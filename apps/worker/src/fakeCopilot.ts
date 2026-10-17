@@ -35,8 +35,11 @@ export type FakeCopilotOptions = {
 };
 
 export function fakeCopilot({ script = echo, models = { list: [] }, shell }: FakeCopilotOptions = {}) {
-  // The access token each opened session got from its gitHubTokenProvider.
+  // The token each opened session ran on: a seat's access token from its
+  // gitHubTokenProvider, or an installation token its runtime started with.
   const tokens: string[] = [];
+  // Ids of every session disconnected, in order.
+  const closed: string[] = [];
   // Ids of every session opened, in order (a resume counts again).
   const sessionIds: string[] = [];
   // Each opened session's MCP servers, in the order sessions opened.
@@ -45,9 +48,12 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const sends: Array<{ sessionId: string; prompt: string; model: string }> = [];
 
   const copilot: Copilot = {
-    async openSession({ sessionId, gitHubTokenProvider, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall }) {
-      const token = await gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
-      if (token.kind === "token") tokens.push(token.accessToken);
+    async openSession({ sessionId, auth, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall }) {
+      if (auth.kind === "installation") tokens.push(auth.token);
+      else {
+        const token = await auth.gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
+        if (token.kind === "token") tokens.push(token.accessToken);
+      }
       sessionIds.push(sessionId);
       mcpServers.push(servers);
       const handlers = new Set<(event: SessionEvent) => void>();
@@ -117,12 +123,16 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           model = next;
         },
         rpc: { model: { list: async () => models } },
+        async disconnect() {
+          handlers.clear();
+          closed.push(sessionId);
+        },
       };
       return session;
     },
   };
 
-  const fake = { copilot, tokens, sessionIds, mcpServers, sends, script, shell };
+  const fake = { copilot, tokens, closed, sessionIds, mcpServers, sends, script, shell };
   return fake;
 }
 

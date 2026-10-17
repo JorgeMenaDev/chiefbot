@@ -107,19 +107,76 @@ export async function installationToken(
   fullName: string,
   access: keyof typeof installationPermissions,
 ): Promise<string | null> {
-  const headers = { authorization: `Bearer ${appJwt(app)}`, accept: "application/vnd.github+json" };
-  const installation = await fetch(`${apiUrl}/repos/${fullName}/installation`, { headers });
-  if (installation.status === 404) return null;
-  if (!installation.ok) throw new Error(`GitHub /repos/${fullName}/installation failed: ${installation.status}`);
-  const { id } = z.object({ id: z.number().int() }).parse(await installation.json());
-  const res = await fetch(`${apiUrl}/app/installations/${id}/access_tokens`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ repositories: [fullName.split("/")[1]], permissions: installationPermissions[access] }),
-  });
-  if (!res.ok) throw new Error(`GitHub refused an installation token for ${fullName}: ${res.status}`);
-  return z.object({ token: z.string().min(1) }).parse(await res.json()).token;
+  const installation = await installationOf(apiUrl, app, fullName);
+  if (!installation) return null;
+  const minted = await mint(apiUrl, app, installation.id, { repositories: [repoName(fullName)], permissions: installationPermissions[access] });
+  if (!minted.ok) throw new Error(`GitHub refused an installation token for ${fullName}: ${minted.status}`);
+  return minted.token;
 }
+
+// A one-hour installation token of the app that may only make Copilot requests
+// (https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/server-to-server-tokens).
+// They bill `account`, the owner of the repo, where the app must be installed on
+// all repositories. GitHub's Copilot check wants one repository id, so a first
+// token, with only metadata, looks the repo's id up. The token cannot read or
+// write the repo, so it may sit in a computer. Or what the deployer must fix.
+export async function copilotRequestsToken(
+  apiUrl: string,
+  app: GitHubAppKey,
+  fullName: string,
+): Promise<{ token: string; expiresAt: number; account: string } | { error: string }> {
+  const installation = await installationOf(apiUrl, app, fullName);
+  if (!installation) {
+    return { error: `Chiefbot's repo app is not installed on ${repoOwner(fullName)}, so it cannot pay for Copilot for ${fullName}.` };
+  }
+  const lookup = await mint(apiUrl, app, installation.id, { repositories: [repoName(fullName)], permissions: { metadata: "read" } });
+  const repositoryId = lookup.ok ? lookup.repositories[0]?.id : undefined;
+  if (repositoryId === undefined) return { error: `GitHub would not tell Chiefbot's repo app the id of ${fullName} (${lookup.status}).` };
+  const minted = await mint(apiUrl, app, installation.id, { repository_ids: [repositoryId], permissions: { copilot_requests: "write" } });
+  if (!minted.ok) {
+    return {
+      error: `GitHub refused a Copilot token for ${installation.account} (${minted.status}): Chiefbot's repo app needs the Copilot Requests permission, installed on all of ${installation.account}'s repositories (bun run setup --org-billed-copilot).`,
+    };
+  }
+  return { token: minted.token, expiresAt: minted.expiresAt, account: installation.account };
+}
+
+const repoOwner = (fullName: string) => fullName.split("/")[0] ?? fullName;
+const repoName = (fullName: string) => fullName.split("/")[1] ?? fullName;
+
+// The app's installation on the repo's owner, or null when it is not installed on the repo.
+async function installationOf(apiUrl: string, app: GitHubAppKey, fullName: string) {
+  const res = await fetch(`${apiUrl}/repos/${fullName}/installation`, { headers: appHeaders(app) });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GitHub /repos/${fullName}/installation failed: ${res.status}`);
+  const { id, account } = z.object({ id: z.number().int(), account: z.object({ login: z.string() }) }).parse(await res.json());
+  return { id, account: account.login };
+}
+
+const MintedToken = z.object({
+  token: z.string().min(1),
+  expires_at: z.string(),
+  repositories: z.array(z.object({ id: z.number().int() })).default([]),
+});
+
+// Mints an installation token; GitHub's refusal comes back with its status.
+async function mint(
+  apiUrl: string,
+  app: GitHubAppKey,
+  installationId: number,
+  body: { repositories?: string[]; repository_ids?: number[]; permissions: Record<string, string> },
+) {
+  const res = await fetch(`${apiUrl}/app/installations/${installationId}/access_tokens`, {
+    method: "POST",
+    headers: appHeaders(app),
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) return { ok: false as const, status: res.status };
+  const minted = MintedToken.parse(await res.json());
+  return { ok: true as const, status: res.status, token: minted.token, expiresAt: Date.parse(minted.expires_at), repositories: minted.repositories };
+}
+
+const appHeaders = (app: GitHubAppKey) => ({ authorization: `Bearer ${appJwt(app)}`, accept: "application/vnd.github+json" });
 
 // A JWT that authenticates as the app (https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app):
 // backdated a minute for clock drift, and valid for less than GitHub's ten-minute limit.

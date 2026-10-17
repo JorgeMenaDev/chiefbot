@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { User } from "./auth.ts";
 import { TurnEventMessage, TurnHello } from "./chat.ts";
-import { ApprovalId, BotId, ProjectId, TurnId } from "./ids.ts";
+import { AgentConnector } from "./connectors.ts";
+import { ApprovalId, BotId, ProjectId, TurnId, UserId } from "./ids.ts";
 import { ModelReport } from "./models.ts";
 import { Task } from "./projects.ts";
 import { TaskWorker } from "./taskWorkers.ts";
+import { CopilotPayer } from "./workspaces.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
 // hands it to the computer at start and keeps only its hash. It is not a GitHub token.
@@ -49,6 +51,8 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //   bound           control accepted the credential; sent right after. The connection belongs to
 //                   that one bot (or, on /task-worker, that one task worker).
 //   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time
+//   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
+//                   (proxied as `member`, the member who asked). Sent once, after its first hello.
 //   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
 //   screen-open     a viewer is waiting: dial /worker/:botId/screen/:streamId and pipe the screen's VNC bytes through it
 //   approval-answer the user's answer to one of the worker's approval-requests.
@@ -57,6 +61,14 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound") }),
   z.object({ type: z.literal("run-turn"), turnId: TurnId, text: z.string(), model: z.string() }),
+  z.object({
+    type: z.literal("run-task"),
+    turnId: TurnId,
+    text: z.string(),
+    member: UserId,
+    payer: CopilotPayer,
+    connectors: z.array(AgentConnector),
+  }),
   z.object({ type: z.literal("screen-control"), control: ScreenControl }),
   z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),
   z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() }),

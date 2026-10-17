@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ApprovalKind } from "./chat.ts";
 import { ApprovalId, ProjectId, TaskWorkerId } from "./ids.ts";
+import { CopilotPayer } from "./workspaces.ts";
 
 // A worker's life:
 //   launching  control wrote its launch record and is making its computer, or the worker has not connected yet
@@ -21,6 +22,8 @@ export const TaskWorker = z.object({
   projectId: ProjectId,
   taskNumber: z.number().int().min(1),
   requestedBy: z.string(),
+  // Who pays for its Copilot: set once its task starts.
+  payer: CopilotPayer.nullable(),
   state: TaskWorkerState,
   result: z.string().nullable(),
   pullRequest: z.url().nullable(),

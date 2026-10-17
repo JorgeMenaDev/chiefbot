@@ -1,10 +1,14 @@
 import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
 import {
+  ApiError,
   ApprovalId,
   BrokeredGitHubToken,
   BrokerRefusal,
   ControlToWorker,
+  CopilotInstallationToken,
+  type AgentConnector,
   type ApprovalKind,
+  type ReportedConnectorCall,
   type ScreenControl,
   type TurnEvent,
   type TurnId,
@@ -13,7 +17,9 @@ import {
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
+import { connectorServers } from "./connectorServers.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
+import { installationSession } from "./installationSession.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
@@ -139,13 +145,51 @@ export function startWorker({
     return { kind: "approve-once", approvedInteractively: true };
   };
 
-  // The bot's one Copilot session, opened by reportModels when the worker first
-  // binds (or by the next turn, if that open failed). Its id is the bot's (or task worker's), so
-  // after a restart the worker resumes the same conversation.
-  function openSession() {
-    // A task worker's computer does one task for a project: it is no one's chief of staff.
+  // Throws with control's reason when it refuses.
+  async function fromControl(path: string, init: RequestInit = {}) {
+    const res = await fetch(`${base}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } });
+    if (res.ok) return res;
+    const refusal = ApiError.safeParse(await res.json().catch(() => null));
+    throw new Error(refusal.success ? (refusal.data.message ?? refusal.data.error) : `Control answered ${res.status}`);
+  }
+
+  // A task worker's session, set up by its task: on the Copilot `payer` control
+  // named (the requester's seat, or the organization's installation tokens) and
+  // with the project's `connectors` for the member who asked. Control logs remote
+  // connectors' calls in its proxy; a command connector's call runs here, so it
+  // is reported. A failed report does not stop the call.
+  function taskSession(
+    options: Omit<Parameters<Copilot["openSession"]>[0], "auth">,
+    { member, payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
+  ) {
+    const withConnectors = {
+      ...options,
+      mcpServers: connectorServers(connectors, { base, credential: token, member }),
+      onMcpCall: async (serverName: string, toolName: string) => {
+        if (!connectors.some(({ name, kind }: AgentConnector) => name === serverName && kind === "command")) return;
+        const call: ReportedConnectorCall = { connector: serverName, tool: toolName };
+        await fromControl("/connector-calls", { method: "POST", body: JSON.stringify(call) }).catch(() => {});
+      },
+    };
+    return payer.kind === "org"
+      ? installationSession({
+          ...withConnectors,
+          copilot,
+          token: async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json()),
+        })
+      : copilot.openSession({ ...withConnectors, auth: { kind: "seat", gitHubTokenProvider: gitHubToken } });
+  }
+
+  // The computer's one Copilot session. A bot's is opened by reportModels when
+  // the worker first binds (or by the next turn, if that open failed). A task
+  // worker's is opened by its task (`task`). Its id is the bot's (or task
+  // worker's), so after a restart the worker resumes the same conversation.
+  function openSession(task?: Extract<ControlToWorker, { type: "run-task" }>) {
+    // A task worker does one task for a project: it is no one's chief of staff.
     const tools = [pullRequestTool({ base, token }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, botToken: token }) : [])];
-    session ??= copilot.openSession({ sessionId: id, gitHubTokenProvider: gitHubToken, onPermissionRequest, tools }).then((opened) => {
+    const options = { sessionId: id, onPermissionRequest, tools };
+    // A chief always runs on its owner's own Copilot seat.
+    session ??= (task ? taskSession(options, task) : copilot.openSession({ ...options, auth: { kind: "seat", gitHubTokenProvider: gitHubToken } })).then((opened) => {
       opened.on(onSessionEvent);
       return opened;
     });
@@ -177,11 +221,12 @@ export function startWorker({
 
   // Control sends a turn only once the previous one is done. A changed model is
   // set on the session first, so switching mid-conversation keeps the history.
-  async function runTurn(turnId: TurnId, text: string, model: string) {
+  // A task worker's one turn (`task`) opens its session and runs on the default model.
+  async function runTurn(turnId: TurnId, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
     active = { turnId, ...newTurnStream() };
     try {
-      const opened = await openSession();
-      if (sessionModel !== model) {
+      const opened = await openSession(task);
+      if (model !== null && sessionModel !== model) {
         await opened.setModel(model);
         sessionModel = model;
       }
@@ -206,10 +251,14 @@ export function startWorker({
       switch (message.type) {
         case "bound":
           onBound?.();
-          void reportModels();
+          // A task worker's session waits for its task, which names its payer; it has no model picker.
+          if (route === "worker") void reportModels();
           break;
         case "run-turn":
           void runTurn(message.turnId, message.text, message.model);
+          break;
+        case "run-task":
+          void runTurn(message.turnId, message.text, null, message);
           break;
         case "screen-control":
           screenControl = message.control;

@@ -21,7 +21,7 @@ test("a new workspace lists its creator as its owner", async () => {
 
   expect(res.status).toBe(201);
   const created = Workspace.parse(await res.json());
-  expect(created).toMatchObject({ name: "Platform team", role: "owner" });
+  expect(created).toMatchObject({ name: "Platform team", role: "owner", copilotMode: "personal" });
   expect(Workspace.array().parse(await (await user.api("GET", "/workspaces")).json())).toEqual([created]);
   const detail = WorkspaceDetail.parse(await (await user.api("GET", `/workspaces/${created.id}`)).json());
   expect(detail.members).toEqual([{ userId: expect.any(String), login: "octo-user", role: "owner" }]);
@@ -44,7 +44,7 @@ test("an invite by GitHub login waits until that login signs in and accepts it",
 
   const accepted = await json(await guest.api("POST", `/invites/${invite.id}/accept`));
 
-  expect(accepted).toEqual({ status: 200, body: { id: team.id, name: "Platform team", role: "member" } });
+  expect(accepted).toEqual({ status: 200, body: { id: team.id, name: "Platform team", role: "member", copilotMode: "personal" } });
   expect(await invitesOf(guest)).toEqual([]);
   const detail = await detailOf(guest, team);
   expect(detail.members.map(({ login, role }) => [login, role])).toEqual([
@@ -161,4 +161,17 @@ test("an invite needs a valid login of someone not yet a member, and inviting a 
     status: 400,
     body: { error: "invalid_workspace" },
   });
+});
+
+test("the owner chooses who pays for the workspace's project agents, and every member sees it", async () => {
+  const { owner, guest, team } = await teamWithMember();
+  const setMode = (user: TestUser, mode: unknown) => user.api("PUT", `/workspaces/${team.id}/copilot-mode`, { mode });
+
+  const changed = await json(await setMode(owner, "org"));
+
+  expect(changed).toEqual({ status: 200, body: { ...team, copilotMode: "org" } });
+  expect(await detailOf(guest, team)).toMatchObject({ copilotMode: "org", role: "member" });
+  expect(await json(await setMode(guest, "personal"))).toEqual({ status: 403, body: { error: "owner_only" } });
+  expect(await json(await setMode(owner, "free"))).toEqual({ status: 400, body: { error: "invalid_copilot_mode" } });
+  expect((await detailOf(owner, team)).copilotMode).toBe("org");
 });

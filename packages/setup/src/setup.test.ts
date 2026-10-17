@@ -100,6 +100,36 @@ test("with --org both apps belong to the organization", async () => {
   expect(nextSteps(result)[0]).toContain(`${github.url}/organizations/acme/settings/apps/`);
 });
 
+test("with --org-billed-copilot the repo app may also make Copilot requests, and is installed on all the organization's repositories", async () => {
+  const { github, dir } = fixture();
+
+  const result = await runSetup({
+    githubUrl: github.url,
+    githubApiUrl: github.url,
+    dir,
+    org: "acme",
+    orgBilledCopilot: true,
+    open: async (url) => void (await clickCreateGitHubApps(url)),
+  });
+
+  expect(github.manifests.map((manifest) => manifest.default_permissions)).toEqual([
+    { contents: "write", pull_requests: "write", copilot_requests: "write" },
+    {},
+  ]);
+  expect(nextSteps(result).at(-1)).toBe(
+    `2. Open ${result.app.htmlUrl}/installations/new, install the repo app on acme with All repositories (GitHub bills acme's Copilot through it), and turn on acme's policy that allows Copilot requests from GitHub App installations.`,
+  );
+});
+
+test("--org-billed-copilot needs --org: only an organization can pay this way", async () => {
+  const { github, dir } = fixture();
+
+  const run = runSetup({ githubUrl: github.url, githubApiUrl: github.url, dir, orgBilledCopilot: true, open: async () => {} });
+
+  await expect(run).rejects.toThrow("--org-billed-copilot needs --org");
+  expect(github.manifests).toEqual([]);
+});
+
 test("a callback with the wrong state is refused and the real one still finishes setup", async () => {
   const { github, dir } = fixture();
 

@@ -6,6 +6,7 @@ import {
   Task,
   TaskWorker,
   type ChatItem,
+  type CopilotPayer,
   type TaskStatus,
   type TaskWorkerState,
   type Workspace,
@@ -214,7 +215,8 @@ function CoordinatorChat({ project }: { project: Project }) {
   );
 }
 
-// The coordinator asks for no approvals and gets no handoff notices, so those never show.
+// The coordinator asks for no approvals and gets no handoff notices, so those
+// never show. Each turn starts with who pays for its Copilot.
 function ChatRow({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
@@ -225,6 +227,8 @@ function ChatRow({ item }: { item: ChatItem }) {
       return <div className={`tool-row ${item.status}`}>{item.name}</div>;
     case "error":
       return <div className="message error">{item.message}</div>;
+    case "payer":
+      return <p className="muted payer">{payerText(item.payer)}</p>;
     case "approval":
     case "notice":
       return null;
@@ -282,13 +286,19 @@ function TaskLedger({ project, login }: { project: Project; login: string }) {
   );
 }
 
-// One worker of a task: its state, its pull request and what it waits on. Only
+// Who pays for a run, in a line.
+function payerText(payer: CopilotPayer) {
+  return payer.kind === "seat" ? `On ${payer.login}'s Copilot seat` : `Billed to ${payer.account}'s Copilot (organization)`;
+}
+
+// One worker of a task: its state, who pays for it, its pull request and what it waits on. Only
 // the member who asked for it answers its approvals; the others see who must.
 function WorkerRow({ project, worker, login }: { project: Project; worker: TaskWorker; login: string }) {
   return (
     <div className="worker-row">
       <span className="muted">
         Worker: {workerStateText[worker.state]}
+        {worker.payer && ` · ${payerText(worker.payer)}`}
         {worker.pullRequest && (
           <>
             {" · "}

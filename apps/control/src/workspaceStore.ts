@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import {
+  CopilotMode,
   UserId,
   Workspace,
   WorkspaceId,
@@ -18,6 +19,11 @@ export function workspaceStore(db: Database) {
     name TEXT NOT NULL,
     created_at INTEGER NOT NULL
   )`);
+  // copilot_mode: who pays for the Copilot requests of the workspace's project
+  // agents (CopilotMode). Added after the table first shipped, so added in place too.
+  if (!db.query<{ name: string }, []>("PRAGMA table_info(workspaces)").all().some(({ name }) => name === "copilot_mode")) {
+    db.run("ALTER TABLE workspaces ADD COLUMN copilot_mode TEXT NOT NULL DEFAULT 'personal'");
+  }
   db.run(`CREATE TABLE IF NOT EXISTS workspace_members (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -36,9 +42,9 @@ export function workspaceStore(db: Database) {
     UNIQUE (workspace_id, login)
   )`);
 
-  type WorkspaceRow = { id: string; name: string; role: string };
-  const toWorkspace = (row: WorkspaceRow): Workspace => Workspace.parse(row);
-  const workspaceColumns = `workspaces.id, workspaces.name, workspace_members.role
+  type WorkspaceRow = { id: string; name: string; role: string; copilot_mode: string };
+  const toWorkspace = ({ copilot_mode, ...row }: WorkspaceRow): Workspace => Workspace.parse({ ...row, copilotMode: copilot_mode });
+  const workspaceColumns = `workspaces.id, workspaces.name, workspace_members.role, workspaces.copilot_mode
     FROM workspaces JOIN workspace_members ON workspace_members.workspace_id = workspaces.id`;
 
   // The workspace as the user sees it, or null when they are not a member
@@ -74,8 +80,19 @@ export function workspaceStore(db: Database) {
         userId,
         now,
       );
-      return { id, name, role: "owner" };
+      return { id, name, role: "owner", copilotMode: "personal" };
     }),
+
+    // Who pays for the Copilot requests of the workspace's project agents.
+    setCopilotMode(workspaceId: WorkspaceId, mode: CopilotMode) {
+      db.query("UPDATE workspaces SET copilot_mode = ?2 WHERE id = ?1").run(workspaceId, mode);
+    },
+
+    // The workspace's mode, or null when there is no such workspace.
+    copilotMode(workspaceId: WorkspaceId): CopilotMode | null {
+      const row = db.query<{ copilot_mode: string }, [string]>("SELECT copilot_mode FROM workspaces WHERE id = ?1").get(workspaceId);
+      return row ? CopilotMode.parse(row.copilot_mode) : null;
+    },
 
     // The workspaces the user is a member of, with their role in each.
     workspacesFor(userId: UserId): Workspace[] {
