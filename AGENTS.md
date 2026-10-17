@@ -13,7 +13,7 @@ apps/worker   Runs inside each bot computer. Dials out to control, runs Copilot 
 packages/contracts  Zod schemas for every message that crosses a process boundary. Types are inferred from them.
 packages/setup      `bun run setup`: registers the deployer's own repo app and sign-in app (App Manifest flow) and writes ~/.chiefbot. Control and desktop read the sign-in app's client ID; control alone uses the repo app.
 packages/fake-github  The fake GitHub every test uses.
-infra/        Bot computer Docker image; Terraform for GCP (written, NOT applied until the deployer approves the spend).
+infra/        Computer and control Docker images (built from the repo root), Caddy for compose.yaml, Terraform for GCP (written, NOT applied until the deployer approves the spend). docs/deploy.md.
 ```
 
 - **Bot computer** = one Docker image (Xvfb + Chromium + x11vnc on loopback + git + worker) with one volume per bot. It runs locally under Docker now and on GCP later, one Compute Engine VM per bot. Both sit behind one `ComputerProvider` interface (`create / start / stop / destroy / status`): `DockerProvider` (local) and `GceProvider` (GCP). The screen opens no port: for each viewer the worker dials control and pipes x11vnc, and control checks the viewer owns the bot.

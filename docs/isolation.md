@@ -26,6 +26,8 @@ Proof:
 
 - **One kernel.** All bots share the Colima VM's Linux kernel. A kernel exploit inside one container could reach the others. This is acceptable for a local proof of concept with one user's own bots.
 - **The Mac is reachable.** Every bot reaches the Mac through `host.docker.internal`, because the worker dials control there. So a bot can also reach any other port the Mac listens on. Control's routes all need a token. Never publish a bot port on the Mac. The screen shows how: x11vnc listens only on the container's loopback, the worker dials control for each viewer, and control checks that the viewer owns the bot.
+- **The host is reachable.** On Docker Engine for Linux the same name is the host's Docker bridge address (control maps `host.docker.internal` to `host-gateway` for every computer), so the same rule holds there: a computer can reach any port the host listens on beyond loopback.
+- **Control holds the Docker socket in compose.** With `compose.yaml`, control runs in a container with the host's Docker socket, which is root on that machine; no computer ever gets it. See `docs/deploy.md`.
 - **No resource limits.** A bot can use all of the VM's CPU and memory and slow the other bots down. Add limits when this shows up.
 - **The root filesystem is writable.** Writes outside `/home/bot` stay in that bot's container and are lost when the container is removed.
 

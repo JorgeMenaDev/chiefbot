@@ -103,7 +103,7 @@ export function gceProvider({ client, project, zone, instanceTemplate, image }: 
 // included, as Docker does for a new volume.
 // The env (with the bot's credential) sits in the VM's metadata, readable by
 // project members who can read the VM. It stays there on purpose: see
-// docs/deploy-gcp.md, Known limits.
+// docs/deploy.md, Known limits.
 function cloudConfig(image: string, env: Record<string, string>) {
   const registry = image.split("/")[0];
   const envLines = Object.entries(env).map(([key, value]) => `      ${key}=${value}`);
