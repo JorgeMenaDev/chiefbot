@@ -1,13 +1,18 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { ApprovalId, ProjectId, TaskWorkerId, WorkspaceId } from "@chiefbot/contracts";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openStore } from "./store.ts";
+import { atCleanUp, cleanUp } from "./testControl.ts";
+
+afterEach(cleanUp);
 
 test("a database the first v0.2 build made opens and keeps working: new columns are added, stale project file keys dropped", async () => {
-  const path = join(mkdtempSync(join(tmpdir(), "chiefbot-upgrade-")), "control.sqlite");
+  const dir = mkdtempSync(join(tmpdir(), "chiefbot-upgrade-"));
+  atCleanUp(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "control.sqlite");
   const old = new Database(path);
   old.run(await Bun.file(new URL("./upgrade.fixture.sql", import.meta.url)).text());
   old.close();
