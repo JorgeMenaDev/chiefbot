@@ -6,7 +6,7 @@ import { z } from "zod";
 //   not_found             no such bot or routine for this user (404)
 //   reauth_needed         the bot owner must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
-//   invalid_after         the body or query failed its schema (400)
+//   invalid_after, invalid_pull_request  the body or query failed its schema (400)
 //   invalid_schedule      a routine's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
 //   github_rejected_token GitHub refused the sign-in's access token (401)
@@ -14,6 +14,12 @@ import { z } from "zod";
 //   bot_offline, bot_stopping, turn_running, human_has_screen  a turn was refused (409, TurnRefusal);
 //                         bot_stopping also refuses a screen viewer: the computer is stopping
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
+//   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
+//   repo_read_only        the bot owner may not push to the repo (403)
+//   app_not_installed     the deployer's GitHub App is not installed on the repo (403)
+//   no_turn               a push or pull request outside a turn: nobody can approve it (409)
+//   declined              the user declined the push or pull request (403)
+//   github_failed         GitHub refused what control forwarded; `message` says why (502)
 //   expected_websocket    a WebSocket route got a plain request (400)
 export const ApiErrorCode = z.enum([
   "unauthorized",
@@ -26,6 +32,7 @@ export const ApiErrorCode = z.enum([
   "invalid_answer",
   "invalid_routine",
   "invalid_after",
+  "invalid_pull_request",
   "invalid_schedule",
   "model_unavailable",
   "github_rejected_token",
@@ -35,6 +42,12 @@ export const ApiErrorCode = z.enum([
   "turn_running",
   "human_has_screen",
   "not_pending",
+  "repo_not_found",
+  "repo_read_only",
+  "app_not_installed",
+  "no_turn",
+  "declined",
+  "github_failed",
   "expected_websocket",
 ]);
 export type ApiErrorCode = z.infer<typeof ApiErrorCode>;

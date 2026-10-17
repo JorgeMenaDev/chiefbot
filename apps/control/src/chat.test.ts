@@ -164,11 +164,11 @@ test("an approval answered while the human has the screen runs its tool call onl
   const bot = await onlineBot("Ada");
   const ran: string[] = [];
   computers.copilot.script = async function* (_prompt, runtime) {
-    ran.push((await runtime.shell("echo git push")).output);
+    if (await runtime.mcp("github", "Merge pull request", false)) ran.push("merged");
     yield sdk.idle();
   };
   const chat = watchChat(bot.id);
-  await send(bot.id, "push it");
+  await send(bot.id, "merge it");
   const request = (await chat.until((events) => events.some((e) => e.event.type === "approval-request"))).find(
     (e) => e.event.type === "approval-request",
   );
@@ -187,7 +187,7 @@ test("an approval answered while the human has the screen runs its tool call onl
 
   await api("POST", `/bots/${bot.id}/hand-back`);
   await chat.until(doneCount(1));
-  expect(ran).toEqual(["git push\n"]);
+  expect(ran).toEqual(["merged"]);
 });
 
 test("the token broker gives a bot's worker its owner's access token only, and nobody else anything", async () => {
@@ -209,13 +209,13 @@ test("the token broker gives a bot's worker its owner's access token only, and n
 test("a worker reads only its own bot's approval answers, whatever turn it names", async () => {
   const { url, api, computers, botToken, onlineBot, send, watchChat } = await setup();
   computers.copilot.script = async function* (_prompt, runtime) {
-    await runtime.shell("git push origin main");
+    await runtime.mcp("github", "Merge pull request", false);
     yield sdk.idle();
   };
   const ada = await onlineBot("Ada");
   const grace = await onlineBot("Grace");
   const chat = watchChat(ada.id);
-  const adaTurn = await send(ada.id, "push it");
+  const adaTurn = await send(ada.id, "merge it");
   const request = (await chat.until((events) => events.some((e) => e.event.type === "approval-request"))).find(
     (e) => e.event.type === "approval-request",
   );

@@ -38,12 +38,12 @@ test("a bot with nothing to do is stopped after the idle limit, and not before",
 test("a turn waiting on an approval and a screen viewer keep their bots running; once both end, the bots stop", async () => {
   const { time, computers, url, auth, api, statusOf, onlineBot, chat } = await setup();
   computers.copilot.script = async function* (_prompt, runtime) {
-    await runtime.shell("git push origin main");
+    await runtime.mcp("github", "Merge pull request", false);
     yield sdk.idle();
   };
   const ada = await onlineBot("Ada");
   const grace = await onlineBot("Grace");
-  await api("POST", `/bots/${ada.id}/messages`, { text: "push it" });
+  await api("POST", `/bots/${ada.id}/messages`, { text: "merge it" });
   await eventually(async () => (await chat(ada.id)).some((event) => event.type === "approval-request"));
   const viewer = new WebSocket(`${url.replace("http", "ws")}/bots/${grace.id}/screen`, { headers: auth });
   await new Promise((resolve) => (viewer.onmessage = resolve));

@@ -1,4 +1,0 @@
-#!/bin/sh
-# Git's pre-push hook for every repo in the bot computer (core.hooksPath in the
-# system gitconfig). Every push asks the user first: apps/worker/src/prePush.ts.
-exec bun /opt/chiefbot/pre-push.js "$@"

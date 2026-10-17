@@ -5,9 +5,15 @@ import type { Copilot } from "./copilot.ts";
 // computer with its full tool set (shell, files, git), working in `workingDirectory`.
 // Session history lives under ~/.copilot, on the bot's own disk.
 // GitHub identity comes only from each session's gitHubTokenProvider, never from
-// a logged-in user or an env token. The runtime's shell inherits agentEnv().
-export function copilotSdk({ workingDirectory }: { workingDirectory: string }): Copilot {
-  const client = new CopilotClient({ mode: "copilot-cli", workingDirectory, useLoggedInUser: false, env: agentEnv(process.env) });
+// a logged-in user or an env token. The runtime's shell inherits agentEnv() plus
+// `gitConfig`, the GIT_CONFIG_* variables that send git to control's proxy.
+export function copilotSdk({ workingDirectory, gitConfig }: { workingDirectory: string; gitConfig: Record<string, string> }): Copilot {
+  const client = new CopilotClient({
+    mode: "copilot-cli",
+    workingDirectory,
+    useLoggedInUser: false,
+    env: { ...agentEnv(process.env), ...gitConfig },
+  });
   return {
     async openSession({ sessionId, gitHubTokenProvider, onPermissionRequest, tools }) {
       // No model here: the worker sets the bot's model before each turn that needs it.
@@ -19,9 +25,9 @@ export function copilotSdk({ workingDirectory }: { workingDirectory: string }): 
   };
 }
 
-// Tokens the agent's shell must not hold: with a GitHub token, gh or curl could
-// open a pull request without the approval-gated create_pull_request tool; with
-// the bot credential, it could fetch the owner's token from control's broker.
+// Tokens the agent's shell is not handed: a GitHub token would let gh or curl
+// write to repos without control's approval. The bot credential is withheld too,
+// though a process in the computer can still read it (docs/isolation.md).
 const withheld = ["GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "CHIEFBOT_BOT_TOKEN"];
 
 // The environment the Copilot runtime (and every command it runs) gets: the worker's, minus those tokens.

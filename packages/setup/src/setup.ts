@@ -1,4 +1,4 @@
-import type { GitHubAppConfig } from "@chiefbot/contracts";
+import type { GitHubAppConfig, GitHubAppSecrets } from "@chiefbot/contracts";
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import { readLocalConfig, writeLocalConfig, writeOwnerOnly } from "./config.ts";
@@ -126,7 +126,7 @@ export async function runSetup({ githubUrl, githubApiUrl, dir, org, open }: Setu
     writeOwnerOnly(
       dir,
       "github-app-secrets.json",
-      `${JSON.stringify({ clientSecret: created.client_secret, webhookSecret: created.webhook_secret, privateKey: created.pem }, null, 2)}\n`,
+      `${JSON.stringify({ clientSecret: created.client_secret, webhookSecret: created.webhook_secret, privateKey: created.pem } satisfies GitHubAppSecrets, null, 2)}\n`,
     );
     writeLocalConfig(dir, { githubApp: app });
     const settingsUrl =

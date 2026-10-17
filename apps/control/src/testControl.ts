@@ -33,7 +33,7 @@ export type TestControlOptions = {
   user?: FakeGitHubUser;
   // The workers' Copilot. Default: fakeCopilot() echoing each prompt.
   copilot?: FakeCopilot;
-  // Where the workers serve git (fakeComputers).
+  // Where the workers serve git's credential helper (fakeComputers).
   gitSocket?: string;
   // Wraps the fake provider, e.g. to make start fail.
   provider?: (fake: ComputerProvider) => ComputerProvider;
@@ -64,6 +64,7 @@ export async function startTestControl({
     dbPath: persistent ? join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite") : ":memory:",
     githubApiUrl: github.url,
     githubClientId: "test-client",
+    githubApp: github.app,
     computers: provider ? provider(computers.provider) : computers.provider,
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),

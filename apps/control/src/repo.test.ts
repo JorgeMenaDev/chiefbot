@@ -1,53 +1,45 @@
 import { afterEach, expect, test } from "bun:test";
 import { ApiError, ApprovalId, type ChatEvent } from "@chiefbot/contracts";
 import { fakeCopilot, sdk, type FakeRuntime } from "@chiefbot/worker/fake-copilot";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atCleanUp, cleanUp, startTestControl, type TestUser } from "./testControl.ts";
 
-// Repo work end to end: control, a fake GitHub with a private repo, and a bot
-// whose fake Copilot runs real git in a temp workspace. Git gets the owner's
-// token only through the worker's credential helper, as in the bot computer.
+// Repo work end to end: control, a fake GitHub with private repos and the
+// deployer's GitHub App, and a bot whose fake Copilot runs real git in a temp
+// workspace. As in the bot computer, git reaches GitHub only through control's
+// git proxy, with the bot's credential from the worker's credential helper.
 
 afterEach(cleanUp);
 
 const helper = join(import.meta.dir, "../../worker/src/gitCredential.ts");
-const prePush = join(import.meta.dir, "../../worker/src/prePush.ts");
 
-async function setup({ persistent = false } = {}) {
+async function setup() {
   const workspace = mkdtempSync(join(tmpdir(), "chiefbot-workspace-"));
   atCleanUp(() => rmSync(workspace, { recursive: true, force: true }));
   // Short: a unix socket path must fit in about 100 bytes.
-  const socket = `/tmp/chiefbot-t06-${crypto.randomUUID().slice(0, 8)}.sock`;
-  // The image's hooks directory (infra/computer/hooks), running the hook from source.
-  const hooks = join(workspace, ".hooks");
-  mkdirSync(hooks);
-  writeFileSync(join(hooks, "pre-push"), `#!/bin/sh\nexec "${process.execPath}" ${prePush} "$@"\n`);
-  chmodSync(join(hooks, "pre-push"), 0o755);
-  // What the bot computer's image configures (infra/computer/Dockerfile), minus the
-  // github.com scope: the fake remote is on 127.0.0.1.
-  const env = {
+  const socket = `/tmp/chiefbot-t12-${crypto.randomUUID().slice(0, 8)}.sock`;
+  const env: Record<string, string> = {
     PATH: process.env.PATH ?? "",
     HOME: workspace,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
-    GIT_CONFIG_COUNT: "4",
-    GIT_CONFIG_KEY_0: "credential.helper",
-    GIT_CONFIG_VALUE_0: `!"${process.execPath}" ${helper}`,
-    GIT_CONFIG_KEY_1: "user.name",
-    GIT_CONFIG_VALUE_1: "Chiefbot",
-    GIT_CONFIG_KEY_2: "user.email",
-    GIT_CONFIG_VALUE_2: "chiefbot@example.com",
-    GIT_CONFIG_KEY_3: "core.hooksPath",
-    GIT_CONFIG_VALUE_3: hooks,
+    GIT_AUTHOR_NAME: "Chiefbot",
+    GIT_AUTHOR_EMAIL: "chiefbot@example.com",
+    GIT_COMMITTER_NAME: "Chiefbot",
+    GIT_COMMITTER_EMAIL: "chiefbot@example.com",
     CHIEFBOT_GIT_SOCKET: socket,
   };
-  const control = await startTestControl({ persistent, copilot: fakeCopilot({ shell: { cwd: workspace, env } }), gitSocket: socket });
+  const copilot = fakeCopilot({ shell: { cwd: workspace, env } });
+  const control = await startTestControl({ copilot, gitSocket: socket });
+  // What the worker gives the agent's shell (index.ts), pointed at the fake GitHub.
+  Object.assign(env, gitProxyConfig({ controlUrl: control.url, helper: `"${process.execPath}" ${helper}`, githubUrl: control.github.url }));
   control.github.createRepo("octo/demo", { "README.md": "# Demo\nTeh demo.\n" });
   const bot = await control.user.onlineBot("Ada");
-  return { ...control, ...control.user, botId: bot.id };
+  return { ...control, ...control.user, botId: bot.id, env, workspace };
 }
 
 const approvalIds = (events: ChatEvent[]) =>
@@ -68,7 +60,7 @@ async function fixTypo(runtime: FakeRuntime, githubUrl: string, results: ShellRe
   results.push(await runtime.shell("cd demo && git push -q -u origin fix-typo"));
 }
 
-test("the bot clones, commits and pushes with the owner's token, and the push waits for the user's approval", async () => {
+test("the bot clones through control, and its push waits in control until the user approves it", async () => {
   const { github, copilot, api, watchChat, botId } = await setup();
   const results: ShellResult[] = [];
   copilot.script = async function* (_prompt, runtime) {
@@ -80,26 +72,24 @@ test("the bot clones, commits and pushes with the owner's token, and the push wa
   await api("POST", `/bots/${botId}/messages`, { text: "Fix the typo in octo/demo" });
   const approvalId = await nthApproval(chat);
 
-  // Clone, branch and commit ran; the push waits.
-  expect(results.map((r) => [r.approved, r.exitCode])).toEqual([[true, 0], [true, 0], [true, 0]]);
+  // Clone, branch and commit ran without asking; the push waits in control.
+  expect(results.map((r) => r.exitCode)).toEqual([0, 0, 0]);
   expect(chat.events.at(-1)?.event).toEqual({
     type: "approval-request",
     approvalId,
-    kind: "command",
-    detail: "cd demo && git push -q -u origin fix-typo",
+    kind: "push",
+    detail: "git push to octo/demo: fix-typo",
   });
-  expect(github.git("octo/demo", "branch", "--list", "fix-typo")).toBe("");
+  expect(github.pushes).toEqual([]);
 
   const answer = await api("POST", `/bots/${botId}/approvals/${approvalId}`, { approved: true });
   await chat.until(done);
 
   expect(answer.status).toBe(204);
   expect(results.at(-1)).toMatchObject({ approved: true, exitCode: 0 });
-  expect(github.git("octo/demo", "log", "-1", "--format=%s", "fix-typo")).toBe("Fix a typo");
   expect(github.git("octo/demo", "show", "fix-typo:README.md")).toBe("# Demo\nThe demo.");
-  expect(chat.events.map((e) => e.event).filter((e) => e.type === "approval-answer")).toEqual([
-    { type: "approval-answer", approvalId, approved: true },
-  ]);
+  // Control pushed with the GitHub App's installation token, not the user's token.
+  expect(github.pushes).toEqual([{ repository: "octo/demo", by: "app" }]);
 });
 
 test("a declined push never reaches GitHub, and an approval is answered once", async () => {
@@ -117,44 +107,92 @@ test("a declined push never reaches GitHub, and an approval is answered once", a
   await chat.until(done);
   const again = await api("POST", `/bots/${botId}/approvals/${approvalId}`, { approved: true });
 
-  expect(results.at(-1)).toMatchObject({ approved: false });
+  expect(results.at(-1)?.exitCode).not.toBe(0);
+  expect(results.at(-1)?.output).toContain("The user declined this push.");
   expect(github.git("octo/demo", "branch", "--list", "fix-typo")).toBe("");
   expect([again.status, ApiError.parse(await again.json())]).toEqual([409, { error: "not_pending" }]);
 });
 
-test("a push the shell matcher cannot see still asks the user, through git's pre-push hook", async () => {
-  const { github, copilot, api, watchChat, botId } = await setup();
+test("from the agent's shell, git finds no GitHub token: not from the credential helper, not from the worker", async () => {
+  const { github, copilot, watchChat, send, botId } = await setup();
   const results: ShellResult[] = [];
   copilot.script = async function* (_prompt, runtime) {
     await runtime.shell(`git clone -q ${github.url}/octo/demo.git demo`);
-    await runtime.shell("cd demo && git checkout -q -b fix-typo && git commit -q --allow-empty -m 'Empty'");
-    // Asked once by the shell matcher; the hook lets the approved command's push through.
-    results.push(await runtime.shell("cd demo && git push -q origin HEAD:early"));
-    results.push(await runtime.shell("p=push; cd demo && git $p -q -u origin fix-typo"));
-    results.push(await runtime.shell("p=push; cd demo && git $p -q origin fix-typo:other"));
+    await runtime.shell("cd demo && git commit -q --allow-empty -m 'Sneaky'");
+    const githubHost = new URL(github.url).host;
+    // Ask git's credential helpers for github.com's password.
+    results.push(await runtime.shell(`printf 'protocol=http\\nhost=${githubHost}\\n\\n' | git credential fill`));
+    // Push straight to GitHub, past the proxy.
+    results.push(await runtime.shell(`cd demo && GIT_CONFIG_COUNT=0 git push -q ${github.url}/octo/demo.git HEAD:sneaky`));
+    // Ask the worker's socket, as the credential helper does.
+    results.push(await runtime.shell(`printf '\\n' | ${process.execPath} ${helper} get`));
     yield sdk.idle();
   };
   const chat = watchChat(botId);
-  await api("POST", `/bots/${botId}/messages`, { text: "Push it" });
-
-  await api("POST", `/bots/${botId}/approvals/${await nthApproval(chat, 0)}`, { approved: true });
-  const hookApproval = await nthApproval(chat, 1);
-  expect(chat.events.at(-1)?.event).toMatchObject({
-    kind: "command",
-    detail: `git push to ${github.url}/octo/demo.git: fix-typo`,
-  });
-  expect(github.git("octo/demo", "branch", "--list", "fix-typo")).toBe("");
-  await api("POST", `/bots/${botId}/approvals/${hookApproval}`, { approved: true });
-  await api("POST", `/bots/${botId}/approvals/${await nthApproval(chat, 2)}`, { approved: false });
+  await send(botId, "Push without asking");
   await chat.until(done);
 
-  expect(approvalIds(chat.events)).toHaveLength(3);
-  expect(results.map((r) => r.exitCode === 0)).toEqual([true, true, false]);
-  expect(results[2]?.output).toContain("The user declined this push.");
-  expect(github.git("octo/demo", "branch", "--list", "--format=%(refname:short)")).toBe("early\nfix-typo\nmain");
+  const [credentialFill, directPush, socketHelper] = results;
+  expect(credentialFill?.exitCode).not.toBe(0);
+  expect(directPush?.exitCode).not.toBe(0);
+  // The worker hands out only the bot's credential for control's proxy.
+  expect(socketHelper?.output).toMatch(/^username=chiefbot\npassword=.+\n$/);
+  for (const result of results) expect(result.output).not.toMatch(/gh[ousr]_fake_/);
+  expect(approvalIds(chat.events)).toEqual([]);
+  expect(github.pushes).toEqual([]);
 });
 
-test("the bot opens a pull request only after the user approves it", async () => {
+test("a push outside a turn fails, even with the bot's credential: nobody can approve it", async () => {
+  const { github, env, workspace } = await setup();
+  // Async: control answers git in this same process.
+  const run = async (command: string) => {
+    const proc = Bun.spawn(["sh", "-c", command], { cwd: workspace, env, stderr: "pipe" });
+    return { exitCode: await proc.exited, stderr: await new Response(proc.stderr).text() };
+  };
+  await run(`git clone -q ${github.url}/octo/demo.git demo && cd demo && git commit -q --allow-empty -m x`);
+
+  const push = await run("cd demo && git push -q origin HEAD:early");
+
+  expect(push.exitCode).not.toBe(0);
+  expect(push.stderr).toContain("No turn is running, so nobody can approve this push.");
+  expect(github.pushes).toEqual([]);
+});
+
+test("the bot may clone only what its owner can see, and push only where the owner may write and the app is installed", async () => {
+  const { github, copilot, send, watchChat, botId } = await setup();
+  github.createRepo("someone/secret", { "README.md": "x\n" }, { access: { someone: "write" } });
+  github.createRepo("octo/read-only", { "README.md": "x\n" }, { access: { "octo-user": "read" } });
+  github.createRepo("octo/no-app", { "README.md": "x\n" }, { installed: false });
+  const results: ShellResult[] = [];
+  copilot.script = async function* (_prompt, runtime) {
+    results.push(await runtime.shell(`git clone -q ${github.url}/someone/secret.git secret`));
+    results.push(await runtime.shell(`git clone -q ${github.url}/octo/read-only.git read-only`));
+    results.push(await runtime.shell("cd read-only && git commit -q --allow-empty -m x && git push -q origin HEAD:main"));
+    results.push(await runtime.shell(`git clone -q ${github.url}/octo/no-app.git no-app`));
+    yield sdk.idle();
+  };
+  const chat = watchChat(botId);
+  await send(botId, "Try them all");
+  await chat.until(done);
+
+  expect(results.map((r) => r.exitCode === 0)).toEqual([false, true, false, false]);
+  expect(results[0]?.output).toContain("someone/secret was not found, or your GitHub account cannot see it.");
+  expect(results[2]?.output).toContain("Your GitHub account cannot push to octo/read-only.");
+  expect(results[3]?.output).toContain("Install your Chiefbot GitHub App on octo/no-app");
+  expect(approvalIds(chat.events)).toEqual([]);
+  expect(github.pushes).toEqual([]);
+});
+
+test("the git proxy refuses a path that is not a repo name, so control's tokens never reach other GitHub paths", async () => {
+  const { url, botId, botToken } = await setup();
+  const auth = { authorization: `Basic ${btoa(`chiefbot:${botToken(botId)}`)}` };
+
+  const res = await fetch(`${url}/git/octo/..git/info/refs?service=git-upload-pack`, { headers: auth });
+
+  expect([res.status, await res.text()]).toEqual([404, "octo/. is not a GitHub repository name.\n"]);
+});
+
+test("control opens the bot's pull request only after the user approves it", async () => {
   const { github, copilot, api, watchChat, botId } = await setup();
   let pr: unknown = null;
   copilot.script = async function* (_prompt, runtime) {
@@ -180,34 +218,44 @@ test("the bot opens a pull request only after the user approves it", async () =>
   await chat.until(done);
 
   expect(github.pullRequests).toEqual([
-    { repository: "octo/demo", number: 1, head: "fix-typo", base: "main", title: "Fix a typo", body: "Teh → The" },
+    { repository: "octo/demo", number: 1, head: "fix-typo", base: "main", title: "Fix a typo", body: "Teh → The", by: "app" },
   ]);
   expect(pr).toEqual({ approved: true, result: `Opened pull request #1: ${github.url}/octo/demo/pull/1` });
 });
 
-test("a pending approval survives a desktop and a control restart, and the bot waits until the user answers", async () => {
-  const { github, copilot, restart, api, watchChat, botId } = await setup({ persistent: true });
-  const results: ShellResult[] = [];
+test("a declined pull request is never opened, and the bot is told why", async () => {
+  const { github, copilot, api, watchChat, botId } = await setup();
+  let error: unknown = null;
   copilot.script = async function* (_prompt, runtime) {
-    await fixTypo(runtime, github.url, results);
+    await runtime
+      .tool("create_pull_request", { repository: "octo/demo", head: "main", base: "main", title: "Nothing" })
+      .catch((caught: unknown) => (error = caught));
+    yield sdk.idle();
+  };
+  const chat = watchChat(botId);
+  await api("POST", `/bots/${botId}/messages`, { text: "Open a PR" });
+  await api("POST", `/bots/${botId}/approvals/${await nthApproval(chat)}`, { approved: false });
+  await chat.until(done);
+
+  expect(github.pullRequests).toEqual([]);
+  expect(String(error)).toContain("The user declined this pull request.");
+});
+
+test("a push waiting for an answer survives a desktop restart: the card comes back pending and still works", async () => {
+  const { github, copilot, api, watchChat, botId } = await setup();
+  copilot.script = async function* (_prompt, runtime) {
+    await fixTypo(runtime, github.url, []);
     yield sdk.idle();
   };
   await api("POST", `/bots/${botId}/messages`, { text: "Fix the typo" });
   const approvalId = await nthApproval(watchChat(botId));
 
-  // The desktop quits, control restarts, and the user comes back later.
-  restart();
-  const answer = await api("POST", `/bots/${botId}/approvals/${approvalId}`, { approved: true });
+  // A new chat connection, as after the desktop app restarts.
   const chat = watchChat(botId);
+  expect((await chat.settled()).at(-1)?.event).toMatchObject({ type: "approval-request", approvalId });
+  await api("POST", `/bots/${botId}/approvals/${approvalId}`, { approved: true });
   await chat.until(done);
 
-  expect(answer.status).toBe(204);
-  expect(chat.events.map((e) => e.event.type).filter((type) => type !== "tool-call")).toEqual([
-    "user-message",
-    "approval-request",
-    "approval-answer",
-    "done",
-  ]);
   expect(github.git("octo/demo", "log", "-1", "--format=%s", "fix-typo")).toBe("Fix a typo");
 });
 
@@ -230,7 +278,7 @@ test("an approval whose turn ended because the bot restarted can no longer be an
   expect(github.git("octo/demo", "branch", "--list", "fix-typo")).toBe("");
 });
 
-test("after the owner disconnects GitHub, git in the bot computer gets no token and says to sign in again", async () => {
+test("after the owner disconnects GitHub, git in the bot computer gets nothing through control and says to sign in again", async () => {
   const { github, copilot, api, watchChat, botId } = await setup();
   let release = () => {};
   const disconnected = new Promise<void>((resolve) => (release = resolve));

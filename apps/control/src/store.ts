@@ -10,6 +10,7 @@ import {
   ModelReport,
   TurnId,
   UserId,
+  type ApprovalKind,
   type BotToken,
   type TurnEvent,
   type GitHubTokens,
@@ -333,6 +334,17 @@ export function openStore(path: string) {
         db.query("INSERT INTO approvals (id, bot_id, turn_id) VALUES (?1, ?2, ?3)").run(event.approvalId, botId, turnId);
       }
       return append(botId, turnId, event);
+    }),
+
+    // An approval control itself asks for (a push or a pull request), recorded in
+    // the bot's unfinished turn like the worker's own. Null when no turn is running.
+    requestApproval: db.transaction((botId: BotId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): ChatEvent | null => {
+      const turn = db
+        .query<{ id: string }, [string]>("SELECT id FROM turns WHERE bot_id = ?1 AND done = 0 ORDER BY created_at DESC LIMIT 1")
+        .get(botId);
+      if (!turn) return null;
+      db.query("INSERT INTO approvals (id, bot_id, turn_id) VALUES (?1, ?2, ?3)").run(ask.approvalId, botId, turn.id);
+      return append(botId, TurnId.parse(turn.id), { type: "approval-request", ...ask });
     }),
 
     // Records the user's answer to a pending approval of the bot's unfinished

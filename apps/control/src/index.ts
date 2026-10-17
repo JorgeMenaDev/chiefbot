@@ -1,4 +1,4 @@
-import { chiefbotHome, configuredGitHubClientId, setupNeeded } from "@chiefbot/setup";
+import { chiefbotHome, configuredGitHubApp, configuredGitHubClientId, setupNeeded } from "@chiefbot/setup";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,7 +18,8 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 //   CHIEFBOT_GITHUB_URL          default https://github.com (the refresh grant)
 //   CHIEFBOT_GITHUB_CLIENT_ID    default: the GitHub App `bun run setup` registered (~/.chiefbot/config.json);
 //                                must match the desktop's
-//   CHIEFBOT_HOME                default ~/.chiefbot: setup's config and secrets, and the secret key
+//   CHIEFBOT_HOME                default ~/.chiefbot: setup's config and secrets (the GitHub App's ID and
+//                                private key, with which control reaches repos for bots), and the secret key
 //   CHIEFBOT_SECRET_KEY_FILE     default ~/.chiefbot/secret.key: the key that encrypts refresh
 //                                tokens in the SQLite file. Made on first run. Not used with gce,
 //                                which keeps refresh tokens in Secret Manager in CHIEFBOT_GCP_PROJECT.
@@ -29,7 +30,8 @@ const port = Number(process.env.CHIEFBOT_CONTROL_PORT ?? 7410);
 const idleStopMinutes = Number(process.env.CHIEFBOT_IDLE_STOP_MINUTES ?? 30);
 if (!(idleStopMinutes > 0)) throw new Error("CHIEFBOT_IDLE_STOP_MINUTES must be a positive number of minutes");
 const githubClientId = configuredGitHubClientId(process.env, homedir());
-if (githubClientId === null) {
+const githubApp = configuredGitHubApp(process.env, homedir());
+if (githubClientId === null || githubApp === null) {
   console.error(setupNeeded);
   process.exit(1);
 }
@@ -44,6 +46,7 @@ const control = startControl({
   githubApiUrl: process.env.CHIEFBOT_GITHUB_API_URL ?? "https://api.github.com",
   githubUrl: process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com",
   githubClientId,
+  githubApp,
   secrets:
     config.provider === "gce"
       ? secretManagerStore(googleSecretManager(config))
