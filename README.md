@@ -47,6 +47,8 @@ Creating a bot needs Docker and the `chiefbot-computer:dev` image. Each bot is a
 
 **Repo work and approvals.** A bot clones, branches, edits and commits in its workspace without asking. Before it pushes or opens a pull request, it asks you: the chat shows an approval card (after T3 Code's) with the exact command or pull request, and the bot waits until you click **Approve** or **Decline**, however long that takes. The worker's permission handler decides what asks (`apps/worker/src/approvals.ts`): shell commands that mention `git … push`, `gh pr create|merge`, `gh repo delete`, a `gh api` write to `/pulls` or a way to skip git hooks, the bot's `create_pull_request` tool, and GitHub tools that write. Every push also asks through git's pre-push hook, however the command was spelled, unless it is the push command you just approved. Approvals guard against model mistakes, not a hostile bot: `docs/isolation.md`. Control stores each request and answer (`POST /bots/<id>/approvals/<approval id>`), so a pending card survives a restart of the desktop or control and you can answer later; if the bot's computer restarts first, the turn ends and the card shows **Expired**. A routine's turn waits for approvals the same way: if its 30-minute limit passes first, the run is marked failed, but the card stays answerable and the bot's computer stays running until the turn ends. Git gets the owner's token from control's broker on each use: the image configures a credential helper for github.com that asks the worker over a unix socket (`apps/worker/src/gitCredential.ts`), so no token is written to the bot's disk or into a remote URL. Pull requests go through the GitHub API from the worker (`CHIEFBOT_GITHUB_API_URL`, passed on by control). The token reaches only repositories where your GitHub App is installed.
 
+**Workspaces.** A workspace is a team. Anyone signed in can create one and is its owner. The owner invites people by GitHub login; an invite waits until someone with that login signs in to Chiefbot and accepts it from the workspace switcher at the top of the sidebar. The **Members** screen lists members and pending invites: the owner invites, withdraws invites and removes members, and a member can leave. There are two roles, owner and member, and the owner cannot leave. Every workspace route answers 404 to anyone who is not a member, so outsiders cannot tell a workspace exists. Projects, connectors and tasks will belong to a workspace; bots stay personal.
+
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
 `bun run dev` starts both apps. To run them apart: `bun run --cwd apps/control dev` and `bun run --cwd apps/desktop dev`.
@@ -197,3 +199,16 @@ Tests use a fake GitHub with a real git remote. This check uses the real GitHub 
 9. Send: `Add a second line to README.md, commit and push.` Click **Decline** on the card. The bot says the push was declined, and github.com shows no new commit.
 10. If a card turns **Expired** while the bot was still running, the Copilot runtime gave up waiting: note how long it waited. If git says `lost your GitHub sign-in`, control needs a new sign-in: click **Sign in again**. If the push fails with 403, your GitHub App is not installed on the repo.
 11. Clean up: `gh repo delete <your login>/chiefbot-scratch --yes` (it removes the pull request too).
+
+## Manual check: invite a second GitHub account to a workspace
+
+Tests use a fake GitHub with two users. This check uses the real GitHub with two accounts (the second can be a throwaway account) and makes no Copilot calls. It needs no Docker.
+
+1. Run control and the desktop apart: `bun run --cwd apps/control dev` in one terminal, `bun run --cwd apps/desktop dev` in another. Sign in as your first account.
+2. Open the switcher at the top of the sidebar (it says **Personal**), type a name in **+ New workspace** and press Enter. The workspace becomes current and its **Members** screen lists you as **owner**.
+3. Type the second account's login, in any letter case, and click **Invite**. It shows as invited, "joins once they sign in and accept".
+4. Quit the desktop (control keeps running). Start one with its own sign-in: `bun run --cwd apps/desktop dev -- --user-data-dir=/tmp/chiefbot-second`, and sign in as the second account.
+5. In this second desktop, the switcher shows a **1** badge. Open it and click **Accept**. The workspace becomes current, with you as **member** and a **Leave** button.
+6. Click **Leave**. It goes back to **Personal**. Quit it and start the first desktop again (`bun run --cwd apps/desktop dev`): its **Members** screen lists only the owner.
+7. Invite the second account again, accept as in steps 4 and 5, then click **Remove** next to it in the first desktop. In the second desktop, the workspace is gone from the switcher.
+8. Clean up: `rm -rf /tmp/chiefbot-second`.
