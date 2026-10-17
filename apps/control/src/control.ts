@@ -80,6 +80,8 @@ export type ControlOptions = {
   // pending approval, no screen viewer and no routine run in progress; a
   // project's after this long with no coordinator turn running or queued. Default 30.
   idleStopMinutes?: number;
+  // A project's worker that waits this long on one approval stops, keeping its disk. Default 60.
+  approvalWaitMinutes?: number;
   // Mints the installation tokens an organization pays for Copilot with.
   // Defaults to the repo app's (github.ts copilotRequestsToken); a fake in tests.
   copilotTokens?: CopilotTokenMinter;
@@ -172,6 +174,7 @@ export function startControl({
   workerControlUrl,
   clock = systemClock,
   idleStopMinutes = 30,
+  approvalWaitMinutes = 60,
   context,
   copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
   publicUrl,
@@ -251,6 +254,7 @@ export function startControl({
     connectorsFor: connectors.agentConnectors,
     computers,
     approvals,
+    approvalWaitMinutes,
     clock,
     pullRequest: repos.pullRequest,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
@@ -706,6 +710,7 @@ export function startControl({
     stop: () => {
       idle.stop();
       coordinatorIdle.stop();
+      taskWorkers.stop();
       scheduler.stop();
       subscriptions.stop();
       server.stop(true);

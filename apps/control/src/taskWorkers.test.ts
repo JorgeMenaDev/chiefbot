@@ -523,6 +523,37 @@ test("a member removed mid-turn: their coordinator turn ends, nothing is minted 
   expect(token.status).toBe(404);
 });
 
+test("a worker waiting on an approval longer than the limit stops, keeping its disk, also when control restarts meanwhile", async () => {
+  const time = fakeClock(Date.now());
+  const control = await teamProject({ persistent: true, clock: time.clock });
+  const { owner, project, computers } = control;
+  const { tool, release } = await heldTurn(control, async function* (_prompt, runtime) {
+    // A GitHub tool that writes: the worker asks the member who asked for it.
+    await runtime.mcp("github", "Create issue", false);
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ pendingApprovals }) => pendingApprovals.length === 1);
+  release();
+
+  time.advance(30 * 60_000);
+  control.restart();
+  await eventually(() => computers.computers.get(id)?.worker !== null);
+  time.advance(29 * 60_000);
+  await Bun.sleep(20);
+  const before = (await workersOf(owner, project)).find((worker) => worker.id === id)?.state;
+  time.advance(2 * 60_000);
+
+  expect(before).toBe("working");
+  expect(await workerWhen(owner, project, id, ({ state }) => state === "failed")).toMatchObject({
+    result: "It waited over 60 minutes for octo-user to approve, so its computer stopped, keeping its disk. Dispatch the task again to retry.",
+    pendingApprovals: [],
+    computerRemoved: false,
+  });
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
+  expect(computers.destroyed).toEqual([]);
+});
+
 test("when the organization pays, a worker runs on its installation token", async () => {
   let minted = 0;
   const control = await teamProject({

@@ -1,5 +1,6 @@
 import {
   AnswerApprovalRequest,
+  type ApprovalId,
   PullRequestArgs,
   WorkerToControl,
   type AgentConnector,
@@ -47,7 +48,9 @@ export type TaskWorkerHostOptions = {
   connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
   computers: ComputerProvider;
   approvals: ReturnType<typeof controlApprovals>;
-  // Times the organization's tasks out (orgTaskLimitMs). A fake in tests.
+  // A worker that waits this long on one approval stops, keeping its disk.
+  approvalWaitMinutes: number;
+  // Times those waits. A fake in tests.
   clock: Clock;
   // Opens a pull request after the requester approves it (repos.ts).
   pullRequest: ReturnType<typeof repoAccess>["pullRequest"];
@@ -97,6 +100,7 @@ export function taskWorkerHost({
   connectorsFor,
   computers,
   approvals,
+  approvalWaitMinutes,
   clock,
   pullRequest,
   controlUrlForComputers,
@@ -108,6 +112,8 @@ export function taskWorkerHost({
   // Each worker's connected socket, and each launch control is making the computer for.
   const sockets = new Map<TaskWorkerId, Socket>();
   const launches = new Map<TaskWorkerId, Promise<void>>();
+  // The wait limit of each approval a worker waits on: its cancel, by approval id.
+  const waitLimits = new Map<ApprovalId, () => void>();
 
   const publish = (projectId: ProjectId) => {
     const event = { type: "workers", projectId, workers: workers.workersOf(projectId) } satisfies ClientEvent;
@@ -126,11 +132,36 @@ export function taskWorkerHost({
     userId,
     ask: (kind, detail, signal) =>
       approvals.ask((approvalId) => {
-        const event = workers.requestApproval(workerId, { approvalId, kind, detail });
-        if (event) publish(projectId);
+        const now = clock.now();
+        const event = workers.requestApproval(workerId, { approvalId, kind, detail }, now);
+        if (event) {
+          limitWait(workerId, approvalId, now);
+          publish(projectId);
+        }
         return event;
       }, signal),
   });
+
+  // A worker still waiting on the approval approvalWaitMinutes after `requestedAt`
+  // fails, and its computer stops, keeping its disk (turnOver): it costs nothing
+  // while it waits. Its requester's answer comes too late; the coordinator can
+  // dispatch the task again.
+  function limitWait(workerId: TaskWorkerId, approvalId: ApprovalId, requestedAt: number) {
+    const due = requestedAt + approvalWaitMinutes * 60_000 - clock.now();
+    waitLimits.set(
+      approvalId,
+      clock.setTimeout(() => {
+        waitLimits.delete(approvalId);
+        const worker = workers.worker(workerId);
+        if (!worker?.pendingApprovals.some((pending) => pending.approvalId === approvalId)) return;
+        const message = `It waited over ${approvalWaitMinutes} minutes for ${worker.requestedBy} to approve, so its computer stopped, keeping its disk. Dispatch the task again to retry.`;
+        const [ended] = workers.end(workerId, "failed", message);
+        if (!ended) return;
+        turnOver(workerId, ended.turnId);
+        publish(worker.projectId);
+      }, Math.max(0, due)),
+    );
+  }
 
   // Makes the worker's computer. A failure fails the worker and removes what was made.
   async function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
@@ -219,6 +250,8 @@ export function taskWorkerHost({
         const answer = workers.answerApproval(worker.id, req.params.approvalId, body.data.approved);
         if (!answer || answer.event.type !== "approval-answer") return apiError(409, "not_pending");
         const { approvalId, approved } = answer.event;
+        waitLimits.get(approvalId)?.();
+        waitLimits.delete(approvalId);
         approvals.answered(approvalId, approved);
         send(worker.id, { type: "approval-answer", approvalId, approved });
         publish(worker.projectId);
@@ -390,11 +423,12 @@ export function taskWorkerHost({
       }
     },
 
-    // On control's start: a worker still launching whose computer is not
-    // running lost its launch to the restart, so it fails. A computer whose
-    // turn ended but still runs stops. Then every worker computer that should
-    // be gone is removed.
+    // On control's start: every approval a worker waits on gets its wait limit
+    // again. A worker still launching whose computer is not running lost its
+    // launch to the restart, so it fails. A computer whose turn ended but still
+    // runs stops. Then every worker computer that should be gone is removed.
     async recover() {
+      for (const { workerId, approvalId, requestedAt } of workers.waitingApprovals()) limitWait(workerId, approvalId, requestedAt);
       for (const workerId of workers.launching()) {
         if ((await computers.status(workerId)) !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
       }
@@ -402,6 +436,12 @@ export function taskWorkerHost({
         if ((await computers.status(workerId)) === "running") await computers.stop(workerId);
       }
       await reap();
+    },
+
+    // Control is stopping: no wait limit fires any more.
+    stop() {
+      for (const cancel of waitLimits.values()) cancel();
+      waitLimits.clear();
     },
 
     open(ws: Socket, { workerId }: TaskWorkerSocketData) {
@@ -420,8 +460,10 @@ export function taskWorkerHost({
       const worker = workers.worker(workerId);
       if (!worker) return;
       if (message.type === "turn-event") {
-        const stored = workers.appendTurnEvent(workerId, message.turnId, message.index, message.event);
+        const now = clock.now();
+        const stored = workers.appendTurnEvent(workerId, message.turnId, message.index, message.event, now);
         if (!stored) return;
+        if (message.event.type === "approval-request") limitWait(workerId, message.event.approvalId, now);
         if (message.event.type === "done") turnOver(workerId, message.turnId);
         if (message.event.type === "done" || message.event.type === "approval-request") publish(worker.projectId);
         return;

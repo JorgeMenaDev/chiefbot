@@ -55,12 +55,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     event TEXT NOT NULL
   )`);
   db.run("CREATE INDEX IF NOT EXISTS task_worker_events_by_worker ON task_worker_events (worker_id, seq)");
-  // What the worker asked the requester to approve, and the answer (NULL while pending).
+  // What the worker asked the requester to approve, when (epoch milliseconds,
+  // control's clock: its wait limit counts from then), and the answer (NULL while pending).
   db.run(`CREATE TABLE IF NOT EXISTS task_worker_approvals (
     id TEXT PRIMARY KEY,
     worker_id TEXT NOT NULL REFERENCES task_workers(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     detail TEXT NOT NULL,
+    requested_at INTEGER NOT NULL,
     approved INTEGER
   )`);
 
@@ -230,10 +232,10 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       db.query("UPDATE task_workers SET computer = 'unwanted' WHERE id = ?1 AND computer = 'wanted'").run(workerId);
     }),
 
-    // Adds the worker's event number `index` to its working turn. `done` ends
+    // Adds the worker's event number `index` to its working turn, at `now`. `done` ends
     // the task: finished with the last message as the result, or failed with the
     // turn's error. Null, storing nothing, for a repeat or another turn.
-    appendTurnEvent: db.transaction((workerId: TaskWorkerId, turnId: TurnId, index: number, event: TurnEvent): ChatEvent | null => {
+    appendTurnEvent: db.transaction((workerId: TaskWorkerId, turnId: TurnId, index: number, event: TurnEvent, now: number): ChatEvent | null => {
       const updated = db
         .query(
           `UPDATE task_workers SET next_index = next_index + 1, updated_at = ?4
@@ -242,11 +244,12 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         .get(workerId, turnId, index, Date.now());
       if (!updated) return null;
       if (event.type === "approval-request") {
-        db.query("INSERT INTO task_worker_approvals (id, worker_id, kind, detail) VALUES (?1, ?2, ?3, ?4)").run(
+        db.query("INSERT INTO task_worker_approvals (id, worker_id, kind, detail, requested_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(
           event.approvalId,
           workerId,
           event.kind,
           event.detail,
+          now,
         );
       }
       const stored = append(workerId, event);
@@ -332,17 +335,18 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       db.query("UPDATE task_workers SET pull_request = COALESCE(pull_request, ?2), updated_at = ?3 WHERE id = ?1").run(workerId, url, Date.now());
     },
 
-    // An approval control itself asks for (a push or a pull request), recorded in
-    // the worker's turn like its own. Null when the worker is not working.
+    // An approval control itself asks for (a push, a pull request or a connector
+    // call) at `now`, recorded in the worker's turn like its own. Null when the worker is not working.
     requestApproval: db.transaction(
-      (workerId: TaskWorkerId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): ChatEvent | null => {
+      (workerId: TaskWorkerId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }, now: number): ChatEvent | null => {
         const working = db.query("SELECT 1 FROM task_workers WHERE id = ?1 AND state = 'working'").get(workerId);
         if (!working) return null;
-        db.query("INSERT INTO task_worker_approvals (id, worker_id, kind, detail) VALUES (?1, ?2, ?3, ?4)").run(
+        db.query("INSERT INTO task_worker_approvals (id, worker_id, kind, detail, requested_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(
           ask.approvalId,
           workerId,
           ask.kind,
           ask.detail,
+          now,
         );
         touch(workerId);
         return append(workerId, { type: "approval-request", ...ask });
@@ -362,6 +366,18 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       touch(workerId);
       return append(workerId, { type: "approval-answer", approvalId: ApprovalId.parse(row.id), approved });
     }),
+
+    // Every approval a working worker waits on, anywhere, with when it was asked:
+    // control re-arms their wait limits when it starts.
+    waitingApprovals(): Array<{ workerId: TaskWorkerId; approvalId: ApprovalId; requestedAt: number }> {
+      return db
+        .query<{ worker_id: string; id: string; requested_at: number }, []>(
+          `SELECT worker_id, task_worker_approvals.id, requested_at FROM task_worker_approvals JOIN task_workers ON task_workers.id = worker_id
+           WHERE approved IS NULL AND task_workers.state = 'working'`,
+        )
+        .all()
+        .map((row) => ({ workerId: TaskWorkerId.parse(row.worker_id), approvalId: ApprovalId.parse(row.id), requestedAt: row.requested_at }));
+    },
 
     // The worker's answered approvals, for a worker that may have missed the answers.
     answeredApprovals(workerId: TaskWorkerId) {

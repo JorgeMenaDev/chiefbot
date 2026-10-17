@@ -28,11 +28,15 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 //   CHIEFBOT_COMPUTERS           docker (default) | gce
 //   CHIEFBOT_WORKER_CONTROL_URL  default http://host.docker.internal:<port> (control as containers reach it)
 //   CHIEFBOT_IDLE_STOP_MINUTES   default 30: an idle bot's or coordinator's computer stops after this long
+//   CHIEFBOT_APPROVAL_WAIT_MINUTES  default 60: a project's worker waiting this long on one approval
+//                                stops, keeping its disk
 //   CHIEFBOT_PUBLIC_URL          default http://127.0.0.1:<port>: control as members' browsers reach it
 //                                (connector OAuth sign-ins return to <it>/connectors/oauth/callback)
 const port = Number(process.env.CHIEFBOT_CONTROL_PORT ?? 7410);
 const idleStopMinutes = Number(process.env.CHIEFBOT_IDLE_STOP_MINUTES ?? 30);
 if (!(idleStopMinutes > 0)) throw new Error("CHIEFBOT_IDLE_STOP_MINUTES must be a positive number of minutes");
+const approvalWaitMinutes = Number(process.env.CHIEFBOT_APPROVAL_WAIT_MINUTES ?? 60);
+if (!(approvalWaitMinutes > 0)) throw new Error("CHIEFBOT_APPROVAL_WAIT_MINUTES must be a positive number of minutes");
 const config = computersConfig(process.env, homedir());
 if (config.provider === "gce") await restoreSetup(googleSecretManager(config), chiefbotHome(process.env, homedir()));
 const signIn = configuredSignIn(process.env, homedir());
@@ -65,6 +69,7 @@ const control = startControl({
       : dockerProvider(config),
   workerControlUrl: process.env.CHIEFBOT_WORKER_CONTROL_URL ?? `http://host.docker.internal:${port}`,
   idleStopMinutes,
+  approvalWaitMinutes,
   ...(process.env.CHIEFBOT_PUBLIC_URL ? { publicUrl: process.env.CHIEFBOT_PUBLIC_URL } : {}),
 });
 console.log(`control listening on ${control.url} with ${config.provider} computers`);
