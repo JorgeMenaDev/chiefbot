@@ -77,6 +77,13 @@ You need: the `gcloud` CLI (`brew install --cask google-cloud-sdk`), Terraform (
 
    The control VM boots and retries its image every 10 seconds until step 5 pushes it.
 
+   Then copy your GitHub App's config and private key to control's data disk, where control reads them (`CHIEFBOT_HOME=/data/chiefbot`). Control mints the app's installation tokens with the key to reach repos for bots. Without them control stops with "Run `bun run setup`".
+
+   ```bash
+   gcloud compute scp ~/.chiefbot/config.json ~/.chiefbot/github-app-secrets.json chiefbot-control:/tmp/ --zone=europe-west2-a --tunnel-through-iap
+   gcloud compute ssh chiefbot-control --zone=europe-west2-a --tunnel-through-iap -- 'sudo mkdir -p -m 700 /mnt/disks/data/chiefbot && sudo mv /tmp/config.json /tmp/github-app-secrets.json /mnt/disks/data/chiefbot/ && sudo chmod 600 /mnt/disks/data/chiefbot/*'
+   ```
+
 5. **Build and push both images for linux/amd64.** The Mac is arm64, so build with `--platform linux/amd64`. If buildx fails with `exec format error`, run `docker run --privileged --rm tonistiigi/binfmt --install amd64` once.
 
    ```bash
@@ -125,5 +132,6 @@ Makes no Copilot calls. Each bot costs about $0.09 per running hour.
 ## Known limits
 
 - GitHub refresh tokens are in Secret Manager, one secret `github-refresh-token-<user id>` each, with only the latest version enabled. Access tokens (8 hours) and expiry times stay in control's SQLite on the data disk.
-- The bot's credential (`CHIEFBOT_BOT_TOKEN`) stays in its VM's metadata (decided in ticket #8). Project members who can read VMs can read it. It gets only that one bot's owner's access token (8 hours at most, never a refresh token), and it stops working when the bot is deleted. Anyone with SSH to the VM (Owner, Editor, Compute Admin) could read it from the VM anyway. Moving it to Secret Manager needs a host-side fetch on Container-Optimized OS (no `gcloud` or `jq`), a secret per bot, and an IAM grant to the shared `chiefbot-computer` account that lets every bot VM read every bot's secret unless each bot gets its own service account. Revisit when the project gets members with read-only roles such as Compute Viewer.
+- The bot's credential (`CHIEFBOT_BOT_TOKEN`) stays in its VM's metadata (decided in ticket #8). Project members who can read VMs can read it. It gets only that one bot's owner's access token (8 hours at most, never a refresh token) and control's git proxy for repos that owner may use, where every push waits for the owner's approval. It stops working when the bot is deleted. Anyone with SSH to the VM (Owner, Editor, Compute Admin) could read it from the VM anyway. Moving it to Secret Manager needs a host-side fetch on Container-Optimized OS (no `gcloud` or `jq`), a secret per bot, and an IAM grant to the shared `chiefbot-computer` account that lets every bot VM read every bot's secret unless each bot gets its own service account. Revisit when the project gets members with read-only roles such as Compute Viewer.
 - No snapshot schedule backs up the control data disk.
+- The GitHub App's private key sits on the control VM's data disk (owner-only, root). Anyone with SSH to the control VM can read it. Moving it to Secret Manager is a later step.
