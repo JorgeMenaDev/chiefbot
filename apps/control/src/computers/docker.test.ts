@@ -16,7 +16,7 @@ function setup() {
 }
 
 const botId = BotId.parse("bot_1");
-const spec = { botId, env: { CHIEFBOT_BOT_TOKEN: "bot-secret" } };
+const spec = { id: botId, env: { CHIEFBOT_BOT_TOKEN: "bot-secret" } };
 
 test("create makes a stopped container from the image, with the env and the bot's own volume as home", async () => {
   const { engine, computers } = setup();
@@ -37,7 +37,7 @@ test("each bot is locked down: its own network, a non-root user, no capabilities
   const other = BotId.parse("bot_2");
 
   await computers.create(spec);
-  await computers.create({ botId: other, env: {} });
+  await computers.create({ id: other, env: {} });
 
   expect([...engine.networks]).toEqual(["chiefbot-bot_1-net", "chiefbot-bot_2-net"]);
   expect(engine.containers.get("chiefbot-bot_1")?.config).toMatchObject({

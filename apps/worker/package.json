@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/worker.ts",
+    "./coordinator": "./src/coordinator.ts",
     "./fake-copilot": "./src/fakeCopilot.ts"
   },
   "scripts": {

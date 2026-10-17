@@ -1,6 +1,5 @@
 import { z } from "zod";
-import type { BotId } from "@chiefbot/contracts";
-import type { ComputerProvider } from "./computer.ts";
+import type { ComputerId, ComputerProvider } from "./computer.ts";
 
 // ComputerProvider on a local Docker Engine (Colima on the Mac). One container per
 // bot plus one named volume mounted as the bot's home (/home/bot, with the
@@ -18,9 +17,9 @@ export type DockerProviderOptions = {
 const ContainerInspect = z.object({ State: z.object({ Running: z.boolean() }) });
 
 export function dockerProvider({ socketPath, image }: DockerProviderOptions): ComputerProvider {
-  const container = (botId: BotId) => `chiefbot-${botId}`;
-  const volume = (botId: BotId) => `chiefbot-${botId}-home`;
-  const network = (botId: BotId) => `chiefbot-${botId}-net`;
+  const container = (id: ComputerId) => `chiefbot-${id}`;
+  const volume = (id: ComputerId) => `chiefbot-${id}-home`;
+  const network = (id: ComputerId) => `chiefbot-${id}-net`;
 
   // One Engine API call. Statuses in `ok` count as success besides 2xx.
   async function engine(method: string, path: string, body?: unknown, ok: number[] = []) {
@@ -36,11 +35,11 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
   }
 
   return {
-    async create({ botId, env }) {
-      const labels = { "chiefbot.bot-id": botId };
-      await engine("POST", "/volumes/create", { Name: volume(botId), Labels: labels });
-      await engine("POST", "/networks/create", { Name: network(botId), Driver: "bridge", Labels: labels });
-      await engine("POST", `/containers/create?name=${container(botId)}`, {
+    async create({ id, env }) {
+      const labels = { "chiefbot.computer-id": id };
+      await engine("POST", "/volumes/create", { Name: volume(id), Labels: labels });
+      await engine("POST", "/networks/create", { Name: network(id), Driver: "bridge", Labels: labels });
+      await engine("POST", `/containers/create?name=${container(id)}`, {
         Image: image,
         Env: Object.entries(env).map(([key, value]) => `${key}=${value}`),
         Labels: labels,
@@ -48,8 +47,8 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
         User: "bot",
         HostConfig: {
           // The bot's volume is its only mount: never the Docker socket or a host path.
-          Mounts: [{ Type: "volume", Source: volume(botId), Target: "/home/bot" }],
-          NetworkMode: network(botId),
+          Mounts: [{ Type: "volume", Source: volume(id), Target: "/home/bot" }],
+          NetworkMode: network(id),
           // The bot runs as a plain user: it needs no Linux capabilities, and nothing may gain them.
           CapDrop: ["ALL"],
           SecurityOpt: ["no-new-privileges"],
@@ -62,23 +61,23 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
     },
 
     // 304 means it was already in that state.
-    async start(botId) {
-      await engine("POST", `/containers/${container(botId)}/start`, undefined, [304]);
+    async start(id) {
+      await engine("POST", `/containers/${container(id)}/start`, undefined, [304]);
     },
 
-    async stop(botId) {
-      await engine("POST", `/containers/${container(botId)}/stop`, undefined, [304]);
+    async stop(id) {
+      await engine("POST", `/containers/${container(id)}/stop`, undefined, [304]);
     },
 
     // 404 means it is already gone. The network holds no data, so it always goes.
-    async destroy(botId, { deleteData }) {
-      await engine("DELETE", `/containers/${container(botId)}?force=true`, undefined, [404]);
-      await engine("DELETE", `/networks/${network(botId)}`, undefined, [404]);
-      if (deleteData) await engine("DELETE", `/volumes/${volume(botId)}`, undefined, [404]);
+    async destroy(id, { deleteData }) {
+      await engine("DELETE", `/containers/${container(id)}?force=true`, undefined, [404]);
+      await engine("DELETE", `/networks/${network(id)}`, undefined, [404]);
+      if (deleteData) await engine("DELETE", `/volumes/${volume(id)}`, undefined, [404]);
     },
 
-    async status(botId) {
-      const res = await engine("GET", `/containers/${container(botId)}/json`, undefined, [404]);
+    async status(id) {
+      const res = await engine("GET", `/containers/${container(id)}/json`, undefined, [404]);
       if (res.status === 404) return "absent";
       return ContainerInspect.parse(await res.json()).State.Running ? "running" : "stopped";
     },

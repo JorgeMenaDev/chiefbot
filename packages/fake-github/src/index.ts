@@ -5,7 +5,7 @@ import { z } from "zod";
 import { createBareRepo, git, gitHttpBackend } from "./git.ts";
 
 // A fake github.com + api.github.com for tests: the OAuth device flow, the
-// refresh grant, the two API reads control makes, private git repos over smart
+// refresh grant, the API reads control makes, private git repos over smart
 // HTTP, opening pull requests, and registering a GitHub App from a manifest
 // (what `bun run setup` does). One origin serves both hosts' paths.
 
@@ -155,6 +155,21 @@ export function startFakeGitHub({ user = defaultFakeUser, pollErrors = [], devic
           if (!user) return Response.json({ message: "Bad credentials" }, { status: 401 });
           if (!user.copilot) return Response.json({ message: "Not Found" }, { status: 404 });
           return Response.json({ login: user.login, copilot_plan: user.copilot.plan, access_type_sku: user.copilot.sku });
+        },
+      },
+      // A file at the root of the repo's default branch, raw (what Accept:
+      // application/vnd.github.raw+json asks for). Like GitHub, 404 for a missing
+      // file and for a repo the token cannot see.
+      "/repos/:owner/:repo/contents/:path": {
+        GET: (req) => {
+          if (!authorized(req)) return Response.json({ message: "Bad credentials" }, { status: 401 });
+          const repository = `${req.params.owner}/${req.params.repo}`;
+          if (!existsSync(bareRepo(repository))) return Response.json({ message: "Not Found" }, { status: 404 });
+          try {
+            return new Response(git(bareRepo(repository), ["show", `HEAD:${req.params.path}`]) + "\n");
+          } catch {
+            return Response.json({ message: "Not Found" }, { status: 404 });
+          }
         },
       },
       // Like GitHub: 422 unless the head branch exists in the repo.

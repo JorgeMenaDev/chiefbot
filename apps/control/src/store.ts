@@ -20,6 +20,7 @@ import {
 } from "@chiefbot/contracts";
 import type { GitHubIdentity } from "./github.ts";
 import { nextDueAt } from "./schedule.ts";
+import { projectStore } from "./projectStore.ts";
 import { workspaceStore } from "./workspaceStore.ts";
 
 // Control's durable state in SQLite. Every row hangs off a user or a workspace.
@@ -194,10 +195,13 @@ export function openStore(path: string) {
   });
 
   const workspaces = workspaceStore(db);
+  const projects = projectStore(db, hash);
 
   return {
     // Workspaces, members and invites (workspaceStore.ts).
     workspaces,
+    // Projects, task ledgers and coordinator chats (projectStore.ts).
+    projects,
 
     // Creates or updates the user GitHub identified.
     upsertUser(identity: GitHubIdentity): UserId {
