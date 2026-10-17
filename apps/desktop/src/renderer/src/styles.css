@@ -269,6 +269,13 @@ body {
   border: 1px solid rgb(255 123 114 / 0.4);
   border-radius: 8px;
 }
+/* Control's note about a handoff to a project: needs input, or done. */
+.message.notice {
+  padding: 8px 12px;
+  border: 1px solid rgb(121 192 255 / 0.4);
+  border-radius: 8px;
+  font-size: 13px;
+}
 .tool-row {
   font-size: 12px;
   color: #8b8b93;

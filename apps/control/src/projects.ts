@@ -35,7 +35,7 @@ type Socket = { send(message: string): unknown; close(code?: number, reason?: st
 export type ProjectHostOptions = {
   store: ReturnType<typeof openStore>;
   // Who pays for each coordinator turn (copilotIdentity.ts).
-  identity: ReturnType<typeof copilotIdentity>;
+  payerOf: ReturnType<typeof copilotIdentity>;
   computers: ComputerProvider;
   context: ContextStore;
   githubApiUrl: string;
@@ -49,6 +49,8 @@ export type ProjectHostOptions = {
   publishToUser: (userId: UserId, event: ClientEvent) => void;
   // Upgrades the request to a project WebSocket; undefined once upgraded.
   upgrade: (req: Request, data: ProjectSocketData) => Response | undefined;
+  // The project's task ledger changed.
+  onLedgerChange: (projectId: ProjectId) => void;
 };
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
@@ -80,7 +82,7 @@ export type ProjectHostOptions = {
 //   POST   /coordinator/:projectId/tools  body CoordinatorToolCall → its answer (see projects.ts in contracts)
 export function projectHost({
   store,
-  identity,
+  payerOf,
   computers,
   context,
   githubApiUrl,
@@ -89,6 +91,7 @@ export function projectHost({
   publish,
   publishToUser,
   upgrade,
+  onLedgerChange,
 }: ProjectHostOptions) {
   const { projects } = store;
   // Each project's connected coordinator, and the projects whose coordinator has said hello.
@@ -101,6 +104,7 @@ export function projectHost({
   const publishTasks = (projectId: ProjectId) => {
     const tasks = projects.tasks(projectId);
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, { type: "tasks", projectId, tasks });
+    onLedgerChange(projectId);
   };
   const toCoordinator = (projectId: ProjectId, message: ControlToCoordinator) =>
     coordinators.get(projectId)?.send(JSON.stringify(message));
@@ -111,7 +115,7 @@ export function projectHost({
   const schedule = (projectId: ProjectId) => {
     if (!greeted.has(projectId)) return;
     const next = projects.claimNextTurn(projectId);
-    const run = next && identity({ kind: "project", projectId, askerId: next.member.userId });
+    const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
     if (!next || !run) return;
     publishChat(projectId, projects.addPayer(next.turnId, run.payer));
     toCoordinator(projectId, { type: "run-turn", ...next, payer: run.payer });
@@ -121,7 +125,7 @@ export function projectHost({
   // for a seat, `userId`'s); 404 otherwise: a coordinator gets no one else's.
   const runningToken = async (projectId: ProjectId, kind: CopilotPayer["kind"], userId?: string) => {
     const asker = projects.runningMember(projectId);
-    const run = asker && identity({ kind: "project", projectId, askerId: asker });
+    const run = asker && payerOf({ kind: "project", projectId, askerId: asker });
     if (!run || run.payer.kind !== kind || (userId !== undefined && asker !== userId)) return apiError(404, "not_found");
     const token: CopilotToken = await run.token();
     if ("error" in token) return token.error === "reauth_needed" ? apiError(403, token.error) : apiError(502, token.error, token.message);
@@ -303,6 +307,18 @@ export function projectHost({
 
   return {
     routes,
+
+    // Call after changing the project's ledger outside a coordinator tool call:
+    // members see it, and the handoffs linked to its tasks are checked.
+    ledgerChanged: publishTasks,
+
+    // Queues `text` in the member's chat with the coordinator, behind their own
+    // unanswered message if there is one (a handoff from their chief of staff).
+    deliver(projectId: ProjectId, userId: UserId, text: string) {
+      const queued = projects.queueTurn(projectId, userId, text, true);
+      if (queued) publishChat(projectId, { userId, event: queued });
+      schedule(projectId);
+    },
 
     open(ws: Socket, data: ProjectSocketData) {
       if (data.kind === "project-chat") {

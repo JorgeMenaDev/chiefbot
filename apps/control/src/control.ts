@@ -30,6 +30,7 @@ import { systemClock, type Clock } from "./clock.ts";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
+import { chiefHost } from "./handoffs.ts";
 import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
@@ -136,6 +137,8 @@ type SocketData =
 //   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
 //   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
 //                             task ledgers and chats (projects.ts)
+//   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff: handing work to
+//                             projects and watching it (handoffs.ts)
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //
@@ -199,12 +202,12 @@ export function startControl({
   });
 
   // Who pays for each agent run's Copilot (copilotIdentity.ts).
-  const identity = copilotIdentity({ store, broker, mint: copilotTokens });
+  const payerOf = copilotIdentity({ store, broker, mint: copilotTokens });
 
   // Projects, their coordinators and the coordinators' scheduler (projects.ts).
   const projects = projectHost({
     store,
-    identity,
+    payerOf,
     computers,
     context,
     githubApiUrl,
@@ -213,7 +216,13 @@ export function startControl({
     publish: (topic, message) => server.publish(topic, message),
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     upgrade: (req, data) => upgrade(server, req, data),
+    // The handoffs watcher: tells chiefs when their task needs input or is done.
+    onLedgerChange: (projectId) => {
+      for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
+    },
   });
+  // Chiefs of staff handing work to projects (handoffs.ts).
+  const chiefs = chiefHost({ store, projects });
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running, model }) => ({
@@ -303,6 +312,7 @@ export function startControl({
     routes: {
       ...workspaceRoutes(store),
       ...projects.routes,
+      ...chiefs.routes,
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));
@@ -500,7 +510,7 @@ export function startControl({
         GET: async (req) => {
           const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          const token = await identity({ kind: "chief", ownerId: bot.userId })?.token();
+          const token = await payerOf({ kind: "chief", ownerId: bot.userId })?.token();
           if (token && "kind" in token && token.kind === "seat") return Response.json(token.token);
           return apiError(403, "reauth_needed");
         },

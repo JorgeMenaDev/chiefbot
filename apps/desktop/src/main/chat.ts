@@ -141,6 +141,9 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       const card: ChatItem = { kind: "approval", id: `${turnId}:${approvalId}`, approvalId, request: kind, detail, state: "pending" };
       return { ...view, working: waitingForApproval, items: [...view.items, card] };
     }
+    // Control's note about a handoff: it leaves any running turn as it is.
+    case "handoff-update":
+      return { ...view, items: [...view.items, { kind: "notice", id: `${turnId}:notice`, text: event.text }] };
     case "approval-answer": {
       const state = event.approved ? "approved" : "declined";
       const items = view.items.map(

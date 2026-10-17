@@ -196,8 +196,8 @@ function CoordinatorChat({ project }: { project: Project }) {
   );
 }
 
-// The coordinator asks for no approvals, so those never show. Each turn starts
-// with who pays for its Copilot.
+// The coordinator asks for no approvals and gets no handoff notices, so those
+// never show. Each turn starts with who pays for its Copilot.
 function ChatRow({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
@@ -211,6 +211,7 @@ function ChatRow({ item }: { item: ChatItem }) {
     case "payer":
       return <p className="muted payer">{payerText(item.payer)}</p>;
     case "approval":
+    case "notice":
       return null;
   }
 }

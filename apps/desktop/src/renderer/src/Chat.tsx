@@ -106,6 +106,8 @@ function Message({ botId, item }: { botId: BotId; item: ChatItem }) {
       );
     case "error":
       return <div className="message error">{item.message}</div>;
+    case "notice":
+      return <div className="message notice">{item.text}</div>;
     case "approval":
       return <ApprovalCard botId={botId} item={item} />;
     // A chief's chat has none: it always runs on its owner's seat, as its header says.

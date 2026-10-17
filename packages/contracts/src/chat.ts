@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApprovalId, BotId, TurnId } from "./ids.ts";
+import { ApprovalId, BotId, HandoffId, TurnId } from "./ids.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
@@ -49,12 +49,23 @@ export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPaye
 export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
 export type AnswerApprovalRequest = z.infer<typeof AnswerApprovalRequest>;
 
+// Control's note in a chief of staff's chat: a project's task for one of its
+// handoffs (handoffs.ts) now needs the owner's input, or is done. Posted once
+// each time the task's status becomes one of these, in a turn of its own.
+export const HandoffUpdate = z.object({
+  type: z.literal("handoff-update"),
+  handoffId: HandoffId,
+  status: z.enum(["needs_input", "done"]),
+  text: z.string(),
+});
+export type HandoffUpdate = z.infer<typeof HandoffUpdate>;
+
 // One entry of a bot's chat history as control stores it. `seq` grows across all
 // of control's chat history, so a client resumes with "everything after seq N".
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, TurnPayer, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
@@ -84,6 +95,8 @@ export const ChatItem = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("assistant"), id: z.string(), text: z.string() }),
   z.object({ kind: z.literal("tool"), id: z.string(), name: z.string(), status: z.enum(["running", "succeeded", "failed"]) }),
   z.object({ kind: z.literal("error"), id: z.string(), message: z.string() }),
+  // Control's note about a handoff (HandoffUpdate).
+  z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
   // Who pays for the turn that follows.
   z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer }),
   // expired: the turn ended before anyone answered (its worker restarted).
