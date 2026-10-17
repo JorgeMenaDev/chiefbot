@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ApiError, BrokeredGitHubToken, ClientEvent, ContextFile, Project, Task, User, Workspace, WorkspaceInvite, type ChatEvent, type ProjectId } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
+import { fakeClock } from "./clock.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 afterEach(cleanUp);
@@ -91,8 +92,8 @@ test("only the workspace owner deletes a project, and its computer goes with it"
 });
 
 // A team with a project for octo-org/shop whose coordinator is online.
-async function teamProject() {
-  const control = await team();
+async function teamProject(options: TestControlOptions = {}) {
+  const control = await team(undefined, options);
   const project = Project.parse(await (await control.createProject()).json());
   return { ...control, project };
 }
@@ -284,4 +285,37 @@ test("a coordinator that restarts mid-turn ends that turn with an error, then ru
 
   expect((await ownerChat.until(doneCount(1))).map(({ event }) => event.type)).toEqual(["user-message", "payer", "text-delta", "error", "done"]);
   expect(replies(await guest.watchProjectChat(project.id).until(doneCount(1)))).toEqual(["You said: my turn"]);
+});
+
+test("a coordinator's computer stops once idle, not while a turn runs, and the next message starts it again", async () => {
+  const minute = 60_000;
+  const time = fakeClock(Date.now());
+  const { owner, project, computers, copilot } = await teamProject({ clock: time.clock, idleStopMinutes: 30 });
+  let release = () => {};
+  copilot.script = async function* () {
+    await new Promise<void>((resolve) => (release = resolve));
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  };
+  const chat = owner.watchProjectChat(project.id);
+  await ask(owner, project, "a long one");
+  await eventually(() => copilot.sends.length === 1);
+
+  time.advance(3 * 60 * minute);
+  await Bun.sleep(50);
+  expect(await computers.provider.status(project.id)).toBe("running");
+  release();
+  await chat.until(doneCount(1));
+  time.advance(29 * minute);
+  await Bun.sleep(50);
+  expect(await computers.provider.status(project.id)).toBe("running");
+  time.advance(2 * minute);
+  await eventually(async () => (await computers.provider.status(project.id)) === "stopped");
+
+  copilot.script = fakeCopilot().script;
+  await ask(owner, project, "wake up");
+
+  expect(replies(await chat.until(doneCount(2)))).toEqual(["Done.", "You said: wake up"]);
+  expect(await computers.provider.status(project.id)).toBe("running");
+  expect(computers.destroyed).toEqual([]);
 });

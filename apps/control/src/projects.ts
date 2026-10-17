@@ -58,13 +58,16 @@ export type ProjectHostOptions = {
   connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
   // The project's task ledger changed.
   onLedgerChange: (projectId: ProjectId) => void;
+  // The coordinator did something: its idle time starts again (idle.ts).
+  onActivity: (projectId: ProjectId) => void;
 };
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
 // (from the ComputerProvider), a task ledger and shared context in control,
 // and one chat with the coordinator per member. The project's scheduler runs
 // one coordinator turn at a time across all members' chats, oldest first, so
-// each turn sees every task the turns before it made.
+// each turn sees every task the turns before it made. Control stops an idle
+// coordinator's computer (`sleep`, from idle.ts); a turn queued for it starts the computer again.
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET    /workspaces/:id/projects  → Project[]
@@ -102,11 +105,15 @@ export function projectHost({
   upgrade,
   connectorsFor,
   onLedgerChange,
+  onActivity,
 }: ProjectHostOptions) {
   const { projects } = store;
   // Each project's connected coordinator, and the projects whose coordinator has said hello.
   const coordinators = new Map<ProjectId, Socket>();
   const greeted = new Set<ProjectId>();
+  // Projects whose computer control is stopping (no turn may land on it), and those it is starting.
+  const stopping = new Set<ProjectId>();
+  const waking = new Set<ProjectId>();
 
   const chatTopic = (projectId: ProjectId, userId: UserId) => `project-chat:${projectId}:${userId}`;
   const publishChat = (projectId: ProjectId, { userId, event }: { userId: UserId; event: ChatEvent }) =>
@@ -126,7 +133,8 @@ export function projectHost({
   // workspace, for a shared one) whoever pays: org billing changes only
   // Copilot's identity. If they cannot be read, the turn runs without connectors.
   const schedule = (projectId: ProjectId) => {
-    if (!greeted.has(projectId)) return;
+    if (stopping.has(projectId)) return;
+    if (!greeted.has(projectId)) return wake(projectId);
     const next = projects.claimNextTurn(projectId);
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
     if (!next || !run) return;
@@ -134,6 +142,17 @@ export function projectHost({
     void connectorsFor(projectId, next.member.userId)
       .catch(() => [])
       .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, payer: run.payer, connectors }));
+  };
+
+  // Starts the project's computer when a turn waits and no coordinator is
+  // connected: it was stopped for idleness. A no-op for a computer still running.
+  const wake = (projectId: ProjectId) => {
+    if (coordinators.has(projectId) || waking.has(projectId) || !projects.hasQueuedTurn(projectId)) return;
+    waking.add(projectId);
+    computers
+      .start(projectId)
+      .catch((error: unknown) => console.error(`could not start the computer of ${projectId}:`, error))
+      .finally(() => waking.delete(projectId));
   };
 
   // The running turn's token for the coordinator, if its payer is of `kind` (and,
@@ -332,6 +351,27 @@ export function projectHost({
   return {
     routes,
 
+    // Projects whose coordinator is connected: their computers run.
+    awake: () => [...coordinators.keys()].map((id) => ({ id })),
+
+    // Whether the project's coordinator has a turn running or waiting.
+    busy: (projectId: ProjectId) => projects.runningMember(projectId) !== null || projects.hasQueuedTurn(projectId),
+
+    // Stops the idle project's computer. Its coordinator is forgotten once the
+    // computer is stopped, and a turn queued meanwhile starts it again.
+    async sleep(projectId: ProjectId) {
+      stopping.add(projectId);
+      try {
+        await computers.stop(projectId);
+        coordinators.get(projectId)?.close();
+        coordinators.delete(projectId);
+        greeted.delete(projectId);
+      } finally {
+        stopping.delete(projectId);
+      }
+      wake(projectId);
+    },
+
     // Call after changing the project's ledger outside a coordinator tool call:
     // members see it, and the handoffs linked to its tasks are checked.
     ledgerChanged: publishTasks,
@@ -359,7 +399,7 @@ export function projectHost({
         return;
       }
       const project = projects.project(data.projectId);
-      if (!project) return ws.close();
+      if (!project || stopping.has(data.projectId)) return ws.close();
       // One connection per project: a reconnecting coordinator replaces its stale socket.
       coordinators.get(data.projectId)?.close(4000, "replaced");
       coordinators.set(data.projectId, ws);
@@ -380,6 +420,7 @@ export function projectHost({
       if (message.type === "turn-event") {
         const stored = projects.appendTurnEvent(projectId, message.turnId, message.index, message.event);
         if (!stored) return;
+        onActivity(projectId);
         publishChat(projectId, stored);
         if (message.event.type === "done") schedule(projectId);
         return;

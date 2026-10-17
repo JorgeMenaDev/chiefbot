@@ -77,7 +77,8 @@ export type ControlOptions = {
   // When routines are due and bots count as idle. A fake in tests.
   clock?: Clock;
   // A running bot's computer stops after this long with no running turn, no
-  // pending approval, no screen viewer and no routine run in progress. Default 30.
+  // pending approval, no screen viewer and no routine run in progress; a
+  // project's after this long with no coordinator turn running or queued. Default 30.
   idleStopMinutes?: number;
   // Mints the installation tokens an organization pays for Copilot with.
   // Defaults to the repo app's (github.ts copilotRequestsToken); a fake in tests.
@@ -267,6 +268,7 @@ export function startControl({
     upgrade: (req, data) => upgrade(server, req, data),
     connectorsFor: connectors.agentConnectors,
     onLedgerChange: watchHandoffs,
+    onActivity: (projectId) => coordinatorIdle.touch(projectId),
   });
   // Chiefs of staff handing work to projects (handoffs.ts).
   const chiefs = chiefHost({ store, projects });
@@ -670,18 +672,27 @@ export function startControl({
   const idle = startIdleStop({
     clock,
     idleMs: idleStopMinutes * 60_000,
-    runningBots: store.runningBots,
+    running: () => store.runningBots().map(({ botId, userId }) => ({ id: botId, userId })),
     busy: (botId) =>
       store.unfinishedTurns(botId).length > 0 ||
       store.routineRunning(botId) ||
       screens.watched(botId),
-    stop: (userId, botId) => setRunning(userId, botId, false),
+    stop: ({ id, userId }) => setRunning(userId, id, false),
+  });
+  // Coordinators' computers stop the same way; the next queued turn starts them again (projects.ts).
+  const coordinatorIdle = startIdleStop({
+    clock,
+    idleMs: idleStopMinutes * 60_000,
+    running: projects.awake,
+    busy: projects.busy,
+    stop: ({ id }) => projects.sleep(id),
   });
 
   return {
     url: server.url.origin,
     stop: () => {
       idle.stop();
+      coordinatorIdle.stop();
       scheduler.stop();
       subscriptions.stop();
       server.stop(true);

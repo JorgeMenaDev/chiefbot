@@ -276,6 +276,11 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer }) };
     },
 
+    // Whether a turn waits for the project's coordinator.
+    hasQueuedTurn(projectId: ProjectId): boolean {
+      return db.query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND state = 'queued'").get(projectId) !== null;
+    },
+
     // The member whose turn is running on the project's coordinator, if any.
     runningMember(projectId: ProjectId): UserId | null {
       const row = db
