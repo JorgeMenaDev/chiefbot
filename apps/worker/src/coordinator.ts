@@ -1,25 +1,18 @@
 import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
 import {
-  ApiError,
-  BrokeredGitHubToken,
   ControlToCoordinator,
-  CopilotInstallationToken,
   type AgentConnector,
-  type CoordinatorToControl,
   type CopilotPayer,
   type CoordinatorToolCall,
-  type ReportedConnectorCall,
   type Project,
   type ProjectMember,
-  type TurnEvent,
   type TurnId,
   type UserId,
 } from "@chiefbot/contracts";
 import { connectorServers } from "./connectorServers.ts";
+import { controlLink } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
-import { installationSession } from "./installationSession.ts";
-import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 
 export type CoordinatorOptions = {
   // Control's base URL as seen from the computer.
@@ -37,7 +30,8 @@ export type CoordinatorOptions = {
 
 // A project's coordinator, on the project's computer. Dials out to control's
 // /coordinator/:projectId WebSocket with the project's credential and keeps the
-// connection up. Each member has their own chat, so their own Copilot session.
+// connection up (controlLink.ts), resending its latest turn's events on every
+// reconnect. Each member has their own chat, so their own Copilot session.
 // Each turn runs on the payer control names: the member's own Copilot seat (a
 // token control brokers for the member whose turn is running), or, when the
 // workspace's organization pays, an installation token control mints, which
@@ -47,44 +41,18 @@ export type CoordinatorOptions = {
 // the shared context and the project's workers, all kept by control, plus the
 // project's connectors that control sends with each turn, which act as the
 // member whoever pays for Copilot. No shell, no files.
-// Like a bot's worker, it resends its latest turn's events on every reconnect.
 export function startCoordinator({ controlUrl, projectId, projectToken, copilot, retryMs = 2000, onBound }: CoordinatorOptions) {
   const base = `${controlUrl}/coordinator/${projectId}`;
-  const auth = { authorization: `Bearer ${projectToken}` };
-  let socket: WebSocket | null = null;
-  let retry: Timer | null = null;
-  let stopped = false;
   let project: Project | null = null;
-  // Every event of the latest turn, numbered by position.
-  let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
-  // The turn running now, whose chat it is, and what it has streamed so far.
-  let active: ({ turnId: TurnId; userId: UserId } & TurnStream) | null = null;
+  // The member whose turn is running: only their session's events reach the chat.
+  let activeMember: UserId | null = null;
   // Each member's session, opened by their first turn and opened again (resumed,
   // keeping its history) when their connectors or the kind of payer change.
   // `key` identifies both; `unsubscribe` stops its events reaching the chat.
   const sessions = new Map<UserId, { key: string; session: Promise<BotSession>; unsubscribe: () => void }>();
 
-  function send(message: CoordinatorToControl) {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
-  }
-
-  function emit(turnId: TurnId, event: TurnEvent) {
-    if (latest?.turnId !== turnId) latest = { turnId, events: [] };
-    latest.events.push(event);
-    send({ type: "turn-event", turnId, index: latest.events.length - 1, event });
-    if (event.type === "done" && active?.turnId === turnId) active = null;
-  }
-
-  // Throws with control's reason when it refuses.
-  async function fromControl(path: string, init: RequestInit = {}) {
-    const res = await fetch(`${base}${path}`, { ...init, headers: { ...auth, "content-type": "application/json" } });
-    if (res.ok) return res;
-    const refusal = ApiError.safeParse(await res.json().catch(() => null));
-    throw new Error(refusal.success ? (refusal.data.message ?? refusal.data.error) : `Control answered ${res.status}`);
-  }
-
   const tools = coordinatorTools(async (toolCall: CoordinatorToolCall) =>
-    (await fromControl("/tools", { method: "POST", body: JSON.stringify(toolCall) })).text(),
+    (await link.fromControl("/tools", { method: "POST", body: JSON.stringify(toolCall) })).text(),
   );
   const toolNames = new Set<string>(tools.map(({ name }) => name));
 
@@ -97,14 +65,6 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       (request.kind === "mcp" && connectors.some(({ name }) => name === request.serverName))
         ? { kind: "approve-once" }
         : { kind: "reject", feedback: "The coordinator can only use its task, context and worker tools and the project's connectors." };
-
-  // Control logs remote connectors' calls in its proxy; a command connector's
-  // call runs here, so it is reported. A failed report does not stop the call.
-  const reportCall = (connectors: AgentConnector[]) => async (serverName: string, toolName: string) => {
-    if (!connectors.some(({ name, kind }) => name === serverName && kind === "command")) return;
-    const call: ReportedConnectorCall = { connector: serverName, tool: toolName };
-    await fromControl("/connector-calls", { method: "POST", body: JSON.stringify(call) }).catch(() => {});
-  };
 
   async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[]) {
     const key = JSON.stringify({ payer: payer.kind, connectors });
@@ -124,27 +84,10 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       tools,
       instructions: instructions(project, member),
       mcpServers: connectorServers(connectors, { base, credential: projectToken }),
-      onMcpCall: reportCall(connectors),
+      onMcpCall: link.reportCalls(connectors),
     };
-    const opening =
-      payer.kind === "org"
-        ? // The organization's Copilot, on installation tokens control mints for the running turn.
-          installationSession({
-            ...options,
-            copilot,
-            token: async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json()),
-          })
-        : copilot.openSession({
-            ...options,
-            // The member's own Copilot seat, brokered by control while their turn runs.
-            auth: {
-              kind: "seat",
-              gitHubTokenProvider: async () => {
-                const { accessToken, expiresAt } = BrokeredGitHubToken.parse(await (await fromControl(`/github-token/${member.userId}`)).json());
-                return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
-              },
-            },
-          });
+    // The member's own seat is brokered by control only while their turn runs.
+    const opening = link.openSession(copilot, payer.kind, options, `/github-token/${member.userId}`);
     let stopEvents = () => {};
     const session = opening.then((opened) => {
       stopEvents = opened.on((event) => onSessionEvent(member.userId, event));
@@ -157,52 +100,34 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     return session;
   }
 
-  // Sub-agent events (agentId set) are left out: the chat shows the coordinator's own work.
   function onSessionEvent(userId: UserId, event: SessionEvent) {
-    if (!active || active.userId !== userId || event.agentId) return;
-    const { turnId } = active;
-    for (const turnEvent of toTurnEvents(event, active)) emit(turnId, turnEvent);
+    if (activeMember === userId) link.sessionEvent(event);
   }
 
   async function runTurn(turnId: TurnId, member: ProjectMember, text: string, payer: CopilotPayer, connectors: AgentConnector[]) {
-    active = { turnId, userId: member.userId, ...newTurnStream() };
+    link.begin(turnId);
+    activeMember = member.userId;
     try {
       await (await sessionFor(member, payer, connectors)).send(text);
     } catch (error) {
-      emit(turnId, { type: "error", message: error instanceof Error ? error.message : String(error) });
-      emit(turnId, { type: "done" });
+      link.fail(turnId, error);
     }
   }
 
-  function connect() {
-    socket = new WebSocket(base.replace(/^http/, "ws"), { headers: auth });
-    socket.onopen = () => {
-      if (latest) {
-        const { turnId, events } = latest;
-        events.forEach((event, index) => send({ type: "turn-event", turnId, index, event }));
-      }
-      send({ type: "hello", activeTurnId: active?.turnId ?? null });
-    };
-    socket.onmessage = (event) => {
-      const message = ControlToCoordinator.parse(JSON.parse(String(event.data)));
+  const link = controlLink({
+    base,
+    token: projectToken,
+    retryMs,
+    parse: (json) => ControlToCoordinator.parse(json),
+    onMessage(message) {
       if (message.type === "bound") {
         project = message.project;
         onBound?.(message.project);
       } else void runTurn(message.turnId, message.member, message.text, message.payer, message.connectors);
-    };
-    socket.onclose = () => {
-      if (!stopped) retry = setTimeout(connect, retryMs);
-    };
-  }
-  connect();
-
-  return {
-    stop() {
-      stopped = true;
-      if (retry) clearTimeout(retry);
-      socket?.close();
     },
-  };
+  });
+
+  return { stop: link.stop };
 }
 
 // What the coordinator is told about its job, the project and who it talks with.

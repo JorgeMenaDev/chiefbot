@@ -1,29 +1,14 @@
 import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
-import {
-  ApiError,
-  ApprovalId,
-  BrokeredGitHubToken,
-  BrokerRefusal,
-  ControlToWorker,
-  CopilotInstallationToken,
-  type AgentConnector,
-  type ApprovalKind,
-  type ReportedConnectorCall,
-  type ScreenControl,
-  type TurnEvent,
-  type TurnId,
-  type WorkerToControl,
-} from "@chiefbot/contracts";
+import { ApprovalId, ControlToWorker, type ApprovalKind, type ScreenControl, type TurnId } from "@chiefbot/contracts";
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
 import { connectorServers } from "./connectorServers.ts";
+import { controlLink } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
-import { installationSession } from "./installationSession.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
-import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 
 export type WorkerOptions = {
   // Control's base URL as seen from the computer, e.g. http://host.docker.internal:7410.
@@ -50,11 +35,11 @@ export type WorkerOptions = {
 };
 
 // Dials out to control's /worker/:id WebSocket with the bot's credential (or a task
-// worker's /task-worker/:id with its own: the same protocol) and keeps the connection up: control restarts and network drops end in a reconnect.
+// worker's /task-worker/:id with its own: the same protocol) and keeps the
+// connection up (controlLink.ts), so a turn survives a control restart.
 // Runs the turns control sends on the bot's Copilot session, one at a time, and
 // streams their events back. After each bind it reports the models the owner's
-// Copilot plan offers. The latest turn's events are kept and resent on
-// every reconnect (control stores each once), so a turn survives a control restart.
+// Copilot plan offers.
 // On `screen-open` it pipes the screen to a viewer through control (screen.ts).
 // While the human has the screen (take-over), every tool call waits for hand-back.
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
@@ -74,60 +59,28 @@ export function startWorker({
 }: WorkerOptions) {
   // Every control route of this computer starts here.
   const base = `${controlUrl}/${route}/${id}`;
-  const url = base.replace(/^http/, "ws");
   // Each open screen stream's close function.
   const streams = new Set<() => void>();
-  let socket: WebSocket | null = null;
-  let retry: Timer | null = null;
-  let stopped = false;
   // Who drives the screen, as control last said. While it is "human", every tool
   // call of the running turn waits until hand-back: these wake it.
   let screenControl: ScreenControl = "agent";
   const handBackWaiters = new Set<() => void>();
   const agentHasScreen = () =>
     screenControl === "agent" ? Promise.resolve() : new Promise<void>((resolve) => handBackWaiters.add(resolve));
-  // Every event of the latest turn, numbered by position.
-  let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
   let session: Promise<BotSession> | null = null;
   // The model set on the open session, or null before the first turn sets one.
   let sessionModel: string | null = null;
-  // The turn the session is running, and what it has streamed so far.
-  let active: ({ turnId: TurnId } & TurnStream) | null = null;
   // Approvals the session waits on, each resolved by the user's answer.
   const waiting = new Map<ApprovalId, (approved: boolean) => void>();
-
-  function send(message: WorkerToControl) {
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
-  }
-
-  function emit(turnId: TurnId, event: TurnEvent) {
-    if (latest?.turnId !== turnId) latest = { turnId, events: [] };
-    latest.events.push(event);
-    send({ type: "turn-event", turnId, index: latest.events.length - 1, event });
-    if (event.type === "done" && active?.turnId === turnId) active = null;
-  }
-
-  // Short-lived GitHub access token for the SDK, from control's broker. The
-  // worker keeps no token: the SDK asks again when one has an hour or less left.
-  async function gitHubToken() {
-    const res = await fetch(`${base}/github-token`, { headers: { authorization: `Bearer ${token}` } });
-    if (!res.ok) {
-      if (BrokerRefusal.safeParse(await res.json().catch(() => null)).success) {
-        throw new Error("Chiefbot has lost your GitHub sign-in. Sign in again in the Chiefbot app, then resend.");
-      }
-      throw new Error(`Control's token broker answered ${res.status}`);
-    }
-    const { accessToken, expiresAt } = BrokeredGitHubToken.parse(await res.json());
-    return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
-  }
 
   // Puts an approval-request in the active turn's chat and waits, however long,
   // for the user's answer. Null outside a turn: nobody is there to answer.
   async function askUser(ask: { kind: ApprovalKind; detail: string }): Promise<boolean | null> {
-    if (!active) return null;
+    const turnId = link.activeTurnId();
+    if (!turnId) return null;
     const approvalId = ApprovalId.parse(`approval_${crypto.randomUUID()}`);
     const answered = new Promise<boolean>((resolve) => waiting.set(approvalId, resolve));
-    emit(active.turnId, { type: "approval-request", approvalId, ...ask });
+    link.emit(turnId, { type: "approval-request", approvalId, ...ask });
     return answered;
   }
 
@@ -145,20 +98,11 @@ export function startWorker({
     return { kind: "approve-once", approvedInteractively: true };
   };
 
-  // Throws with control's reason when it refuses.
-  async function fromControl(path: string, init: RequestInit = {}) {
-    const res = await fetch(`${base}${path}`, { ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } });
-    if (res.ok) return res;
-    const refusal = ApiError.safeParse(await res.json().catch(() => null));
-    throw new Error(refusal.success ? (refusal.data.message ?? refusal.data.error) : `Control answered ${res.status}`);
-  }
-
   // A task worker's session, set up by its task: on the Copilot `payer` control
   // named (the requester's seat, or the organization's installation tokens) and
   // with the project's `connectors` for the member who asked. Control logs remote
   // connectors' calls in its proxy, and asks the member about those that may
-  // write, so this does not ask again; a command connector's call runs here, so
-  // it is reported. A failed report does not stop the call.
+  // write, so this does not ask again; a command connector's call is reported.
   function taskSession(
     options: Omit<Parameters<Copilot["openSession"]>[0], "auth">,
     { payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
@@ -169,23 +113,17 @@ export function startWorker({
       await agentHasScreen();
       return { kind: "approve-once" };
     };
-    const withConnectors = {
-      ...options,
-      onPermissionRequest: askUnlessControlDoes,
-      mcpServers: connectorServers(connectors, { base, credential: token }),
-      onMcpCall: async (serverName: string, toolName: string) => {
-        if (!connectors.some(({ name, kind }: AgentConnector) => name === serverName && kind === "command")) return;
-        const call: ReportedConnectorCall = { connector: serverName, tool: toolName };
-        await fromControl("/connector-calls", { method: "POST", body: JSON.stringify(call) }).catch(() => {});
+    return link.openSession(
+      copilot,
+      payer.kind,
+      {
+        ...options,
+        onPermissionRequest: askUnlessControlDoes,
+        mcpServers: connectorServers(connectors, { base, credential: token }),
+        onMcpCall: link.reportCalls(connectors),
       },
-    };
-    return payer.kind === "org"
-      ? installationSession({
-          ...withConnectors,
-          copilot,
-          token: async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json()),
-        })
-      : copilot.openSession({ ...withConnectors, auth: { kind: "seat", gitHubTokenProvider: gitHubToken } });
+      "/github-token",
+    );
   }
 
   // The computer's one Copilot session. A bot's is opened by reportModels when
@@ -197,8 +135,8 @@ export function startWorker({
     const tools = [pullRequestTool({ base, token }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, botToken: token }) : [])];
     const options = { sessionId: id, onPermissionRequest, tools };
     // A chief always runs on its owner's own Copilot seat.
-    session ??= (task ? taskSession(options, task) : copilot.openSession({ ...options, auth: { kind: "seat", gitHubTokenProvider: gitHubToken } })).then((opened) => {
-      opened.on(onSessionEvent);
+    session ??= (task ? taskSession(options, task) : link.openSession(copilot, "seat", options, "/github-token")).then((opened) => {
+      opened.on((event: SessionEvent) => link.sessionEvent(event));
       return opened;
     });
     session.catch(() => {
@@ -208,20 +146,12 @@ export function startWorker({
     return session;
   }
 
-  // Maps the SDK's session events to TurnEvents for the active turn. Sub-agent
-  // events (agentId set) are left out: the chat shows the main agent's work.
-  function onSessionEvent(event: SessionEvent) {
-    if (!active || event.agentId) return;
-    const { turnId } = active;
-    for (const turnEvent of toTurnEvents(event, active)) emit(turnId, turnEvent);
-  }
-
   // Lists the plan's models on the bot's session (it opens it, so the first turn
   // starts faster).
   async function reportModels() {
     try {
       const list = await (await openSession()).rpc.model.list();
-      send({ type: "models", report: modelReport(list) });
+      link.send({ type: "models", report: modelReport(list) });
     } catch (error) {
       onModelsError?.(error);
     }
@@ -231,7 +161,7 @@ export function startWorker({
   // set on the session first, so switching mid-conversation keeps the history.
   // A task worker's one turn (`task`) opens its session and runs on the default model.
   async function runTurn(turnId: TurnId, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
-    active = { turnId, ...newTurnStream() };
+    link.begin(turnId);
     try {
       const opened = await openSession(task);
       if (model !== null && sessionModel !== model) {
@@ -240,22 +170,16 @@ export function startWorker({
       }
       await opened.send(text);
     } catch (error) {
-      emit(turnId, { type: "error", message: error instanceof Error ? error.message : String(error) });
-      emit(turnId, { type: "done" });
+      link.fail(turnId, error);
     }
   }
 
-  function connect() {
-    socket = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } });
-    socket.onopen = () => {
-      if (latest) {
-        const { turnId, events } = latest;
-        events.forEach((event, index) => send({ type: "turn-event", turnId, index, event }));
-      }
-      send({ type: "hello", activeTurnId: active?.turnId ?? null });
-    };
-    socket.onmessage = (event) => {
-      const message = ControlToWorker.parse(JSON.parse(String(event.data)));
+  const link = controlLink({
+    base,
+    token,
+    retryMs,
+    parse: (json) => ControlToWorker.parse(json),
+    onMessage(message) {
       switch (message.type) {
         case "bound":
           onBound?.();
@@ -276,9 +200,7 @@ export function startWorker({
           }
           break;
         case "screen-open": {
-          const close = openScreenStream(`${url}/screen/${message.streamId}`, token, screen, () =>
-            streams.delete(close),
-          );
+          const close = openScreenStream(`${base.replace(/^http/, "ws")}/screen/${message.streamId}`, token, screen, () => streams.delete(close));
           streams.add(close);
           break;
         }
@@ -287,12 +209,8 @@ export function startWorker({
           waiting.delete(message.approvalId);
           break;
       }
-    };
-    socket.onclose = () => {
-      if (!stopped) retry = setTimeout(connect, retryMs);
-    };
-  }
-  connect();
+    },
+  });
 
   // Git's credential helper asks here for the computer's credential, which control's
   // git proxy takes (never a GitHub token), so it is never written to disk. A
@@ -306,9 +224,7 @@ export function startWorker({
   return {
     screenControl: () => screenControl,
     stop() {
-      stopped = true;
-      if (retry) clearTimeout(retry);
-      socket?.close();
+      link.stop();
       for (const close of streams) close();
       git?.stop(true);
       if (gitSocket) rmSync(gitSocket, { force: true });
