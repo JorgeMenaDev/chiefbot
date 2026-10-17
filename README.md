@@ -274,17 +274,19 @@ Tests use a fake Copilot. This check makes 3 live Copilot calls on the real GitH
 
 ## Manual check: connectors, the checklist and the call log
 
-Tests use a fake MCP server and a fake Copilot. This check uses the real GitHub MCP server and Atlassian's, and makes 2 live Copilot calls. It needs Docker, the computer image rebuilt with this code (`bun run computer:build`), a project as in the check above, and a Jira site you can sign in to.
+Tests use a fake MCP server and a fake Copilot. This check uses the real GitHub MCP server and Atlassian's, and makes 5 live Copilot calls. It needs Docker, the computer image rebuilt with this code (`bun run computer:build`), a project as in the check above, and a Jira site you can sign in to.
 
 1. Commit `connectors: [github, jira]` to the project repo's `chiefbot.project.yaml` and create the project again (control reads the file when the project is made).
 2. Open **Connectors** in the sidebar. The checklist lists **github** and **jira** as **Not defined**. Click **Add preset** on each. Both now say **Connect your own account**, needed by the project.
 3. Click **Connect** on GitHub. A token field opens (GitHub's MCP server has no sign-in control can run). Paste a fine-grained personal access token with read access to the repo and click **Save**. GitHub shows **Ready**.
 4. Click **Connect** on Jira. The browser opens Atlassian's consent page. Approve. The browser shows "Connected to Jira", and within a few seconds the checklist shows **Ready**. If Atlassian refuses the `http://127.0.0.1` callback, note its error: set `CHIEFBOT_PUBLIC_URL` to an https URL that reaches control and retry.
 5. In the project's chat send: "List the open issues of this repo on GitHub and my assigned Jira issues." The reply uses both.
-6. Click **Connector calls** in the project's header. It lists the GitHub and Jira calls, asked by you, as you, with the turn's id.
-7. Check that your GitHub token never reached the coordinator's computer: `docker exec chiefbot-<project id> sh -c 'env | grep -c github_pat_; grep -rl github_pat_ /home/bot 2>/dev/null'` prints `0` and no file.
-8. In a second desktop signed in as a member (as in the check above), open **Connectors**: GitHub and Jira say **Connect your own account**, since your connections are yours alone.
-9. Clean up: delete both connectors as the owner (their tokens go too), and revoke the GitHub token on github.com.
+6. Send: "Create a Jira issue in <project key> titled Chiefbot approval check." A **Connector approval** card naming Jira and the tool appears in your chat, and Jira has no such issue yet. Click **Approve**: the issue appears. Send the same again and click **Decline**: no second issue, and the coordinator says it was declined.
+7. Send: "Comment 'hello' on the newest issue of this repo using your GitHub tools." The coordinator finds no GitHub tool that writes (the preset is GitHub's read-only server) and says so. Nothing is posted.
+8. Click **Connector calls** in the project's header. It lists the GitHub and Jira calls, asked by you, as you, with the turn's id. The declined call is not there.
+9. Check that your GitHub token never reached the coordinator's computer: `docker exec chiefbot-<project id> sh -c 'env | grep -c github_pat_; grep -rl github_pat_ /home/bot 2>/dev/null'` prints `0` and no file.
+10. In a second desktop signed in as a member (as in the check above), open **Connectors**: GitHub and Jira say **Connect your own account**, since your connections are yours alone.
+11. Clean up: delete both connectors as the owner (their tokens go too), delete the Jira issue, and revoke the GitHub token on github.com.
 
 ## Manual check: a chief of staff hands work to a project
 
@@ -310,8 +312,9 @@ Tests use a fake Copilot, fake computers and a fake GitHub. This check uses the 
 7. Restart control (save a file in `apps/control`). The worker's container stays, stopped: the task is not done yet.
 8. Send: `The pull request is accepted: mark the task done.` Within a few seconds `docker ps -a` no longer lists the `chiefbot-worker_…` container, and `docker volume ls` and `docker network ls` show nothing for it.
 9. Leaked computers: create a second task and dispatch a worker on it. While it shows **working**, stop control (Ctrl-C). Mark the worker's computer as a failed delete would leave it: `sqlite3 apps/control/.data/control.sqlite "UPDATE task_workers SET computer = 'unwanted' WHERE state = 'working'"`. Start control again. Within a few seconds its container, volume and network are gone.
-10. If a card never appears and the worker shows **failed**, its result says why (a lost GitHub sign-in, the repo app not installed on the repo). `docker logs chiefbot-worker_<id>` shows the worker's side.
-11. Clean up: delete the project (owner only), then `gh repo delete <your login>/chiefbot-worker-check --yes`.
+10. Approval wait limit: stop control and start it again with `CHIEFBOT_APPROVAL_WAIT_MINUTES=3`. Create a third task, dispatch a worker on it and leave its **Push approval** card unanswered. After a minute restart control once more (the limit must survive it). About three minutes after the card appeared the worker shows **failed**, its result saying it waited too long, and `docker ps -a` shows its container **Exited** with its volume kept.
+11. If a card never appears and the worker shows **failed**, its result says why (a lost GitHub sign-in, the repo app not installed on the repo). `docker logs chiefbot-worker_<id>` shows the worker's side.
+12. Clean up: delete the project (owner only), then `gh repo delete <your login>/chiefbot-worker-check --yes`.
 
 ## Manual check: a project listens to CI and an issue query
 
@@ -336,7 +339,8 @@ Needs a GitHub organization with Copilot Business or Enterprise whose policy all
 4. Check the token cannot touch the repo. Find the coordinator's runtime: `docker exec chiefbot-<project id> sh -c 'for p in /proc/[0-9]*; do tr "\0" "\n" < $p/environ 2>/dev/null | grep ^COPILOT_GITHUB_TOKEN=; done | sort -u'`. With that token, `curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer <token>" https://api.github.com/repos/<organization>/<repo>/contents/chiefbot.project.yaml` prints `404` (or `403`), never `200`.
 5. On github.com, the organization's Copilot usage (Settings → Copilot → usage or the billing report) lists the requests under the app's installation within a day, not under your seat.
 6. Renewal (optional, about an hour): leave the project idle for 45 minutes, then send another message. It is answered, and `docker exec chiefbot-<project id> ps -o pid,lstart,args | grep -i copilot` shows a runtime started just now. The earlier messages are still in the conversation: ask `What did I ask you first?`.
-7. Clean up: delete the project and the workspace, and uninstall the repo app from the organization if it was only for this check.
+7. Mid-task renewal (optional, over an hour, a few Copilot requests): send the coordinator `Create a task "Long wait" and dispatch a worker on it with these instructions: run "sleep 3600; echo finished" in the shell, then reply with its output.` About 55 minutes after the worker starts, `docker exec chiefbot-worker_<id> ps -o lstart,args | grep -i copilot` shows a runtime started just now, and **worker_transcript** shows the worker going on. It ends **finished**, not failed.
+8. Clean up: delete the project and the workspace, and uninstall the repo app from the organization if it was only for this check.
 
 ## Manual check: production with docker compose
 
@@ -357,4 +361,5 @@ Tests use a fake GitHub with two users. This check uses the real GitHub with two
 5. In this second desktop, the switcher shows a **1** badge. Open it and click **Accept**. The workspace becomes current, with you as **member** and a **Leave** button.
 6. Click **Leave**. It goes back to **Personal**. Quit it and start the first desktop again (`bun run --cwd apps/desktop dev`): its **Members** screen lists only the owner.
 7. Invite the second account again, accept as in steps 4 and 5, then click **Remove** next to it in the first desktop. In the second desktop, the workspace is gone from the switcher.
-8. Clean up: `rm -rf /tmp/chiefbot-second`.
+8. Removal ends what runs (optional; needs Docker, a project in the workspace as in the worker check, and 2 Copilot calls): invite and accept once more. As the second account, ask the project's coordinator to create a task and dispatch a worker on it, and keep the project's chat open. While the worker shows **working**, remove the account in the first desktop. The second desktop's project chat closes, and within seconds `docker ps -a` no longer lists the worker's container.
+9. Clean up: `rm -rf /tmp/chiefbot-second`.
