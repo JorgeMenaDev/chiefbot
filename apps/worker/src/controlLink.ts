@@ -12,10 +12,16 @@ import {
   type TurnKey,
   type WorkerToControl,
 } from "@chiefbot/contracts";
-import type { Clock } from "./clock.ts";
+import { systemClock, type Clock } from "./clock.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
-import { installationSession } from "./installationSession.ts";
+import { installationSession, renewWithinMs } from "./installationSession.ts";
 import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
+
+// One turn of the runtime as control gave it: its id and its key. Whatever acts
+// in the turn holds this object from the turn's start, never "the turn running
+// now", and reads `key` when it calls control: only control's turn-key message
+// for this same turn changes it.
+export type Turn = { readonly turnId: TurnId; key: TurnKey };
 
 // The link an agent runtime in a computer keeps to control: a bot's or task
 // worker's (worker.ts) or a project's coordinator (coordinator.ts). Both speak
@@ -30,7 +36,9 @@ import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 // (control stores each event once). Each turn comes with its key (contracts
 // ids.ts TurnKey), the bearer of every call to control in it; the computer's
 // credential is only for the WebSocket (and a bot's own model listing). Its HTTP
-// calls throw with control's reason when control refuses.
+// calls throw with control's reason when control refuses. A session reaches its
+// remote connectors through this link's forwarder on the computer's loopback,
+// which adds its turn's key to each request when it is made.
 export function controlLink<Message>({
   base,
   token,
@@ -54,8 +62,14 @@ export function controlLink<Message>({
   let stopped = false;
   // Every event of the latest turn, numbered by position.
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
-  // The turn running now, its key, and what it has streamed so far.
-  let active: ({ turnId: TurnId; key: TurnKey } & TurnStream) | null = null;
+  // The turn running now and what it has streamed so far: where session events
+  // go, and the only turn the connector forwarder serves.
+  let active: ({ turn: Turn } & TurnStream) | null = null;
+  // The connector forwarder, started by the first connector URL.
+  let forwarder: Bun.Server<undefined> | null = null;
+  // The organization's latest installation token: each turn's runtime starts on
+  // it while it has time left for a turn, so a turn costs no new token.
+  let orgToken: CopilotInstallationToken | null = null;
 
   // Turn events and hellos: what a bot's worker and a coordinator both send.
   function send(message: WorkerToControl) {
@@ -66,7 +80,21 @@ export function controlLink<Message>({
     if (latest?.turnId !== turnId) latest = { turnId, events: [] };
     latest.events.push(event);
     send({ type: "turn-event", turnId, index: latest.events.length - 1, event });
-    if (event.type === "done" && active?.turnId === turnId) active = null;
+    if (event.type === "done" && active?.turn.turnId === turnId) active = null;
+  }
+
+  // Forwards /turns/:turnId/mcp/:name to control's proxy for that connector, with
+  // the key the turn has now, while the turn runs (403 invalid_turn_key after).
+  async function forward(req: Request, server: Bun.Server<undefined>) {
+    const [, turnId, name] = new URL(req.url).pathname.match(/^\/turns\/([^/]+)\/mcp\/([^/]+)$/) ?? [];
+    const turn = active && active.turn.turnId === turnId ? active.turn : null;
+    if (!turn) return Response.json({ error: "invalid_turn_key", message: "This turn has ended." } satisfies ApiError, { status: 403 });
+    server.timeout(req, 0);
+    const headers = pick(req.headers, ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]);
+    headers.set("authorization", `Bearer ${turn.key}`);
+    const body = req.method === "POST" ? await req.arrayBuffer() : null;
+    const upstream = await fetch(`${base}/mcp/${name}`, { method: req.method, headers, body, signal: req.signal });
+    return new Response(upstream.body, { status: upstream.status, headers: pick(upstream.headers, ["content-type", "mcp-session-id"]) });
   }
 
   // Calls control at `path` with `bearer` (the turn's key, or the computer's
@@ -94,7 +122,7 @@ export function controlLink<Message>({
         const { turnId, events } = latest;
         events.forEach((event, index) => send({ type: "turn-event", turnId, index, event }));
       }
-      send({ type: "hello", activeTurnId: active?.turnId ?? null });
+      send({ type: "hello", activeTurnId: active?.turn.turnId ?? null });
     };
     socket.onmessage = (event) => onMessage(parse(JSON.parse(String(event.data))));
     socket.onclose = () => {
@@ -108,31 +136,38 @@ export function controlLink<Message>({
     emit,
     fromControl,
 
-    // The turn running now, or null.
-    activeTurnId: () => active?.turnId ?? null,
-
-    // The running turn's key. Throws outside a turn: nothing then may act for anyone.
-    turnKey(): TurnKey {
-      if (!active) throw new Error("No turn is running, so Chiefbot refuses this call.");
-      return active.key;
+    // The runtime starts `turnId`: the turn whatever acts in it holds. Its
+    // session's events stream into it from now on.
+    begin(turnId: TurnId, key: TurnKey): Turn {
+      const turn = { turnId, key };
+      active = { turn, ...newTurnStream() };
+      return turn;
     },
 
-    // The runtime starts `turnId`: the session's events stream into it from now on.
-    begin(turnId: TurnId, key: TurnKey) {
-      active = { turnId, key, ...newTurnStream() };
+    // Whether the turn still runs here: it has not ended, and no other turn began.
+    running: (turn: Turn) => active?.turn === turn,
+
+    // Control ended the turn itself (its member left): nothing of it streams or is forwarded any more.
+    drop(turn: Turn) {
+      if (active?.turn === turn) active = null;
     },
 
-    // Control's new key for the running turn (it restarted, revoking the old one).
+    // Control's new key for the turn (it restarted, revoking the old one).
     rekey(turnId: TurnId, key: TurnKey) {
-      if (active?.turnId === turnId) active.key = key;
+      if (active?.turn.turnId === turnId) active.turn.key = key;
     },
 
-    // Maps one SDK session event to the running turn's TurnEvents. Sub-agent
-    // events (agentId set) are left out: the chat shows the main agent's work.
-    sessionEvent(event: SessionEvent) {
-      if (!active || event.agentId) return;
-      const { turnId } = active;
-      for (const turnEvent of toTurnEvents(event, active)) emit(turnId, turnEvent);
+    // Where a session of `turn` reaches the remote connector `name`: the forwarder.
+    connectorUrl(turn: Turn, name: string) {
+      forwarder ??= Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: forward });
+      return `${forwarder.url.origin}/turns/${turn.turnId}/mcp/${name}`;
+    },
+
+    // Maps one SDK session event of `turn` to its TurnEvents, while it runs.
+    // Sub-agent events (agentId set) are left out: the chat shows the main agent's work.
+    sessionEvent(turn: Turn, event: SessionEvent) {
+      if (active?.turn !== turn || event.agentId) return;
+      for (const turnEvent of toTurnEvents(event, active)) emit(turn.turnId, turnEvent);
     },
 
     // The turn failed outside the session's own events: an error, then done.
@@ -151,7 +186,11 @@ export function controlLink<Message>({
       { onCut, ...options }: Omit<Parameters<Copilot["openSession"]>[0], "auth"> & { onCut?: () => void },
       bearer: () => string,
     ): Promise<BotSession> {
-      const token = async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token", bearer())).json());
+      const token = async () => {
+        if (orgToken && orgToken.expiresAt - (clock ?? systemClock).now() > renewWithinMs) return orgToken;
+        orgToken = CopilotInstallationToken.parse(await (await fromControl("/installation-token", bearer())).json());
+        return orgToken;
+      };
       return payer === "org"
         ? installationSession({ ...options, copilot, token, ...(clock === undefined ? {} : { clock }), ...(onCut === undefined ? {} : { onCut }) })
         : copilot.openSession({ ...options, auth: { kind: "seat", gitHubTokenProvider: () => seatToken(bearer()) } });
@@ -172,6 +211,17 @@ export function controlLink<Message>({
       stopped = true;
       if (retry) clearTimeout(retry);
       socket?.close();
+      forwarder?.stop(true);
     },
   };
+}
+
+// A copy of only the `names` headers that are set.
+function pick(headers: Headers, names: string[]) {
+  const picked = new Headers();
+  for (const name of names) {
+    const value = headers.get(name);
+    if (value !== null) picked.set(name, value);
+  }
+  return picked;
 }

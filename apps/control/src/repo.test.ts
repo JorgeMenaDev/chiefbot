@@ -5,7 +5,7 @@ import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { atCleanUp, cleanUp, startTestControl, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, eventually, startTestControl, type TestUser } from "./testControl.ts";
 
 // Repo work end to end: control, a fake GitHub with private repos and the
 // deployer's repo app, and a bot whose fake Copilot runs real git in a temp
@@ -333,6 +333,8 @@ test("after the owner disconnects GitHub, git in the bot computer gets nothing t
   };
   const chat = watchChat(botId);
   await api("POST", `/bots/${botId}/messages`, { text: "Clone octo/demo" });
+  // The turn's session is open (it took a token) and its agent is working.
+  await eventually(() => copilot.sends.length === 1);
 
   await api("DELETE", "/me/github");
   release();

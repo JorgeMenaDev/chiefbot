@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { ApiError, BrokeredGitHubToken, Project, Task, User, Workspace, WorkspaceInvite, type ChatEvent, type ProjectId } from "@chiefbot/contracts";
-import { sdk } from "@chiefbot/worker/fake-copilot";
+import { sdk, type FakeRuntime } from "@chiefbot/worker/fake-copilot";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
@@ -163,7 +163,7 @@ test("the coordinator stops a removed member's session: what it does later reach
   await eventually(() => late.length === 1);
 
   expect(copilot.aborted).toContain(guestSession);
-  expect(late).toEqual(["This member's turn is not running, so Chiefbot refuses this call."]);
+  expect(late).toEqual(["This call needs the key of a turn of this agent that is still running."]);
   expect(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json()).toEqual([]);
 });
 
@@ -223,4 +223,114 @@ test("a control restart revokes every turn key; a turn its coordinator still run
   coordinator.event(turnId, { type: "done" });
   await owner.watchProjectChat(project.id).until(doneCount(1));
   expect(await refusal(await listTasks(rekeyed.turnKey))).toEqual([403, "invalid_turn_key"]);
+});
+
+test("a callback that comes late from one turn acts in that turn only: it cannot act in the member's next turn", async () => {
+  const { owner, project, copilot } = await team();
+  const first: FakeRuntime[] = [];
+  let release = () => {};
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "First") first.push(runtime);
+    else await new Promise<void>((resolve) => (release = resolve));
+    yield sdk.idle();
+  };
+  await ask(owner, project.id, "First");
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  await ask(owner, project.id, "Second");
+  await eventually(() => copilot.sends.length === 2);
+
+  // The first turn's runtime calls a tool while the second turn runs.
+  const late = await first[0]?.tool("create_task", { title: "Late" }).catch((error: Error) => error.message);
+  release();
+  await owner.watchProjectChat(project.id).until(doneCount(2));
+
+  expect(late).toBe("This call needs the key of a turn of this agent that is still running.");
+  expect(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json()).toEqual([]);
+});
+
+// Opens the tracker's event stream through control's proxy with `turnKey`, and
+// reads its first chunk. `closed` settles once the stream ends, either way.
+async function openStream(url: string, projectId: ProjectId, turnKey: string) {
+  const res = await fetch(`${url}/coordinator/${projectId}/mcp/tracker`, { headers: { authorization: `Bearer ${turnKey}`, accept: "text/event-stream" } });
+  const reader = res.body?.getReader();
+  await reader?.read();
+  const closed = (async () => {
+    while (!(await reader?.read())?.done);
+  })().catch(() => {});
+  return { status: res.status, closed };
+}
+
+test("a connector's event stream ends with its turn, and with its member's removal", async () => {
+  const control = await teamWithTracker();
+  const { url, owner, guest, workspace, project, upstream } = control;
+  await guest.api("PUT", `/workspaces/${workspace.id}/connectors/tracker/token`, { token: "tracker-guest" });
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+
+  await ask(owner, project.id, "Watch the tracker");
+  const ownerTurn = await coordinator.nth("run-turn");
+  const ownerStream = await openStream(url, project.id, ownerTurn.turnKey);
+  coordinator.event(ownerTurn.turnId, { type: "done" });
+  await ownerStream.closed;
+  await ask(guest, project.id, "Watch it too");
+  const guestStream = await openStream(url, project.id, (await coordinator.nth("run-turn", 2)).turnKey);
+  await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`);
+  await guestStream.closed;
+
+  expect([ownerStream.status, guestStream.status]).toEqual([200, 200]);
+  await eventually(() => upstream.streams.cancelled === 2);
+});
+
+test("a connector's GET event stream opens without approval; a DELETE waits for the member's approval", async () => {
+  const control = await teamWithTracker();
+  const { url, owner, project, upstream } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const chat = owner.watchProjectChat(project.id);
+  await ask(owner, project.id, "Done with the tracker");
+  const { turnKey } = await coordinator.nth("run-turn");
+
+  const stream = await openStream(url, project.id, turnKey);
+  const ended = fetch(`${url}/coordinator/${project.id}/mcp/tracker`, { method: "DELETE", headers: { authorization: `Bearer ${turnKey}`, "mcp-session-id": "fake-session" } });
+  const [asked] = approvalRequests(await chat.until((events) => approvalRequests(events).length === 1));
+  await owner.api("POST", `/projects/${project.id}/approvals/${asked?.approvalId}`, { approved: false });
+
+  expect(stream.status).toBe(200);
+  expect(upstream.streams.opened).toBe(1);
+  expect(asked?.detail).toBe("Tracker: DELETE");
+  expect(await refusal(await ended)).toEqual([403, "declined"]);
+});
+
+test("after a control restart, a running turn's connector calls go out with its new key at once", async () => {
+  // Secrets in memory, so the member's connector token outlives the restart.
+  const secrets = new Map<string, string>();
+  const control = await teamWithTracker({
+    persistent: true,
+    secrets: { get: async (name) => secrets.get(name) ?? null, put: async (name, value) => void secrets.set(name, value), delete: async (name) => void secrets.delete(name) },
+  });
+  const { owner, project, copilot, upstream } = control;
+  const statuses: Array<number | null> = [];
+  let release = () => {};
+  copilot.script = async function* (_prompt, runtime) {
+    statuses.push((await runtime.callMcp("tracker", "list_issues")).status);
+    await new Promise<void>((resolve) => (release = resolve));
+    // Until the coordinator has reconnected and got the turn's new key.
+    for (let tries = 0; tries < 100; tries++) {
+      const { status } = await runtime.callMcp("tracker", "list_issues");
+      if (status === 200 || tries === 99) statuses.push(status);
+      if (status === 200) break;
+      await Bun.sleep(20);
+    }
+    yield sdk.idle();
+  };
+  await ask(owner, project.id, "List the issues twice");
+  await eventually(() => statuses.length === 1);
+
+  control.restart();
+  release();
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+
+  expect(statuses).toEqual([200, 200]);
+  expect(upstream.calls).toHaveLength(2);
 });

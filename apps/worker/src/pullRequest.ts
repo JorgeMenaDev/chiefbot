@@ -8,7 +8,7 @@ export const pullRequestToolName = "create_pull_request";
 // worker holds no token that could open one itself. The user may take hours to
 // answer, so the request has no idle timeout.
 // `base` is the computer's control routes (/worker/:id or /task-worker/:id);
-// `turnKey` gives the running turn's key, and throws outside a turn.
+// `turnKey` gives the key of the turn its session was opened for (it throws for none).
 export function pullRequestTool({ base, turnKey }: { base: string; turnKey: () => string }) {
   return {
     name: pullRequestToolName,

@@ -125,10 +125,10 @@ async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>, worker
   return { tool, release: () => coordinator.event(turnId, { type: "done" }) };
 }
 
-// The key of the worker's turn, as its session's connector `name` carries it.
-const workerKey = (copilot: FakeCopilot, name: string) => {
+// Where the latest session reaches its connector `name`: its computer's forwarder to control.
+const connectorUrl = (copilot: FakeCopilot, name: string) => {
   const server = copilot.mcpServers.at(-1)?.[name];
-  return server?.type === "http" ? (server.headers?.authorization ?? "") : "";
+  return server?.type === "http" ? server.url : "";
 };
 
 test("a resent dispatch with the same creation id starts one worker, even while the first is still getting its computer", async () => {
@@ -412,8 +412,8 @@ test("a worker gets the project's connectors through control's proxy, and its ca
   const { id } = TaskWorker.parse(dispatched);
   await workerWhen(owner, project, id, ({ state }) => state === "finished");
 
-  // The worker's session reaches the connector through its own route on control.
-  expect(copilot.mcpServers.at(-1)?.tracker).toMatchObject({ type: "http", url: expect.stringContaining(`/task-worker/${id}/mcp/tracker`) });
+  // The worker's session reaches the connector through its computer's forwarder, which adds its turn's key.
+  expect(copilot.mcpServers.at(-1)?.tracker).toEqual({ type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/turns\/turn_[^/]+\/mcp\/tracker$/), tools: ["*"] });
   expect(upstream.calls).toEqual([{ tool: "list_issues", authorization: "Bearer tracker-guest" }]);
   const log = ConnectorCall.array().parse(await (await owner.api("GET", `/projects/${project.id}/connector-calls`)).json());
   expect(log.map(({ connector, tool, requester, identity }) => [connector, tool, requester, identity])).toEqual([
@@ -454,11 +454,11 @@ test("a worker's call to a connector tool that may write waits for the member wh
   expect(upstream.calls).toEqual([{ tool: "create_issue", authorization: "Bearer tracker-guest" }]);
 });
 
-test("a removed member loses everything at once: their project chat closes, their queued turns go, their workers stop and their turn keys stop working", async () => {
+test("a removed member loses everything at once: their project chat closes, their queued turns go, their workers stop and their credentials stop working", async () => {
   const upstream = startFakeMcpServer();
   atCleanUp(upstream.stop);
   const control = await teamProject({}, "connectors: [tracker]\n");
-  const { url, owner, guest, workspace, project, copilot } = control;
+  const { url, owner, guest, workspace, project, copilot, computers } = control;
   await owner.api("POST", `/workspaces/${workspace.id}/connectors`, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "none", scope: "" });
   let release = () => {};
   let dispatched: unknown = null;
@@ -474,7 +474,7 @@ test("a removed member loses everything at once: their project chat closes, thei
   await ask(guest, project, "Fix the typo");
   const { id } = TaskWorker.parse(dispatched);
   await workerWhen(owner, project, id, ({ state }) => state === "working");
-  const workerAuth = { authorization: workerKey(copilot, "tracker") };
+  const workerAuth = { authorization: `Bearer ${computers.computers.get(id)?.spec.env.CHIEFBOT_TASK_WORKER_TOKEN}` };
   // The owner's turn runs; octo-friend's next message waits behind it.
   await owner.api("POST", `/projects/${project.id}/messages`, { text: "Hold on" });
   await eventually(() => copilot.sends.some(({ prompt }) => prompt === "Hold on"));
@@ -489,12 +489,8 @@ test("a removed member loses everything at once: their project chat closes, thei
 
   await chatClosed;
   expect(await workerWhen(owner, project, id, ({ computerRemoved }) => computerRemoved)).toMatchObject({ state: "stopped" });
-  const refused = await Promise.all([
-    fetch(`${url}/task-worker/${id}/github-token`, { headers: workerAuth }),
-    fetch(`${url}/task-worker/${id}/mcp/tracker`, { method: "POST", headers: workerAuth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }),
-    fetch(`${url}/task-worker/${id}/pull-requests`, { method: "POST", headers: workerAuth, body: "{}" }),
-  ]);
-  expect(refused.map(({ status }) => status)).toEqual([403, 403, 403]);
+  // Its turn's key ended with its turn (turnKeys.test.ts); its own credential no longer opens its connection.
+  expect((await fetch(`${url}/task-worker/${id}`, { headers: workerAuth })).status).toBe(401);
   release();
   await owner.watchProjectChat(project.id).until(doneCount(1));
   await Bun.sleep(50);
@@ -571,7 +567,7 @@ test("an approval control holds for a worker's request is withdrawn when that re
   atCleanUp(upstream.stop);
   const time = fakeClock(Date.now());
   const control = await teamProject({ clock: time.clock }, "connectors: [tracker]\n");
-  const { url, owner, workspace, project, copilot } = control;
+  const { owner, workspace, project, copilot } = control;
   const connectors = `/workspaces/${workspace.id}/connectors`;
   await owner.api("POST", connectors, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
   await owner.api("PUT", `${connectors}/tracker/token`, { token: "tracker-owner" });
@@ -580,9 +576,9 @@ test("an approval control holds for a worker's request is withdrawn when that re
   await workerWhen(owner, project, id, ({ state }) => state === "working");
   // The worker's runtime calls a tool that may write, then goes away before the answer.
   const hangUp = new AbortController();
-  const call = fetch(`${url}/task-worker/${id}/mcp/tracker`, {
+  const call = fetch(connectorUrl(copilot, "tracker"), {
     method: "POST",
-    headers: { authorization: workerKey(copilot, "tracker"), "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_issue" } }),
     signal: hangUp.signal,
   }).catch(() => null);

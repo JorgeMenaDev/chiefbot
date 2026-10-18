@@ -101,7 +101,7 @@ test("a bot's computer and its Copilot session get the access token, never the r
   const brokered = await (await tokenFor(ada)).text();
 
   expect(errors).toEqual([]);
-  expect(computers.copilot.tokens).toEqual([tokens.accessToken]);
+  expect([...new Set(computers.copilot.tokens)]).toEqual([tokens.accessToken]);
   expect(brokered).not.toContain(tokens.refreshToken);
   expect(JSON.stringify(computers.computers.get(ada)?.spec)).not.toContain(tokens.refreshToken);
 });

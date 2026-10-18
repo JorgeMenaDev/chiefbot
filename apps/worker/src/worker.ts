@@ -5,7 +5,7 @@ import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
 import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
-import { controlLink } from "./controlLink.ts";
+import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
@@ -74,60 +74,69 @@ export function startWorker({
   const handBackWaiters = new Set<() => void>();
   const agentHasScreen = () =>
     screenControl === "agent" ? Promise.resolve() : new Promise<void>((resolve) => handBackWaiters.add(resolve));
-  let session: Promise<BotSession> | null = null;
-  // The model set on the open session, or null before the first turn sets one.
+  // The open Copilot session and the turn it was opened for: null for a bot's
+  // session opened only to list models.
+  let open: { turn: Turn | null; session: Promise<BotSession> } | null = null;
+  // The model set on the open session, or null before a turn sets one.
   let sessionModel: string | null = null;
   // Approvals the session waits on, each resolved by the user's answer.
   const waiting = new Map<ApprovalId, (approved: boolean) => void>();
 
-  // Puts an approval-request in the active turn's chat and waits, however long,
-  // for the user's answer. Null outside a turn: nobody is there to answer.
-  async function askUser(ask: { kind: ApprovalKind; detail: string }): Promise<boolean | null> {
-    const turnId = link.activeTurnId();
-    if (!turnId) return null;
+  // Puts an approval-request in the turn's chat and waits, however long, for the
+  // user's answer. Null once that turn is over (or for no turn): nobody is there to answer.
+  async function askUser(turn: Turn | null, ask: { kind: ApprovalKind; detail: string }): Promise<boolean | null> {
+    if (!turn || !link.running(turn)) return null;
     const approvalId = ApprovalId.parse(`approval_${crypto.randomUUID()}`);
     const answered = new Promise<boolean>((resolve) => waiting.set(approvalId, resolve));
-    link.emit(turnId, { type: "approval-request", approvalId, ...ask });
+    link.emit(turn.turnId, { type: "approval-request", approvalId, ...ask });
     return answered;
   }
 
-  // Runs safe tool calls once the agent has the screen. A risky one becomes an
-  // approval-request in the chat, and the session waits until the user answers.
-  // The human may take over while it waits, so an approved call waits for hand-back too.
-  const onPermissionRequest: PermissionHandler = async (request) => {
-    await agentHasScreen();
-    const ask = approvalFor(request);
-    if (!ask) return { kind: "approve-once" };
-    const approved = await askUser(ask);
-    if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside a turn." };
-    if (!approved) return { kind: "reject", feedback: "The user declined this." };
-    await agentHasScreen();
-    return { kind: "approve-once", approvedInteractively: true };
-  };
+  // The permission handler of `turn`'s session. It runs safe tool calls once
+  // the agent has the screen. A risky one becomes an approval-request in that
+  // turn, and the session waits until the user answers. The human may take over
+  // while it waits, so an approved call waits for hand-back too.
+  const permissionFor =
+    (turn: Turn | null): PermissionHandler =>
+    async (request) => {
+      await agentHasScreen();
+      const ask = approvalFor(request);
+      if (!ask) return { kind: "approve-once" };
+      const approved = await askUser(turn, ask);
+      if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside its turn." };
+      if (!approved) return { kind: "reject", feedback: "The user declined this." };
+      await agentHasScreen();
+      return { kind: "approve-once", approvedInteractively: true };
+    };
 
   // A task worker's turn was cut short to renew the organization's token
   // (installationSession.ts): the permission requests its runtime waited on are
   // gone, so their approvals are withdrawn. Continuing, the agent asks again if it still needs them.
-  function withdrawApprovals() {
-    const turnId = link.activeTurnId();
+  function withdrawApprovals(turn: Turn) {
     for (const [approvalId, answer] of waiting) {
-      if (turnId) link.emit(turnId, { type: "approval-withdrawn", approvalId });
+      if (link.running(turn)) link.emit(turn.turnId, { type: "approval-withdrawn", approvalId });
       answer(false);
     }
     waiting.clear();
   }
 
-  // A task worker's session, set up by its task: on the Copilot `payer` control
-  // named (the requester's seat, or the organization's installation tokens) and
-  // with the project's `connectors` for the member who asked. Control logs remote
-  // connectors' calls in its proxy, and asks the member about those that may
-  // write, so this does not ask again; a command connector's call is reported.
+  // The turn's key, for a tool of its session: a session for no turn has none.
+  const keyOf = (turn: Turn | null) => () => {
+    if (!turn) throw new Error("No turn is running, so Chiefbot refuses this call.");
+    return turn.key;
+  };
+
+  // A task worker's session, set up by its task's turn: on the Copilot `payer`
+  // control named (the requester's seat, or the organization's installation
+  // tokens) and with the project's `connectors` for the member who asked. Control
+  // logs remote connectors' calls in its proxy, and asks the member about those
+  // that may write, so this does not ask again; a command connector's call is reported.
   function taskSession(
     options: Omit<Parameters<Copilot["openSession"]>[0], "auth">,
     { payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
+    turn: Turn,
   ) {
     const remote = new Set(connectors.flatMap(({ kind, name }) => (kind === "remote" ? [name] : [])));
-    const turnKey = () => link.turnKey();
     const askUnlessControlDoes: PermissionHandler = async (request, invocation) => {
       if (request.kind !== "mcp" || !remote.has(request.serverName)) return options.onPermissionRequest(request, invocation);
       await agentHasScreen();
@@ -139,53 +148,60 @@ export function startWorker({
       {
         ...options,
         onPermissionRequest: askUnlessControlDoes,
-        mcpServers: connectorServers(connectors, { base, credential: turnKey() }),
-        onMcpCall: link.reportCalls(connectors, turnKey),
-        onCut: withdrawApprovals,
+        mcpServers: connectorServers(connectors, (name) => link.connectorUrl(turn, name)),
+        onMcpCall: link.reportCalls(connectors, () => turn.key),
+        onCut: () => withdrawApprovals(turn),
       },
-      turnKey,
+      () => turn.key,
     );
   }
 
-  // The computer's one Copilot session. A bot's is opened by reportModels when
-  // the worker first binds (or by the next turn, if that open failed). A task
-  // worker's is opened by its task (`task`). Its id is the bot's (or task
-  // worker's), so after a restart the worker resumes the same conversation.
-  function openSession(task?: Extract<ControlToWorker, { type: "run-task" }>) {
+  // Opens the computer's Copilot session for `turn` (resuming its conversation:
+  // its id is the bot's, or task worker's), in place of the open one. Every
+  // callback in it holds that turn, so a late one acts in no other. A bot's
+  // session for no turn lists its models when the worker binds; a task worker's
+  // is opened by its task (`task`).
+  async function openSession(turn: Turn | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
+    const previous = open;
+    open = null;
+    sessionModel = null;
+    await (await previous?.session.catch(() => null))?.disconnect();
     // A task worker does one task for a project: it is no one's chief of staff.
-    const turnKey = () => link.turnKey();
+    const turnKey = keyOf(turn);
     const tools = [pullRequestTool({ base, turnKey }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : [])];
-    const options = { sessionId: id, onPermissionRequest, tools };
+    const options = { sessionId: id, onPermissionRequest: permissionFor(turn), tools };
     // A chief always runs on its owner's own Copilot seat.
-    session ??= (task ? taskSession(options, task) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
-      opened.on((event: SessionEvent) => link.sessionEvent(event));
+    const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
+      if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
       return opened;
     });
+    open = { turn, session };
     session.catch(() => {
-      session = null;
-      sessionModel = null;
+      if (open?.session === session) open = null;
     });
     return session;
   }
 
-  // Lists the plan's models on the bot's session (it opens it, so the first turn
-  // starts faster).
+  // Lists the plan's models on the bot's open session, or a new one (so the
+  // first turn's session resumes faster).
   async function reportModels() {
     try {
-      const list = await (await openSession()).rpc.model.list();
+      const list = await (await (open?.session ?? openSession(null))).rpc.model.list();
       link.send({ type: "models", report: modelReport(list) });
     } catch (error) {
       onModelsError?.(error);
     }
   }
 
-  // Control sends a turn only once the previous one is done. A changed model is
-  // set on the session first, so switching mid-conversation keeps the history.
-  // A task worker's one turn (`task`) opens its session and runs on the default model.
+  // Control sends a turn only once the previous one is done. Each turn opens its
+  // session (above), with the bot's model set first, so switching
+  // mid-conversation keeps the history. A task worker's one turn (`task`) runs on
+  // the default model. Git's credential helper hands git this turn's key from now on.
   async function runTurn(turnId: TurnId, turnKey: TurnKey, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
-    link.begin(turnId, turnKey);
+    const turn = link.begin(turnId, turnKey);
+    git?.reload({ fetch: gitCredential(turn) });
     try {
-      const opened = await openSession(task);
+      const opened = await openSession(turn, task);
       if (model !== null && sessionModel !== model) {
         await opened.setModel(model);
         sessionModel = model;
@@ -238,18 +254,18 @@ export function startWorker({
     },
   });
 
-  // Git's credential helper asks here for the running turn's key, which control's
-  // git proxy takes (never a GitHub token), so it is never written to disk.
-  // Outside a turn there is none: git then fails. A stopped container keeps
-  // /tmp, so a stale socket file is removed first.
+  // Git's credential helper asks here for a turn's key, which control's git proxy
+  // takes (never a GitHub token), so it is never written to disk. Each turn
+  // installs its own answer (runTurn): its key, while it runs. Git cannot say
+  // which turn started it, so a git still running from an ended turn gets the
+  // next turn's. Outside a turn there is none: git then fails. A stopped
+  // container keeps /tmp, so a stale socket file is removed first.
+  const noTurn = () => new Response("No turn is running.", { status: 409 });
+  const gitCredential = (turn: Turn) => () => (link.running(turn) ? new Response(`username=chiefbot\npassword=${turn.key}\n`) : noTurn());
   let git: Bun.Server<undefined> | null = null;
   if (gitSocket) {
     rmSync(gitSocket, { force: true });
-    git = Bun.serve({
-      unix: gitSocket,
-      fetch: () =>
-        link.activeTurnId() ? new Response(`username=chiefbot\npassword=${link.turnKey()}\n`) : new Response("No turn is running.", { status: 409 }),
-    });
+    git = Bun.serve({ unix: gitSocket, fetch: noTurn });
   }
 
   return {

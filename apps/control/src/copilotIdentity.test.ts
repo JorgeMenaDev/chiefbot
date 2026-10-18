@@ -105,15 +105,15 @@ test("an hour on, a new organization token restarts the coordinator's runtime an
   expect(chat.filter(({ event }) => event.type === "error")).toEqual([]);
 });
 
-test("a token with time left is kept: the runtime is not restarted between turns", async () => {
-  const { guest, project, copilot } = await team("org");
+test("a token with time left is kept: the next turn's runtime starts on it", async () => {
+  const { guest, project, copilot, minter } = await team("org");
 
   await ask(guest, project, "first");
   setSystemTime(Date.now() + 30 * minute);
   await ask(guest, project, "second", 2);
 
-  expect(copilot.tokens).toEqual(["ghs_org_1"]);
-  expect(copilot.closed).toEqual([]);
+  expect(copilot.tokens).toEqual(["ghs_org_1", "ghs_org_1"]);
+  expect(minter.minted).toEqual(["octo-org/shop"]);
 });
 
 test("switching the workspace to org billing moves the member's next turn onto the organization, in the same session", async () => {

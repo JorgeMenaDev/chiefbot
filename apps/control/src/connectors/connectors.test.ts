@@ -16,7 +16,7 @@ import {
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk } from "@chiefbot/worker/fake-copilot";
 import type { SecretStore } from "../secrets/secretStore.ts";
-import { atCleanUp, cleanUp, doneCount, startTestControl, type TestUser } from "../testControl.ts";
+import { atCleanUp, cleanUp, doneCount, fakeCoordinator, startTestControl, type TestUser } from "../testControl.ts";
 import type { z } from "zod";
 import { startFakeMcpServer } from "./fakeMcpServer.ts";
 
@@ -178,7 +178,7 @@ async function askAndWait(member: TestUser, projectId: Project["id"], text: stri
 }
 
 test("a coordinator session gets only the connectors its project declares that are ready for the member", async () => {
-  const { url, owner, guest, path, define, createProject, copilot, computers } = await team();
+  const { owner, guest, path, define, createProject, copilot, computers } = await team();
   const project = await createProject("octo-org/shop", ["github", "harness", "pager"]);
   await define(preset("github"));
   await define(preset("jira"));
@@ -198,13 +198,8 @@ test("a coordinator session gets only the connectors its project declares that a
 
   const [guestServers, ownerServers] = copilot.mcpServers;
   expect(Object.keys(guestServers ?? {})).toEqual(["github", "harness"]);
-  // Its credential is the turn's key, never the project's own credential.
-  expect(guestServers?.github).toEqual({
-    type: "http",
-    url: `${url}/coordinator/${project.id}/mcp/github`,
-    headers: { authorization: expect.stringMatching(/^Bearer .+/) },
-    tools: ["*"],
-  });
+  // It goes through the coordinator computer's forwarder, which adds the turn's key: the session holds no credential.
+  expect(guestServers?.github).toEqual({ type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/turns\/turn_[^/]+\/mcp\/github$/), tools: ["*"] });
   expect(JSON.stringify(copilot.mcpServers)).not.toContain(projectToken);
   expect(guestServers?.harness).toEqual({
     type: "local",
@@ -221,9 +216,9 @@ test("a coordinator session gets only the connectors its project declares that a
   const undeclared: number[] = [];
   copilot.script = async function* () {
     const github = copilot.mcpServers.at(-1)?.github;
-    const res = await fetch(`${url}/coordinator/${project.id}/mcp/jira`, {
+    const res = await fetch(github?.type === "http" ? github.url.replace(/github$/, "jira") : "", {
       method: "POST",
-      headers: { ...(github?.type === "http" ? github.headers : {}), "content-type": "application/json" },
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     undeclared.push(res.status);
@@ -283,7 +278,8 @@ test("each connector call runs as the right identity and is logged with who aske
 });
 
 test("every proxied MCP request runs as the member whose turn key it carries, whatever it claims, and none runs once that turn ended", async () => {
-  const { url, owner, guest, path, define, createProject, copilot, computers } = await team();
+  const control = await team();
+  const { url, owner, guest, path, define, createProject, computers } = control;
   const upstream = startFakeMcpServer();
   atCleanUp(upstream.stop);
   await define({ name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
@@ -291,34 +287,31 @@ test("every proxied MCP request runs as the member whose turn key it carries, wh
   await guest.api("PUT", `${path}/tracker/token`, { token: "tracker-guest" });
   await owner.api("PUT", `${path}/tracker/token`, { token: "tracker-owner" });
   const ownerId = User.parse(await (await owner.api("GET", "/me")).json()).id;
-  // The session's own config: its turn's key.
-  const turnKeyAuth = () => {
-    const server = copilot.mcpServers.at(-1)?.tracker;
-    return server?.type === "http" ? (server.headers?.authorization ?? "") : "";
-  };
-  const proxied = (authorization: string, method: string, rpc?: string) =>
+  const credential = computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN ?? "";
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const proxied = (bearer: string, method: string, rpc?: string) =>
     fetch(`${url}/coordinator/${project.id}/mcp/tracker`, {
       method,
-      headers: { authorization, "x-chiefbot-member": ownerId, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${bearer}`, "x-chiefbot-member": ownerId, "content-type": "application/json" },
       ...(rpc ? { body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: rpc, params: { name: "list_issues" } }) } : {}),
     });
-  // In octo-friend's turn, a request that names the owner.
-  copilot.script = async function* () {
-    await proxied(turnKeyAuth(), "POST", "tools/call");
-    yield sdk.idle();
-  };
 
-  await askAndWait(guest, project.id, "hi");
-  const ended = turnKeyAuth();
-  const credential = `Bearer ${computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN}`;
+  // In octo-friend's turn, a request that names the owner.
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "hi" });
+  const { turnId, turnKey } = await coordinator.nth("run-turn");
+  const inTurn = await proxied(turnKey, "POST", "tools/call");
+  coordinator.event(turnId, { type: "done" });
+  await guest.watchProjectChat(project.id).until(doneCount(1));
   const outside = [
-    await proxied(ended, "POST", "tools/list"),
-    await proxied(ended, "POST", "resources/list"),
-    await proxied(ended, "GET"),
-    await proxied(ended, "DELETE"),
+    await proxied(turnKey, "POST", "tools/list"),
+    await proxied(turnKey, "POST", "resources/list"),
+    await proxied(turnKey, "GET"),
+    await proxied(turnKey, "DELETE"),
     await proxied(credential, "POST", "tools/list"),
   ];
 
+  expect(inTurn.status).toBe(200);
   expect(upstream.calls).toEqual([{ tool: "list_issues", authorization: "Bearer tracker-guest" }]);
   for (const res of outside) expect([res.status, ApiError.parse(await res.json()).error]).toEqual([403, "invalid_turn_key"]);
   // Besides the call, only control's own session reached the server, to see which tools only read.
