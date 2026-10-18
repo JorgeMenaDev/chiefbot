@@ -85,7 +85,7 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       onPermissionRequest: permissionFor(new Set(tools.map(({ name }) => name)), connectors),
       tools,
       instructions: instructions(project, member),
-      mcpServers: connectorServers(connectors, (name) => link.connectorUrl(turn, name)),
+      mcpServers: connectorServers(connectors, (name) => link.connector(turn, name)),
       onMcpCall: link.reportCalls(connectors, bearer),
     };
     // The member's own seat is brokered by control only while their turn runs.

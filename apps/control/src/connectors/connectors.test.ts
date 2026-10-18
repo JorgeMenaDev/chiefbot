@@ -198,8 +198,13 @@ test("a coordinator session gets only the connectors its project declares that a
 
   const [guestServers, ownerServers] = copilot.mcpServers;
   expect(Object.keys(guestServers ?? {})).toEqual(["github", "harness"]);
-  // It goes through the coordinator computer's forwarder, which adds the turn's key: the session holds no credential.
-  expect(guestServers?.github).toEqual({ type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/turns\/turn_[^/]+\/mcp\/github$/), tools: ["*"] });
+  // It goes through the coordinator computer's forwarder with its turn's forwarder secret; the forwarder adds the turn's key.
+  expect(guestServers?.github).toEqual({
+    type: "http",
+    url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/github$/),
+    headers: { authorization: expect.stringMatching(/^Bearer [\w-]{43}$/) },
+    tools: ["*"],
+  });
   expect(JSON.stringify(copilot.mcpServers)).not.toContain(projectToken);
   expect(guestServers?.harness).toEqual({
     type: "local",
@@ -218,7 +223,7 @@ test("a coordinator session gets only the connectors its project declares that a
     const github = copilot.mcpServers.at(-1)?.github;
     const res = await fetch(github?.type === "http" ? github.url.replace(/github$/, "jira") : "", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { ...(github?.type === "http" ? github.headers : {}), "content-type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     undeclared.push(res.status);

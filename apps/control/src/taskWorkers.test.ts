@@ -125,10 +125,10 @@ async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>, worker
   return { tool, release: () => coordinator.event(turnId, { type: "done" }) };
 }
 
-// Where the latest session reaches its connector `name`: its computer's forwarder to control.
-const connectorUrl = (copilot: FakeCopilot, name: string) => {
+// How the latest session reaches its connector `name`: its computer's forwarder to control, with the turn's forwarder secret.
+const connectorOf = (copilot: FakeCopilot, name: string) => {
   const server = copilot.mcpServers.at(-1)?.[name];
-  return server?.type === "http" ? server.url : "";
+  return server?.type === "http" ? { url: server.url, headers: server.headers ?? {} } : { url: "", headers: {} };
 };
 
 test("a resent dispatch with the same creation id starts one worker, even while the first is still getting its computer", async () => {
@@ -413,7 +413,7 @@ test("a worker gets the project's connectors through control's proxy, and its ca
   await workerWhen(owner, project, id, ({ state }) => state === "finished");
 
   // The worker's session reaches the connector through its computer's forwarder, which adds its turn's key.
-  expect(copilot.mcpServers.at(-1)?.tracker).toEqual({ type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/turns\/turn_[^/]+\/mcp\/tracker$/), tools: ["*"] });
+  expect(copilot.mcpServers.at(-1)?.tracker).toMatchObject({ type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/tracker$/) });
   expect(upstream.calls).toEqual([{ tool: "list_issues", authorization: "Bearer tracker-guest" }]);
   const log = ConnectorCall.array().parse(await (await owner.api("GET", `/projects/${project.id}/connector-calls`)).json());
   expect(log.map(({ connector, tool, requester, identity }) => [connector, tool, requester, identity])).toEqual([
@@ -576,9 +576,10 @@ test("an approval control holds for a worker's request is withdrawn when that re
   await workerWhen(owner, project, id, ({ state }) => state === "working");
   // The worker's runtime calls a tool that may write, then goes away before the answer.
   const hangUp = new AbortController();
-  const call = fetch(connectorUrl(copilot, "tracker"), {
+  const connector = connectorOf(copilot, "tracker");
+  const call = fetch(connector.url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { ...connector.headers, "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_issue" } }),
     signal: hangUp.signal,
   }).catch(() => null);

@@ -1,4 +1,5 @@
 import type { SessionEvent } from "@github/copilot-sdk";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   ApiError,
   BrokeredGitHubToken,
@@ -38,7 +39,8 @@ export type Turn = { readonly turnId: TurnId; key: TurnKey };
 // credential is only for the WebSocket (and a bot's own model listing). Its HTTP
 // calls throw with control's reason when control refuses. A session reaches its
 // remote connectors through this link's forwarder on the computer's loopback,
-// which adds its turn's key to each request when it is made.
+// with its turn's private forwarder secret; the forwarder adds the turn's key to
+// each request as it goes out.
 export function controlLink<Message>({
   base,
   token,
@@ -62,9 +64,10 @@ export function controlLink<Message>({
   let stopped = false;
   // Every event of the latest turn, numbered by position.
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
-  // The turn running now and what it has streamed so far: where session events
-  // go, and the only turn the connector forwarder serves.
-  let active: ({ turn: Turn } & TurnStream) | null = null;
+  // The turn running now, its forwarder secret, and what it has streamed so far:
+  // where session events go, and the only turn the connector forwarder serves.
+  // The secret (32 random bytes) is the turn's alone and is forgotten with it.
+  let active: ({ turn: Turn; secret: string } & TurnStream) | null = null;
   // The connector forwarder, started by the first connector URL.
   let forwarder: Bun.Server<undefined> | null = null;
   // The organization's latest installation token: each turn's runtime starts on
@@ -83,16 +86,22 @@ export function controlLink<Message>({
     if (event.type === "done" && active?.turn.turnId === turnId) active = null;
   }
 
-  // Forwards /turns/:turnId/mcp/:name to control's proxy for that connector, with
-  // the key the turn has now, while the turn runs (403 invalid_turn_key after).
+  // Forwards /mcp/:name to control's proxy for that connector, for the running
+  // turn whose secret is the request's bearer (401 for anything else, which
+  // never reaches control). The turn's key is read once the body is in, so a
+  // rekey during the upload applies.
   async function forward(req: Request, server: Bun.Server<undefined>) {
-    const [, turnId, name] = new URL(req.url).pathname.match(/^\/turns\/([^/]+)\/mcp\/([^/]+)$/) ?? [];
-    const turn = active && active.turn.turnId === turnId ? active.turn : null;
-    if (!turn) return Response.json({ error: "invalid_turn_key", message: "This turn has ended." } satisfies ApiError, { status: 403 });
+    const serving = active;
+    if (!serving || !sameSecret(req.headers.get("authorization")?.replace(/^Bearer /, "") ?? "", serving.secret)) {
+      return Response.json({ error: "unauthorized" } satisfies ApiError, { status: 401 });
+    }
+    const [, name] = new URL(req.url).pathname.match(/^\/mcp\/([^/]+)$/) ?? [];
+    if (!name) return Response.json({ error: "not_found" } satisfies ApiError, { status: 404 });
     server.timeout(req, 0);
-    const headers = pick(req.headers, ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]);
-    headers.set("authorization", `Bearer ${turn.key}`);
     const body = req.method === "POST" ? await req.arrayBuffer() : null;
+    if (active !== serving) return Response.json({ error: "invalid_turn_key", message: "This turn has ended." } satisfies ApiError, { status: 403 });
+    const headers = pick(req.headers, ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]);
+    headers.set("authorization", `Bearer ${serving.turn.key}`);
     const upstream = await fetch(`${base}/mcp/${name}`, { method: req.method, headers, body, signal: req.signal });
     return new Response(upstream.body, { status: upstream.status, headers: pick(upstream.headers, ["content-type", "mcp-session-id"]) });
   }
@@ -140,7 +149,7 @@ export function controlLink<Message>({
     // session's events stream into it from now on.
     begin(turnId: TurnId, key: TurnKey): Turn {
       const turn = { turnId, key };
-      active = { turn, ...newTurnStream() };
+      active = { turn, secret: randomBytes(32).toString("base64url"), ...newTurnStream() };
       return turn;
     },
 
@@ -157,10 +166,12 @@ export function controlLink<Message>({
       if (active?.turn.turnId === turnId) active.turn.key = key;
     },
 
-    // Where a session of `turn` reaches the remote connector `name`: the forwarder.
-    connectorUrl(turn: Turn, name: string) {
+    // How a session of the running `turn` reaches the remote connector `name`:
+    // the forwarder's URL, and the turn's secret as the bearer.
+    connector(turn: Turn, name: string) {
+      if (active?.turn !== turn) throw new Error("This turn has ended.");
       forwarder ??= Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: forward });
-      return `${forwarder.url.origin}/turns/${turn.turnId}/mcp/${name}`;
+      return { url: `${forwarder.url.origin}/mcp/${name}`, headers: { authorization: `Bearer ${active.secret}` } };
     },
 
     // Maps one SDK session event of `turn` to its TurnEvents, while it runs.
@@ -215,6 +226,10 @@ export function controlLink<Message>({
     },
   };
 }
+
+// Whether `given` is the secret, in time that does not depend on where they differ.
+const sameSecret = (given: string, secret: string) =>
+  timingSafeEqual(createHash("sha256").update(given).digest(), createHash("sha256").update(secret).digest());
 
 // A copy of only the `names` headers that are set.
 function pick(headers: Headers, names: string[]) {

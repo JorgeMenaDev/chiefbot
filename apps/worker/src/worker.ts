@@ -148,7 +148,7 @@ export function startWorker({
       {
         ...options,
         onPermissionRequest: askUnlessControlDoes,
-        mcpServers: connectorServers(connectors, (name) => link.connectorUrl(turn, name)),
+        mcpServers: connectorServers(connectors, (name) => link.connector(turn, name)),
         onMcpCall: link.reportCalls(connectors, () => turn.key),
         onCut: () => withdrawApprovals(turn),
       },
