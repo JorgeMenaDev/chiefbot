@@ -70,13 +70,16 @@ async function teamWithTracker(options: TestControlOptions = {}) {
   return { ...control, upstream };
 }
 
-// One JSON-RPC request to the project's tracker through control's proxy, with `turnKey`.
-const rpc = (url: string, projectId: ProjectId, turnKey: string, method: string, params: object = {}) =>
+// A POST of `body` to the project's tracker through control's proxy, with `turnKey`.
+const toTracker = (url: string, projectId: ProjectId, turnKey: string, body: string) =>
   fetch(`${url}/coordinator/${projectId}/mcp/tracker`, {
     method: "POST",
     headers: { authorization: `Bearer ${turnKey}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    body,
   });
+// One JSON-RPC request to the tracker.
+const rpc = (url: string, projectId: ProjectId, turnKey: string, method: string, params: object = {}) =>
+  toTracker(url, projectId, turnKey, JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }));
 
 const approvalRequests = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "approval-request" ? [event] : []));
 
@@ -162,4 +165,35 @@ test("the coordinator stops a removed member's session: what it does later reach
   expect(copilot.aborted).toContain(guestSession);
   expect(late).toEqual(["This member's turn is not running, so Chiefbot refuses this call."]);
   expect(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json()).toEqual([]);
+});
+
+test("a connector request that is not session setup, a tool listing or a read-only tool's call waits for the member's approval, whatever the server marks", async () => {
+  const control = await teamWithTracker();
+  const { url, owner, project, upstream } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const chat = owner.watchProjectChat(project.id);
+  await ask(owner, project.id, "Read issue 1");
+  const { turnKey } = await coordinator.nth("run-turn");
+  const call = (method: string, params?: object) => rpc(url, project.id, turnKey, method, params);
+  const decline = async (n: number) => {
+    const asked = approvalRequests(await chat.until((events) => approvalRequests(events).length === n))[n - 1];
+    await owner.api("POST", `/projects/${project.id}/approvals/${asked?.approvalId}`, { approved: false });
+    return asked;
+  };
+
+  const open = [await call("initialize"), await call("notifications/initialized"), await call("ping"), await call("tools/list"), await call("tools/call", { name: "list_issues" })];
+  const read = call("resources/read", { uri: "tracker://issues/1" });
+  const askedToRead = await decline(1);
+  const batch = toTracker(url, project.id, turnKey, JSON.stringify([{ jsonrpc: "2.0", id: 2, method: "tools/list" }, { jsonrpc: "2.0", id: 3, method: "prompts/get", params: { name: "triage" } }]));
+  const askedInBatch = await decline(2);
+  const notRpc = await toTracker(url, project.id, turnKey, "not json");
+
+  expect(open.map(({ status }) => status)).toEqual([200, 200, 200, 200, 200]);
+  expect([askedToRead?.detail, askedInBatch?.detail]).toEqual(["Tracker: resources/read", "Tracker: prompts/get"]);
+  expect(await refusal(await read)).toEqual([403, "declined"]);
+  expect(await refusal(await batch)).toEqual([403, "declined"]);
+  expect(await refusal(notRpc)).toEqual([400, "invalid_connector"]);
+  expect(upstream.methods).not.toContain("resources/read");
+  expect(upstream.methods).not.toContain("prompts/get");
 });

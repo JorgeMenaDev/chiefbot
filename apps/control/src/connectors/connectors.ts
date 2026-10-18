@@ -209,18 +209,21 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks }: Connecto
     const connector = declared(projectId, req.params.name);
     if (connector?.server.kind !== "remote") return apiError(404, "not_found");
     const body = req.method === "POST" ? await req.text() : null;
-    const tools = body === null ? [] : toolCallsIn(body);
+    const requests = body === null ? [] : requestsIn(body);
+    if (requests === null) return apiError(400, "invalid_connector", "Expected a JSON-RPC message or batch");
+    const tools = requests.flatMap(({ tool }) => (tool === null ? [] : [tool]));
     const credential = await credentialFor(connector, member.userId);
     if (!credential) return apiError(403, "connector_not_ready", `${member.login} has no ${connector.name} credential: see the checklist`);
     // A GET is the server's event stream: it stays open. An approval waits however long it takes.
     server.timeout(req, 0);
-    if (tools.length > 0 && !connector.writesWithoutApproval) {
-      const readOnlyNow = await readOnlyTools(connector, connector.server.url, member.userId, credential);
-      for (const tool of tools.filter((name) => !readOnlyNow.has(name))) {
-        const outcome = await caller.ask(`${connector.title}: ${tool}`, req.signal);
-        if (outcome === "declined") return apiError(403, "declined", `${member.login} declined ${connector.title}: ${tool}`);
-        if (outcome !== "approved") return apiError(409, "no_turn", `The turn ended before ${member.login} answered`);
-      }
+    const gated = connector.writesWithoutApproval ? [] : requests.filter(({ method }) => !openMethods.has(method));
+    const readOnlyNow = tools.length > 0 && gated.length > 0 ? await readOnlyTools(connector, connector.server.url, member.userId, credential) : new Set<string>();
+    for (const { method, tool } of gated) {
+      if (tool !== null && readOnlyNow.has(tool)) continue;
+      const what = `${connector.title}: ${tool ?? method}`;
+      const outcome = await caller.ask(what, req.signal);
+      if (outcome === "declined") return apiError(403, "declined", `${member.login} declined ${what}`);
+      if (outcome !== "approved") return apiError(409, "no_turn", `The turn ended before ${member.login} answered`);
     }
     for (const tool of tools) {
       connectors.logCall(projectId, { connector: connector.name, tool, requester: member.login, identity: credential.identity, run: caller.turnId });
@@ -389,17 +392,26 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks }: Connecto
   return { routes, agentConnectors, controlSession };
 }
 
-// The tools a JSON-RPC message (or batch) calls: each tools/call's tool name.
+// The JSON-RPC methods control's proxy forwards without asking: they only set up
+// the session or list tools, and act on nothing. Every other message waits for
+// approval, unless it calls a tool the server marks read-only: a server's
+// annotations are trusted for tools/call only.
+const openMethods = new Set(["initialize", "notifications/initialized", "notifications/cancelled", "ping", "tools/list"]);
+
+// Each message of a JSON-RPC body (one, or a batch): its method ("response" for
+// an answer to the server), and the tool a tools/call calls. Null when the body
+// is not JSON-RPC.
 const RpcMessage = z.object({ method: z.string().optional(), params: z.object({ name: z.unknown() }).partial().optional() });
-function toolCallsIn(body: string): string[] {
+function requestsIn(body: string): Array<{ method: string; tool: string | null }> | null {
   let json: unknown;
   try {
     json = JSON.parse(body);
   } catch {
-    return [];
+    return null;
   }
-  const messages = RpcMessage.array().safeParse(Array.isArray(json) ? json : [json]).data ?? [];
-  return messages.flatMap(({ method, params }) => (method === "tools/call" ? [String(params?.name ?? "")] : []));
+  const messages = RpcMessage.array().min(1).safeParse(Array.isArray(json) ? json : [json]);
+  if (!messages.success) return null;
+  return messages.data.map(({ method = "response", params }) => ({ method, tool: method === "tools/call" ? String(params?.name ?? "") : null }));
 }
 
 // The small HTML page a member's browser shows at the end of a sign-in.
