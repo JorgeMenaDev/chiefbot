@@ -34,8 +34,8 @@ test("a message runs a Copilot turn on the bot's worker and the reply streams to
     { type: "text-delta", messageId: "msg-1", text: "hi" },
     { type: "done" },
   ]);
-  // The SDK session got the owner's access token from control's broker.
-  expect(copilot.tokens).toEqual([user.tokens.accessToken]);
+  // Each SDK session (the model listing's, then the turn's) got the owner's access token from control's broker.
+  expect([...new Set(copilot.tokens)]).toEqual([user.tokens.accessToken]);
 });
 
 // A fake Copilot script that streams "Hello" and "world", pausing in between until release().
@@ -59,7 +59,7 @@ test("history survives a control restart, and a turn the worker runs meanwhile s
   const reply = pausedReply();
   computers.copilot.script = reply.script;
   const turnId = await send(bot.id, "second");
-  const before = await watchChat(bot.id).until((events) => events.at(-1)?.event.type === "text-delta");
+  const before = await watchChat(bot.id).until((events) => events.at(-1)?.turnId === turnId && events.at(-1)?.event.type === "text-delta");
 
   stopControl();
   reply.release();

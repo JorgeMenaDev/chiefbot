@@ -5,12 +5,12 @@ import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { atCleanUp, cleanUp, startTestControl, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, eventually, startTestControl, type TestUser } from "./testControl.ts";
 
 // Repo work end to end: control, a fake GitHub with private repos and the
 // deployer's repo app, and a bot whose fake Copilot runs real git in a temp
 // workspace. As in the bot computer, git reaches GitHub only through control's
-// git proxy, with the bot's credential from the worker's credential helper.
+// git proxy, with the running turn's key from the worker's credential helper.
 
 afterEach(cleanUp);
 
@@ -39,8 +39,11 @@ async function setup() {
   Object.assign(env, gitProxyConfig({ controlUrl: control.url, helper: `"${process.execPath}" ${helper}`, githubUrl: control.github.url }));
   control.github.createRepo("octo/demo", { "README.md": "# Demo\nTeh demo.\n" });
   const bot = await control.user.onlineBot("Ada");
-  return { ...control, ...control.user, botId: bot.id, env, workspace };
+  return { ...control, ...control.user, botId: bot.id, env, workspace, socket };
 }
+
+// The running turn's key, as the worker hands it to git's credential helper.
+const turnKeyFrom = async (socket: string) => (await (await fetch("http://worker/git-credential", { unix: socket })).text()).match(/password=(.*)/)?.[1] ?? "";
 
 const approvalIds = (events: ChatEvent[]) =>
   events.flatMap(({ event }) => (event.type === "approval-request" ? [event.approvalId] : []));
@@ -176,19 +179,18 @@ test("the GitHub token a bot computer gets can neither push nor open pull reques
   expect(github.pushes).toEqual([{ repository: "octo/demo", by: "octo-user" }]);
 });
 
-test("a push outside a turn fails, even with the bot's credential: nobody can approve it", async () => {
-  const { github, env, workspace } = await setup();
+test("outside a turn git gets nothing through control, not even with the bot's credential: nobody could approve a push", async () => {
+  const { github, env, workspace, url, botId, botToken } = await setup();
   // Async: control answers git in this same process.
-  const run = async (command: string) => {
-    const proc = Bun.spawn(["sh", "-c", command], { cwd: workspace, env, stderr: "pipe" });
-    return { exitCode: await proc.exited, stderr: await new Response(proc.stderr).text() };
-  };
-  await run(`git clone -q ${github.url}/octo/demo.git demo && cd demo && git commit -q --allow-empty -m x`);
+  const proc = Bun.spawn(["sh", "-c", `git clone -q ${github.url}/octo/demo.git demo`], { cwd: workspace, env, stderr: "pipe" });
+  const clone = { exitCode: await proc.exited, stderr: await new Response(proc.stderr).text() };
+  const auth = { authorization: `Basic ${btoa(`chiefbot:${botToken(botId)}`)}` };
 
-  const push = await run("cd demo && git push -q origin HEAD:early");
+  const push = await fetch(`${url}/git/octo/demo.git/info/refs?service=git-receive-pack`, { headers: auth });
 
-  expect(push.exitCode).not.toBe(0);
-  expect(push.stderr).toContain("No turn is running, so nobody can approve this push.");
+  expect(clone.exitCode).not.toBe(0);
+  expect(clone.stderr).toContain("No turn is running.");
+  expect(push.status).toBe(401);
   expect(github.pushes).toEqual([]);
 });
 
@@ -218,12 +220,19 @@ test("the bot may clone only what its owner can see, and push only where the own
 });
 
 test("the git proxy refuses a path that is not a repo name, so control's tokens never reach other GitHub paths", async () => {
-  const { url, botId, botToken } = await setup();
-  const auth = { authorization: `Basic ${btoa(`chiefbot:${botToken(botId)}`)}` };
+  const { url, copilot, send, watchChat, botId, socket } = await setup();
+  const answers: Array<[number, string]> = [];
+  copilot.script = async function* () {
+    const auth = { authorization: `Basic ${btoa(`chiefbot:${await turnKeyFrom(socket)}`)}` };
+    const res = await fetch(`${url}/git/octo/..git/info/refs?service=git-upload-pack`, { headers: auth });
+    answers.push([res.status, await res.text()]);
+    yield sdk.idle();
+  };
 
-  const res = await fetch(`${url}/git/octo/..git/info/refs?service=git-upload-pack`, { headers: auth });
+  await send(botId, "Look around");
+  await watchChat(botId).until(done);
 
-  expect([res.status, await res.text()]).toEqual([404, "octo/. is not a GitHub repository name.\n"]);
+  expect(answers).toEqual([[404, "octo/. is not a GitHub repository name.\n"]]);
 });
 
 test("control opens the bot's pull request only after the user approves it", async () => {
@@ -324,6 +333,8 @@ test("after the owner disconnects GitHub, git in the bot computer gets nothing t
   };
   const chat = watchChat(botId);
   await api("POST", `/bots/${botId}/messages`, { text: "Clone octo/demo" });
+  // The turn's session is open (it took a token) and its agent is working.
+  await eventually(() => copilot.sends.length === 1);
 
   await api("DELETE", "/me/github");
   release();

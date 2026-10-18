@@ -13,15 +13,15 @@ import { createPullRequest, installationToken, repoPermission, type GitHubAppKey
 // only credential that may write (the deployer's repo app, through one-repo
 // installation tokens it never hands out; the owner's sign-in token, which their
 // bots get for Copilot, has no repository permissions). A bot computer reaches repos through
-// control's git proxy with its bot credential: fetches pass through, and every
+// control's git proxy with its running turn's key: fetches pass through, and every
 // push waits for the owner's approval before control forwards it. Pull requests
 // are opened by control, also after approval. Each request first checks that the
 // owner is still signed in and, through the repo app, that they may do it themselves.
-// A project's task worker reaches repos the same way, with its own credential: for
+// A project's task worker reaches repos the same way, with its turn's key: for
 // it, the "owner" is the member who asked for it.
 
-// Who a credential acts for: whose GitHub account bounds its repo access, and
-// how to ask that person to approve, in the running turn of the bot or task worker.
+// Who a turn key acts for: whose GitHub account bounds its repo access, and
+// how to ask that person to approve, in that turn of the bot or task worker.
 export type RepoAgent = {
   userId: UserId;
   ask: (kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
@@ -34,8 +34,8 @@ export type RepoAccessOptions = {
   app: GitHubAppKey;
   // The bot owner's GitHub login, or null when they must sign in again.
   ownerLogin: (userId: UserId) => Promise<string | null>;
-  // The agent a bot's or task worker's credential belongs to, if any.
-  agentFor: (credential: string) => RepoAgent | null;
+  // The agent whose running turn a key is (a bot's or task worker's), if any.
+  agentFor: (key: string) => RepoAgent | null;
 };
 
 type Refusal = { error: ApiErrorCode; status: number; message: string };
@@ -83,12 +83,12 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
 
     // GET /git/:owner/:repo/info/refs, POST /git/:owner/:repo/git-upload-pack and
     // POST /git/:owner/:repo/git-receive-pack: git's smart HTTP protocol, with the
-    // bot credential as the Basic auth password. Errors are text/plain, which git
+    // turn's key as the Basic auth password. Errors are text/plain, which git
     // prints as "remote: …".
     async git(req: Request, server: Bun.Server<unknown>, { owner, repo }: { owner: string; repo: string }): Promise<Response> {
       const bot = agentFor(basicPassword(req));
       if (!bot) {
-        return new Response("Chiefbot: no bot credential, or an unknown one.\n", {
+        return new Response("Chiefbot: no turn key, or one whose turn is not running.\n", {
           status: 401,
           headers: { "www-authenticate": 'Basic realm="Chiefbot"' },
         });

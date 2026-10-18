@@ -1,7 +1,8 @@
 import { ChiefToolCall, type BotId, type Handoff, type Project, type User } from "@chiefbot/contracts";
-import { apiError, bearer, unauthorized } from "./http.ts";
+import { apiError } from "./http.ts";
 import type { projectHost } from "./projects.ts";
 import type { openStore } from "./store.ts";
+import { botTurn, heldTurn } from "./turnKeys.ts";
 
 // Handoffs: a person's chief of staff (their own bot) hands work to a project
 // of one of their workspaces, then watches it. Each handoff becomes a task in
@@ -9,7 +10,8 @@ import type { openStore } from "./store.ts";
 // requester's own chat with it, through the project's scheduler. The chief
 // never manages the project's workers: it only starts and watches.
 //
-//   POST /worker/:botId/chief-tools  bearer bot token of that bot, body ChiefToolCall → its answer
+//   POST /worker/:botId/chief-tools  bearer the key of that bot's running turn (403 invalid_turn_key
+//                                    otherwise), body ChiefToolCall → its answer
 //                                    (handoffs.ts in contracts). A chief sees only projects of the
 //                                    workspaces its owner is a member of: 404 not_found for any other.
 export function chiefHost({
@@ -46,9 +48,8 @@ export function chiefHost({
   const routes = {
     "/worker/:botId/chief-tools": {
       POST: async (req: Bun.BunRequest<"/worker/:botId/chief-tools">) => {
-        const bot = store.botForToken(bearer(req));
-        if (!bot) return unauthorized();
-        if (bot.botId !== req.params.botId) return apiError(403, "wrong_bot");
+        const bot = heldTurn(store.turnKeys, req, botTurn(req.params.botId));
+        if (bot instanceof Response) return bot;
         const call = ChiefToolCall.safeParse(await req.json().catch(() => null));
         if (!call.success) {
           const issues = call.error.issues.map(({ path, message }) => (path.length > 0 ? `${path.join(".")}: ${message}` : message));

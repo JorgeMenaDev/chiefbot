@@ -141,17 +141,6 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   // A stored chat event and the member whose chat it is in.
   type MemberEvent = { userId: UserId; event: ChatEvent };
 
-  const runningTurn = (projectId: ProjectId): { turnId: TurnId; userId: UserId } | null => {
-    const row = db
-      .query<{ id: string; user_id: string }, [string]>(
-        `SELECT coordinator_turns.id, coordinator_turns.user_id FROM coordinator_turns
-         JOIN projects ON projects.id = coordinator_turns.project_id
-         JOIN workspace_members ON workspace_members.workspace_id = projects.workspace_id AND workspace_members.user_id = coordinator_turns.user_id
-         WHERE coordinator_turns.project_id = ?1 AND coordinator_turns.state = 'running'`,
-      )
-      .get(projectId);
-    return row ? { turnId: TurnId.parse(row.id), userId: UserId.parse(row.user_id) } : null;
-  };
   const userOfTurn = (turnId: TurnId) => {
     const row = db.query<{ user_id: string }, [string]>("SELECT user_id FROM coordinator_turns WHERE id = ?1").get(turnId);
     if (!row) throw new Error(`no coordinator turn ${turnId}`);
@@ -313,15 +302,18 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return db.query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND state = 'queued'").get(projectId) !== null;
     },
 
-    // The member whose turn is running on the project's coordinator, if any and
-    // while they are still a member: what a coordinator gets is minted for them.
-    runningMember(projectId: ProjectId): UserId | null {
-      return runningTurn(projectId)?.userId ?? null;
+    // Whether a turn of the project runs or waits for its coordinator.
+    hasUnfinishedTurn(projectId: ProjectId): boolean {
+      return db.query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND state != 'done'").get(projectId) !== null;
     },
 
-    // The project's running coordinator turn and the member it runs for, if any
-    // and while they are still a member.
-    runningTurn,
+    // The member the project's turn runs for, while it runs; null otherwise.
+    runningTurnMember(projectId: ProjectId, turnId: TurnId): UserId | null {
+      const row = db
+        .query<{ user_id: string }, [string, string]>("SELECT user_id FROM coordinator_turns WHERE id = ?1 AND project_id = ?2 AND state = 'running'")
+        .get(turnId, projectId);
+      return row ? UserId.parse(row.user_id) : null;
+    },
 
     // The member left the workspace or was removed: their queued turns in its
     // projects go, and their running one ends. The events that end it, to publish.
@@ -351,14 +343,15 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return { userId: userOfTurn(turnId), event: append(turnId, event) };
     }),
 
-    // An approval control asks for in the project's running turn (a connector
-    // call), recorded in its member's chat. Null when no turn is running.
-    requestApproval: db.transaction((projectId: ProjectId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): MemberEvent | null => {
-      const turn = db.query<{ id: string }, [string]>("SELECT id FROM coordinator_turns WHERE project_id = ?1 AND state = 'running'").get(projectId);
+    // An approval control asks for in a running coordinator turn (a connector
+    // call), recorded in its member's chat. Null when that turn is not running.
+    requestApproval: db.transaction((turnId: TurnId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): MemberEvent | null => {
+      const turn = db
+        .query<{ project_id: string; user_id: string }, [string]>("SELECT project_id, user_id FROM coordinator_turns WHERE id = ?1 AND state = 'running'")
+        .get(turnId);
       if (!turn) return null;
-      const turnId = TurnId.parse(turn.id);
-      approvals.record(projectId, turnId, ask, Date.now());
-      return { userId: userOfTurn(turnId), event: append(turnId, { type: "approval-request", ...ask }) };
+      approvals.record(turn.project_id, turnId, ask, Date.now());
+      return { userId: UserId.parse(turn.user_id), event: append(turnId, { type: "approval-request", ...ask }) };
     }),
 
     // Records the member's answer to a pending approval of their running turn.

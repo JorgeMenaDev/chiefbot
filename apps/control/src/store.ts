@@ -29,6 +29,7 @@ import { connectorStore } from "./connectors/connectorStore.ts";
 import { projectStore } from "./projectStore.ts";
 import { subscriptionStore } from "./subscriptionStore.ts";
 import { taskWorkerStore } from "./taskWorkerStore.ts";
+import { turnKeyStore } from "./turnKeys.ts";
 import { workspaceStore } from "./workspaceStore.ts";
 
 // Control's durable state in SQLite. Every row hangs off a user or a workspace.
@@ -212,6 +213,7 @@ export function openStore(path: string) {
   };
   const handoffs = handoffStore(db, projects, postNotice);
   const taskWorkers = taskWorkerStore(db, hash);
+  const turnKeys = turnKeyStore(db, hash);
 
   return {
     // Workspaces, members and invites (workspaceStore.ts).
@@ -226,6 +228,8 @@ export function openStore(path: string) {
     subscriptions,
     // Projects' task workers: launch records, transcripts, approvals (taskWorkerStore.ts).
     taskWorkers,
+    // Every agent's running turns' keys (turnKeys.ts).
+    turnKeys,
 
     // Creates or updates the user GitHub identified.
     upsertUser(identity: GitHubIdentity): UserId {
@@ -363,13 +367,9 @@ export function openStore(path: string) {
     }),
 
     // An approval control itself asks for (a push or a pull request), recorded in
-    // the bot's unfinished turn like the worker's own. Null when no turn is running.
-    requestApproval: db.transaction((botId: BotId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): ChatEvent | null => {
-      const turn = db
-        .query<{ id: string }, [string]>("SELECT id FROM turns WHERE bot_id = ?1 AND done = 0 ORDER BY created_at DESC LIMIT 1")
-        .get(botId);
-      if (!turn) return null;
-      const turnId = TurnId.parse(turn.id);
+    // the bot's turn like the worker's own. Null when that turn is done.
+    requestApproval: db.transaction((botId: BotId, turnId: TurnId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): ChatEvent | null => {
+      if (!db.query("SELECT 1 FROM turns WHERE id = ?1 AND bot_id = ?2 AND done = 0").get(turnId, botId)) return null;
       approvals.record(botId, turnId, ask, Date.now());
       return append(botId, turnId, { type: "approval-request", ...ask });
     }),

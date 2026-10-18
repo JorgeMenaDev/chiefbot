@@ -1,0 +1,336 @@
+import { afterEach, expect, test } from "bun:test";
+import { ApiError, BrokeredGitHubToken, Project, Task, User, Workspace, WorkspaceInvite, type ChatEvent, type ProjectId } from "@chiefbot/contracts";
+import { sdk, type FakeRuntime } from "@chiefbot/worker/fake-copilot";
+import type { FakeGitHubUser } from "@chiefbot/fake-github";
+import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
+import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
+
+afterEach(cleanUp);
+
+const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan: "individual", sku: "free_limited_copilot" } };
+
+// Control with a workspace owned by the signed-in user, octo-friend as its
+// member, and a project for octo-org/shop whose project file has `file`.
+async function team(file = "", options: TestControlOptions = {}) {
+  const control = await startTestControl(options);
+  const owner = control.user;
+  const workspace = Workspace.parse(await (await owner.api("POST", "/workspaces", { name: "Platform team" })).json());
+  await owner.api("POST", `/workspaces/${workspace.id}/invites`, { login: friend.login });
+  const guest = await control.signIn(friend);
+  const [invite] = WorkspaceInvite.array().parse(await (await guest.api("GET", "/invites")).json());
+  await guest.api("POST", `/invites/${invite?.id}/accept`);
+  control.github.createRepo("octo-org/shop", { "chiefbot.project.yaml": file });
+  const project = Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo: "octo-org/shop" })).json());
+  return { ...control, owner, guest, workspace, project };
+}
+
+// Calls a coordinator route of the project with `bearer`.
+const asCoordinator = (url: string, projectId: ProjectId, bearer: string) => (path: string, init: RequestInit = {}) =>
+  fetch(`${url}/coordinator/${projectId}${path}`, { ...init, headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" } });
+
+const ask = async (member: TestUser, projectId: ProjectId, text: string) => {
+  const res = await member.api("POST", `/projects/${projectId}/messages`, { text });
+  if (res.status !== 202) throw new Error(`ask failed: ${res.status} ${await res.text()}`);
+};
+
+const refusal = async (res: Response) => [res.status, ApiError.parse(await res.json()).error];
+
+test("a turn's key reaches only its own member's sign-in, only while that turn runs", async () => {
+  const control = await team();
+  const { url, owner, guest, project } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+
+  await ask(owner, project.id, "first");
+  const first = await coordinator.nth("run-turn");
+  const call = asCoordinator(url, project.id, first.turnKey);
+  const inTurn = await call("/github-token");
+  const withCredential = await asCoordinator(url, project.id, coordinator.token)("/github-token");
+  coordinator.event(first.turnId, { type: "done" });
+  await ask(guest, project.id, "second");
+  const second = await coordinator.nth("run-turn", 2);
+  const afterTurn = [await call("/github-token"), await call("/tools", { method: "POST", body: JSON.stringify({ tool: "list_tasks" }) })];
+  const guestSeat = await asCoordinator(url, project.id, second.turnKey)("/github-token");
+
+  expect([inTurn.status, BrokeredGitHubToken.parse(await inTurn.json()).accessToken]).toEqual([200, owner.tokens.accessToken]);
+  expect(await refusal(withCredential)).toEqual([403, "invalid_turn_key"]);
+  for (const res of afterTurn) expect(await refusal(res)).toEqual([403, "invalid_turn_key"]);
+  expect(BrokeredGitHubToken.parse(await guestSeat.json()).accessToken).toBe(guest.tokens.accessToken);
+});
+
+// A team whose project declares a remote connector `tracker` (a fake MCP server
+// whose create_issue may write), connected for the owner.
+async function teamWithTracker(options: TestControlOptions = {}) {
+  const upstream = startFakeMcpServer({ writes: ["create_issue"] });
+  atCleanUp(upstream.stop);
+  const control = await team("connectors: [tracker]\n", options);
+  const connectors = `/workspaces/${control.workspace.id}/connectors`;
+  await control.owner.api("POST", connectors, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
+  await control.owner.api("PUT", `${connectors}/tracker/token`, { token: "tracker-owner" });
+  return { ...control, upstream };
+}
+
+// A POST of `body` to the project's tracker through control's proxy, with `turnKey`.
+const toTracker = (url: string, projectId: ProjectId, turnKey: string, body: string) =>
+  fetch(`${url}/coordinator/${projectId}/mcp/tracker`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${turnKey}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body,
+  });
+// One JSON-RPC request to the tracker.
+const rpc = (url: string, projectId: ProjectId, turnKey: string, method: string, params: object = {}) =>
+  toTracker(url, projectId, turnKey, JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }));
+
+const approvalRequests = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "approval-request" ? [event] : []));
+
+test("an approval asked in one turn is answered and used only in that turn", async () => {
+  const control = await teamWithTracker();
+  const { url, owner, project, upstream } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const chat = owner.watchProjectChat(project.id);
+  const answer = (approvalId: string) => owner.api("POST", `/projects/${project.id}/approvals/${approvalId}`, { approved: true });
+  const createIssue = (turnKey: string) => rpc(url, project.id, turnKey, "tools/call", { name: "create_issue" });
+
+  await ask(owner, project.id, "File the bug");
+  const a = await coordinator.nth("run-turn");
+  const heldInA = createIssue(a.turnKey);
+  const [askedInA] = approvalRequests(await chat.until((events) => approvalRequests(events).length === 1));
+  coordinator.event(a.turnId, { type: "done" });
+  const endedA = await heldInA;
+  await ask(owner, project.id, "File it again");
+  const b = await coordinator.nth("run-turn", 2);
+  const fromA = await createIssue(a.turnKey);
+  const answeredInB = await answer(askedInA?.approvalId ?? "");
+  const heldInB = createIssue(b.turnKey);
+  const [, askedInB] = approvalRequests(await chat.until((events) => approvalRequests(events).length === 2));
+  const approvedInB = await answer(askedInB?.approvalId ?? "");
+
+  expect(await refusal(endedA)).toEqual([409, "no_turn"]);
+  expect(await refusal(fromA)).toEqual([403, "invalid_turn_key"]);
+  expect(await refusal(answeredInB)).toEqual([409, "not_pending"]);
+  expect(askedInB?.approvalId).not.toBe(askedInA?.approvalId);
+  expect([approvedInB.status, (await heldInB).status]).toEqual([204, 200]);
+  expect(chat.events.find(({ event }) => event.type === "approval-request" && event.approvalId === askedInB?.approvalId)?.turnId).toBe(b.turnId);
+  expect(upstream.calls).toEqual([{ tool: "create_issue", authorization: "Bearer tracker-owner" }]);
+});
+
+test("a member removed mid-turn: their turn's key stops working at once, their coordinator session is told to stop, and the next turn is the next member's own", async () => {
+  const control = await team();
+  const { url, owner, guest, workspace, project } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+  const tool = (turnKey: string, call: object) => asCoordinator(url, project.id, turnKey)("/tools", { method: "POST", body: JSON.stringify(call) });
+  await ask(guest, project.id, "Hold on");
+  const guestTurn = await coordinator.nth("run-turn");
+  await ask(owner, project.id, "Next");
+
+  expect((await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`)).status).toBe(204);
+
+  expect(await coordinator.nth("member-removed")).toEqual({ type: "member-removed", userId: guestId });
+  const ownerTurn = await coordinator.nth("run-turn", 2);
+  const late = [await tool(guestTurn.turnKey, { tool: "create_task", title: "Sneak in" }), await asCoordinator(url, project.id, guestTurn.turnKey)("/github-token")];
+  const created = await tool(ownerTurn.turnKey, { tool: "create_task", title: "Owner's task" });
+
+  expect(ownerTurn.member.login).toBe("octo-user");
+  for (const res of late) expect(await refusal(res)).toEqual([403, "invalid_turn_key"]);
+  expect(Task.parse(await created.json())).toMatchObject({ title: "Owner's task", requestedBy: "octo-user" });
+});
+
+test("the coordinator stops a removed member's session: what it does later reaches control as no one", async () => {
+  const { owner, guest, workspace, project, copilot } = await team();
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+  let wake = () => {};
+  const late: unknown[] = [];
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "Hold on") {
+      // The runtime goes on after the member is removed, as a stuck one would.
+      await new Promise<void>((resolve) => (wake = resolve));
+      late.push(await runtime.tool("create_task", { title: "Sneak in" }).catch((error: Error) => error.message));
+    }
+    yield sdk.idle();
+  };
+  await ask(guest, project.id, "Hold on");
+  await eventually(() => copilot.sends.length === 1);
+
+  await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`);
+  const guestSession = `${project.id}-${guestId}`;
+  await eventually(() => copilot.closed.includes(guestSession));
+  await ask(owner, project.id, "Next");
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  wake();
+  await eventually(() => late.length === 1);
+
+  expect(copilot.aborted).toContain(guestSession);
+  expect(late).toEqual(["This call needs the key of a turn of this agent that is still running."]);
+  expect(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json()).toEqual([]);
+});
+
+test("a connector request that is not session setup, a tool listing or a read-only tool's call waits for the member's approval, whatever the server marks", async () => {
+  const control = await teamWithTracker();
+  const { url, owner, project, upstream } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const chat = owner.watchProjectChat(project.id);
+  await ask(owner, project.id, "Read issue 1");
+  const { turnKey } = await coordinator.nth("run-turn");
+  const call = (method: string, params?: object) => rpc(url, project.id, turnKey, method, params);
+  const decline = async (n: number) => {
+    const asked = approvalRequests(await chat.until((events) => approvalRequests(events).length === n))[n - 1];
+    await owner.api("POST", `/projects/${project.id}/approvals/${asked?.approvalId}`, { approved: false });
+    return asked;
+  };
+
+  const open = [await call("initialize"), await call("notifications/initialized"), await call("ping"), await call("tools/list"), await call("tools/call", { name: "list_issues" })];
+  const read = call("resources/read", { uri: "tracker://issues/1" });
+  const askedToRead = await decline(1);
+  const batch = toTracker(url, project.id, turnKey, JSON.stringify([{ jsonrpc: "2.0", id: 2, method: "tools/list" }, { jsonrpc: "2.0", id: 3, method: "prompts/get", params: { name: "triage" } }]));
+  const askedInBatch = await decline(2);
+  const notRpc = await toTracker(url, project.id, turnKey, "not json");
+
+  expect(open.map(({ status }) => status)).toEqual([200, 200, 200, 200, 200]);
+  expect([askedToRead?.detail, askedInBatch?.detail]).toEqual(["Tracker: resources/read", "Tracker: prompts/get"]);
+  expect(await refusal(await read)).toEqual([403, "declined"]);
+  expect(await refusal(await batch)).toEqual([403, "declined"]);
+  expect(await refusal(notRpc)).toEqual([400, "invalid_connector"]);
+  expect(upstream.methods).not.toContain("resources/read");
+  expect(upstream.methods).not.toContain("prompts/get");
+});
+
+test("a control restart revokes every turn key; a turn its coordinator still runs gets a new one at hello", async () => {
+  const control = await team("", { persistent: true });
+  const { url, owner, project } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  await ask(owner, project.id, "A long one");
+  const { turnId, turnKey: before } = await coordinator.nth("run-turn");
+  const listTasks = (turnKey: string) => asCoordinator(url, project.id, turnKey)("/tools", { method: "POST", body: JSON.stringify({ tool: "list_tasks" }) });
+  const ran = await listTasks(before);
+
+  control.restart();
+  const revoked = await listTasks(before);
+  await coordinator.reconnect();
+  coordinator.hello(turnId);
+  const rekeyed = await coordinator.nth("turn-key");
+
+  expect(ran.status).toBe(200);
+  expect(await refusal(revoked)).toEqual([403, "invalid_turn_key"]);
+  expect(rekeyed.turnId).toBe(turnId);
+  expect(rekeyed.turnKey).not.toBe(before);
+  expect((await listTasks(rekeyed.turnKey)).status).toBe(200);
+  // The coordinator ends the turn as usual; its new key goes with it.
+  coordinator.event(turnId, { type: "done" });
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  expect(await refusal(await listTasks(rekeyed.turnKey))).toEqual([403, "invalid_turn_key"]);
+});
+
+test("a callback that comes late from one turn acts in that turn only: it cannot act in the member's next turn", async () => {
+  const { owner, project, copilot } = await team();
+  const first: FakeRuntime[] = [];
+  let release = () => {};
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "First") first.push(runtime);
+    else await new Promise<void>((resolve) => (release = resolve));
+    yield sdk.idle();
+  };
+  await ask(owner, project.id, "First");
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  await ask(owner, project.id, "Second");
+  await eventually(() => copilot.sends.length === 2);
+
+  // The first turn's runtime calls a tool while the second turn runs.
+  const late = await first[0]?.tool("create_task", { title: "Late" }).catch((error: Error) => error.message);
+  release();
+  await owner.watchProjectChat(project.id).until(doneCount(2));
+
+  expect(late).toBe("This call needs the key of a turn of this agent that is still running.");
+  expect(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json()).toEqual([]);
+});
+
+// Opens the tracker's event stream through control's proxy with `turnKey`, and
+// reads its first chunk. `closed` settles once the stream ends, either way.
+async function openStream(url: string, projectId: ProjectId, turnKey: string) {
+  const res = await fetch(`${url}/coordinator/${projectId}/mcp/tracker`, { headers: { authorization: `Bearer ${turnKey}`, accept: "text/event-stream" } });
+  const reader = res.body?.getReader();
+  await reader?.read();
+  const closed = (async () => {
+    while (!(await reader?.read())?.done);
+  })().catch(() => {});
+  return { status: res.status, closed };
+}
+
+test("a connector's event stream ends with its turn, and with its member's removal", async () => {
+  const control = await teamWithTracker();
+  const { url, owner, guest, workspace, project, upstream } = control;
+  await guest.api("PUT", `/workspaces/${workspace.id}/connectors/tracker/token`, { token: "tracker-guest" });
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+
+  await ask(owner, project.id, "Watch the tracker");
+  const ownerTurn = await coordinator.nth("run-turn");
+  const ownerStream = await openStream(url, project.id, ownerTurn.turnKey);
+  coordinator.event(ownerTurn.turnId, { type: "done" });
+  await ownerStream.closed;
+  await ask(guest, project.id, "Watch it too");
+  const guestStream = await openStream(url, project.id, (await coordinator.nth("run-turn", 2)).turnKey);
+  await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`);
+  await guestStream.closed;
+
+  expect([ownerStream.status, guestStream.status]).toEqual([200, 200]);
+  await eventually(() => upstream.streams.cancelled === 2);
+});
+
+test("a connector's GET event stream opens without approval; a DELETE waits for the member's approval", async () => {
+  const control = await teamWithTracker();
+  const { url, owner, project, upstream } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const chat = owner.watchProjectChat(project.id);
+  await ask(owner, project.id, "Done with the tracker");
+  const { turnKey } = await coordinator.nth("run-turn");
+
+  const stream = await openStream(url, project.id, turnKey);
+  const ended = fetch(`${url}/coordinator/${project.id}/mcp/tracker`, { method: "DELETE", headers: { authorization: `Bearer ${turnKey}`, "mcp-session-id": "fake-session" } });
+  const [asked] = approvalRequests(await chat.until((events) => approvalRequests(events).length === 1));
+  await owner.api("POST", `/projects/${project.id}/approvals/${asked?.approvalId}`, { approved: false });
+
+  expect(stream.status).toBe(200);
+  expect(upstream.streams.opened).toBe(1);
+  expect(asked?.detail).toBe("Tracker: DELETE");
+  expect(await refusal(await ended)).toEqual([403, "declined"]);
+});
+
+test("after a control restart, a running turn's connector calls go out with its new key at once", async () => {
+  // Secrets in memory, so the member's connector token outlives the restart.
+  const secrets = new Map<string, string>();
+  const control = await teamWithTracker({
+    persistent: true,
+    secrets: { get: async (name) => secrets.get(name) ?? null, put: async (name, value) => void secrets.set(name, value), delete: async (name) => void secrets.delete(name) },
+  });
+  const { owner, project, copilot, upstream } = control;
+  const statuses: Array<number | null> = [];
+  let release = () => {};
+  copilot.script = async function* (_prompt, runtime) {
+    statuses.push((await runtime.callMcp("tracker", "list_issues")).status);
+    await new Promise<void>((resolve) => (release = resolve));
+    // Until the coordinator has reconnected and got the turn's new key.
+    for (let tries = 0; tries < 100; tries++) {
+      const { status } = await runtime.callMcp("tracker", "list_issues");
+      if (status === 200 || tries === 99) statuses.push(status);
+      if (status === 200) break;
+      await Bun.sleep(20);
+    }
+    yield sdk.idle();
+  };
+  await ask(owner, project.id, "List the issues twice");
+  await eventually(() => statuses.length === 1);
+
+  control.restart();
+  release();
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+
+  expect(statuses).toEqual([200, 200]);
+  expect(upstream.calls).toHaveLength(2);
+});

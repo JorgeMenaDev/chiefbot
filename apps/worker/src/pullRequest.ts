@@ -7,8 +7,9 @@ export const pullRequestToolName = "create_pull_request";
 // control, which asks the user and then opens it with the repo app. The
 // worker holds no token that could open one itself. The user may take hours to
 // answer, so the request has no idle timeout.
-// `base` is the computer's control routes (/worker/:id or /task-worker/:id), `token` its credential.
-export function pullRequestTool({ base, token }: { base: string; token: string }) {
+// `base` is the computer's control routes (/worker/:id or /task-worker/:id);
+// `turnKey` gives the key of the turn its session was opened for (it throws for none).
+export function pullRequestTool({ base, turnKey }: { base: string; turnKey: () => string }) {
   return {
     name: pullRequestToolName,
     description: "Open a pull request on GitHub from a branch you already pushed. The user approves it first.",
@@ -16,7 +17,7 @@ export function pullRequestTool({ base, token }: { base: string; token: string }
     async handler(raw) {
       const res = await fetch(`${base}/pull-requests`, {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${turnKey()}`, "content-type": "application/json" },
         body: JSON.stringify(PullRequestArgs.parse(raw)),
         timeout: false,
       });

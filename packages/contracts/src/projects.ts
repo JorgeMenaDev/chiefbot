@@ -1,7 +1,7 @@
 import { z } from "zod";
-import { ChatItem, TurnEventMessage, TurnHello } from "./chat.ts";
+import { ChatItem, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
 import { AgentConnector } from "./connectors.ts";
-import { ProjectId, TaskWorkerId, TurnId, UserId, WorkspaceId } from "./ids.ts";
+import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
 import { RepoFullName } from "./repos.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
@@ -145,23 +145,32 @@ export type ProjectMember = z.infer<typeof ProjectMember>;
 // Control → coordinator on the /coordinator/:projectId WebSocket.
 //   bound     the project this connection belongs to; sent right after control accepts the credential
 //   run-turn  run one turn in `member`'s chat, on `payer`'s Copilot: the member's
-//             seat (GET …/github-token/:userId) or the organization's
-//             (GET …/installation-token). Control's scheduler sends one at a time
+//             seat (GET …/github-token) or the organization's
+//             (GET …/installation-token). `turnKey` is the turn's key (ids.ts
+//             TurnKey): the bearer of every call to control in the turn, which
+//             acts only as `member` and only in this turn. Control's scheduler sends one at a time
 //             per project, across all members' chats. `connectors` are the MCP
 //             servers the member's session gets: those the project file declares
 //             that are defined in the workspace and ready for this member. They
 //             act as the member (or the workspace, for a shared connector)
 //             whoever pays for Copilot.
+//   turn-key  the running turn's new key (chat.ts TurnKeyMessage)
+//   member-removed  the member left the workspace or was removed: control ended
+//             their turn and revoked its key. Their session stops now and closes
+//             (an organization's runtime with it); nothing it does reaches a chat.
 export const ControlToCoordinator = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound"), project: Project }),
   z.object({
     type: z.literal("run-turn"),
     turnId: TurnId,
+    turnKey: TurnKey,
     member: ProjectMember,
     text: z.string(),
     payer: CopilotPayer,
     connectors: z.array(AgentConnector).default([]),
   }),
+  TurnKeyMessage,
+  z.object({ type: z.literal("member-removed"), userId: UserId }),
 ]);
 export type ControlToCoordinator = z.infer<typeof ControlToCoordinator>;
 

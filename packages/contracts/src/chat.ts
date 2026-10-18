@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApprovalId, BotId, HandoffId, TurnId } from "./ids.ts";
+import { ApprovalId, BotId, HandoffId, TurnId, TurnKey } from "./ids.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
@@ -133,3 +133,8 @@ export type ChatView = z.infer<typeof ChatView>;
 //               unfinished turn: the runtime lost it.
 export const TurnEventMessage = z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent });
 export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable() });
+
+// Control → an agent's runtime, after a hello naming a turn that still runs whose
+// key control no longer has (control restarted, which revokes every key): the
+// turn's new key, which replaces the old one from now on.
+export const TurnKeyMessage = z.object({ type: z.literal("turn-key"), turnId: TurnId, turnKey: TurnKey });

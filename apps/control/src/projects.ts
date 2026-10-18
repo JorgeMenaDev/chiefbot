@@ -29,6 +29,7 @@ import type { repoAccess } from "./repos.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import type { taskWorkerHost } from "./taskWorkers.ts";
+import { coordinatorTurn, heldTurn, type CoordinatorTurn } from "./turnKeys.ts";
 
 // What a project WebSocket is bound to: a project's coordinator, or one
 // member's chat with it from `after` on.
@@ -92,13 +93,14 @@ export type ProjectHostOptions = {
 //   POST   /projects/:id/messages    body SendMessageRequest → 202 SendMessageResponse: queued for the
 //                                    coordinator (409 turn_running while the member's last one is unfinished)
 //   WS     /projects/:id/chat        ?after=<seq> → each ChatEvent of the member's own chat after seq, then live ones
-// Coordinator routes (bearer: the project's credential; 403 for another project's):
+// Coordinator routes. The WebSocket takes the project's credential (403 for another project's); every
+// other route takes the key of one of the project's running turns (403 invalid_turn_key otherwise), and
+// acts only as that turn's member, in that turn:
 //   WS     /coordinator/:projectId   ControlToCoordinator; CoordinatorToControl back
-//   GET    /coordinator/:projectId/github-token/:userId  → BrokeredGitHubToken of the member whose turn
-//                                    is running, when their seat pays for it (404 for anyone else, or
-//                                    when the organization pays; 403 reauth_needed)
+//   GET    /coordinator/:projectId/github-token  → BrokeredGitHubToken of the turn's member, when their
+//                                    seat pays for it (404 when the organization pays; 403 reauth_needed)
 //   GET    /coordinator/:projectId/installation-token  → CopilotInstallationToken, when the organization
-//                                    pays for the running turn (404 otherwise; 502 copilot_token_failed)
+//                                    pays for the turn (404 otherwise; 502 copilot_token_failed)
 //   POST   /coordinator/:projectId/tools  body CoordinatorToolCall → its answer (see projects.ts in contracts)
 export function projectHost({
   store,
@@ -150,10 +152,11 @@ export function projectHost({
     const next = projects.claimNextTurn(projectId);
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
     if (!next || !run) return;
+    const turnKey = store.turnKeys.issue({ agent: "coordinator", projectId, userId: next.member.userId, turnId: next.turnId });
     publishChat(projectId, projects.addPayer(next.turnId, run.payer));
     void connectorsFor(projectId, next.member.userId)
       .catch(() => [])
-      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, payer: run.payer, connectors }));
+      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, turnKey, payer: run.payer, connectors }));
   };
 
   // Starts the project's computer when a turn waits and no coordinator is
@@ -167,12 +170,13 @@ export function projectHost({
       .finally(() => waking.delete(projectId));
   };
 
-  // The running turn's token for the coordinator, if its payer is of `kind` (and,
-  // for a seat, `userId`'s); 404 otherwise: a coordinator gets no one else's.
-  const runningToken = async (projectId: ProjectId, kind: CopilotPayer["kind"], userId?: string) => {
-    const asker = projects.runningMember(projectId);
-    const run = asker && payerOf({ kind: "project", projectId, askerId: asker });
-    if (!run || run.payer.kind !== kind || (userId !== undefined && asker !== userId)) return apiError(404, "not_found");
+  // The Copilot token of the turn the request's key holds, if its payer is of
+  // `kind`; 404 otherwise: a coordinator gets no one else's.
+  const turnToken = async (req: Request & { params: { projectId: string } }, kind: CopilotPayer["kind"]) => {
+    const turn = heldTurn(store.turnKeys, req, coordinatorTurn(req.params.projectId));
+    if (turn instanceof Response) return turn;
+    const run = payerOf({ kind: "project", projectId: turn.projectId, askerId: turn.userId });
+    if (!run || run.payer.kind !== kind) return apiError(404, "not_found");
     const token: CopilotToken = await run.token();
     if ("error" in token) return token.error === "reauth_needed" ? apiError(403, token.error) : apiError(502, token.error, token.message);
     return Response.json(token.token);
@@ -192,6 +196,7 @@ export function projectHost({
     };
 
   // The project whose credential the request carries, if it is :projectId's; 401 or 403 otherwise.
+  // Only the WebSocket takes it: every other coordinator route takes a turn key.
   const ownCoordinator = (req: Request & { params: { projectId: string } }) => {
     const projectId = projects.projectForToken(bearer(req));
     if (!projectId) return unauthorized();
@@ -342,32 +347,25 @@ export function projectHost({
         return projectId instanceof Response ? projectId : upgrade(req, { kind: "coordinator", projectId });
       },
     },
-    // Only the member whose turn is running: a coordinator gets no one else's seat.
-    "/coordinator/:projectId/github-token/:userId": {
-      GET: (req: Bun.BunRequest<"/coordinator/:projectId/github-token/:userId">) => {
-        const projectId = ownCoordinator(req);
-        return projectId instanceof Response ? projectId : runningToken(projectId, "seat", req.params.userId);
-      },
+    // Only the seat of the turn's member: a coordinator gets no one else's.
+    "/coordinator/:projectId/github-token": {
+      GET: (req: Bun.BunRequest<"/coordinator/:projectId/github-token">) => turnToken(req, "seat"),
     },
     "/coordinator/:projectId/installation-token": {
-      GET: (req: Bun.BunRequest<"/coordinator/:projectId/installation-token">) => {
-        const projectId = ownCoordinator(req);
-        return projectId instanceof Response ? projectId : runningToken(projectId, "org");
-      },
+      GET: (req: Bun.BunRequest<"/coordinator/:projectId/installation-token">) => turnToken(req, "org"),
     },
     "/coordinator/:projectId/tools": {
       POST: async (req: Bun.BunRequest<"/coordinator/:projectId/tools">) => {
-        const projectId = ownCoordinator(req);
-        if (projectId instanceof Response) return projectId;
+        const turn = heldTurn(store.turnKeys, req, coordinatorTurn(req.params.projectId));
+        if (turn instanceof Response) return turn;
         const call = CoordinatorToolCall.safeParse(await req.json().catch(() => null));
         if (!call.success) {
           const issues = call.error.issues.map(({ path, message }) => (path.length > 0 ? `${path.join(".")}: ${message}` : message));
           return apiError(400, "invalid_tool_call", issues.join("; "));
         }
-        const asker = projects.runningMember(projectId);
-        const project = projects.project(projectId);
-        if (!asker || !project) return apiError(409, "invalid_tool_call", "No coordinator turn is running");
-        return runTool(project, { userId: asker, login: store.user(asker).login }, call.data);
+        const project = projects.project(turn.projectId);
+        if (!project) return apiError(404, "not_found");
+        return runTool(project, { userId: turn.userId, login: store.user(turn.userId).login }, call.data);
       },
     },
   };
@@ -379,7 +377,7 @@ export function projectHost({
     awake: () => [...coordinators.keys()].map((id) => ({ id })),
 
     // Whether the project's coordinator has a turn running or waiting.
-    busy: (projectId: ProjectId) => projects.runningMember(projectId) !== null || projects.hasQueuedTurn(projectId),
+    busy: (projectId: ProjectId) => projects.hasUnfinishedTurn(projectId),
 
     // Stops the idle project's computer. Its coordinator is forgotten once the
     // computer is stopped, and a turn queued meanwhile starts it again.
@@ -397,10 +395,12 @@ export function projectHost({
     },
 
     // The member left the workspace or was removed: their chats close, their
-    // queued turns go and their running one ends, so the next one runs.
+    // queued turns go and their running one ends, which revokes its key, so the
+    // next one runs. Each coordinator stops their session now.
     memberRemoved(workspaceId: WorkspaceId, userId: UserId) {
       for (const project of projects.projectsIn(workspaceId)) {
         for (const ws of [...(chatSockets.get(chatTopic(project.id, userId)) ?? [])]) ws.close(4003, "removed");
+        toCoordinator(project.id, { type: "member-removed", userId });
       }
       const ended = projects.dropMember(workspaceId, userId);
       for (const { projectId, event } of ended) {
@@ -410,11 +410,11 @@ export function projectHost({
       for (const projectId of new Set(ended.map(({ projectId }) => projectId))) schedule(projectId);
     },
 
-    // Asks the member of the project's running turn to approve `detail`, in their
-    // chat, and resolves with their answer ("no_turn" when no turn runs).
-    ask(projectId: ProjectId, kind: ApprovalKind, detail: string, signal: AbortSignal): Promise<ApprovalOutcome> {
+    // Asks the member of the coordinator turn to approve `detail`, in that turn
+    // of their chat, and resolves with their answer ("no_turn" once it ended).
+    ask({ projectId, turnId }: CoordinatorTurn, kind: ApprovalKind, detail: string, signal: AbortSignal): Promise<ApprovalOutcome> {
       return approvals.ask((approvalId) => {
-        const asked = projects.requestApproval(projectId, { approvalId, kind, detail });
+        const asked = projects.requestApproval(turnId, { approvalId, kind, detail });
         if (asked) publishChat(projectId, asked);
         return asked?.event ?? null;
       }, signal);
@@ -488,6 +488,12 @@ export function projectHost({
       for (const lost of projects.abandonRunningTurn(projectId, message.activeTurnId, "The coordinator restarted before it finished this message.")) {
         approvals.turnEnded(lost.event.turnId);
         publishChat(projectId, lost);
+      }
+      // A turn it still runs whose key control restarted without gets a new one.
+      const turnId = message.activeTurnId;
+      const userId = turnId && projects.runningTurnMember(projectId, turnId);
+      if (turnId && userId && store.turnKeys.missing(turnId)) {
+        toCoordinator(projectId, { type: "turn-key", turnId, turnKey: store.turnKeys.issue({ agent: "coordinator", projectId, userId, turnId }) });
       }
       greeted.add(projectId);
       schedule(projectId);

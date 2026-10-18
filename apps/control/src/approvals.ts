@@ -9,8 +9,11 @@ export type ApprovalOutcome = "approved" | "declined" | "no_turn" | "ended";
 // (repos.ts). Each becomes an approval card in the running turn of the bot (or
 // task worker) that asked, recorded like the worker's own, and waits however
 // long the user takes.
+// Every place a turn ends calls turnEnded, so this is also where what lives only
+// as long as a turn (a connector's event stream) learns that it ended.
 export function controlApprovals() {
   const waiting = new Map<ApprovalId, { turnId: TurnId; settle: (outcome: ApprovalOutcome) => void }>();
+  const endings = new Map<TurnId, AbortController>();
 
   return {
     // Asks in a running turn and resolves with the outcome. `request` records the
@@ -36,9 +39,19 @@ export function controlApprovals() {
       waiting.get(approvalId)?.settle(approved ? "approved" : "declined");
     },
 
-    // A turn ended: what it still waited on can no longer be answered.
+    // A turn ended: what it still waited on can no longer be answered, and its signal aborts.
     turnEnded(turnId: TurnId) {
       for (const { turnId: waitingOn, settle } of [...waiting.values()]) if (waitingOn === turnId) settle("ended");
+      endings.get(turnId)?.abort();
+      endings.delete(turnId);
+    },
+
+    // Aborts when the running turn ends. Ask for it in the same tick as the
+    // check that the turn runs, so the end cannot come in between.
+    turnSignal(turnId: TurnId): AbortSignal {
+      const ending = endings.get(turnId) ?? new AbortController();
+      endings.set(turnId, ending);
+      return ending.signal;
     },
   };
 }

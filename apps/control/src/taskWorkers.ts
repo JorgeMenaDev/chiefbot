@@ -29,6 +29,7 @@ import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import type { repoAccess, RepoAgent } from "./repos.ts";
 import type { openStore } from "./store.ts";
+import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
 
 // A task worker's WebSocket: the worker of exactly one task worker, the turn it
 // runs and the member who asked for it.
@@ -85,15 +86,16 @@ export type TaskWorkerHostOptions = {
 //   POST /projects/:id/workers/:workerId/approvals/:approvalId  body AnswerApprovalRequest → 204
 //                                (403 requester_only for anyone but the member who asked;
 //                                409 not_pending when it is answered, unknown or its turn ended)
-// Worker routes (bearer: the task worker's credential; 403 for another worker's):
+// Worker routes. The WebSocket takes the task worker's credential (403 for another worker's); every
+// other route takes the key of the worker's running turn (403 invalid_turn_key otherwise):
 //   WS   /task-worker/:workerId                ControlToWorker; WorkerToControl back
-//   GET  /task-worker/:workerId/github-token   → BrokeredGitHubToken of the member who asked, while
+//   GET  /task-worker/:workerId/github-token   → BrokeredGitHubToken of the member who asked, when
 //                                its task runs on their seat (404 otherwise; 403 reauth_needed)
-//   GET  /task-worker/:workerId/installation-token  → CopilotInstallationToken, while its task runs
+//   GET  /task-worker/:workerId/installation-token  → CopilotInstallationToken, when its task runs
 //                                on the organization's Copilot (404 otherwise; 502 copilot_token_failed)
 //   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest once the
 //                                member who asked approves (errors as a bot's)
-// The git proxy (repos.ts) takes the worker's credential through agentFor.
+// The git proxy (repos.ts) takes the turn's key through agentOf.
 export function taskWorkerHost({
   store,
   payerOf,
@@ -127,16 +129,16 @@ export function taskWorkerHost({
   const send = (workerId: TaskWorkerId, message: ControlToWorker) => sockets.get(workerId)?.send(JSON.stringify(message));
   const refused = (message: string, status = 400) => apiError(status, "invalid_tool_call", message);
 
-  // What a worker credential acts as for repo access: the member who asked, asked
-  // in the worker's turn. An approval whose request goes away first (the worker's
+  // What a worker's turn acts as for repo access: the member who asked, asked
+  // in that turn. An approval whose request goes away first (the worker's
   // runtime stopped, as when its turn is cut to renew its token) is withdrawn.
-  const agentOf = ({ workerId, projectId, userId }: { workerId: TaskWorkerId; projectId: ProjectId; userId: UserId }): RepoAgent => ({
+  const agentOf = ({ workerId, projectId, userId, turnId }: TaskWorkerTurn): RepoAgent => ({
     userId,
     async ask(kind, detail, signal) {
       let asked: ApprovalId | null = null;
       const outcome = await approvals.ask((approvalId) => {
         const now = clock.now();
-        const event = workers.requestApproval(workerId, { approvalId, kind, detail }, now);
+        const event = workers.requestApproval(workerId, turnId, { approvalId, kind, detail }, now);
         if (event) {
           asked = approvalId;
           limitWait(workerId, approvalId, now);
@@ -281,29 +283,23 @@ export function taskWorkerHost({
     },
     // The token broker: the access token of the member who asked, never a refresh token.
     "/task-worker/:workerId/github-token": {
-      GET: (req: Bun.BunRequest<"/task-worker/:workerId/github-token">) => {
-        const own = ownWorker(req);
-        return own instanceof Response ? own : runningToken(own, "seat");
-      },
+      GET: (req: Bun.BunRequest<"/task-worker/:workerId/github-token">) => turnToken(req, "seat"),
     },
     "/task-worker/:workerId/installation-token": {
-      GET: (req: Bun.BunRequest<"/task-worker/:workerId/installation-token">) => {
-        const own = ownWorker(req);
-        return own instanceof Response ? own : runningToken(own, "org");
-      },
+      GET: (req: Bun.BunRequest<"/task-worker/:workerId/installation-token">) => turnToken(req, "org"),
     },
     // The worker's create_pull_request tool. Waits, however long, for the requester's
     // answer; once opened, the pull request is linked on the worker and its task.
     "/task-worker/:workerId/pull-requests": {
       POST: async (req: Bun.BunRequest<"/task-worker/:workerId/pull-requests">, server: Bun.Server<unknown>) => {
-        const own = ownWorker(req);
-        if (own instanceof Response) return own;
+        const turn = heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId));
+        if (turn instanceof Response) return turn;
         const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
         if (!args.success) return apiError(400, "invalid_pull_request");
         server.timeout(req, 0);
-        const opened = await pullRequest(agentOf(own), args.data, req.signal);
+        const opened = await pullRequest(agentOf(turn), args.data, req.signal);
         if ("error" in opened) return apiError(opened.status, opened.error, opened.message);
-        const worker = workers.worker(own.workerId);
+        const worker = workers.worker(turn.workerId);
         if (worker) {
           workers.setPullRequest(worker.id, opened.url);
           const task = projects.tasks(worker.projectId).find(({ number }) => number === worker.taskNumber);
@@ -318,10 +314,11 @@ export function taskWorkerHost({
     },
   };
 
-  // The token for the worker's running task, if who pays for it is of `kind`; 404 otherwise.
-  async function runningToken(own: { workerId: TaskWorkerId; projectId: ProjectId; userId: UserId }, kind: CopilotPayer["kind"]) {
-    const working = workers.worker(own.workerId)?.state === "working";
-    const run = working ? payerOf({ kind: "project", projectId: own.projectId, askerId: own.userId }) : null;
+  // The token for the turn the request's key holds, if who pays for it is of `kind`; 404 otherwise.
+  async function turnToken(req: Request & { params: { workerId: string } }, kind: CopilotPayer["kind"]) {
+    const turn = heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId));
+    if (turn instanceof Response) return turn;
+    const run = payerOf({ kind: "project", projectId: turn.projectId, askerId: turn.userId });
     if (!run || run.payer.kind !== kind) return apiError(404, "not_found");
     const token: CopilotToken = await run.token();
     if ("error" in token) return token.error === "reauth_needed" ? apiError(403, token.error) : apiError(502, token.error, token.message);
@@ -335,12 +332,14 @@ export function taskWorkerHost({
     const run = payerOf({ kind: "project", projectId, askerId: userId });
     const started = run && workers.startTurn(workerId, run.payer);
     if (!run || !started) return;
+    const turnKey = store.turnKeys.issue({ agent: "task-worker", workerId, projectId, userId, turnId: started.turnId });
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
-    send(workerId, { type: "run-task", turnId: started.turnId, text: started.prompt, payer: run.payer, connectors });
+    send(workerId, { type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors });
   }
 
   // The worker whose credential the request carries, if it is :workerId's; 401 or 403 otherwise.
+  // Only the WebSocket takes it: every other worker route takes its turn's key.
   function ownWorker(req: Request & { params: { workerId: string } }) {
     const own = workers.forToken(bearer(req));
     if (!own) return unauthorized();
@@ -351,16 +350,12 @@ export function taskWorkerHost({
   return {
     routes,
 
-    // Asks the member who asked for the worker to approve `detail` in its task
+    // Asks the member who asked for the worker to approve `detail` in its turn
     // (a connector call), as its pushes are asked.
-    ask: (own: { workerId: TaskWorkerId; projectId: ProjectId; userId: UserId }, kind: ApprovalKind, detail: string, signal: AbortSignal) =>
-      agentOf(own).ask(kind, detail, signal),
+    ask: (turn: TaskWorkerTurn, kind: ApprovalKind, detail: string, signal: AbortSignal) => agentOf(turn).ask(kind, detail, signal),
 
-    // For the git proxy: the worker a credential belongs to, as a repo agent.
-    agentFor(credential: string): RepoAgent | null {
-      const own = workers.forToken(credential);
-      return own ? agentOf(own) : null;
-    },
+    // For the git proxy: the worker's turn as a repo agent.
+    agentOf,
 
     // One of the coordinator's worker tools, in the turn of `asker`. Answers the
     // call's result as JSON, or a refusal the model sees.
@@ -496,6 +491,10 @@ export function taskWorkerHost({
         publish(worker.projectId);
       } else if (worker.state === "working") {
         for (const answer of workers.answeredApprovals(workerId, turnId)) send(workerId, { type: "approval-answer", ...answer });
+        // Control restarted since the turn started: it gets a new key.
+        if (store.turnKeys.missing(turnId)) {
+          send(workerId, { type: "turn-key", turnId, turnKey: store.turnKeys.issue({ agent: "task-worker", workerId, projectId: worker.projectId, userId, turnId }) });
+        }
       }
     },
   };

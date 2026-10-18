@@ -3,7 +3,7 @@ import { systemClock, type Clock } from "./clock.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 
 // A turn should start on a token with at least this long left: one with less is renewed first.
-const renewWithinMs = 20 * 60_000;
+export const renewWithinMs = 20 * 60_000;
 // A turn still running this long before its token expires is cut short and continued on a new one.
 const continueBeforeMs = 5 * 60_000;
 

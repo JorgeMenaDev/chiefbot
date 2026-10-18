@@ -1,14 +1,14 @@
 import { afterEach, expect, test } from "bun:test";
 import { ApiError, ConnectorCall, Project, Task, TaskWorker, User, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
-import { fakeCopilot, sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
+import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
-import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 // A project's workers end to end: the coordinator (fake Copilot) dispatches a
 // task through its tools, control writes a launch record and makes a fake
@@ -105,32 +105,31 @@ const forever: FakeScript = async function* () {
   await new Promise(() => {});
 };
 
-// Holds the coordinator's turn open (after it made task #1), so the test can call
-// its tools straight on control with the project's credential, as the coordinator
-// does. Workers run `worker`.
+// A fake coordinator takes the project's (fakeCoordinator) and holds the owner's
+// turn open, after making task #1, so the test calls the coordinator's tools
+// straight on control with that turn's key, as the coordinator does. `release`
+// ends the turn. Workers run `worker` on the fake Copilot.
 async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>, worker: FakeScript = forever) {
-  const { url, project, copilot, computers, owner } = control;
-  let release = () => {};
-  copilot.script = async function* (prompt, runtime) {
-    if (isWorker(prompt)) {
-      yield* worker(prompt, runtime);
-      return;
-    }
-    await runtime.tool("create_task", { title: "Fix the typo" });
-    await new Promise<void>((resolve) => (release = resolve));
-    yield sdk.idle();
-  };
+  const { url, project, copilot, owner } = control;
+  copilot.script = worker;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
   const res = await owner.api("POST", `/projects/${project.id}/messages`, { text: "Fix the typo" });
   if (res.status !== 202) throw new Error(`ask failed: ${res.status}`);
-  await eventually(() => copilot.sends.length === 1);
-  await Bun.sleep(20);
-  const headers = { authorization: `Bearer ${computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN}` };
+  const { turnId, turnKey } = await coordinator.nth("run-turn");
   const tool = async (call: Record<string, unknown>) => {
-    const answer = await fetch(`${url}/coordinator/${project.id}/tools`, { method: "POST", headers, body: JSON.stringify(call) });
+    const answer = await fetch(`${url}/coordinator/${project.id}/tools`, { method: "POST", headers: { authorization: `Bearer ${turnKey}` }, body: JSON.stringify(call) });
     return { status: answer.status, body: (await answer.json()) as unknown };
   };
-  return { tool, release: () => release() };
+  await tool({ tool: "create_task", title: "Fix the typo" });
+  return { tool, release: () => coordinator.event(turnId, { type: "done" }) };
 }
+
+// How the latest session reaches its connector `name`: its computer's forwarder to control, with the turn's forwarder secret.
+const connectorOf = (copilot: FakeCopilot, name: string) => {
+  const server = copilot.mcpServers.at(-1)?.[name];
+  return server?.type === "http" ? { url: server.url, headers: server.headers ?? {} } : { url: "", headers: {} };
+};
 
 test("a resent dispatch with the same creation id starts one worker, even while the first is still getting its computer", async () => {
   const creates: string[] = [];
@@ -413,8 +412,8 @@ test("a worker gets the project's connectors through control's proxy, and its ca
   const { id } = TaskWorker.parse(dispatched);
   await workerWhen(owner, project, id, ({ state }) => state === "finished");
 
-  // The worker's session reaches the connector through its own route on control.
-  expect(copilot.mcpServers.at(-1)?.tracker).toMatchObject({ type: "http", url: expect.stringContaining(`/task-worker/${id}/mcp/tracker`) });
+  // The worker's session reaches the connector through its computer's forwarder, which adds its turn's key.
+  expect(copilot.mcpServers.at(-1)?.tracker).toMatchObject({ type: "http", url: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/tracker$/) });
   expect(upstream.calls).toEqual([{ tool: "list_issues", authorization: "Bearer tracker-guest" }]);
   const log = ConnectorCall.array().parse(await (await owner.api("GET", `/projects/${project.id}/connector-calls`)).json());
   expect(log.map(({ connector, tool, requester, identity }) => [connector, tool, requester, identity])).toEqual([
@@ -490,37 +489,12 @@ test("a removed member loses everything at once: their project chat closes, thei
 
   await chatClosed;
   expect(await workerWhen(owner, project, id, ({ computerRemoved }) => computerRemoved)).toMatchObject({ state: "stopped" });
-  const refused = await Promise.all([
-    fetch(`${url}/task-worker/${id}/github-token`, { headers: workerAuth }),
-    fetch(`${url}/task-worker/${id}/mcp/tracker`, { method: "POST", headers: workerAuth, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) }),
-    fetch(`${url}/task-worker/${id}/pull-requests`, { method: "POST", headers: workerAuth, body: "{}" }),
-  ]);
-  expect(refused.map(({ status }) => status)).toEqual([401, 401, 401]);
+  // Its turn's key ended with its turn (turnKeys.test.ts); its own credential no longer opens its connection.
+  expect((await fetch(`${url}/task-worker/${id}`, { headers: workerAuth })).status).toBe(401);
   release();
   await owner.watchProjectChat(project.id).until(doneCount(1));
   await Bun.sleep(50);
   expect(copilot.sends.map(({ prompt }) => prompt).filter((prompt) => !isWorker(prompt))).toEqual(["Fix the typo", "Hold on"]);
-});
-
-test("a member removed mid-turn: their coordinator turn ends, nothing is minted or done for it, and the next member's turn runs", async () => {
-  const control = await teamProject();
-  const { url, owner, guest, workspace, project, copilot, computers } = control;
-  copilot.script = async function* (prompt) {
-    if (prompt === "Hold on") await new Promise(() => {});
-    yield sdk.idle();
-  };
-  await guest.api("POST", `/projects/${project.id}/messages`, { text: "Hold on" });
-  await eventually(() => copilot.sends.length === 1);
-  await owner.api("POST", `/projects/${project.id}/messages`, { text: "Next" });
-  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
-  const coordinator = { authorization: `Bearer ${computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN}` };
-
-  await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`);
-
-  await owner.watchProjectChat(project.id).until(doneCount(1));
-  expect(copilot.sends.map(({ prompt }) => prompt)).toEqual(["Hold on", "Next"]);
-  const token = await fetch(`${url}/coordinator/${project.id}/github-token/${guestId}`, { headers: coordinator });
-  expect(token.status).toBe(404);
 });
 
 test("a worker waiting on an approval longer than the limit stops, keeping its disk, also when control restarts meanwhile", async () => {
@@ -593,7 +567,7 @@ test("an approval control holds for a worker's request is withdrawn when that re
   atCleanUp(upstream.stop);
   const time = fakeClock(Date.now());
   const control = await teamProject({ clock: time.clock }, "connectors: [tracker]\n");
-  const { url, owner, workspace, project, computers } = control;
+  const { owner, workspace, project, copilot } = control;
   const connectors = `/workspaces/${workspace.id}/connectors`;
   await owner.api("POST", connectors, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "personal-oauth", scope: "" });
   await owner.api("PUT", `${connectors}/tracker/token`, { token: "tracker-owner" });
@@ -602,9 +576,10 @@ test("an approval control holds for a worker's request is withdrawn when that re
   await workerWhen(owner, project, id, ({ state }) => state === "working");
   // The worker's runtime calls a tool that may write, then goes away before the answer.
   const hangUp = new AbortController();
-  const call = fetch(`${url}/task-worker/${id}/mcp/tracker`, {
+  const connector = connectorOf(copilot, "tracker");
+  const call = fetch(connector.url, {
     method: "POST",
-    headers: { authorization: `Bearer ${computers.computers.get(id)?.spec.env.CHIEFBOT_TASK_WORKER_TOKEN}`, "content-type": "application/json" },
+    headers: { ...connector.headers, "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "create_issue" } }),
     signal: hangUp.signal,
   }).catch(() => null);
@@ -634,6 +609,6 @@ test("when the organization pays, a worker runs on its installation token", asyn
   const working = await workerWhen(owner, project, id, ({ state }) => state === "working");
   expect(working.payer).toEqual({ kind: "org", account: "octo-org" });
   await eventually(() => copilot.sends.some(({ sessionId }) => sessionId === id));
-  // The coordinator's session took the first token, the worker's the second.
-  expect(copilot.tokens).toEqual(["ghs_org_1", "ghs_org_2"]);
+  // The (fake) coordinator asked for none: the worker's session took the first.
+  expect(copilot.tokens).toEqual(["ghs_org_1"]);
 });
