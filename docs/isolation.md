@@ -15,7 +15,9 @@ Each bot is separate from every other bot, including other bots of the same user
 
 User routes (`/bots/:id/...`) check that the signed-in user owns the bot. Another user's bot reads as 404.
 
-A project's task worker gets the same boundaries on its own throwaway computer (`chiefbot-worker_<id>`, with its own volume and network) and its own credential, `CHIEFBOT_TASK_WORKER_TOKEN`, valid only on `/task-worker/<its id>` and for control's git proxy. It acts for the member who asked for it: their GitHub access bounds what it may clone and push, and only they approve its pushes and pull requests. Proof: `taskWorkers.test.ts`.
+**Turn keys.** The computer credential only opens the computer's WebSocket to control (and, for a bot, gets its owner's Copilot token, which the model picker needs between turns). When control starts one of the agent's turns it sends a turn key with it, bound to that agent, the member the turn runs for and the turn, and stored only as a hash. Every other call the computer makes in the turn carries that key: git's proxy, pull requests, chief and coordinator tools, the broker for a project's agents, connectors. Control takes who is acting and which turn an approval belongs to from the key alone, and the key works only while its turn runs: when the turn ends, however it ends (including its member leaving the workspace), the key stops working, and a control restart revokes every key (a turn that survives the restart gets a new one). A missing, unknown, ended or another agent's key gets `403 invalid_turn_key`. Proof: `turnKeys.test.ts`.
+
+A project's task worker gets the same boundaries on its own throwaway computer (`chiefbot-worker_<id>`, with its own volume and network) and its own credential, `CHIEFBOT_TASK_WORKER_TOKEN`, valid only for its WebSocket on `/task-worker/<its id>`; everything else takes its turn's key. It acts for the member who asked for it: their GitHub access bounds what it may clone and push, and only they approve its pushes and pull requests. Proof: `taskWorkers.test.ts`.
 
 Proof:
 
@@ -37,9 +39,9 @@ A bot asks before it pushes or opens a pull request (README, "Repo work and appr
 
 | Route | What the bot computer has | What control does |
 | --- | --- | --- |
-| Fetch or clone | Git's remotes for github.com point at control's git proxy (`/git/<owner>/<repo>.git`, set by the worker through `GIT_CONFIG_*`). Git's credential helper hands it the bot's credential, which is not a GitHub token. | Checks that the owner is still signed in and, through a read-only installation token of the repo app for that one repo, that the owner can see it; then forwards with that token (anonymously for a public repo the app is not installed on). |
-| Push (`git-receive-pack`) | The same credential. | Checks the owner may push and the app is installed. Holds the push, puts an approval card in the bot's running turn, and forwards exactly the bytes the owner approved with a one-repo installation token. No turn running, a decline, or a turn that ends first: GitHub never sees it. |
-| Pull request | The `create_pull_request` tool, which calls `POST /worker/<bot id>/pull-requests` with the bot credential. | The same checks and approval, then opens it with an installation token. |
+| Fetch or clone | Git's remotes for github.com point at control's git proxy (`/git/<owner>/<repo>.git`, set by the worker through `GIT_CONFIG_*`). Git's credential helper hands it the running turn's key, which is not a GitHub token. Outside a turn there is none, and git gets nothing. | Checks that the owner is still signed in and, through a read-only installation token of the repo app for that one repo, that the owner can see it; then forwards with that token (anonymously for a public repo the app is not installed on). |
+| Push (`git-receive-pack`) | The same credential. | Checks the owner may push and the app is installed. Holds the push, puts an approval card in the key's turn, and forwards exactly the bytes the owner approved with a one-repo installation token. No turn running, a decline, or a turn that ends first: GitHub never sees it. |
+| Pull request | The `create_pull_request` tool, which calls `POST /worker/<bot id>/pull-requests` with the turn's key. | The same checks and approval, then opens it with an installation token. |
 
 Control mints installation tokens with the repo app's private key (in control's `CHIEFBOT_HOME`, never in a bot computer), for one repo and only the permissions needed (`contents: read`, or `contents: write` and `pull_requests: write`), and they last an hour. It reads the owner's permission on the repo with the same token (`GET /repos/<repo>/collaborators/<login>/permission`): the owner's own token cannot, because it comes from the sign-in app, which sees no private repo. The bot computer has no credential helper for github.com, no `gh`, and no `GH_TOKEN` or `GITHUB_TOKEN`.
 
@@ -62,7 +64,7 @@ Proof: `repo.test.ts` "the GitHub token a bot computer gets can neither push nor
 - **The sign-in token spends the owner's Copilot plan.** A hostile agent that takes it can make Copilot requests on the owner's plan, and read their profile, until it expires (8 hours at most; **Disconnect GitHub** stops new ones, and revoking the sign-in app at github.com/settings/apps/authorizations ends the current one).
 - **Unverified: a GitHub App with no permissions driving Copilot.** GitHub's Copilot SDK docs say GitHub App user tokens (`ghu_`) and OAuth App tokens (`gho_`) both work for user-billed sessions, but not whether the app needs any permission. The README manual check settles it. If the sign-in app's token cannot run Copilot, the OAuth App fallback (`read:user`) is the one known to work.
 - **GitHub tools in the runtime.** The Copilot runtime's built-in GitHub tools act with the sign-in token, so they cannot write to repos either. The worker still asks before one that writes, as a guardrail against mistakes.
-- **The bot credential is readable in the computer** (above). It is not a GitHub token: through control it reaches only the routes above, each checked against the owner's access and approval, plus the broker.
+- **The bot credential and the running turn's key are readable in the computer** (above). Neither is a GitHub token: the credential reaches only the bot's WebSocket and the broker, and the key only the routes above, each checked against the owner's access and approval, and only until its turn ends.
 
 ## What changes on GCP (one VM per bot, ticket #10)
 

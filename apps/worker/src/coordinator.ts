@@ -6,7 +6,6 @@ import {
   type CoordinatorToolCall,
   type Project,
   type ProjectMember,
-  type TurnId,
   type TurnKey,
   type UserId,
 } from "@chiefbot/contracts";

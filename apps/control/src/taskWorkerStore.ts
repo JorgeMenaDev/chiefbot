@@ -204,7 +204,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
 
     // The worker a credential belongs to, the member who asked for it and its
     // turn, while that member is still in the project's workspace: once they
-    // are not, the credential is refused on every route.
+    // are not, its WebSocket is refused. (Every other route takes a turn key.)
     forToken(token: string) {
       const row = db
         .query<{ id: string; project_id: string; user_id: string; turn_id: string }, [string]>(

@@ -458,7 +458,7 @@ test("a removed member loses everything at once: their project chat closes, thei
   const upstream = startFakeMcpServer();
   atCleanUp(upstream.stop);
   const control = await teamProject({}, "connectors: [tracker]\n");
-  const { url, owner, guest, workspace, project, copilot, computers } = control;
+  const { url, owner, guest, workspace, project, copilot } = control;
   await owner.api("POST", `/workspaces/${workspace.id}/connectors`, { name: "tracker", title: "Tracker", server: { kind: "remote", url: upstream.url }, auth: "none", scope: "" });
   let release = () => {};
   let dispatched: unknown = null;

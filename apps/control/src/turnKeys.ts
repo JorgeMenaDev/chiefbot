@@ -54,16 +54,15 @@ export function turnKeyStore(db: Database, hash: (token: string) => string) {
   };
 }
 
-// The turn whose key `key` is (by default the request's bearer), if it is live
-// and `holds` says it is the route's agent's; a 403 invalid_turn_key otherwise.
-// Never anyone else's turn: there is no fallback.
+// The turn whose key is the request's bearer, if it is live and `holds` says it
+// is the route's agent's; a 403 invalid_turn_key otherwise. Never anyone else's
+// turn: there is no fallback.
 export function heldTurn<Holder extends TurnHolder>(
   keys: ReturnType<typeof turnKeyStore>,
   req: Request,
   holds: (holder: TurnHolder) => holder is Holder,
-  key = bearer(req),
 ): Holder | Response {
-  const holder = keys.holder(key);
+  const holder = keys.holder(bearer(req));
   if (holder && holds(holder)) return holder;
   return apiError(403, "invalid_turn_key", "This call needs the key of a turn of this agent that is still running.");
 }

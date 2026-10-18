@@ -73,5 +73,6 @@ Any other MCP server works the same way: a remote URL with an auth type and a sc
 
 - Remote connectors must speak Streamable HTTP (the older SSE transport is not proxied).
 - A pending OAuth sign-in lives in control's memory for ten minutes: after a control restart, click **Connect** again.
+- An agent's session gets its remote connectors' URL and turn key when it opens (a coordinator's session opens again for each turn that has one). A control restart revokes every turn key: a turn still running then gets a new key for everything else, but its remote connectors answer `403 invalid_turn_key` until its next turn. A server's event stream (`GET`) opened in a turn is not cut when the turn ends.
 - Removing a member from a workspace leaves their connector secrets in the `SecretStore` until the connector is deleted. Control no longer uses them: nothing runs for that member any more.
 - Subscriptions (README, **Subscriptions**) poll only remote connectors: control calls them itself, as the workspace's credential or the adding member's own, and logs each call with the subscription's id as the run.
