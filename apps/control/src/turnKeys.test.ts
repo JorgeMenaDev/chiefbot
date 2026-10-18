@@ -197,3 +197,30 @@ test("a connector request that is not session setup, a tool listing or a read-on
   expect(upstream.methods).not.toContain("resources/read");
   expect(upstream.methods).not.toContain("prompts/get");
 });
+
+test("a control restart revokes every turn key; a turn its coordinator still runs gets a new one at hello", async () => {
+  const control = await team("", { persistent: true });
+  const { url, owner, project } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  await ask(owner, project.id, "A long one");
+  const { turnId, turnKey: before } = await coordinator.nth("run-turn");
+  const listTasks = (turnKey: string) => asCoordinator(url, project.id, turnKey)("/tools", { method: "POST", body: JSON.stringify({ tool: "list_tasks" }) });
+  const ran = await listTasks(before);
+
+  control.restart();
+  const revoked = await listTasks(before);
+  await coordinator.reconnect();
+  coordinator.hello(turnId);
+  const rekeyed = await coordinator.nth("turn-key");
+
+  expect(ran.status).toBe(200);
+  expect(await refusal(revoked)).toEqual([403, "invalid_turn_key"]);
+  expect(rekeyed.turnId).toBe(turnId);
+  expect(rekeyed.turnKey).not.toBe(before);
+  expect((await listTasks(rekeyed.turnKey)).status).toBe(200);
+  // The coordinator ends the turn as usual; its new key goes with it.
+  coordinator.event(turnId, { type: "done" });
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  expect(await refusal(await listTasks(rekeyed.turnKey))).toEqual([403, "invalid_turn_key"]);
+});
