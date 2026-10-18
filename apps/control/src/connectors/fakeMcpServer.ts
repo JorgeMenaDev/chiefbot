@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 
 // A fake remote MCP server for tests: Streamable HTTP at /mcp, answering JSON
-// (never SSE). Its tools are `tools`, each answering its handler's result as
+// (never SSE) to POSTs. A GET opens the server's event stream, which sends one
+// comment and stays open until the client goes away. Its tools are `tools`, each answering its handler's result as
 // JSON text, or by default `list_issues`, `list_runs` and `search`, plus `writes`.
 // tools/list marks every tool read-only (annotations.readOnlyHint) except those
 // in `writes`, which answer like the defaults. `writes` may instead depend on the
@@ -26,6 +27,8 @@ export function startFakeMcpServer({
   const calls: Array<{ tool: string; authorization: string | null }> = [];
   // Every JSON-RPC method received, in order.
   const methods: string[] = [];
+  // How many event streams were opened, and how many the client then cancelled.
+  const streams = { opened: 0, cancelled: 0 };
   const codes = new Map<string, { clientId: string; challenge: string; redirectUri: string }>();
   const refreshTokens = new Set<string>();
   const accessTokens = new Set<string>();
@@ -46,9 +49,22 @@ export function startFakeMcpServer({
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
-    async fetch(req) {
+    async fetch(req, server) {
       const url = new URL(req.url);
       const base = url.origin;
+      if (url.pathname === "/mcp" && req.method === "GET") {
+        server.timeout(req, 0);
+        const stream = new ReadableStream({
+          start(controller) {
+            streams.opened++;
+            controller.enqueue(new TextEncoder().encode(": open\n\n"));
+          },
+          cancel() {
+            streams.cancelled++;
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      }
       if (url.pathname === "/mcp" && req.method === "POST") {
         const authorization = req.headers.get("authorization");
         if (oauth && !accessTokens.has(authorization?.replace(/^Bearer /, "") ?? "")) {
@@ -113,7 +129,7 @@ export function startFakeMcpServer({
     },
   });
 
-  return { url: `${server.url.origin}/mcp`, calls, methods, issued, stop: () => server.stop(true) };
+  return { url: `${server.url.origin}/mcp`, calls, methods, streams, issued, stop: () => server.stop(true) };
 }
 
 export type FakeMcpServer = ReturnType<typeof startFakeMcpServer>;

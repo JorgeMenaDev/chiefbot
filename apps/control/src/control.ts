@@ -246,6 +246,7 @@ export function startControl({
     secrets,
     publicUrl: () => publicUrl ?? server.url.origin,
     ask: { coordinator: (...args) => projects.ask(...args), taskWorker: (...args) => taskWorkers.ask(...args) },
+    turnSignal: approvals.turnSignal,
   });
   // The handoffs watcher: tells chiefs when their task needs input or is done.
   // Without a project, it looks at every one.

@@ -38,6 +38,8 @@ export type ConnectorHostOptions = {
     coordinator: (turn: CoordinatorTurn, kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
     taskWorker: (turn: TaskWorkerTurn, kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
   };
+  // Aborts when the running turn ends (approvals.ts turnSignal).
+  turnSignal: (turnId: TurnId) => AbortSignal;
 };
 
 // How long control trusts a connector server's list of read-only tools.
@@ -75,19 +77,22 @@ const personalSecretName = (workspaceId: WorkspaceId, name: string, userId: User
 //   GET|POST|DELETE /coordinator/:projectId/mcp/:name  control's proxy to a remote connector the project
 //                    declares (404 for any other), Streamable HTTP. Every request runs as the key's
 //                    turn's member, never as anyone the request names: control adds that member's
-//                    identity (403 connector_not_ready without one) and logs each tools/call.
-//                    Every JSON-RPC message but those that only set up the session or list tools
-//                    (`openMethods`) and tools/calls of tools the server marks read-only waits until
-//                    that member approves it in that turn (403 declined; 409 no_turn when the turn
-//                    ends first), unless the owner lets the connector write without approval. A body
-//                    that is not JSON-RPC is refused (400 invalid_connector).
+//                    identity (403 connector_not_ready without one) and logs each tools/call. It
+//                    lasts no longer than that turn: when the turn ends (or its member is removed),
+//                    control cuts it, the server's event stream (GET) included.
+//                    A GET (the event stream) passes. Every other request waits until that member
+//                    approves it in that turn (403 declined; 409 no_turn when the turn ends first),
+//                    unless the owner lets the connector write without approval, or it is a POST
+//                    whose every JSON-RPC message only sets up the session or lists tools
+//                    (`openMethods`) or calls a tool the server marks read-only. A POST body that
+//                    is not JSON-RPC is refused (400 invalid_connector).
 //   POST   /coordinator/:projectId/connector-calls  body ReportedConnectorCall → 204: a command
 //                    connector's call, logged for the key's turn
 // Task worker routes (bearer: the key of the task worker's turn), the same for a project's worker,
 // whose turn runs for the member who asked for it:
 //   GET|POST|DELETE /task-worker/:workerId/mcp/:name
 //   POST   /task-worker/:workerId/connector-calls
-export function connectorHost({ store, secrets, publicUrl, ask: asks }: ConnectorHostOptions) {
+export function connectorHost({ store, secrets, publicUrl, ask: asks, turnSignal }: ConnectorHostOptions) {
   const { connectors, workspaces, projects } = store;
   // Sign-ins waiting for their callback, by state, for ten minutes. In memory:
   // a control restart means the member clicks Connect again.
@@ -190,14 +195,21 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks }: Connecto
   // Who calls a connector through control: the turn whose key the request
   // carries, with its project and member. Only that key names the member, never
   // the request. `ask` asks that member in that turn.
-  type Caller = { projectId: ProjectId; turnId: TurnId; member: ProjectMember; ask: (detail: string, signal: AbortSignal) => Promise<ApprovalOutcome> };
+  // `ended` aborts when that turn ends.
+  type Caller = {
+    projectId: ProjectId;
+    turnId: TurnId;
+    member: ProjectMember;
+    ask: (detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
+    ended: AbortSignal;
+  };
   const caller = (turn: CoordinatorTurn | TaskWorkerTurn | Response): Caller | Response => {
     if (turn instanceof Response) return turn;
     const member = projects.member(turn.projectId, { userId: turn.userId });
     if (!member) return apiError(403, "invalid_turn_key", "This turn's member is no longer in the workspace.");
     const ask = (detail: string, signal: AbortSignal) =>
       turn.agent === "coordinator" ? asks.coordinator(turn, "connector", detail, signal) : asks.taskWorker(turn, "connector", detail, signal);
-    return { projectId: turn.projectId, turnId: turn.turnId, member, ask };
+    return { projectId: turn.projectId, turnId: turn.turnId, member, ask, ended: turnSignal(turn.turnId) };
   };
   const coordinatorCaller = (req: Request & { params: { projectId: string } }) => caller(heldTurn(store.turnKeys, req, coordinatorTurn(req.params.projectId)));
   const taskWorkerCaller = (req: Request & { params: { workerId: string } }) => caller(heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId)));
@@ -209,7 +221,8 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks }: Connecto
     const connector = declared(projectId, req.params.name);
     if (connector?.server.kind !== "remote") return apiError(404, "not_found");
     const body = req.method === "POST" ? await req.text() : null;
-    const requests = body === null ? [] : requestsIn(body);
+    // A GET only opens the server's event stream; any other method but POST (a DELETE ends the session) is asked as itself.
+    const requests = body !== null ? requestsIn(body) : req.method === "GET" ? [] : [{ method: req.method, tool: null }];
     if (requests === null) return apiError(400, "invalid_connector", "Expected a JSON-RPC message or batch");
     const tools = requests.flatMap(({ tool }) => (tool === null ? [] : [tool]));
     const credential = await credentialFor(connector, member.userId);
@@ -230,7 +243,7 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks }: Connecto
     }
     const headers = pick(req.headers, ["content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"]);
     if (credential.token !== null) headers.set("authorization", `Bearer ${credential.token}`);
-    const upstream = await fetch(connector.server.url, { method: req.method, headers, body, signal: req.signal });
+    const upstream = await fetch(connector.server.url, { method: req.method, headers, body, signal: AbortSignal.any([req.signal, caller.ended]) });
     if (upstream.status === 401) {
       return apiError(403, "connector_not_ready", `${connector.name} refused ${member.login}'s credential: connect again`);
     }
