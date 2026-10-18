@@ -95,8 +95,8 @@ test("each bot keeps its own model, and switching mid-conversation runs the next
     [ada.id, "two", "claude-sonnet-4.6"],
     [grace.id, "hello", "gpt-6.1-sol"],
   ]);
-  // Ada's session was opened once: the switch kept her conversation.
-  expect(copilot.sessionIds.filter((id) => id === ada.id)).toHaveLength(1);
+  // Each turn resumes Ada's one session (its id is hers), so the switch kept her conversation.
+  expect(new Set(copilot.sessionIds)).toEqual(new Set([ada.id, grace.id]));
   // The desktop's bot list shows each bot's model.
   await bots((list) => list.map(({ name, model }) => `${name}:${model}`).sort().join() === "Ada:claude-sonnet-4.6,Grace:gpt-6.1-sol");
 });

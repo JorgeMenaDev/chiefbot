@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ApiError, Routine, type BotId, type RoutineInput } from "@chiefbot/contracts";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { tmpdir } from "node:os";
-import { fakeClock } from "./clock.ts";
+import { fakeClock } from "@chiefbot/worker/clock";
 import { TURN_TIMEOUT_MS, WORKER_TIMEOUT_MS } from "./routines.ts";
 import { cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
 
@@ -175,7 +175,7 @@ test("routines are created, edited and deleted per bot, and a schedule control c
 test("a routine turn waiting on an approval keeps its computer after the timeout until the user answers, then stops it", async () => {
   const { time, computers, api, bot, statusOf, addRoutine, routines, chat } = await setup();
   computers.copilot.script = async function* (_prompt, runtime) {
-    await runtime.shell("git push origin main");
+    await runtime.mcp("github", "Merge pull request", false);
     yield sdk.idle();
   };
   const ada = await bot();

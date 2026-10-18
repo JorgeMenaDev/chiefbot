@@ -14,7 +14,7 @@ afterEach(() => {
 test("the bot list follows control live: a new bot goes starting → online, and delete removes it", async () => {
   const github = startFakeGitHub();
   const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {
@@ -51,13 +51,13 @@ test("the bot list follows control live: a new bot goes starting → online, and
   expect(seen.map((list) => list.map(({ name, status }) => `${name}:${status}`))).toEqual(
     expect.arrayContaining([[], ["Ada:online"]]),
   );
-  expect(computers.destroyed).toEqual([{ botId: bot.id, deleteData: true }]);
+  expect(computers.destroyed).toEqual([{ id: bot.id, deleteData: true }]);
 });
 
 test("take over and hand back show in the live list", async () => {
   const github = startFakeGitHub();
   const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {
@@ -85,7 +85,7 @@ test("take over and hand back show in the live list", async () => {
 
 test("create fails with control's reason when control refuses it", async () => {
   const github = startFakeGitHub();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: fakeComputers().provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: fakeComputers().provider });
   stops.push(github.stop, control.stop);
   const bots = createBots({ controlUrl: control.url, session: () => "not-a-session", onChange: () => {} });
 
@@ -94,7 +94,7 @@ test("create fails with control's reason when control refuses it", async () => {
 
 test("a lost GitHub sign-in reaches the desktop live", async () => {
   const github = startFakeGitHub();
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: fakeComputers().provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: fakeComputers().provider });
   stops.push(github.stop, control.stop);
   const signIn = await fetch(`${control.url}/sessions`, {
     method: "POST",
@@ -118,13 +118,13 @@ test("a lost GitHub sign-in reaches the desktop live", async () => {
   const changed = new Promise<User>((resolve) => (userChanged = resolve));
   await fetch(`${control.url}/me/github`, { method: "DELETE", headers: { authorization: `Bearer ${sessionToken}` } });
 
-  expect(await changed).toMatchObject({ login: "octo-jorge", needsGitHubSignIn: true });
+  expect(await changed).toMatchObject({ login: "octo-user", needsGitHubSignIn: true });
 });
 
 test("the model picker reads the plan's models from control, and a refused pick fails with control's reason", async () => {
   const github = startFakeGitHub();
   const computers = fakeComputers({ copilot: fakeCopilot({ models: { list: [], modelPriceCategories: [{ id: "gpt-6-luna" }] } }) });
-  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, computers: computers.provider });
+  const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {

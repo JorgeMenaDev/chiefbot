@@ -1,6 +1,5 @@
 import { z } from "zod";
-import type { BotId } from "@chiefbot/contracts";
-import type { ComputerProvider } from "./computer.ts";
+import type { ComputerId, ComputerProvider } from "./computer.ts";
 import type { ComputeClient } from "./compute.ts";
 
 // ComputerProvider on Compute Engine: one VM per bot, made from an instance
@@ -37,21 +36,22 @@ async function allow(call: Promise<void>, ...statuses: number[]) {
 
 export function gceProvider({ client, project, zone, instanceTemplate, image }: GceProviderOptions): ComputerProvider {
   // Compute Engine names allow lowercase letters, digits and dashes only:
-  // bot_<uuid> becomes chiefbot-bot-<uuid> (49 characters, 54 for the disk; the limit is 63).
-  const vm = (botId: BotId) => `chiefbot-${botId.replaceAll("_", "-").toLowerCase()}`;
-  const disk = (botId: BotId) => `${vm(botId)}-home`;
+  // bot_<uuid> becomes chiefbot-bot-<uuid> (49 characters, 54 for the disk; the limit is 63),
+  // project_<uuid> chiefbot-project-<uuid> (53, 58 for the disk), worker_<uuid> chiefbot-worker-<uuid> (52, 57).
+  const vm = (id: ComputerId) => `chiefbot-${id.replaceAll("_", "-").toLowerCase()}`;
+  const disk = (id: ComputerId) => `${vm(id)}-home`;
 
   return {
-    async create({ botId, env }) {
+    async create({ id, env }) {
       // 409: the disk is already there, kept from the bot's previous VM.
       // 50 GB balanced: room for repos, browser profile and SDK history.
       await allow(
-        client.insertDisk({ name: disk(botId), sizeGb: "50", type: `zones/${zone}/diskTypes/pd-balanced` }),
+        client.insertDisk({ name: disk(id), sizeGb: "50", type: `zones/${zone}/diskTypes/pd-balanced` }),
         409,
       );
       await client.insertInstance(
         {
-          name: vm(botId),
+          name: vm(id),
           // Disks given here replace the template's, so the boot disk is named too.
           disks: [
             {
@@ -60,7 +60,7 @@ export function gceProvider({ client, project, zone, instanceTemplate, image }: 
               initializeParams: { sourceImage: "projects/cos-cloud/global/images/family/cos-stable", diskSizeGb: "10" },
             },
             {
-              source: `projects/${project}/zones/${zone}/disks/${disk(botId)}`,
+              source: `projects/${project}/zones/${zone}/disks/${disk(id)}`,
               deviceName: "home",
               autoDelete: false,
             },
@@ -72,19 +72,19 @@ export function gceProvider({ client, project, zone, instanceTemplate, image }: 
       );
     },
     // Compute Engine accepts start on a running VM and stop on a stopped one.
-    async start(botId) {
-      await client.startInstance(vm(botId));
+    async start(id) {
+      await client.startInstance(vm(id));
     },
-    async stop(botId) {
-      await client.stopInstance(vm(botId));
+    async stop(id) {
+      await client.stopInstance(vm(id));
     },
     // 404 means it is already gone.
-    async destroy(botId, { deleteData }) {
-      await allow(client.deleteInstance(vm(botId)), 404);
-      if (deleteData) await allow(client.deleteDisk(disk(botId)), 404);
+    async destroy(id, { deleteData }) {
+      await allow(client.deleteInstance(vm(id)), 404);
+      if (deleteData) await allow(client.deleteDisk(disk(id)), 404);
     },
-    async status(botId) {
-      const instance = await client.getInstance(vm(botId)).catch((error: unknown) => {
+    async status(id) {
+      const instance = await client.getInstance(vm(id)).catch((error: unknown) => {
         if (httpStatus(error) === 404) return null;
         throw error;
       });
@@ -103,7 +103,7 @@ export function gceProvider({ client, project, zone, instanceTemplate, image }: 
 // included, as Docker does for a new volume.
 // The env (with the bot's credential) sits in the VM's metadata, readable by
 // project members who can read the VM. It stays there on purpose: see
-// docs/deploy-gcp.md, Known limits.
+// docs/deploy.md, Known limits.
 function cloudConfig(image: string, env: Record<string, string>) {
   const registry = image.split("/")[0];
   const envLines = Object.entries(env).map(([key, value]) => `      ${key}=${value}`);

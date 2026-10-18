@@ -1,0 +1,55 @@
+# Chiefbot on one Linux machine: control, and Caddy in front of it for HTTPS.
+# docs/deploy.md has the steps. In short, with Docker only:
+#   docker compose build computer   # the bot computer image, which control runs
+#   CHIEFBOT_DOMAIN=chiefbot.example.com docker compose up -d --build
+#
+# control runs every bot, coordinator and task worker computer as a sibling
+# container on this machine's Docker Engine, through the Docker socket. Whoever
+# controls the control container controls the machine: run nothing else on it.
+# The computers themselves never get the socket (docs/isolation.md).
+name: chiefbot
+
+services:
+  control:
+    build: { context: ., dockerfile: infra/control/Dockerfile }
+    image: chiefbot-control:local
+    restart: unless-stopped
+    environment:
+      CHIEFBOT_CONTROL_HOSTNAME: 0.0.0.0
+      CHIEFBOT_COMPUTERS: docker
+      CHIEFBOT_DOCKER_SOCKET: /var/run/docker.sock
+      CHIEFBOT_COMPUTER_IMAGE: ${CHIEFBOT_COMPUTER_IMAGE:-chiefbot-computer:dev}
+      # setup's config.json and github-app-secrets.json (copied from where you ran
+      # `bun run setup`), and control's secret.key, made on first start.
+      CHIEFBOT_HOME: /chiefbot
+      # Members' browsers and desktops, connector OAuth callbacks, and the
+      # computers themselves all reach control through Caddy.
+      CHIEFBOT_PUBLIC_URL: https://${CHIEFBOT_DOMAIN:?set CHIEFBOT_DOMAIN to this machine's DNS name}
+      CHIEFBOT_WORKER_CONTROL_URL: https://${CHIEFBOT_DOMAIN}
+    volumes:
+      # SQLite (users, bots, projects, ledgers, chats) and projects' context files.
+      - data:/data
+      - ~/.chiefbot:/chiefbot
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      CHIEFBOT_DOMAIN: ${CHIEFBOT_DOMAIN}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  # Built, never started here: control starts one container of it per computer.
+  computer:
+    build: { context: ., dockerfile: infra/computer/Dockerfile }
+    image: ${CHIEFBOT_COMPUTER_IMAGE:-chiefbot-computer:dev}
+    profiles: [image]
+
+volumes:
+  data:
+  caddy-data:
+  caddy-config:

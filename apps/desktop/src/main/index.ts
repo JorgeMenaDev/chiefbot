@@ -2,28 +2,53 @@ import {
   AnswerApprovalRequest,
   ApprovalId,
   BotId,
+  ConnectorApprovalRequest,
+  ConnectorInput,
+  ConnectorName,
+  ConnectorTokenRequest,
   CreateBotRequest,
-  defaultGitHubClientId,
+  CreateProjectRequest,
+  CreateWorkspaceRequest,
+  InviteId,
+  InviteRequest,
+  ProjectId,
   RoutineId,
   RoutineInput,
   SendMessageRequest,
+  SetCopilotModeRequest,
   SetBotModelRequest,
+  SubscriptionId,
+  SubscriptionInput,
+  TaskWorkerId,
+  UserId,
+  WorkspaceId,
 } from "@chiefbot/contracts";
 import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { configuredSignIn, setupNeeded } from "@chiefbot/setup";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
 import { createChats } from "./chat.ts";
+import { createConnectors } from "./connectors.ts";
+import { createProjects } from "./projects.ts";
 import { createRoutines } from "./routines.ts";
+import { createWorkspaces } from "./workspaces.ts";
 
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
 //   CHIEFBOT_GITHUB_URL       default https://github.com
-//   CHIEFBOT_GITHUB_CLIENT_ID default Chartpilot's public OAuth App (device flow, no secret)
+//   CHIEFBOT_GITHUB_CLIENT_ID default: the sign-in app `bun run setup` recorded (~/.chiefbot/config.json)
+//   CHIEFBOT_HOME             default ~/.chiefbot
 const controlUrl = process.env.CHIEFBOT_CONTROL_URL ?? "http://127.0.0.1:7410";
 const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
-const clientId = process.env.CHIEFBOT_GITHUB_CLIENT_ID ?? defaultGitHubClientId;
+const signIn = configuredSignIn(process.env, homedir());
+if (signIn === null) {
+  console.error(setupNeeded);
+  dialog.showErrorBox("Chiefbot is not set up", setupNeeded);
+  process.exit(1);
+}
 
 // The control session token, kept in the app's user-data folder.
 function fileSessionStore(path: string): SessionStore {
@@ -48,6 +73,8 @@ const bots = createBots({
   session: sessionStore.load,
   onChange: (list) => window?.webContents.send("bots:state", list),
   onUser: (user) => auth.userChanged(user),
+  onTasks: (projectId, tasks) => window?.webContents.send("projects:tasks", { projectId, tasks }),
+  onWorkers: (projectId, workers) => window?.webContents.send("projects:workers", { projectId, workers }),
 });
 
 const chats = createChats({
@@ -58,9 +85,19 @@ const chats = createChats({
 
 const routines = createRoutines({ controlUrl, session: sessionStore.load });
 
+const workspaces = createWorkspaces({ controlUrl, session: sessionStore.load });
+
+const connectors = createConnectors({ controlUrl, session: sessionStore.load });
+
+const projects = createProjects({
+  controlUrl,
+  session: sessionStore.load,
+  onChat: (view) => window?.webContents.send("projects:chat", view),
+});
+
 const auth = createAuth({
   controlUrl,
-  deviceFlow: { githubUrl, clientId },
+  deviceFlow: { githubUrl, ...signIn },
   store: sessionStore,
   onChange: (state) => {
     window?.webContents.send("auth:state", state);
@@ -68,6 +105,7 @@ const auth = createAuth({
     else {
       bots.disconnect();
       chats.disconnect();
+      projects.disconnect();
     }
   },
 });
@@ -113,6 +151,106 @@ ipcMain.handle("routines:update", (_event, botId: unknown, routineId: unknown, i
 ipcMain.handle("routines:delete", (_event, botId: unknown, routineId: unknown) =>
   routines.remove(BotId.parse(botId), RoutineId.parse(routineId)),
 );
+ipcMain.handle("workspaces:list", () => workspaces.list());
+ipcMain.handle("workspaces:create", (_event, name: unknown) => workspaces.create(CreateWorkspaceRequest.parse({ name }).name));
+ipcMain.handle("workspaces:detail", (_event, id: unknown) => workspaces.detail(WorkspaceId.parse(id)));
+ipcMain.handle("workspaces:invite", (_event, id: unknown, login: unknown) =>
+  workspaces.invite(WorkspaceId.parse(id), InviteRequest.parse({ login }).login),
+);
+ipcMain.handle("workspaces:revoke-invite", (_event, id: unknown, inviteId: unknown) =>
+  workspaces.revokeInvite(WorkspaceId.parse(id), InviteId.parse(inviteId)),
+);
+ipcMain.handle("workspaces:remove-member", (_event, id: unknown, userId: unknown) =>
+  workspaces.removeMember(WorkspaceId.parse(id), UserId.parse(userId)),
+);
+ipcMain.handle("workspaces:set-copilot-mode", (_event, id: unknown, mode: unknown) =>
+  workspaces.setCopilotMode(WorkspaceId.parse(id), SetCopilotModeRequest.parse({ mode }).mode),
+);
+ipcMain.handle("workspaces:invites", () => workspaces.invites());
+ipcMain.handle("workspaces:accept", (_event, inviteId: unknown) => workspaces.accept(InviteId.parse(inviteId)));
+ipcMain.handle("projects:list", (_event, workspaceId: unknown) => projects.list(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) =>
+  projects.create(WorkspaceId.parse(workspaceId), CreateProjectRequest.parse({ repo }).repo),
+);
+ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
+ipcMain.handle("projects:workers", (_event, id: unknown) => projects.workers(ProjectId.parse(id)));
+ipcMain.handle("projects:answer-chat", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
+  projects.answerChat(ProjectId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
+);
+ipcMain.handle("projects:answer", (_event, id: unknown, workerId: unknown, approvalId: unknown, approved: unknown) =>
+  projects.answer(ProjectId.parse(id), TaskWorkerId.parse(workerId), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
+);
+// Asks first. Resolves true once the project is deleted.
+ipcMain.handle("projects:delete", async (_event, id: unknown, name: unknown) => {
+  if (!window) return false;
+  const { response } = await dialog.showMessageBox(window, {
+    type: "warning",
+    message: `Delete the project ${String(name)}?`,
+    detail: "Its coordinator's and workers' computers, task ledger, chats and shared context are deleted. The repo is not touched.",
+    buttons: ["Delete", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+  await projects.remove(ProjectId.parse(id));
+  return true;
+});
+// Opening a project's chat answers with what main has so far; the rest follows on projects:chat.
+ipcMain.handle("projects:open-chat", (_event, id: unknown) => {
+  const projectId = ProjectId.parse(id);
+  projects.openChat(projectId);
+  return projects.chatView(projectId);
+});
+ipcMain.handle("projects:send", (_event, id: unknown, text: unknown) =>
+  projects.send(ProjectId.parse(id), SendMessageRequest.parse({ text }).text),
+);
+ipcMain.handle("projects:subscriptions", (_event, id: unknown) => projects.subscriptions(ProjectId.parse(id)));
+ipcMain.handle("projects:subscribe", (_event, id: unknown, input: unknown) =>
+  projects.subscribe(ProjectId.parse(id), SubscriptionInput.parse(input)),
+);
+ipcMain.handle("projects:unsubscribe", (_event, id: unknown, subscriptionId: unknown) =>
+  projects.unsubscribe(ProjectId.parse(id), SubscriptionId.parse(subscriptionId)),
+);
+ipcMain.handle("connectors:list", (_event, workspaceId: unknown) => connectors.list(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("connectors:define", (_event, workspaceId: unknown, input: unknown) =>
+  connectors.define(WorkspaceId.parse(workspaceId), ConnectorInput.parse(input)),
+);
+ipcMain.handle("connectors:set-writes", (_event, workspaceId: unknown, name: unknown, allowed: unknown) =>
+  connectors.setWritesWithoutApproval(
+    WorkspaceId.parse(workspaceId),
+    ConnectorName.parse(name),
+    ConnectorApprovalRequest.parse({ writesWithoutApproval: allowed }).writesWithoutApproval,
+  ),
+);
+ipcMain.handle("connectors:set-secret", (_event, workspaceId: unknown, name: unknown, token: unknown) =>
+  connectors.setSecret(WorkspaceId.parse(workspaceId), ConnectorName.parse(name), ConnectorTokenRequest.parse({ token }).token),
+);
+ipcMain.handle("connectors:set-token", (_event, workspaceId: unknown, name: unknown, token: unknown) =>
+  connectors.setToken(WorkspaceId.parse(workspaceId), ConnectorName.parse(name), ConnectorTokenRequest.parse({ token }).token),
+);
+// An OAuth sign-in opens in the default browser; control finishes it on its callback.
+ipcMain.handle("connectors:connect", async (_event, workspaceId: unknown, name: unknown) => {
+  const start = await connectors.connect(WorkspaceId.parse(workspaceId), ConnectorName.parse(name));
+  if (start.kind === "oauth") await shell.openExternal(start.authorizeUrl);
+  return start;
+});
+ipcMain.handle("connectors:checklist", (_event, workspaceId: unknown) => connectors.checklist(WorkspaceId.parse(workspaceId)));
+ipcMain.handle("connectors:calls", (_event, projectId: unknown) => connectors.calls(ProjectId.parse(projectId)));
+// Asks first: every member's connection to it goes too. Resolves true once deleted.
+ipcMain.handle("connectors:delete", async (_event, workspaceId: unknown, name: unknown) => {
+  if (!window) return false;
+  const { response } = await dialog.showMessageBox(window, {
+    type: "warning",
+    message: `Delete the connector ${ConnectorName.parse(name)}?`,
+    detail: "Its workspace secret and every member's connection to it are deleted. Projects that declare it lose it.",
+    buttons: ["Delete", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+  await connectors.remove(WorkspaceId.parse(workspaceId), ConnectorName.parse(name));
+  return true;
+});
 // Asks first. The bot's files (its volume) are kept unless the box is ticked.
 ipcMain.handle("bots:delete", async (_event, id: unknown) => {
   const bot = bots.list().find((candidate) => candidate.id === BotId.parse(id));

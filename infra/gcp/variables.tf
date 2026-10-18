@@ -1,5 +1,10 @@
 variable "project_id" {
-  description = "The GCP project Chiefbot runs in. Create it and link billing first (docs/deploy-gcp.md)."
+  description = "The GCP project Chiefbot runs in. Create it and link billing first (docs/deploy.md)."
+  type        = string
+}
+
+variable "domain" {
+  description = "DNS name members reach control on, e.g. chiefbot.example.com. Point its A record at the control_ip output; Caddy gets its certificate. Also the base of connectors' OAuth callbacks."
   type        = string
 }
 
@@ -15,19 +20,19 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "Zone for the control VM and the bot VMs. Must be in var.region."
+  description = "Zone for the control VM and the computer VMs. Must be in var.region."
   type        = string
   default     = "europe-west2-a"
 }
 
 variable "image_tag" {
-  description = "Tag of the control and bot computer images in Artifact Registry."
+  description = "Tag of the control and computer images in Artifact Registry."
   type        = string
   default     = "v1"
 }
 
 variable "computer_machine_type" {
-  description = "Machine type of each bot's VM."
+  description = "Machine type of each computer's VM: bots, project coordinators and task workers."
   type        = string
   default     = "e2-standard-2"
 }

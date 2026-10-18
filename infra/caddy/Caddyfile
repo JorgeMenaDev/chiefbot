@@ -1,0 +1,7 @@
+# Caddy gets and renews a Let's Encrypt certificate for CHIEFBOT_DOMAIN (its DNS
+# name must point at this machine, with ports 80 and 443 open) and passes every
+# request, WebSockets included, to control. No timeouts: a pull request waits
+# on its approval for as long as it takes.
+{$CHIEFBOT_DOMAIN} {
+	reverse_proxy control:7410
+}

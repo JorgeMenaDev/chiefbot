@@ -1,10 +1,6 @@
 import { z } from "zod";
 import { UserId } from "./ids.ts";
 
-// Chartpilot's public OAuth App: device flow, no client secret, expiring tokens.
-// The desktop signs in with it and control refreshes with it, so both must agree.
-export const defaultGitHubClientId = "Ov23liONZsgOtJmCUaGB";
-
 // Opaque bearer token the control plane issues to a signed-in desktop.
 export const SessionToken = z.string().min(1).brand<"SessionToken">();
 export type SessionToken = z.infer<typeof SessionToken>;

@@ -1,4 +1,4 @@
-import type { JsonValue, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
+import type { JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
 import type { BotSession, Copilot, SdkModelList } from "./copilot.ts";
 
 // A fake Copilot SDK for tests. Each send() plays a script of real-shaped SDK
@@ -14,6 +14,15 @@ export type FakeRuntime = {
   shell(command: string): Promise<{ approved: boolean; exitCode: number; output: string }>;
   // Calls one of the session's custom tools once the permission handler approves it.
   tool(name: string, args: JsonValue): Promise<{ approved: boolean; result: unknown }>;
+  // An MCP server's tool (a GitHub tool that writes, unless readOnly): resolves
+  // with whether the permission handler let it run. It does nothing else.
+  mcp(serverName: string, toolTitle: string, readOnly: boolean): Promise<boolean>;
+  // Calls `toolName` on one of the session's MCP servers as the runtime does:
+  // permission first (a read-only tool unless `readOnly` is false), then the
+  // session's onMcpCall hook, then, for an http server, a JSON-RPC tools/call
+  // POSTed to its url with its headers. Resolves with the HTTP status and JSON
+  // answer (null for a local server, which it does not start).
+  callMcp(serverName: string, toolName: string, readOnly?: boolean): Promise<{ approved: boolean; status: number | null; body: unknown }>;
 };
 
 // What every session's model listing returns. The default is Copilot Free with an empty catalog.
@@ -27,18 +36,29 @@ export type FakeCopilotOptions = {
 };
 
 export function fakeCopilot({ script = echo, models = { list: [] }, shell }: FakeCopilotOptions = {}) {
-  // The access token each opened session got from its gitHubTokenProvider.
+  // The token each opened session ran on: a seat's access token from its
+  // gitHubTokenProvider, or an installation token its runtime started with.
   const tokens: string[] = [];
+  // Ids of every session disconnected, in order.
+  const closed: string[] = [];
+  // Ids of every session whose running turn was aborted, in order.
+  const aborted: string[] = [];
   // Ids of every session opened, in order (a resume counts again).
   const sessionIds: string[] = [];
+  // Each opened session's MCP servers, in the order sessions opened.
+  const mcpServers: Array<Record<string, MCPServerConfig>> = [];
   // Every turn started, with the model its session was on ("default" before any setModel).
   const sends: Array<{ sessionId: string; prompt: string; model: string }> = [];
 
   const copilot: Copilot = {
-    async openSession({ sessionId, gitHubTokenProvider, onPermissionRequest, tools }) {
-      const token = await gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
-      if (token.kind === "token") tokens.push(token.accessToken);
+    async openSession({ sessionId, auth, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall }) {
+      if (auth.kind === "installation") tokens.push(auth.token);
+      else {
+        const token = await auth.gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
+        if (token.kind === "token") tokens.push(token.accessToken);
+      }
       sessionIds.push(sessionId);
+      mcpServers.push(servers);
       const handlers = new Set<(event: SessionEvent) => void>();
       const allowed = async (request: PermissionRequest) =>
         (await onPermissionRequest(request, { sessionId })).kind === "approve-once";
@@ -46,6 +66,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
         for (const handler of handlers) handler(event);
       };
       let shellCalls = 0;
+      let toolCalls = 0;
       const runtime: FakeRuntime = {
         async shell(command) {
           const toolCallId = `shell-${++shellCalls}`;
@@ -58,8 +79,22 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           const tool = tools.find((candidate) => candidate.name === name);
           if (!tool?.handler) throw new Error(`no tool ${name}`);
           if (!(await allowed(fakeRequest.tool(name, args)))) return { approved: false, result: null };
-          const result = await tool.handler(args, { sessionId, toolCallId: `call-${name}`, toolName: name, arguments: args });
+          const result = await tool.handler(args, { sessionId, toolCallId: `call-${name}-${++toolCalls}`, toolName: name, arguments: args });
           return { approved: true, result };
+        },
+        mcp: (serverName, toolTitle, readOnly) => allowed(fakeRequest.mcp(serverName, toolTitle, readOnly)),
+        async callMcp(serverName, toolName, readOnly = true) {
+          const server = servers[serverName];
+          if (!server) throw new Error(`no MCP server ${serverName}`);
+          if (!(await allowed(fakeRequest.mcp(serverName, toolName, readOnly)))) return { approved: false, status: null, body: null };
+          await onMcpCall?.(serverName, toolName);
+          if (server.type !== "http") return { approved: true, status: null, body: null };
+          const res = await fetch(server.url, {
+            method: "POST",
+            headers: { ...server.headers, "content-type": "application/json", accept: "application/json, text/event-stream" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: toolName, arguments: {} } }),
+          });
+          return { approved: true, status: res.status, body: await res.json().catch(() => null) };
         },
       };
       async function runShell(command: string, toolCallId: string) {
@@ -74,6 +109,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
         return { approved: true, exitCode, output: stdout + stderr };
       }
       let model = "default";
+      // Bumped by abort: a script of an earlier turn publishes nothing more.
+      let turn = 0;
       const session: BotSession = {
         on(handler) {
           handlers.add(handler);
@@ -81,22 +118,34 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
         },
         async send(prompt) {
           sends.push({ sessionId, prompt, model });
+          const mine = ++turn;
           // Like the SDK: send returns once the message is admitted; events follow.
           void (async () => {
-            for await (const event of fake.script(prompt, runtime)) publish(event);
+            for await (const event of fake.script(prompt, runtime)) {
+              if (turn !== mine) return;
+              publish(event);
+            }
           })();
           return "user-msg";
+        },
+        async abort() {
+          turn++;
+          aborted.push(sessionId);
         },
         async setModel(next) {
           model = next;
         },
         rpc: { model: { list: async () => models } },
+        async disconnect() {
+          handlers.clear();
+          closed.push(sessionId);
+        },
       };
       return session;
     },
   };
 
-  const fake = { copilot, tokens, sessionIds, sends, script, shell };
+  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, sends, script, shell };
   return fake;
 }
 

@@ -1,3 +1,4 @@
+import { writeOwnerOnly } from "@chiefbot/setup";
 import { SecretManagerServiceClient } from "@google-cloud/secret-manager";
 import { z } from "zod";
 import type { SecretStore } from "./secretStore.ts";
@@ -47,6 +48,22 @@ export function secretManagerStore(client: SecretManagerClient): SecretStore {
       await allow(client.deleteSecret(name), notFound);
     },
   };
+}
+
+// On GCP the deployer keeps the files `bun run setup` wrote in Secret Manager,
+// one secret each (infra/gcp creates them, docs/deploy.md adds their versions),
+// rather than on a disk. Control writes them into its home (CHIEFBOT_HOME, in
+// the container, gone when it stops) before it reads its config.
+const setupSecrets = { "config.json": "chiefbot-config", "github-app-secrets.json": "chiefbot-github-app-secrets" };
+
+export async function restoreSetup(client: Pick<SecretManagerClient, "accessLatest">, dir: string) {
+  for (const [file, secretId] of Object.entries(setupSecrets)) {
+    const data = await allow(client.accessLatest(secretId), notFound);
+    if (data === null) {
+      throw new Error(`Secret Manager has no version of ${secretId}. Add it: gcloud secrets versions add ${secretId} --data-file=$HOME/.chiefbot/${file}`);
+    }
+    writeOwnerOnly(dir, file, data);
+  }
 }
 
 // The real client. Credentials come from Application Default Credentials: on

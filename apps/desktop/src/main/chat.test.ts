@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApprovalId, Bot, BotId, ClientEvent, SignInResponse, TurnId, type ChatView } from "@chiefbot/contracts";
+import { ApprovalId, Bot, BotId, ClientEvent, HandoffId, SignInResponse, TurnId, type ChatEvent, type ChatView } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
@@ -19,7 +19,7 @@ async function setup() {
   const dbPath = join(mkdtempSync(join(tmpdir(), "chiefbot-desktop-")), "control.sqlite");
   const github = startFakeGitHub();
   const computers = fakeComputers();
-  const control = startControl({ port: 0, dbPath, githubApiUrl: github.url, computers: computers.provider });
+  const control = startControl({ port: 0, dbPath, githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
   stops.push(github.stop, computers.stopAll, control.stop);
   const { accessToken, refreshToken } = github.issueTokens();
   const signIn = await fetch(`${control.url}/sessions`, {
@@ -40,7 +40,7 @@ async function setup() {
   });
   const restartControl = () => {
     control.stop();
-    const restarted = startControl({ port: Number(new URL(control.url).port), dbPath, githubApiUrl: github.url, computers: computers.provider });
+    const restarted = startControl({ port: Number(new URL(control.url).port), dbPath, githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
     stops.push(restarted.stop);
   };
   return { control, computers, sessionToken, botId: bot.id, restartControl };
@@ -111,15 +111,15 @@ test("after control restarts mid-reply, the desktop reconnects and the reply fin
   ]);
 });
 
-test("a risky command shows as a pending approval card, still pending after a relaunch, and answering it lets the bot go on", async () => {
+test("a risky tool call shows as a pending approval card, still pending after a relaunch, and answering it lets the bot go on", async () => {
   const { control, computers, sessionToken, botId } = await setup();
   computers.copilot.script = async function* (_prompt, runtime) {
-    await runtime.shell("git push origin main");
+    await runtime.mcp("github", "Merge pull request", false);
     yield sdk.idle();
   };
   const desktop = launch(control.url, sessionToken);
   desktop.chats.open(botId);
-  await desktop.chats.send(botId, "push it");
+  await desktop.chats.send(botId, "merge it");
   await desktop.until(botId, (view) => view.items.some((item) => item.kind === "approval"));
   desktop.chats.disconnect();
 
@@ -131,8 +131,8 @@ test("a risky command shows as a pending approval card, still pending after a re
     kind: "approval",
     id: expect.any(String),
     approvalId: expect.any(String),
-    request: "command",
-    detail: "git push origin main",
+    request: "tool",
+    detail: "github: Merge pull request",
     state: "pending",
   });
   expect(pending.working).toBe("Waiting for your approval");
@@ -146,8 +146,8 @@ test("an approval nobody answered before its turn ended shows as expired", () =>
   const turnId = TurnId.parse("turn-1");
   const approvalId = ApprovalId.parse("approval-1");
   const events = [
-    { type: "user-message", text: "push it" },
-    { type: "approval-request", approvalId, kind: "command", detail: "git push" },
+    { type: "user-message", text: "merge it" },
+    { type: "approval-request", approvalId, kind: "push", detail: "git push to octo/demo: main" },
     { type: "error", message: "The bot restarted before it finished this message." },
     { type: "done" },
   ] as const;
@@ -156,4 +156,29 @@ test("an approval nobody answered before its turn ended shows as expired", () =>
   const view = events.reduce<ChatView>((view, event, seq) => foldChat(view, { seq, turnId, event }), empty);
 
   expect(view.items.find((item) => item.kind === "approval")).toMatchObject({ state: "expired" });
+});
+
+test("control's handoff notice shows in the chief's chat as a notice, even in the middle of a reply", () => {
+  const reply = TurnId.parse("turn-1");
+  const notice = TurnId.parse("turn-2");
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+  const events: ChatEvent[] = [
+    { seq: 1, turnId: reply, event: { type: "user-message", text: "what's next?" } },
+    { seq: 2, turnId: reply, event: { type: "text-delta", messageId: "m1", text: "Let me " } },
+    {
+      seq: 3,
+      turnId: notice,
+      event: { type: "handoff-update", handoffId: HandoffId.parse("handoff-1"), status: "done", text: 'shop finished "Checkout" (task #1).' },
+    },
+    { seq: 4, turnId: reply, event: { type: "text-delta", messageId: "m1", text: "check." } },
+  ];
+
+  const view = events.reduce<ChatView>(foldChat, empty);
+
+  expect(view.items.map((item) => [item.kind, "text" in item ? item.text : ""])).toEqual([
+    ["user", "what's next?"],
+    ["assistant", "Let me check."],
+    ["notice", 'shop finished "Checkout" (task #1).'],
+  ]);
+  expect(view.working).toBe("");
 });

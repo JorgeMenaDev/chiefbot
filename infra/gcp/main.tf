@@ -1,7 +1,8 @@
-# Chiefbot on GCP: network, registry, service accounts, the bot VM template and
-# the control-plane VM. Written, NOT applied: `terraform apply` waits for Jorge's
-# approval of the spend (docs/deploy-gcp.md). Bot VMs are not in here: control
-# creates one per bot from the chiefbot-computer template (GceProvider).
+# Chiefbot on GCP: network, registry, service accounts, setup's secrets, the
+# computer VM template and the control-plane VM with Caddy for HTTPS. Written,
+# NOT applied: `terraform apply` waits for the deployer's approval of the spend
+# (docs/deploy.md). Computer VMs are not in here: control creates one per bot,
+# project coordinator and task worker from the chiefbot-computer template (GceProvider).
 
 terraform {
   required_version = ">= 1.9"
@@ -30,6 +31,7 @@ locals {
   control_image      = "${local.repository}/control:${var.image_tag}"
   control_port       = 7410
   worker_control_url = "http://${google_compute_address.control.address}:${local.control_port}"
+  public_url         = "https://${var.domain}"
   # IAP TCP forwarding connects from this range.
   iap_range = "35.235.240.0/20"
 }
@@ -49,7 +51,7 @@ resource "google_project_service" "apis" {
   disable_on_destroy = false
 }
 
-# --- Network: one subnet, no public IPs, outbound through Cloud NAT ---
+# --- Network: one subnet; computers have no public IP and go out through Cloud NAT ---
 
 resource "google_compute_network" "chiefbot" {
   name                    = "chiefbot"
@@ -85,7 +87,7 @@ resource "google_compute_router_nat" "chiefbot" {
   }
 }
 
-# SSH and control's port through IAP only. Everything else inbound stays denied.
+# SSH through IAP only.
 resource "google_compute_firewall" "iap" {
   name          = "chiefbot-allow-iap"
   network       = google_compute_network.chiefbot.id
@@ -93,11 +95,24 @@ resource "google_compute_firewall" "iap" {
   target_tags   = ["chiefbot-control", "chiefbot-computer"]
   allow {
     protocol = "tcp"
-    ports    = ["22", tostring(local.control_port)]
+    ports    = ["22"]
   }
 }
 
-# Workers dial control's WebSocket.
+# Members and connector OAuth callbacks reach control through Caddy on the
+# control VM: 80 for the certificate challenge and the redirect, 443 for HTTPS.
+resource "google_compute_firewall" "https" {
+  name          = "chiefbot-allow-https"
+  network       = google_compute_network.chiefbot.id
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["chiefbot-control"]
+  allow {
+    protocol = "tcp"
+    ports    = ["80", "443"]
+  }
+}
+
+# Computers (bots, coordinators, task workers) dial control's WebSocket inside the network.
 resource "google_compute_firewall" "workers_to_control" {
   name        = "chiefbot-allow-workers-to-control"
   network     = google_compute_network.chiefbot.id
@@ -127,13 +142,13 @@ resource "google_artifact_registry_repository" "chiefbot" {
 
 # --- Service accounts ---
 
-# Control creates, starts, stops and deletes bot VMs and disks.
+# Control creates, starts, stops and deletes computer VMs and disks.
 resource "google_service_account" "control" {
   account_id   = "chiefbot-control"
   display_name = "Chiefbot control plane"
 }
 
-# Bot VMs only pull their image and write logs. They hold no project rights.
+# Computer VMs only pull their image and write logs. They hold no project rights.
 resource "google_service_account" "computer" {
   account_id   = "chiefbot-computer"
   display_name = "Chiefbot bot computer"
@@ -167,16 +182,30 @@ resource "google_service_account_iam_member" "control_uses_computer" {
   member             = google_service_account.control.member
 }
 
-# For the Secret Manager-backed store of GitHub refresh tokens (ticket #8).
+# Control keeps users' GitHub refresh tokens and connectors' credentials in
+# Secret Manager, one secret each, and reads setup's two secrets below.
 resource "google_project_iam_member" "control_secrets" {
   project = var.project_id
   role    = "roles/secretmanager.admin"
   member  = google_service_account.control.member
 }
 
-# --- Bot computers: the template control makes each bot's VM from ---
+# What `bun run setup` wrote: config.json (both apps' IDs) and
+# github-app-secrets.json (the repo app's private key). Terraform makes the
+# empty secrets; you add their versions with gcloud (docs/deploy.md), so the key
+# never enters Terraform state. Control reads them on every start (index.ts).
+resource "google_secret_manager_secret" "setup" {
+  for_each  = toset(["chiefbot-config", "chiefbot-github-app-secrets"])
+  secret_id = each.value
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
 
-# GceProvider names the boot disk (Container-Optimized OS), the bot's home disk
+# --- Computers: the template control makes each computer's VM from ---
+
+# GceProvider names the boot disk (Container-Optimized OS), the computer's home disk
 # and the cloud-init itself, which replace the template's disks and metadata.
 # The template owns the machine type, network, service account and labels.
 resource "google_compute_instance_template" "computer" {
@@ -219,7 +248,15 @@ resource "google_compute_address" "control" {
   region       = var.region
 }
 
-# SQLite (users, bots, sessions). Outlives the VM.
+# The address var.domain's DNS A record points at.
+resource "google_compute_address" "control_public" {
+  name       = "chiefbot-control-public"
+  region     = var.region
+  depends_on = [google_project_service.apis]
+}
+
+# SQLite (users, bots, projects, ledgers, chats), projects' context files and
+# Caddy's certificates. Outlives the VM.
 resource "google_compute_disk" "control_data" {
   name       = "chiefbot-control-data"
   type       = "pd-balanced"
@@ -252,6 +289,9 @@ resource "google_compute_instance" "control" {
   network_interface {
     subnetwork = google_compute_subnetwork.chiefbot.id
     network_ip = google_compute_address.control.address
+    access_config {
+      nat_ip = google_compute_address.control_public.address
+    }
   }
 
   service_account {
@@ -269,6 +309,8 @@ resource "google_compute_instance" "control" {
     user-data = templatefile("${path.module}/control.cloud-init.yaml", {
       registry = local.registry
       image    = local.control_image
+      domain   = var.domain
+      port     = local.control_port
       env = {
         CHIEFBOT_CONTROL_HOSTNAME   = "0.0.0.0"
         CHIEFBOT_CONTROL_PORT       = tostring(local.control_port)
@@ -278,6 +320,9 @@ resource "google_compute_instance" "control" {
         CHIEFBOT_GCP_ZONE           = var.zone
         CHIEFBOT_COMPUTER_IMAGE     = local.computer_image
         CHIEFBOT_WORKER_CONTROL_URL = local.worker_control_url
+        CHIEFBOT_PUBLIC_URL         = local.public_url
+        # Setup's files from Secret Manager, on a tmpfs: never on a disk.
+        CHIEFBOT_HOME = "/run/chiefbot"
       }
     })
   }

@@ -1,8 +1,12 @@
 import { z } from "zod";
 import { User } from "./auth.ts";
-import { TurnEvent } from "./chat.ts";
-import { ApprovalId, BotId, TurnId } from "./ids.ts";
+import { TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
+import { AgentConnector } from "./connectors.ts";
+import { ApprovalId, BotId, ProjectId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport } from "./models.ts";
+import { ProjectTasks } from "./projects.ts";
+import { ProjectWorkers } from "./taskWorkers.ts";
+import { CopilotPayer } from "./workspaces.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
 // hands it to the computer at start and keeps only its hash. It is not a GitHub token.
@@ -31,41 +35,56 @@ export const CreateBotRequest = z.object({ name: z.string().trim().min(1).max(60
 export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 
 // Control → desktop on the /events WebSocket.
-//   bots  the user's bots; sent on connect and on every change
-//   user  the user changed: their GitHub sign-in was lost or restored
+//   bots   the user's bots; sent on connect and on every change
+//   user   the user changed: their GitHub sign-in was lost or restored
+//   tasks    the whole task ledger of one of the user's projects; sent on every change
+//   workers  every worker of one of the user's projects; sent on every change
 export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bots"), bots: z.array(Bot) }),
   z.object({ type: z.literal("user"), user: User }),
+  ProjectTasks.extend({ type: z.literal("tasks") }),
+  ProjectWorkers.extend({ type: z.literal("workers") }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 
 // Control → worker on the /worker WebSocket.
-//   bound           names the one bot this connection belongs to; sent right after control accepts the credential
-//   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time
+//   bound           control accepted the credential; sent right after. The connection belongs to
+//                   that one bot (or, on /task-worker, that one task worker).
+//   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time.
+//                   `turnKey` is the turn's key (ids.ts TurnKey): the bearer of every call to control in it
+//   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
+//                   (control's proxy runs them as the member who asked), and its `turnKey`. Sent once,
+//                   after its first hello.
+//   turn-key        the running turn's new key (chat.ts TurnKeyMessage)
 //   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
 //   screen-open     a viewer is waiting: dial /worker/:botId/screen/:streamId and pipe the screen's VNC bytes through it
 //   approval-answer the user's answer to one of the worker's approval-requests.
 //                   Sent when the user answers and again after every hello for the
 //                   active turn's answered approvals; the worker ignores repeats.
 export const ControlToWorker = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("bound"), botId: BotId }),
-  z.object({ type: z.literal("run-turn"), turnId: TurnId, text: z.string(), model: z.string() }),
+  z.object({ type: z.literal("bound") }),
+  z.object({ type: z.literal("run-turn"), turnId: TurnId, turnKey: TurnKey, text: z.string(), model: z.string() }),
+  z.object({
+    type: z.literal("run-task"),
+    turnId: TurnId,
+    turnKey: TurnKey,
+    text: z.string(),
+    payer: CopilotPayer,
+    connectors: z.array(AgentConnector),
+  }),
   z.object({ type: z.literal("screen-control"), control: ScreenControl }),
   z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),
   z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() }),
+  TurnKeyMessage,
 ]);
 export type ControlToWorker = z.infer<typeof ControlToWorker>;
 
 // Worker → control on the /worker WebSocket.
-//   turn-event  event number `index` (0, 1, 2…) of a turn
-//   hello       the turn the worker is still running, if any. Sent on every
-//               (re)connect, after the worker has resent every event of its
-//               latest turn. Control stores each index once, so resends are
-//               harmless, then ends every other unfinished turn: the worker lost it.
+//   turn-event, hello  see chat.ts
 //   models      the models the bot owner's Copilot plan offers; sent after every bind
 export const WorkerToControl = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent }),
-  z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable() }),
+  TurnEventMessage,
+  TurnHello,
   z.object({ type: z.literal("models"), report: ModelReport }),
 ]);
 export type WorkerToControl = z.infer<typeof WorkerToControl>;

@@ -269,6 +269,13 @@ body {
   border: 1px solid rgb(255 123 114 / 0.4);
   border-radius: 8px;
 }
+/* Control's note about a handoff to a project: needs input, or done. */
+.message.notice {
+  padding: 8px 12px;
+  border: 1px solid rgb(121 192 255 / 0.4);
+  border-radius: 8px;
+  font-size: 13px;
+}
 .tool-row {
   font-size: 12px;
   color: #8b8b93;
@@ -279,6 +286,11 @@ body {
 }
 .tool-row.succeeded .tool-mark {
   color: #3fb950;
+}
+/* Who pays for a project turn's Copilot, above the coordinator's answer. */
+.payer {
+  margin: 0;
+  font-size: 12px;
 }
 .working {
   margin: 0;
@@ -561,7 +573,8 @@ body {
   color: #3fb950;
 }
 .approval-row.declined,
-.approval-row.expired {
+.approval-row.expired,
+.approval-row.withdrawn {
   color: #ff7b72;
 }
 
@@ -605,4 +618,84 @@ body {
 }
 .routines .link-button {
   justify-self: start;
+}
+
+/* Workspace switcher at the top of the sidebar, and its menu. */
+.switcher {
+  position: relative;
+}
+.switcher-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  background: #1a1a1d;
+  border: 1px solid #2c2c31;
+  border-radius: 6px;
+  color: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+.switcher-menu {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: #151517;
+  border: 1px solid #2c2c31;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+}
+.switcher-menu .new-bot-form {
+  margin-top: 4px;
+}
+.switcher-menu .error {
+  margin: 4px;
+  font-size: 12px;
+}
+.badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #1f6feb;
+  color: #fff;
+  font-size: 11px;
+}
+.invite-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.invite-row button {
+  padding: 4px 10px;
+}
+
+/* A project's sidebar rows sit above the bots; its task ledger beside the coordinator chat. */
+.bot-list.projects {
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #1f1f23;
+}
+.ledger {
+  width: 34%;
+  min-width: 280px;
+  overflow-y: auto;
+}
+.ledger-task {
+  display: grid;
+  gap: 6px;
+}
+.worker-row {
+  display: grid;
+  gap: 6px;
+  padding-left: 12px;
+  border-left: 2px solid #1f1f23;
 }

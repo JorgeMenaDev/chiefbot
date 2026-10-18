@@ -1,41 +1,56 @@
 import type { ServerWebSocket } from "bun";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   AnswerApprovalRequest,
   ApprovalId,
   BotToken,
   CreateBotRequest,
-  defaultGitHubClientId,
   GitHubTokens,
+  PullRequestArgs,
   RoutineInput,
   SendMessageRequest,
   SessionToken,
   SetBotModelRequest,
   WorkerToControl,
   type Bot,
-  type ApiError,
-  type ApiErrorCode,
   type BotId,
   type ClientEvent,
   type ControlToWorker,
   type ModelOption,
+  type OpenedPullRequest,
+  type ProjectId,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
   type User,
   type UserId,
 } from "@chiefbot/contracts";
-import { systemClock, type Clock } from "./clock.ts";
+import { systemClock, type Clock } from "@chiefbot/worker/clock";
+import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
-import { fetchIdentity, GitHubAuthError, refreshGitHubTokens } from "./github.ts";
+import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
+import { chiefHost } from "./handoffs.ts";
+import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
+import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions } from "./models.ts";
+import { repoAccess, type RepoAgent } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
+import { connectorHost } from "./connectors/connectors.ts";
+import { localContextStore, type ContextStore } from "./contextStore.ts";
+import { projectHost, type ProjectSocketData } from "./projects.ts";
+import { subscriptionHost } from "./subscriptions.ts";
+import { taskWorkerHost, type TaskWorkerSocketData } from "./taskWorkers.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
+import { botTurn, heldTurn, type BotTurn } from "./turnKeys.ts";
 import { chatTurns } from "./turns.ts";
+import { workspaceRoutes } from "./workspaces.ts";
 
 export type ControlOptions = {
   port: number;
@@ -46,8 +61,13 @@ export type ControlOptions = {
   githubApiUrl: string;
   // github.com, for the refresh grant. Defaults to githubApiUrl: the fake serves both.
   githubUrl?: string;
-  // The OAuth App the desktop signs in with. Refreshes must use the same one.
-  githubClientId?: string;
+  // Client ID of the deployer's sign-in app (`bun run setup`), which has no
+  // repository permissions. The desktop signs in with it; refreshes must use the
+  // same one. Its tokens are what bot computers get, for the Copilot SDK.
+  githubClientId: string;
+  // The repo app's ID and private key: control mints its installation tokens to
+  // reach repos for bots (repos.ts), and never hands them to a bot computer.
+  githubApp: GitHubAppKey;
   // Where users' refresh tokens live. Defaults to an encrypted store in dbPath
   // whose key lasts only this process: fine for tests; index.ts passes a lasting one.
   secrets?: SecretStore;
@@ -58,19 +78,34 @@ export type ControlOptions = {
   // When routines are due and bots count as idle. A fake in tests.
   clock?: Clock;
   // A running bot's computer stops after this long with no running turn, no
-  // pending approval, no screen viewer and no routine run in progress. Default 30.
+  // pending approval, no screen viewer and no routine run in progress; a
+  // project's after this long with no coordinator turn running or queued. Default 30.
   idleStopMinutes?: number;
+  // A project's worker that waits this long on one approval stops, keeping its disk. Default 60.
+  approvalWaitMinutes?: number;
+  // Mints the installation tokens an organization pays for Copilot with.
+  // Defaults to the repo app's (github.ts copilotRequestsToken); a fake in tests.
+  copilotTokens?: CopilotTokenMinter;
+  // Control's URL as users' browsers reach it, for OAuth callbacks. Defaults to the URL control listens on.
+  publicUrl?: string;
+  // Where projects' shared context files live. Defaults to a context folder
+  // next to dbPath (a fresh temporary one for an in-memory database).
+  context?: ContextStore;
 };
 
 // What a WebSocket connection is bound to: a desktop client of one user, one
 // bot's chat from `after` on, the worker of exactly one bot, or one end of a
 // screen stream: the owner's viewer, or the bot's worker piping its VNC server.
+// Or a project's: its coordinator, or a member's chat with it (projects.ts), or one
+// of its task workers (taskWorkers.ts).
 type SocketData =
   | { kind: "client"; userId: UserId }
   | { kind: "chat"; botId: BotId; after: number }
   | { kind: "worker"; userId: UserId; botId: BotId }
   | { kind: "viewer"; botId: BotId; streamId: string }
-  | { kind: "screen"; streamId: string };
+  | { kind: "screen"; streamId: string }
+  | ProjectSocketData
+  | TaskWorkerSocketData;
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -102,10 +137,32 @@ type SocketData =
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
 //                             (403 for another bot's)
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
-//                             (403 BrokerRefusal when the owner must sign in again)
+//                             (403 BrokerRefusal when the owner must sign in again). The bot token, not a
+//                             turn key: a bot always acts for its owner, who also needs it between turns,
+//                             for the model picker.
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//   POST   /worker/:botId/pull-requests  bearer the key of the bot's running turn (403 invalid_turn_key
+//                             otherwise), body PullRequestArgs → 201 OpenedPullRequest once the owner
+//                             approves in that turn (403 declined, 409 no_turn, 404 repo_not_found, 403
+//                             repo_read_only or app_not_installed, 502 github_failed)
+//   GET    /git/:owner/:repo/info/refs, POST /git/:owner/:repo/git-upload-pack|git-receive-pack
+//                             git's smart HTTP, Basic auth with the key of a bot's or task worker's
+//                             running turn as the password: control's git proxy to GitHub. A push waits
+//                             for approval in that turn (repos.ts). Errors are text/plain for git to
+//                             print, not ApiErrors.
+//   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
+//   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
+//                             task ledgers and chats (projects.ts)
+//   …      /projects/:id/workers, /task-worker  projects' task workers (taskWorkers.ts)
+//   …      /workspaces/:id/connectors, /workspaces/:id/checklist, /connectors/oauth/callback,
+//          /coordinator/:projectId/mcp  connectors, the access checklist and the MCP proxy
+//                             (connectors/connectors.ts)
+//   …      /projects/:id/subscriptions  what a project listens to: CI runs, issue queries and
+//                             schedules, each event handled once (subscriptions.ts)
+//   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
+//                             turn's key: handing work to projects and watching it (handoffs.ts)
 //
-// Every error body is an ApiError (packages/contracts errors.ts).
+// Every other error body is an ApiError (packages/contracts errors.ts).
 //
 // The screen never listens beyond the computer's loopback: for each viewer,
 // control asks the worker to dial back and pipe x11vnc, and joins the two sockets.
@@ -115,14 +172,22 @@ export function startControl({
   dbPath,
   githubApiUrl,
   githubUrl = githubApiUrl,
-  githubClientId = defaultGitHubClientId,
+  githubClientId,
+  githubApp,
   secrets = localSecretStore({ dbPath, key: crypto.getRandomValues(new Uint8Array(32)) }),
   computers,
   workerControlUrl,
   clock = systemClock,
   idleStopMinutes = 30,
+  approvalWaitMinutes = 60,
+  context,
+  copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
+  publicUrl,
 }: ControlOptions) {
   const store = openStore(dbPath);
+  // An in-memory database gets a temporary context folder, removed on stop.
+  const tempContext = context || dbPath !== ":memory:" ? null : mkdtempSync(join(tmpdir(), "chiefbot-context-"));
+  context ??= localContextStore(tempContext ?? join(dirname(dbPath), "context"));
   const broker = tokenBroker({
     store,
     secrets,
@@ -144,8 +209,89 @@ export function startControl({
     workerOf: (botId) => workers.get(botId),
     humanHasScreen: (botId) => screens.controlOf(botId) === "human",
     stopping: (botId) => stopping.has(botId),
-    onActivity: (botId) => idle.touch(botId),
+    onEvent: (botId, event) => {
+      idle.touch(botId);
+      if (event.event.type === "done") approvals.turnEnded(event.turnId);
+    },
   });
+  // Approvals control asks for itself, and the repo access they guard.
+  const approvals = controlApprovals();
+  // A bot's turn as repo access sees it: its owner, asked in that turn.
+  const botAgent = ({ botId, userId, turnId }: BotTurn): RepoAgent => ({
+    userId,
+    ask: (kind, detail, signal) =>
+      approvals.ask((approvalId) => {
+        const event = store.requestApproval(botId, turnId, { approvalId, kind, detail });
+        turns.publishChat(botId, event);
+        return event;
+      }, signal),
+  });
+  const repos = repoAccess({
+    githubUrl,
+    githubApiUrl,
+    app: githubApp,
+    ownerLogin: async (userId) => ((await broker.accessToken(userId)) ? (store.user(userId)?.login ?? null) : null),
+    agentFor: (key) => {
+      const turn = store.turnKeys.holder(key);
+      if (turn?.agent === "bot") return botAgent(turn);
+      return turn?.agent === "task-worker" ? taskWorkers.agentOf(turn) : null;
+    },
+  });
+
+  // Who pays for each agent run's Copilot (copilotIdentity.ts).
+  const payerOf = copilotIdentity({ store, broker, mint: copilotTokens });
+  // Connectors, the access checklist, and the MCP proxy agents reach them through (connectors/connectors.ts).
+  const connectors = connectorHost({
+    store,
+    secrets,
+    publicUrl: () => publicUrl ?? server.url.origin,
+    ask: { coordinator: (...args) => projects.ask(...args), taskWorker: (...args) => taskWorkers.ask(...args) },
+    turnSignal: approvals.turnSignal,
+  });
+  // The handoffs watcher: tells chiefs when their task needs input or is done.
+  // Without a project, it looks at every one.
+  const watchHandoffs = (projectId?: ProjectId) => {
+    for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
+  };
+
+  // The projects' task workers, one throwaway computer each (taskWorkers.ts).
+  const taskWorkers = taskWorkerHost({
+    store,
+    payerOf,
+    connectorsFor: connectors.agentConnectors,
+    computers,
+    approvals,
+    approvalWaitMinutes,
+    clock,
+    pullRequest: repos.pullRequest,
+    controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
+    publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
+    onLedgerChange: watchHandoffs,
+    upgrade: (req, data) => upgrade(server, req, data),
+  });
+
+  // Projects, their coordinators and the coordinators' scheduler (projects.ts).
+  const projects = projectHost({
+    store,
+    payerOf,
+    computers,
+    context,
+    workers: taskWorkers,
+    approvals,
+    githubApiUrl,
+    repoReadToken: repos.readToken,
+    controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
+    publish: (topic, message) => server.publish(topic, message),
+    publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
+    upgrade: (req, data) => upgrade(server, req, data),
+    connectorsFor: connectors.agentConnectors,
+    onLedgerChange: watchHandoffs,
+    onActivity: (projectId) => coordinatorIdle.touch(projectId),
+  });
+  // Chiefs of staff handing work to projects (handoffs.ts).
+  const chiefs = chiefHost({ store, projects });
+  // What projects listen to: polled CI runs and issue queries, and schedules (subscriptions.ts).
+  const subscriptions = subscriptionHost({ store, clock, connectors, projects });
 
   const botsOf = (userId: UserId): Bot[] =>
     store.botsFor(userId).map(({ id, name, running, model }) => ({
@@ -232,6 +378,15 @@ export function startControl({
     port,
     hostname,
     routes: {
+      ...workspaceRoutes(store, async (workspaceId, userId) => {
+        projects.memberRemoved(workspaceId, userId);
+        taskWorkers.memberRemoved(workspaceId, userId);
+      }),
+      ...projects.routes,
+      ...taskWorkers.routes,
+      ...connectors.routes,
+      ...chiefs.routes,
+      ...subscriptions.routes,
       "/sessions": {
         POST: async (req) => {
           const tokens = GitHubTokens.safeParse(await req.json().catch(() => null));
@@ -283,12 +438,11 @@ export function startControl({
           const { id } = store.createBot(user.id, body.data.name, botToken);
           try {
             await computers.create({
-              botId: id,
+              id,
               env: {
                 CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin,
                 CHIEFBOT_BOT_ID: id,
                 CHIEFBOT_BOT_TOKEN: botToken,
-                CHIEFBOT_GITHUB_API_URL: githubApiUrl,
               },
             });
             await computers.start(id);
@@ -365,6 +519,7 @@ export function startControl({
           const answer = approvalId.success ? store.answerApproval(botId, approvalId.data, body.data.approved) : null;
           if (!answer || !approvalId.success) return apiError(409, "not_pending");
           turns.publishChat(botId, answer);
+          approvals.answered(approvalId.data, body.data.approved);
           workers.get(botId)?.send(
             JSON.stringify({
               type: "approval-answer",
@@ -423,16 +578,33 @@ export function startControl({
           return bot instanceof Response ? bot : upgrade(server, req, { kind: "worker", ...bot });
         },
       },
-      // The token broker: the owner's access token, never a refresh token.
+      // The token broker: a chief always runs on its owner's seat, so the owner's
+      // access token, never a refresh token.
       "/worker/:botId/github-token": {
         GET: async (req) => {
           const bot = ownWorker(req);
           if (bot instanceof Response) return bot;
-          const token = await broker.accessToken(bot.userId);
-          if (token) return Response.json(token);
+          const token = await payerOf({ kind: "chief", ownerId: bot.userId })?.token();
+          if (token && "kind" in token && token.kind === "seat") return Response.json(token.token);
           return apiError(403, "reauth_needed");
         },
       },
+      // The bot's create_pull_request tool. Waits, however long, for the owner's answer.
+      "/worker/:botId/pull-requests": {
+        POST: async (req, server) => {
+          const bot = heldTurn(store.turnKeys, req, botTurn(req.params.botId));
+          if (bot instanceof Response) return bot;
+          const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
+          if (!args.success) return apiError(400, "invalid_pull_request");
+          server.timeout(req, 0);
+          const opened = await repos.pullRequest(botAgent(bot), args.data, req.signal);
+          if ("error" in opened) return apiError(opened.status, opened.error, opened.message);
+          return Response.json(opened satisfies OpenedPullRequest, { status: 201 });
+        },
+      },
+      "/git/:owner/:repo/info/refs": { GET: (req, server) => repos.git(req, server, req.params) },
+      "/git/:owner/:repo/git-upload-pack": { POST: (req, server) => repos.git(req, server, req.params) },
+      "/git/:owner/:repo/git-receive-pack": { POST: (req, server) => repos.git(req, server, req.params) },
       // Only a stream control opened for this bot, and only once.
       "/worker/:botId/screen/:streamId": {
         GET: (req, server) => {
@@ -447,6 +619,8 @@ export function startControl({
       // Bun's documented way to type ws.data.
       data: {} as SocketData,
       open(ws) {
+        if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.open(ws, ws.data);
+        if (ws.data.kind === "task-worker") return taskWorkers.open(ws, ws.data);
         if (ws.data.kind === "viewer") {
           const worker = workers.get(ws.data.botId);
           if (!worker) return ws.close();
@@ -474,11 +648,13 @@ export function startControl({
         workers.get(ws.data.botId)?.close(4000, "replaced");
         workers.set(ws.data.botId, ws);
         turns.workerChanged(ws.data.botId);
-        ws.send(JSON.stringify({ type: "bound", botId: ws.data.botId } satisfies ControlToWorker));
+        ws.send(JSON.stringify({ type: "bound" } satisfies ControlToWorker));
         ws.send(screenControlMessage(ws.data.botId));
         publish(ws.data.userId);
       },
       close(ws) {
+        if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.close(ws, ws.data);
+        if (ws.data.kind === "task-worker") return taskWorkers.close(ws, ws.data);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.end(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
@@ -486,11 +662,13 @@ export function startControl({
         publish(ws.data.userId);
       },
       message(ws, raw) {
+        if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.message(ws.data, raw);
+        if (ws.data.kind === "task-worker") return taskWorkers.message(ws.data, raw);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.relay(ws.data.streamId, ws.data.kind, raw);
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));
         if (message.type === "models") return store.setModelReport(ws.data.userId, message.report);
-        turns.fromWorker(ws.data.botId, message, (reply) => ws.send(JSON.stringify(reply)));
+        turns.fromWorker(ws.data.userId, ws.data.botId, message, (reply) => ws.send(JSON.stringify(reply)));
       },
     },
   });
@@ -506,25 +684,44 @@ export function startControl({
     },
   });
 
+  subscriptions.start();
+  // Worker computers left behind by a control that stopped mid-way go now.
+  void taskWorkers.recover().catch((error: unknown) => console.error("could not recover task workers:", error));
+
   // Pending approvals belong to unfinished turns, so those count as busy too.
   const idle = startIdleStop({
     clock,
     idleMs: idleStopMinutes * 60_000,
-    runningBots: store.runningBots,
+    running: () => store.runningBots().map(({ botId, userId }) => ({ id: botId, userId })),
     busy: (botId) =>
       store.unfinishedTurns(botId).length > 0 ||
       store.routineRunning(botId) ||
       screens.watched(botId),
-    stop: (userId, botId) => setRunning(userId, botId, false),
+    stop: ({ id, userId }) => setRunning(userId, id, false),
   });
+  // Coordinators' computers stop the same way; the next queued turn starts them again (projects.ts).
+  const coordinatorIdle = startIdleStop({
+    clock,
+    idleMs: idleStopMinutes * 60_000,
+    running: projects.awake,
+    busy: projects.busy,
+    stop: ({ id }) => projects.sleep(id),
+  });
+
+  // A ledger change whose notice a crash kept from its chief is told now.
+  watchHandoffs();
 
   return {
     url: server.url.origin,
     stop: () => {
       idle.stop();
+      coordinatorIdle.stop();
+      taskWorkers.stop();
       scheduler.stop();
+      subscriptions.stop();
       server.stop(true);
       store.close();
+      if (tempContext) rmSync(tempContext, { recursive: true, force: true });
     },
   };
 }
@@ -536,17 +733,4 @@ function upgrade(server: Bun.Server<SocketData>, req: Request, data: SocketData)
 
 function randomToken() {
   return crypto.randomUUID() + crypto.randomUUID();
-}
-
-function bearer(req: Request) {
-  return req.headers.get("authorization")?.replace(/^Bearer /, "") ?? "";
-}
-
-function unauthorized() {
-  return apiError(401, "unauthorized");
-}
-
-// Every error body control sends: an ApiError.
-function apiError(status: number, error: ApiErrorCode, message?: string) {
-  return Response.json((message === undefined ? { error } : { error, message }) satisfies ApiError, { status });
 }

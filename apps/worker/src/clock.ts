@@ -1,4 +1,5 @@
-// Control's clock. Injected so scheduler tests run on a fake one.
+// A clock for control's schedulers and a worker's token renewals. Injected so
+// tests run on a fake one.
 export type Clock = {
   now(): number;
   // Calls fn once, ms from now. Returns the cancel.

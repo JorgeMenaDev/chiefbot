@@ -4,7 +4,7 @@ output "registry" {
 }
 
 output "computer_image" {
-  description = "Push the bot computer image here."
+  description = "Push the computer image here."
   value       = local.computer_image
 }
 
@@ -14,11 +14,16 @@ output "control_image" {
 }
 
 output "worker_control_url" {
-  description = "Control's URL as bot VMs reach it."
+  description = "Control's URL as computer VMs reach it."
   value       = local.worker_control_url
 }
 
-output "control_tunnel" {
-  description = "Opens control on http://127.0.0.1:7410 on this Mac, through IAP."
-  value       = "gcloud compute start-iap-tunnel ${google_compute_instance.control.name} ${local.control_port} --local-host-port=localhost:${local.control_port} --zone=${var.zone} --project=${var.project_id}"
+output "control_ip" {
+  description = "Point var.domain's DNS A record here."
+  value       = google_compute_address.control_public.address
+}
+
+output "public_url" {
+  description = "Control as members reach it: the desktop's CHIEFBOT_CONTROL_URL."
+  value       = local.public_url
 }

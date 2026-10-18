@@ -16,7 +16,7 @@ function setup() {
 }
 
 const botId = BotId.parse("bot_1");
-const spec = { botId, env: { CHIEFBOT_BOT_TOKEN: "bot-secret" } };
+const spec = { id: botId, env: { CHIEFBOT_BOT_TOKEN: "bot-secret" } };
 
 test("create makes a stopped container from the image, with the env and the bot's own volume as home", async () => {
   const { engine, computers } = setup();
@@ -37,7 +37,7 @@ test("each bot is locked down: its own network, a non-root user, no capabilities
   const other = BotId.parse("bot_2");
 
   await computers.create(spec);
-  await computers.create({ botId: other, env: {} });
+  await computers.create({ id: other, env: {} });
 
   expect([...engine.networks]).toEqual(["chiefbot-bot_1-net", "chiefbot-bot_2-net"]);
   expect(engine.containers.get("chiefbot-bot_1")?.config).toMatchObject({
@@ -50,6 +50,14 @@ test("each bot is locked down: its own network, a non-root user, no capabilities
       Mounts: [{ Type: "volume", Source: "chiefbot-bot_1-home", Target: "/home/bot" }],
     },
   });
+});
+
+test("host.docker.internal names the Docker host on every engine, Linux included, so the worker reaches control there", async () => {
+  const { engine, computers } = setup();
+
+  await computers.create(spec);
+
+  expect(engine.containers.get("chiefbot-bot_1")?.config).toMatchObject({ HostConfig: { ExtraHosts: ["host.docker.internal:host-gateway"] } });
 });
 
 test("start runs the computer and stop stops it; repeating either is harmless", async () => {

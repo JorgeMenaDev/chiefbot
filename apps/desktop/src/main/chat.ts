@@ -10,39 +10,73 @@ export type ChatsOptions = {
   retryMs?: number;
 };
 
-// The bots' chats, owned by Electron main. Each opened chat keeps a WebSocket to
-// control's /bots/:id/chat. On reconnect it asks only for events after the last
-// one it has, so a dropped connection or a control restart resumes the stream.
-export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: ChatsOptions) {
-  type Chat = { view: ChatView; lastSeq: number; socket: WebSocket | null; retry: Timer | null };
-  const chats = new Map<BotId, Chat>();
-  const call = controlCaller({ controlUrl, session });
+// Follows one chat over a WebSocket to control: its whole history first, then
+// live events. On reconnect it asks only for events after the last one it has,
+// so a dropped connection or a control restart resumes the stream.
+// `path(after)` is the chat's WebSocket path, e.g. /bots/:id/chat?after=…
+export function followChat({
+  controlUrl,
+  session,
+  path,
+  onEvent,
+  retryMs,
+}: {
+  controlUrl: string;
+  session: () => string | null;
+  path: (after: number) => string;
+  onEvent: (event: ChatEvent) => void;
+  retryMs: number;
+}) {
+  let lastSeq = 0;
+  let socket: WebSocket | null = null;
+  let retry: Timer | null = null;
+  let closed = false;
 
-  function connect(botId: BotId, chat: Chat) {
+  function connect() {
     const token = session();
     if (!token) return;
-    const socket = new WebSocket(`${controlUrl.replace(/^http/, "ws")}/bots/${botId}/chat?after=${chat.lastSeq}`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
-    chat.socket = socket;
+    socket = new WebSocket(`${controlUrl.replace(/^http/, "ws")}${path(lastSeq)}`, { headers: { authorization: `Bearer ${token}` } });
     socket.onmessage = (message) => {
       const event = ChatEvent.parse(JSON.parse(String(message.data)));
-      chat.lastSeq = event.seq;
-      chat.view = foldChat(chat.view, event);
-      onChange(chat.view);
+      lastSeq = event.seq;
+      onEvent(event);
     };
     socket.onclose = () => {
-      if (chats.get(botId) === chat) chat.retry = setTimeout(() => connect(botId, chat), retryMs);
+      if (!closed) retry = setTimeout(connect, retryMs);
     };
   }
+  connect();
+
+  return {
+    close() {
+      closed = true;
+      if (retry) clearTimeout(retry);
+      socket?.close();
+    },
+  };
+}
+
+// The bots' chats, owned by Electron main. Each opened chat follows control's /bots/:id/chat.
+export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: ChatsOptions) {
+  const chats = new Map<BotId, { view: ChatView; close: () => void }>();
+  const call = controlCaller({ controlUrl, session });
 
   return {
     // Starts following a bot's chat (its whole history first). Repeat calls are harmless.
     open(botId: BotId) {
       if (chats.has(botId)) return;
-      const chat: Chat = { view: { botId, items: [], working: null }, lastSeq: 0, socket: null, retry: null };
+      const chat = { view: { botId, items: [], working: null }, close: () => {} };
       chats.set(botId, chat);
-      connect(botId, chat);
+      chat.close = followChat({
+        controlUrl,
+        session,
+        retryMs,
+        path: (after) => `/bots/${botId}/chat?after=${after}`,
+        onEvent: (event) => {
+          chat.view = foldChat(chat.view, event);
+          onChange(chat.view);
+        },
+      }).close;
     },
 
     view: (botId: BotId): ChatView => chats.get(botId)?.view ?? { botId, items: [], working: null },
@@ -63,10 +97,7 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
     disconnect() {
       const open = [...chats.values()];
       chats.clear();
-      for (const chat of open) {
-        if (chat.retry) clearTimeout(chat.retry);
-        chat.socket?.close();
-      }
+      for (const chat of open) chat.close();
     },
   };
 }
@@ -76,7 +107,8 @@ const waitingForApproval = "Waiting for your approval";
 // Folds one stored chat event into what the window shows. Item ids are scoped
 // to their turn, since the SDK's message and tool ids are only unique per turn.
 // While an approval is pending, the bot's status says it waits for the user.
-export function foldChat(view: ChatView, { turnId, event }: ChatEvent): ChatView {
+// The view is a bot's chat or a member's chat with a project's coordinator.
+export function foldChat<View extends Pick<ChatView, "items" | "working">>(view: View, { turnId, event }: ChatEvent): View {
   const upsert = (id: string, make: (existing: ChatItem | undefined) => ChatItem) => {
     const index = view.items.findIndex((item) => item.id === id);
     if (index === -1) return [...view.items, make(undefined)];
@@ -85,6 +117,8 @@ export function foldChat(view: ChatView, { turnId, event }: ChatEvent): ChatView
   switch (event.type) {
     case "user-message":
       return { ...view, working: "", items: [...view.items, { kind: "user", id: turnId, text: event.text }] };
+    case "payer":
+      return { ...view, items: [...view.items, { kind: "payer", id: `${turnId}:payer`, payer: event.payer }] };
     case "text-delta": {
       const id = `${turnId}:${event.messageId}`;
       const items = upsert(id, (existing) => ({
@@ -107,10 +141,20 @@ export function foldChat(view: ChatView, { turnId, event }: ChatEvent): ChatView
       const card: ChatItem = { kind: "approval", id: `${turnId}:${approvalId}`, approvalId, request: kind, detail, state: "pending" };
       return { ...view, working: waitingForApproval, items: [...view.items, card] };
     }
+    // Control's note about a handoff: it leaves any running turn as it is.
+    case "handoff-update":
+      return { ...view, items: [...view.items, { kind: "notice", id: `${turnId}:notice`, text: event.text }] };
     case "approval-answer": {
       const state = event.approved ? "approved" : "declined";
       const items = view.items.map(
         (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state } : item),
+      );
+      return { ...view, working: "", items };
+    }
+    // A withdrawn approval can no longer be answered. The turn goes on.
+    case "approval-withdrawn": {
+      const items = view.items.map(
+        (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state: "withdrawn" } : item),
       );
       return { ...view, working: "", items };
     }

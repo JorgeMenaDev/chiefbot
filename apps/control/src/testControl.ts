@@ -1,13 +1,27 @@
-import { Bot, ChatEvent, ClientEvent, SendMessageResponse, SignInResponse, type BotId } from "@chiefbot/contracts";
+import {
+  Bot,
+  ChatEvent,
+  ClientEvent,
+  ControlToCoordinator,
+  SendMessageResponse,
+  SignInResponse,
+  type BotId,
+  type CoordinatorToControl,
+  type ProjectId,
+  type TurnEvent,
+  type TurnId,
+} from "@chiefbot/contracts";
 import { startFakeGitHub, type FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Clock } from "./clock.ts";
+import type { Clock } from "@chiefbot/worker/clock";
+import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
 import { startControl } from "./control.ts";
+import type { SecretStore } from "./secrets/secretStore.ts";
 
 // Shared fixtures for control's tests: control with a fake GitHub and fake bot
 // computers (their workers run a fake Copilot), a signed-in user acting through
@@ -33,12 +47,16 @@ export type TestControlOptions = {
   user?: FakeGitHubUser;
   // The workers' Copilot. Default: fakeCopilot() echoing each prompt.
   copilot?: FakeCopilot;
-  // Where the workers serve git (fakeComputers).
+  // Where the workers serve git's credential helper (fakeComputers).
   gitSocket?: string;
   // Wraps the fake provider, e.g. to make start fail.
   provider?: (fake: ComputerProvider) => ComputerProvider;
   clock?: Clock;
   idleStopMinutes?: number;
+  // Mints organizations' Copilot tokens. Default: the repo app's, against the fake GitHub.
+  copilotTokens?: CopilotTokenMinter;
+  // Where control keeps secrets. Default: control's own encrypted store.
+  secrets?: SecretStore;
   // How long the signed-in user's GitHub tokens have left.
   accessTokenLeftMs?: number;
   refreshTokenLeftMs?: number;
@@ -54,18 +72,24 @@ export async function startTestControl({
   provider,
   clock,
   idleStopMinutes,
+  copilotTokens,
+  secrets,
   accessTokenLeftMs = 8 * hour,
   refreshTokenLeftMs = 180 * 24 * hour,
 }: TestControlOptions = {}) {
   const github = startFakeGitHub(githubUser ? { user: githubUser } : {});
-  const computers = fakeComputers({ copilot, ...(gitSocket === undefined ? {} : { gitSocket }) });
+  const computers = fakeComputers({ copilot, ...(gitSocket === undefined ? {} : { gitSocket }), ...(clock === undefined ? {} : { clock }) });
   const options = {
     port: 0,
     dbPath: persistent ? join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite") : ":memory:",
     githubApiUrl: github.url,
+    githubClientId: "test-client",
+    githubApp: github.app,
     computers: provider ? provider(computers.provider) : computers.provider,
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),
+    ...(copilotTokens === undefined ? {} : { copilotTokens }),
+    ...(secrets === undefined ? {} : { secrets }),
   };
   let control = startControl(options);
   const url = control.url;
@@ -93,6 +117,8 @@ export async function startTestControl({
     computers,
     copilot,
     url,
+    // Control's SQLite file, for a test that changes it while control is stopped.
+    dbPath: options.dbPath,
     user: await signIn(),
     signIn,
     stopControl,
@@ -125,7 +151,9 @@ function userApi(url: string, sessionToken: string) {
     api,
     createBot,
     watchBots,
-    watchChat: (botId: BotId, after = 0) => watchChat(url, auth, botId, after),
+    watchChat: (botId: BotId, after = 0) => watchChat(url, auth, `/bots/${botId}/chat?after=${after}`),
+    // The user's own chat with a project's coordinator.
+    watchProjectChat: (projectId: ProjectId, after = 0) => watchChat(url, auth, `/projects/${projectId}/chat?after=${after}`),
     // A new bot, once its worker is connected.
     async onlineBot(name: string) {
       const bot = await createBot(name);
@@ -142,11 +170,58 @@ function userApi(url: string, sessionToken: string) {
     bots: () => watchBots().until(() => true),
     statusOf: async (botId: BotId) => (await watchBots().until(() => true)).find((bot) => bot.id === botId)?.status,
     // The bot's whole chat history right now.
-    chat: async (botId: BotId) => (await watchChat(url, auth, botId).settled()).map(({ event }) => event),
+    chat: async (botId: BotId) => (await watchChat(url, auth, `/bots/${botId}/chat`).settled()).map(({ event }) => event),
   };
 }
 
 export type TestUser = ReturnType<typeof userApi>;
+
+// Stands in for the project's coordinator: its computer stops, and this socket
+// connects with the project's credential instead. It sees what control sends,
+// and speaks for the coordinator.
+export async function fakeCoordinator({ url, computers }: TestControl, projectId: ProjectId) {
+  await computers.provider.stop(projectId);
+  const token = computers.computers.get(projectId)?.spec.env.CHIEFBOT_PROJECT_TOKEN ?? "";
+  const received: ControlToCoordinator[] = [];
+  const waiters = new Set<() => void>();
+  let socket: WebSocket;
+  const connect = async () => {
+    socket = new WebSocket(`${url.replace("http", "ws")}/coordinator/${projectId}`, { headers: { authorization: `Bearer ${token}` } });
+    socket.onmessage = (message) => {
+      received.push(ControlToCoordinator.parse(JSON.parse(String(message.data))));
+      for (const wake of waiters) wake();
+    };
+    await new Promise((resolve) => (socket.onopen = resolve));
+  };
+  await connect();
+  atCleanUp(() => socket.close());
+  const send = (message: CoordinatorToControl) => socket.send(JSON.stringify(message));
+  // The nth message of `type` control sent (1 for the first), once it arrives.
+  const nth = <Type extends ControlToCoordinator["type"]>(type: Type, n = 1) =>
+    new Promise<Extract<ControlToCoordinator, { type: Type }>>((resolve, reject) => {
+      const check = () => {
+        const found = received.filter((message): message is Extract<ControlToCoordinator, { type: Type }> => message.type === type)[n - 1];
+        if (!found) return;
+        waiters.delete(check);
+        clearTimeout(timer);
+        resolve(found);
+      };
+      const timer = setTimeout(() => reject(new Error(`no ${type} #${n}; got ${JSON.stringify(received)}`)), 2000);
+      waiters.add(check);
+      check();
+    });
+  let index = 0;
+  return {
+    token,
+    nth,
+    hello: (activeTurnId: TurnId | null) => send({ type: "hello", activeTurnId }),
+    // The turn's next event; the first one of a turn is number 0.
+    event: (turnId: TurnId, event: TurnEvent, from?: number) => send({ type: "turn-event", turnId, index: from ?? index++, event }),
+    newTurn: () => void (index = 0),
+    reconnect: connect,
+  };
+}
+
 
 // The desktop's view of the user's bots: the /events WebSocket's latest list.
 function watchBotList(url: string, headers: Record<string, string>) {
@@ -167,9 +242,10 @@ function watchBotList(url: string, headers: Record<string, string>) {
   };
 }
 
-// The desktop's view of one bot's chat: every ChatEvent the chat socket sent after `after`.
-function watchChat(url: string, headers: Record<string, string>, botId: BotId, after = 0) {
-  const socket = new WebSocket(`${url.replace("http", "ws")}/bots/${botId}/chat?after=${after}`, { headers });
+// The desktop's view of one chat (a bot's, or the user's with a project's
+// coordinator): every ChatEvent the chat socket at `path` sent.
+function watchChat(url: string, headers: Record<string, string>, path: string) {
+  const socket = new WebSocket(`${url.replace("http", "ws")}${path}`, { headers });
   stops.push(() => socket.close());
   const opened = new Promise((resolve) => (socket.onopen = resolve));
   const events: ChatEvent[] = [];

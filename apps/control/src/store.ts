@@ -1,16 +1,18 @@
 import { Database } from "bun:sqlite";
 import {
-  ApprovalId,
   BotId,
   AUTO_MODEL,
-  ChatEvent,
   CopilotPlan,
   Routine,
   RoutineId,
   ModelReport,
   TurnId,
   UserId,
+  type ApprovalId,
+  type ApprovalKind,
   type BotToken,
+  type ChatEvent,
+  type HandoffUpdate,
   type TurnEvent,
   type GitHubTokens,
   type RoutineInput,
@@ -18,10 +20,19 @@ import {
   type SessionToken,
   type User,
 } from "@chiefbot/contracts";
+import { addColumn } from "./addColumn.ts";
+import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 import type { GitHubIdentity } from "./github.ts";
+import { handoffStore } from "./handoffStore.ts";
 import { nextDueAt } from "./schedule.ts";
+import { connectorStore } from "./connectors/connectorStore.ts";
+import { projectStore } from "./projectStore.ts";
+import { subscriptionStore } from "./subscriptionStore.ts";
+import { taskWorkerStore } from "./taskWorkerStore.ts";
+import { turnKeyStore } from "./turnKeys.ts";
+import { workspaceStore } from "./workspaceStore.ts";
 
-// Control's durable state in SQLite. Every row hangs off a user.
+// Control's durable state in SQLite. Every row hangs off a user or a workspace.
 export function openStore(path: string) {
   const db = new Database(path, { strict: true });
   db.run("PRAGMA journal_mode = WAL");
@@ -83,8 +94,8 @@ export function openStore(path: string) {
     event TEXT NOT NULL
   )`);
   db.run("CREATE INDEX IF NOT EXISTS chat_events_by_bot ON chat_events (bot_id, seq)");
-  // What a bot asked the user to approve, and the answer (NULL while pending).
-  // The request itself is in chat_events; this is what an answer is checked against.
+  // What a bot asked the user to approve, and the answer (NULL while pending)
+  // (turnRecords.ts approvalRecords). The request itself is in chat_events too.
   db.run(`CREATE TABLE IF NOT EXISTS approvals (
     id TEXT PRIMARY KEY,
     bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -92,15 +103,15 @@ export function openStore(path: string) {
     approved INTEGER
   )`);
 
-  // Columns added after the tables first shipped, added in place so existing databases keep working.
-  const addColumn = (table: string, column: string, definition: string) => {
-    const columns = db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all();
-    if (!columns.some(({ name }) => name === column)) db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  };
+  // Columns added after the tables first shipped.
   // The bot's Copilot model id.
-  addColumn("bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
+  addColumn(db, "bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
   // The latest ModelReport (JSON) a worker of the user's bots sent: control's cache of their plan's models.
-  addColumn("users", "copilot_models", "TEXT");
+  addColumn(db, "users", "copilot_models", "TEXT");
+  // What each approval asked and when, as for task workers and coordinators.
+  addColumn(db, "approvals", "kind", "TEXT NOT NULL DEFAULT 'tool'");
+  addColumn(db, "approvals", "detail", "TEXT NOT NULL DEFAULT ''");
+  addColumn(db, "approvals", "requested_at", "INTEGER NOT NULL DEFAULT 0");
 
   // A bot's routines: a prompt run on a cron schedule. next_due_at is the next
   // time it runs, epoch milliseconds.
@@ -149,9 +160,7 @@ export function openStore(path: string) {
     return toUser(row);
   };
 
-  type ChatEventRow = { seq: number; turn_id: string; event: string };
-  const toChatEvent = (row: ChatEventRow) =>
-    ChatEvent.parse({ seq: row.seq, turnId: row.turn_id, event: JSON.parse(row.event) });
+  const approvals = approvalRecords(db, { table: "approvals", owner: "bot_id", liveTurns: "SELECT id FROM turns WHERE done = 0" });
   const append = (botId: BotId, turnId: TurnId, event: ChatEvent["event"]) => {
     const row = db
       .query<ChatEventRow, [string, string, string]>(
@@ -192,7 +201,36 @@ export function openStore(path: string) {
     userId: UserId.parse(row.user_id),
   });
 
+  const workspaces = workspaceStore(db);
+  const projects = projectStore(db, hash);
+  const connectors = connectorStore(db);
+  const subscriptions = subscriptionStore(db, projects);
+  // A note from control in a bot's chat, in a turn of its own that is done already.
+  const postNotice = (botId: BotId, notice: HandoffUpdate) => {
+    const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
+    db.query("INSERT INTO turns (id, bot_id, done, created_at) VALUES (?1, ?2, 1, ?3)").run(turnId, botId, Date.now());
+    return append(botId, turnId, notice);
+  };
+  const handoffs = handoffStore(db, projects, postNotice);
+  const taskWorkers = taskWorkerStore(db, hash);
+  const turnKeys = turnKeyStore(db, hash);
+
   return {
+    // Workspaces, members and invites (workspaceStore.ts).
+    workspaces,
+    // Projects, task ledgers and coordinator chats (projectStore.ts).
+    projects,
+    // Connectors, members' connections and the call log (connectors/connectorStore.ts).
+    connectors,
+    // What chiefs of staff handed to projects (handoffStore.ts).
+    handoffs,
+    // Projects' subscriptions and the events they saw (subscriptionStore.ts).
+    subscriptions,
+    // Projects' task workers: launch records, transcripts, approvals (taskWorkerStore.ts).
+    taskWorkers,
+    // Every agent's running turns' keys (turnKeys.ts).
+    turnKeys,
+
     // Creates or updates the user GitHub identified.
     upsertUser(identity: GitHubIdentity): UserId {
       const row = db
@@ -322,54 +360,33 @@ export function openStore(path: string) {
     // finishes it and an approval-request records a pending approval. Null,
     // storing nothing, for a repeat or another bot's or a done turn.
     appendTurnEvent: db.transaction((botId: BotId, turnId: TurnId, index: number, event: TurnEvent): ChatEvent | null => {
-      const updated = db
-        .query(
-          `UPDATE turns SET next_index = next_index + 1, done = ?4
-           WHERE id = ?1 AND bot_id = ?2 AND done = 0 AND next_index = ?3 RETURNING id`,
-        )
-        .get(turnId, botId, index, event.type === "done" ? 1 : 0);
-      if (!updated) return null;
-      if (event.type === "approval-request") {
-        db.query("INSERT INTO approvals (id, bot_id, turn_id) VALUES (?1, ?2, ?3)").run(event.approvalId, botId, turnId);
-      }
+      if (!acceptEvent(db, "turns", "id = ?1 AND bot_id = ?2 AND done = 0", [turnId, botId], index)) return null;
+      if (event.type === "done") db.query("UPDATE turns SET done = 1 WHERE id = ?1").run(turnId);
+      if (event.type === "approval-request") approvals.record(botId, turnId, event, Date.now());
       return append(botId, turnId, event);
+    }),
+
+    // An approval control itself asks for (a push or a pull request), recorded in
+    // the bot's turn like the worker's own. Null when that turn is done.
+    requestApproval: db.transaction((botId: BotId, turnId: TurnId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }): ChatEvent | null => {
+      if (!db.query("SELECT 1 FROM turns WHERE id = ?1 AND bot_id = ?2 AND done = 0").get(turnId, botId)) return null;
+      approvals.record(botId, turnId, ask, Date.now());
+      return append(botId, turnId, { type: "approval-request", ...ask });
     }),
 
     // Records the user's answer to a pending approval of the bot's unfinished
     // turn. Null, storing nothing, when there is no such pending approval.
     answerApproval: db.transaction((botId: BotId, approvalId: ApprovalId, approved: boolean): ChatEvent | null => {
-      const row = db
-        .query<{ turn_id: string }, [string, string, number]>(
-          `UPDATE approvals SET approved = ?3 WHERE id = ?1 AND bot_id = ?2 AND approved IS NULL
-           AND turn_id IN (SELECT id FROM turns WHERE done = 0) RETURNING turn_id`,
-        )
-        .get(approvalId, botId, approved ? 1 : 0);
-      if (!row) return null;
-      return append(botId, TurnId.parse(row.turn_id), { type: "approval-answer", approvalId, approved });
+      const answered = approvals.answer(botId, approvalId, approved);
+      return answered && append(botId, answered.turnId, { type: "approval-answer", approvalId, approved });
     }),
 
     // Whether one of the bot's unfinished turns waits on the user's answer.
-    waitingOnApproval(botId: BotId) {
-      return (
-        db
-          .query<{ id: string }, [string]>(
-            `SELECT approvals.id FROM approvals JOIN turns ON turns.id = approvals.turn_id
-             WHERE approvals.bot_id = ?1 AND approvals.approved IS NULL AND turns.done = 0 LIMIT 1`,
-          )
-          .get(botId) !== null
-      );
-    },
+    waitingOnApproval: (botId: BotId) => approvals.pending(botId).length > 0,
 
     // The answered approvals of one of the bot's turns, for its worker, which may
     // have missed the answers. Another bot's turn has none.
-    answeredApprovals(botId: BotId, turnId: TurnId) {
-      return db
-        .query<{ id: string; approved: number }, [string, string]>(
-          "SELECT id, approved FROM approvals WHERE bot_id = ?1 AND turn_id = ?2 AND approved IS NOT NULL",
-        )
-        .all(botId, turnId)
-        .map((row) => ({ approvalId: ApprovalId.parse(row.id), approved: row.approved === 1 }));
-    },
+    answeredApprovals: (botId: BotId, turnId: TurnId) => approvals.answered(botId, turnId),
 
     // Ends an unfinished turn from control's side (its worker lost it).
     abandonTurn: db.transaction((botId: BotId, turnId: TurnId, message: string): ChatEvent[] => {

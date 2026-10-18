@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
+import { configuredGitHubApp, configuredSignIn } from "@chiefbot/setup";
 import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeSecretManager } from "./fakeSecretManager.ts";
-import { secretManagerStore } from "./secretManager.ts";
+import { restoreSetup, secretManagerStore } from "./secretManager.ts";
 import { localSecretStore, secretKeyFile } from "./secretStore.ts";
 
 const dir = () => mkdtempSync(join(tmpdir(), "chiefbot-secrets-"));
@@ -50,4 +51,26 @@ test("the Secret Manager store reads back the latest value and leaves one versio
   await store.delete("github-refresh-token-user_1");
   await store.delete("github-refresh-token-user_1");
   expect(await store.get("github-refresh-token-user_1")).toBeNull();
+});
+
+test("on GCP control writes setup's two files from Secret Manager into its home, owner-only, and names a missing one", async () => {
+  const { client } = fakeSecretManager();
+  const home = join(dir(), "chiefbot");
+  const app = { id: 42, slug: "chiefbot-abc123", clientId: "Iv1.repo", owner: "octo-org", htmlUrl: "https://github.com/apps/chiefbot-abc123" };
+  const config = { githubApp: app, signIn: { kind: "github-app", app: { ...app, id: 43, clientId: "Iv1.signin" } } };
+  const keys = { clientSecret: "secret", webhookSecret: null, privateKey: "-----BEGIN RSA PRIVATE KEY-----" };
+
+  await expect(restoreSetup(client, home)).rejects.toThrow(
+    "Secret Manager has no version of chiefbot-config. Add it: gcloud secrets versions add chiefbot-config --data-file=$HOME/.chiefbot/config.json",
+  );
+  for (const [id, data] of [["chiefbot-config", config], ["chiefbot-github-app-secrets", keys]] as const) {
+    await client.createSecret(id);
+    await client.addVersion(id, JSON.stringify(data));
+  }
+  await restoreSetup(client, home);
+
+  const env = { CHIEFBOT_HOME: home };
+  expect(configuredSignIn(env, "/nowhere")).toEqual({ kind: "github-app", clientId: "Iv1.signin" });
+  expect(configuredGitHubApp(env, "/nowhere")).toEqual({ id: 42, privateKey: "-----BEGIN RSA PRIVATE KEY-----" });
+  expect(statSync(join(home, "github-app-secrets.json")).mode & 0o777).toBe(0o600);
 });

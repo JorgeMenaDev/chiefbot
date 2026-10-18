@@ -1,15 +1,30 @@
-import type { GitHubTokenProvider, PermissionHandler, SessionConfig, SessionEvent } from "@github/copilot-sdk";
+import type { GitHubTokenProvider, MCPServerConfig, PermissionHandler, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 
-// The slice of the Copilot SDK the worker uses: one long-lived session per bot.
-// copilotSdk() (copilotSdk.ts) is the real SDK; tests use fakeCopilot().
+// How a session's runtime signs in to Copilot, and so who pays:
+//   seat          a person's Copilot seat: user tokens from the session's gitHubTokenProvider
+//   installation  an organization's: an installation token with Copilot Requests. GitHub
+//                 wants it in the runtime's COPILOT_GITHUB_TOKEN, never through
+//                 gitHubTokenProvider, so the session gets a runtime of its own,
+//                 started with this token (installationSession.ts renews it).
+export type CopilotAuth = { kind: "seat"; gitHubTokenProvider: GitHubTokenProvider } | { kind: "installation"; token: string };
+
+// The slice of the Copilot SDK the worker uses: one long-lived session per bot,
+// or one per member's chat on a project's coordinator. copilotSdk() and
+// coordinatorSdk() (copilotSdk.ts) are the real SDK; tests use fakeCopilot().
 export type Copilot = {
-  // Opens the bot's session, resuming its history when it already exists on disk.
-  // Every tool call goes through onPermissionRequest; `tools` are the worker's custom tools.
+  // Opens a session, resuming its history when it already exists on disk.
+  // Every tool call goes through onPermissionRequest; `tools` are the worker's
+  // custom tools. `instructions` are added to the system message. `mcpServers`
+  // are the session's MCP servers (a project's connectors), by name; `onMcpCall`
+  // runs before each of their tool calls (the SDK's onPreMcpToolCall hook).
   openSession(options: {
     sessionId: string;
-    gitHubTokenProvider: GitHubTokenProvider;
+    auth: CopilotAuth;
     onPermissionRequest: PermissionHandler;
     tools: NonNullable<SessionConfig["tools"]>;
+    instructions?: string;
+    mcpServers?: Record<string, MCPServerConfig>;
+    onMcpCall?: (serverName: string, toolName: string) => Promise<void>;
   }): Promise<BotSession>;
 };
 
@@ -23,8 +38,13 @@ export type BotSession = {
   on(handler: (event: SessionEvent) => void): () => void;
   // Starts a turn. Its events follow through on(), ending with session.idle.
   send(prompt: string): Promise<unknown>;
+  // Cuts the running turn short. The conversation is kept.
+  abort(): Promise<void>;
   // Runs the next turns on `model`. The conversation is kept.
   setModel(model: string): Promise<void>;
   // Lists models with the session's own auth, so for the bot owner's plan.
   rpc: { model: { list(): Promise<SdkModelList> } };
+  // Closes the session; its history stays on disk to resume. An installation
+  // session's runtime stops with it.
+  disconnect(): Promise<void>;
 };

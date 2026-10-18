@@ -15,6 +15,7 @@ test("device flow shows the code, waits through pending and slow_down, then retu
 
   const tokens = await runDeviceFlow({
     githubUrl: github.url,
+    kind: "github-app",
     clientId: "test-client",
     onCode: ({ userCode }) => codes.push(userCode),
     sleep: async (ms) => void sleeps.push(ms),
@@ -35,16 +36,41 @@ test("device flow shows the code, waits through pending and slow_down, then retu
   });
 });
 
+test("an OAuth App sign-in asks only for read:user, with expiring tokens; a GitHub App sign-in asks for no scope", async () => {
+  const github = startFakeGitHub();
+  stops.push(github.stop);
+  const signIn = (kind: "github-app" | "oauth-app") =>
+    runDeviceFlow({ githubUrl: github.url, kind, clientId: "test-client", onCode: () => {}, sleep: async () => {} });
+
+  await signIn("oauth-app");
+  await signIn("github-app");
+
+  expect(github.deviceCodeRequests).toEqual([
+    { client_id: "test-client", scope: "read:user offline_access" },
+    { client_id: "test-client" },
+  ]);
+});
+
 test("device flow fails when the user denies access", async () => {
   const github = startFakeGitHub({ pollErrors: ["access_denied"] });
   stops.push(github.stop);
 
   const run = runDeviceFlow({
     githubUrl: github.url,
+    kind: "github-app",
     clientId: "test-client",
     onCode: () => {},
     sleep: async () => {},
   });
 
   await expect(run).rejects.toThrow("access_denied");
+});
+
+test("device flow names the setting to turn on when the GitHub App has Device Flow off", async () => {
+  const github = startFakeGitHub({ deviceFlowDisabled: true });
+  stops.push(github.stop);
+
+  const run = runDeviceFlow({ githubUrl: github.url, kind: "github-app", clientId: "test-client", onCode: () => {}, sleep: async () => {} });
+
+  await expect(run).rejects.toThrow(/Enable Device Flow/);
 });
