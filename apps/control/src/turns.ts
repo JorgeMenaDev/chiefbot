@@ -66,8 +66,9 @@ export function chatTurns({
     if (humanHasScreen(botId)) return { error: "human_has_screen" };
     const model = store.botFor(userId, botId)?.model ?? AUTO_MODEL;
     const started = store.startTurn(botId, text);
+    const turnKey = store.turnKeys.issue({ agent: "bot", botId, userId, turnId: started.turnId });
     publishChat(botId, started);
-    worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, text, model } satisfies ControlToWorker));
+    worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, turnKey, text, model } satisfies ControlToWorker));
     return { turnId: started.turnId };
   };
 
@@ -93,14 +94,17 @@ export function chatTurns({
     // The bot's worker connected or went away: it must say hello before its next turn.
     workerChanged: (botId: BotId) => void greeted.delete(botId),
 
-    // A message from the bot's worker. `reply` answers on its connection.
-    fromWorker(botId: BotId, message: Exclude<WorkerToControl, { type: "models" }>, reply: (message: ControlToWorker) => void) {
+    // A message from the worker of `userId`'s bot. `reply` answers on its connection.
+    fromWorker(userId: UserId, botId: BotId, message: Exclude<WorkerToControl, { type: "models" }>, reply: (message: ControlToWorker) => void) {
       if (message.type === "turn-event") {
         return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
       }
-      // Answers the worker may have missed while it was away.
-      if (message.activeTurnId) {
-        for (const answer of store.answeredApprovals(botId, message.activeTurnId)) reply({ type: "approval-answer", ...answer });
+      // Answers the worker may have missed while it was away, and a new key for
+      // its turn if control restarted since it started.
+      const turnId = message.activeTurnId;
+      if (turnId && store.unfinishedTurns(botId).includes(turnId)) {
+        for (const answer of store.answeredApprovals(botId, turnId)) reply({ type: "approval-answer", ...answer });
+        if (store.turnKeys.missing(turnId)) reply({ type: "turn-key", turnId, turnKey: store.turnKeys.issue({ agent: "bot", botId, userId, turnId }) });
       }
       // The worker lost every unfinished turn but the one it says it is still running.
       for (const turnId of store.unfinishedTurns(botId)) {

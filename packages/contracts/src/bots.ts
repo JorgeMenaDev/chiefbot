@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { User } from "./auth.ts";
-import { TurnEventMessage, TurnHello } from "./chat.ts";
+import { TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
 import { AgentConnector } from "./connectors.ts";
-import { ApprovalId, BotId, ProjectId, TurnId } from "./ids.ts";
+import { ApprovalId, BotId, ProjectId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport } from "./models.ts";
 import { ProjectTasks } from "./projects.ts";
 import { ProjectWorkers } from "./taskWorkers.ts";
@@ -50,9 +50,12 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 // Control → worker on the /worker WebSocket.
 //   bound           control accepted the credential; sent right after. The connection belongs to
 //                   that one bot (or, on /task-worker, that one task worker).
-//   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time
+//   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time.
+//                   `turnKey` is the turn's key (ids.ts TurnKey): the bearer of every call to control in it
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
-//                   (control's proxy runs them as the member who asked). Sent once, after its first hello.
+//                   (control's proxy runs them as the member who asked), and its `turnKey`. Sent once,
+//                   after its first hello.
+//   turn-key        the running turn's new key (chat.ts TurnKeyMessage)
 //   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
 //   screen-open     a viewer is waiting: dial /worker/:botId/screen/:streamId and pipe the screen's VNC bytes through it
 //   approval-answer the user's answer to one of the worker's approval-requests.
@@ -60,10 +63,11 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //                   active turn's answered approvals; the worker ignores repeats.
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound") }),
-  z.object({ type: z.literal("run-turn"), turnId: TurnId, text: z.string(), model: z.string() }),
+  z.object({ type: z.literal("run-turn"), turnId: TurnId, turnKey: TurnKey, text: z.string(), model: z.string() }),
   z.object({
     type: z.literal("run-task"),
     turnId: TurnId,
+    turnKey: TurnKey,
     text: z.string(),
     payer: CopilotPayer,
     connectors: z.array(AgentConnector),
@@ -71,6 +75,7 @@ export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("screen-control"), control: ScreenControl }),
   z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),
   z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() }),
+  TurnKeyMessage,
 ]);
 export type ControlToWorker = z.infer<typeof ControlToWorker>;
 

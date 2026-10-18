@@ -48,6 +48,7 @@ import { taskWorkerHost, type TaskWorkerSocketData } from "./taskWorkers.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
+import { botTurn, heldTurn, type BotTurn } from "./turnKeys.ts";
 import { chatTurns } from "./turns.ts";
 import { workspaceRoutes } from "./workspaces.ts";
 
@@ -136,15 +137,19 @@ type SocketData =
 //   WS     /worker/:botId     bearer bot token of that bot → ControlToWorker; WorkerToControl back
 //                             (403 for another bot's)
 //   GET    /worker/:botId/github-token  bearer bot token of that bot → BrokeredGitHubToken
-//                             (403 BrokerRefusal when the owner must sign in again)
+//                             (403 BrokerRefusal when the owner must sign in again). The bot token, not a
+//                             turn key: a bot always acts for its owner, who also needs it between turns,
+//                             for the model picker.
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
-//   POST   /worker/:botId/pull-requests  same token, body PullRequestArgs → 201 OpenedPullRequest once the
-//                             owner approves (403 declined, 409 no_turn, 404 repo_not_found, 403 repo_read_only
-//                             or app_not_installed, 502 github_failed)
+//   POST   /worker/:botId/pull-requests  bearer the key of the bot's running turn (403 invalid_turn_key
+//                             otherwise), body PullRequestArgs → 201 OpenedPullRequest once the owner
+//                             approves in that turn (403 declined, 409 no_turn, 404 repo_not_found, 403
+//                             repo_read_only or app_not_installed, 502 github_failed)
 //   GET    /git/:owner/:repo/info/refs, POST /git/:owner/:repo/git-upload-pack|git-receive-pack
-//                             git's smart HTTP, Basic auth with a bot token as the password: control's git
-//                             proxy to GitHub. A push waits for the owner's approval (repos.ts). Errors are
-//                             text/plain for git to print, not ApiErrors.
+//                             git's smart HTTP, Basic auth with the key of a bot's or task worker's
+//                             running turn as the password: control's git proxy to GitHub. A push waits
+//                             for approval in that turn (repos.ts). Errors are text/plain for git to
+//                             print, not ApiErrors.
 //   …      /workspaces, /invites  workspaces, members and invites (workspaces.ts)
 //   …      /workspaces/:id/projects, /projects, /coordinator  projects, their coordinators,
 //                             task ledgers and chats (projects.ts)
@@ -154,8 +159,8 @@ type SocketData =
 //                             (connectors/connectors.ts)
 //   …      /projects/:id/subscriptions  what a project listens to: CI runs, issue queries and
 //                             schedules, each event handled once (subscriptions.ts)
-//   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff: handing work to
-//                             projects and watching it (handoffs.ts)
+//   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
+//                             turn's key: handing work to projects and watching it (handoffs.ts)
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //
@@ -211,12 +216,12 @@ export function startControl({
   });
   // Approvals control asks for itself, and the repo access they guard.
   const approvals = controlApprovals();
-  // A bot as repo access sees it: its owner, asked in the bot's running turn.
-  const botAgent = ({ botId, userId }: { botId: BotId; userId: UserId }): RepoAgent => ({
+  // A bot's turn as repo access sees it: its owner, asked in that turn.
+  const botAgent = ({ botId, userId, turnId }: BotTurn): RepoAgent => ({
     userId,
     ask: (kind, detail, signal) =>
       approvals.ask((approvalId) => {
-        const event = store.requestApproval(botId, { approvalId, kind, detail });
+        const event = store.requestApproval(botId, turnId, { approvalId, kind, detail });
         turns.publishChat(botId, event);
         return event;
       }, signal),
@@ -226,9 +231,10 @@ export function startControl({
     githubApiUrl,
     app: githubApp,
     ownerLogin: async (userId) => ((await broker.accessToken(userId)) ? (store.user(userId)?.login ?? null) : null),
-    agentFor: (credential) => {
-      const bot = store.botForToken(credential);
-      return bot ? botAgent(bot) : taskWorkers.agentFor(credential);
+    agentFor: (key) => {
+      const turn = store.turnKeys.holder(key);
+      if (turn?.agent === "bot") return botAgent(turn);
+      return turn?.agent === "task-worker" ? taskWorkers.agentOf(turn) : null;
     },
   });
 
@@ -341,7 +347,6 @@ export function startControl({
     req:
       | Bun.BunRequest<"/worker/:botId">
       | Bun.BunRequest<"/worker/:botId/github-token">
-      | Bun.BunRequest<"/worker/:botId/pull-requests">
       | Bun.BunRequest<"/worker/:botId/screen/:streamId">,
   ) => {
     const bot = store.botForToken(bearer(req));
@@ -586,7 +591,7 @@ export function startControl({
       // The bot's create_pull_request tool. Waits, however long, for the owner's answer.
       "/worker/:botId/pull-requests": {
         POST: async (req, server) => {
-          const bot = ownWorker(req);
+          const bot = heldTurn(store.turnKeys, req, botTurn(req.params.botId));
           if (bot instanceof Response) return bot;
           const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
           if (!args.success) return apiError(400, "invalid_pull_request");
@@ -662,7 +667,7 @@ export function startControl({
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));
         if (message.type === "models") return store.setModelReport(ws.data.userId, message.report);
-        turns.fromWorker(ws.data.botId, message, (reply) => ws.send(JSON.stringify(reply)));
+        turns.fromWorker(ws.data.userId, ws.data.botId, message, (reply) => ws.send(JSON.stringify(reply)));
       },
     },
   });

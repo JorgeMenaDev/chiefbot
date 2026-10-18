@@ -11,6 +11,15 @@ export type BotId = z.infer<typeof BotId>;
 export const TurnId = z.string().min(1).brand<"TurnId">();
 export type TurnId = z.infer<typeof TurnId>;
 
+// The key of one running turn of an agent (a bot, a project's coordinator or a
+// task worker). Control issues it when the turn starts, bound to that agent, the
+// member the turn runs for and the turn; it works only while that turn runs, and
+// control keeps only its hash. The agent's computer sends it as the bearer on
+// every call it makes to control in the turn: that is the only way control
+// knows who is acting and in which turn.
+export const TurnKey = z.string().min(1).brand<"TurnKey">();
+export type TurnKey = z.infer<typeof TurnKey>;
+
 // One thing the bot asked the user to approve (a push, a pull request).
 export const ApprovalId = z.string().min(1).brand<"ApprovalId">();
 export type ApprovalId = z.infer<typeof ApprovalId>;

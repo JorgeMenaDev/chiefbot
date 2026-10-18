@@ -3,8 +3,8 @@ import type { AgentConnector } from "@chiefbot/contracts";
 
 // The SDK's MCP server config for an agent session's connectors (from control).
 // A remote connector is reached through control's proxy at
-// `<base>/mcp/<name>` with the computer's credential; control adds the identity
-// of the member whose turn it runs. A command connector is started on this
+// `<base>/mcp/<name>` with the running turn's key; control adds the identity
+// of that turn's member. A command connector is started on this
 // computer with the env control sent, which holds no credential.
 export function connectorServers(connectors: AgentConnector[], { base, credential }: { base: string; credential: string }): Record<string, MCPServerConfig> {
   return Object.fromEntries(

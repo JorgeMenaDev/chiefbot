@@ -4,7 +4,7 @@ import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk } from "@chiefbot/worker/fake-copilot";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
-import { atCleanUp, cleanUp, doneCount, startTestControl, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, doneCount, fakeCoordinator, startTestControl, type TestUser } from "./testControl.ts";
 
 afterEach(() => {
   cleanUp();
@@ -41,8 +41,7 @@ async function team(mode: CopilotMode, minter = fakeMinter(), { projectFile = ""
   await before(owner, workspace);
   control.github.createRepo("octo-org/shop", { "chiefbot.project.yaml": projectFile });
   const project = Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo: "octo-org/shop" })).json());
-  const coordinatorAuth = { authorization: `Bearer ${control.computers.computers.get(project.id)?.spec.env.CHIEFBOT_PROJECT_TOKEN}` };
-  return { ...control, owner, guest, workspace, project, minter, coordinatorAuth };
+  return { ...control, owner, guest, workspace, project, minter };
 }
 
 // Sends a member's message to the coordinator and resolves with their chat once it is answered.
@@ -67,22 +66,24 @@ test("without org billing, a coordinator turn runs on the seat of the member who
 });
 
 test("with org billing, a coordinator turn runs on the organization's token, and no member's seat is handed out", async () => {
-  const { url, guest, project, copilot, minter, coordinatorAuth } = await team("org");
-  const seatAsked: number[] = [];
-  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
-  copilot.script = async function* () {
-    seatAsked.push((await fetch(`${url}/coordinator/${project.id}/github-token/${guestId}`, { headers: coordinatorAuth })).status);
-    yield sdk.idle();
-  };
+  const control = await team("org");
+  const { url, guest, project, copilot, minter } = control;
 
   const chat = await ask(guest, project, "plan the checkout");
 
   expect(payers(chat)).toEqual([{ kind: "org", account: "octo-org" }]);
   expect(copilot.tokens).toEqual(["ghs_org_1"]);
   expect(minter.minted).toEqual(["octo-org/shop"]);
-  expect(seatAsked).toEqual([404]);
-  // Outside a turn, the organization's token is not handed out either.
-  expect((await fetch(`${url}/coordinator/${project.id}/installation-token`, { headers: coordinatorAuth })).status).toBe(404);
+  // An org turn's key gets the organization's token and no seat; once the turn ends, nothing.
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "again" });
+  const { turnId, turnKey } = await coordinator.nth("run-turn");
+  const call = (path: string) => fetch(`${url}/coordinator/${project.id}${path}`, { headers: { authorization: `Bearer ${turnKey}` } });
+  const inTurn = [await call("/github-token"), await call("/installation-token")];
+  coordinator.event(turnId, { type: "done" });
+  await guest.watchProjectChat(project.id).until(doneCount(2));
+  expect([...inTurn, await call("/installation-token")].map(({ status }) => status)).toEqual([404, 200, 403]);
 });
 
 test("an hour on, a new organization token restarts the coordinator's runtime and resumes the same session", async () => {

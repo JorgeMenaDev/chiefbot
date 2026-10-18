@@ -1,5 +1,5 @@
 import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
-import { ApprovalId, ControlToWorker, type ApprovalKind, type ScreenControl, type TurnId } from "@chiefbot/contracts";
+import { ApprovalId, ControlToWorker, type ApprovalKind, type ScreenControl, type TurnId, type TurnKey } from "@chiefbot/contracts";
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
@@ -48,6 +48,9 @@ export type WorkerOptions = {
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
 // Pushes and pull requests go through control, which asks the user itself.
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
+// Every call to control in a turn (git's, tools', a task's tokens and connectors)
+// carries that turn's key; none is made outside a turn. Only a bot's own Copilot
+// seat token is asked for with the bot's credential: its model listing runs between turns.
 export function startWorker({
   controlUrl,
   route = "worker",
@@ -124,6 +127,7 @@ export function startWorker({
     { payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
   ) {
     const remote = new Set(connectors.flatMap(({ kind, name }) => (kind === "remote" ? [name] : [])));
+    const turnKey = () => link.turnKey();
     const askUnlessControlDoes: PermissionHandler = async (request, invocation) => {
       if (request.kind !== "mcp" || !remote.has(request.serverName)) return options.onPermissionRequest(request, invocation);
       await agentHasScreen();
@@ -135,11 +139,11 @@ export function startWorker({
       {
         ...options,
         onPermissionRequest: askUnlessControlDoes,
-        mcpServers: connectorServers(connectors, { base, credential: token }),
-        onMcpCall: link.reportCalls(connectors),
+        mcpServers: connectorServers(connectors, { base, credential: turnKey() }),
+        onMcpCall: link.reportCalls(connectors, turnKey),
         onCut: withdrawApprovals,
       },
-      "/github-token",
+      turnKey,
     );
   }
 
@@ -149,10 +153,11 @@ export function startWorker({
   // worker's), so after a restart the worker resumes the same conversation.
   function openSession(task?: Extract<ControlToWorker, { type: "run-task" }>) {
     // A task worker does one task for a project: it is no one's chief of staff.
-    const tools = [pullRequestTool({ base, token }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, botToken: token }) : [])];
+    const turnKey = () => link.turnKey();
+    const tools = [pullRequestTool({ base, turnKey }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : [])];
     const options = { sessionId: id, onPermissionRequest, tools };
     // A chief always runs on its owner's own Copilot seat.
-    session ??= (task ? taskSession(options, task) : link.openSession(copilot, "seat", options, "/github-token")).then((opened) => {
+    session ??= (task ? taskSession(options, task) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
       opened.on((event: SessionEvent) => link.sessionEvent(event));
       return opened;
     });
@@ -177,8 +182,8 @@ export function startWorker({
   // Control sends a turn only once the previous one is done. A changed model is
   // set on the session first, so switching mid-conversation keeps the history.
   // A task worker's one turn (`task`) opens its session and runs on the default model.
-  async function runTurn(turnId: TurnId, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
-    link.begin(turnId);
+  async function runTurn(turnId: TurnId, turnKey: TurnKey, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
+    link.begin(turnId, turnKey);
     try {
       const opened = await openSession(task);
       if (model !== null && sessionModel !== model) {
@@ -205,10 +210,13 @@ export function startWorker({
           if (route === "worker") void reportModels();
           break;
         case "run-turn":
-          void runTurn(message.turnId, message.text, message.model);
+          void runTurn(message.turnId, message.turnKey, message.text, message.model);
           break;
         case "run-task":
-          void runTurn(message.turnId, message.text, null, message);
+          void runTurn(message.turnId, message.turnKey, message.text, null, message);
+          break;
+        case "turn-key":
+          link.rekey(message.turnId, message.turnKey);
           break;
         case "screen-control":
           screenControl = message.control;
@@ -230,13 +238,18 @@ export function startWorker({
     },
   });
 
-  // Git's credential helper asks here for the computer's credential, which control's
-  // git proxy takes (never a GitHub token), so it is never written to disk. A
-  // stopped container keeps /tmp, so a stale socket file is removed first.
+  // Git's credential helper asks here for the running turn's key, which control's
+  // git proxy takes (never a GitHub token), so it is never written to disk.
+  // Outside a turn there is none: git then fails. A stopped container keeps
+  // /tmp, so a stale socket file is removed first.
   let git: Bun.Server<undefined> | null = null;
   if (gitSocket) {
     rmSync(gitSocket, { force: true });
-    git = Bun.serve({ unix: gitSocket, fetch: () => new Response(`username=chiefbot\npassword=${token}\n`) });
+    git = Bun.serve({
+      unix: gitSocket,
+      fetch: () =>
+        link.activeTurnId() ? new Response(`username=chiefbot\npassword=${link.turnKey()}\n`) : new Response("No turn is running.", { status: 409 }),
+    });
   }
 
   return {

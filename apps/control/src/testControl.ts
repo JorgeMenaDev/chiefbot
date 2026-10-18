@@ -1,4 +1,16 @@
-import { Bot, ChatEvent, ClientEvent, SendMessageResponse, SignInResponse, type BotId, type ProjectId } from "@chiefbot/contracts";
+import {
+  Bot,
+  ChatEvent,
+  ClientEvent,
+  ControlToCoordinator,
+  SendMessageResponse,
+  SignInResponse,
+  type BotId,
+  type CoordinatorToControl,
+  type ProjectId,
+  type TurnEvent,
+  type TurnId,
+} from "@chiefbot/contracts";
 import { startFakeGitHub, type FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import { mkdtempSync } from "node:fs";
@@ -163,6 +175,53 @@ function userApi(url: string, sessionToken: string) {
 }
 
 export type TestUser = ReturnType<typeof userApi>;
+
+// Stands in for the project's coordinator: its computer stops, and this socket
+// connects with the project's credential instead. It sees what control sends,
+// and speaks for the coordinator.
+export async function fakeCoordinator({ url, computers }: TestControl, projectId: ProjectId) {
+  await computers.provider.stop(projectId);
+  const token = computers.computers.get(projectId)?.spec.env.CHIEFBOT_PROJECT_TOKEN ?? "";
+  const received: ControlToCoordinator[] = [];
+  const waiters = new Set<() => void>();
+  let socket: WebSocket;
+  const connect = async () => {
+    socket = new WebSocket(`${url.replace("http", "ws")}/coordinator/${projectId}`, { headers: { authorization: `Bearer ${token}` } });
+    socket.onmessage = (message) => {
+      received.push(ControlToCoordinator.parse(JSON.parse(String(message.data))));
+      for (const wake of waiters) wake();
+    };
+    await new Promise((resolve) => (socket.onopen = resolve));
+  };
+  await connect();
+  atCleanUp(() => socket.close());
+  const send = (message: CoordinatorToControl) => socket.send(JSON.stringify(message));
+  // The nth message of `type` control sent (1 for the first), once it arrives.
+  const nth = <Type extends ControlToCoordinator["type"]>(type: Type, n = 1) =>
+    new Promise<Extract<ControlToCoordinator, { type: Type }>>((resolve, reject) => {
+      const check = () => {
+        const found = received.filter((message): message is Extract<ControlToCoordinator, { type: Type }> => message.type === type)[n - 1];
+        if (!found) return;
+        waiters.delete(check);
+        clearTimeout(timer);
+        resolve(found);
+      };
+      const timer = setTimeout(() => reject(new Error(`no ${type} #${n}; got ${JSON.stringify(received)}`)), 2000);
+      waiters.add(check);
+      check();
+    });
+  let index = 0;
+  return {
+    token,
+    nth,
+    hello: (activeTurnId: TurnId | null) => send({ type: "hello", activeTurnId }),
+    // The turn's next event; the first one of a turn is number 0.
+    event: (turnId: TurnId, event: TurnEvent, from?: number) => send({ type: "turn-event", turnId, index: from ?? index++, event }),
+    newTurn: () => void (index = 0),
+    reconnect: connect,
+  };
+}
+
 
 // The desktop's view of the user's bots: the /events WebSocket's latest list.
 function watchBotList(url: string, headers: Record<string, string>) {

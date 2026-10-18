@@ -328,12 +328,12 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     },
 
     // An approval control itself asks for (a push, a pull request or a connector
-    // call) at `now`, recorded in the worker's turn like its own. Null when the worker is not working.
+    // call) at `now`, recorded in the worker's turn like its own. Null unless that turn is working.
     requestApproval: db.transaction(
-      (workerId: TaskWorkerId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }, now: number): ChatEvent | null => {
-        const working = db.query<{ turn_id: string }, [string]>("SELECT turn_id FROM task_workers WHERE id = ?1 AND state = 'working'").get(workerId);
+      (workerId: TaskWorkerId, turnId: TurnId, ask: { approvalId: ApprovalId; kind: ApprovalKind; detail: string }, now: number): ChatEvent | null => {
+        const working = db.query("SELECT 1 FROM task_workers WHERE id = ?1 AND turn_id = ?2 AND state = 'working'").get(workerId, turnId);
         if (!working) return null;
-        approvals.record(workerId, TurnId.parse(working.turn_id), ask, now);
+        approvals.record(workerId, turnId, ask, now);
         touch(workerId);
         return append(workerId, { type: "approval-request", ...ask });
       },

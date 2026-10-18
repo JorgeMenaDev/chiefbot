@@ -7,6 +7,7 @@ import {
   type Project,
   type ProjectMember,
   type TurnId,
+  type TurnKey,
   type UserId,
 } from "@chiefbot/contracts";
 import { connectorServers } from "./connectorServers.ts";
@@ -33,14 +34,16 @@ export type CoordinatorOptions = {
 // connection up (controlLink.ts), resending its latest turn's events on every
 // reconnect. Each member has their own chat, so their own Copilot session.
 // Each turn runs on the payer control names: the member's own Copilot seat (a
-// token control brokers for the member whose turn is running), or, when the
+// token control brokers for the turn's member), or, when the
 // workspace's organization pays, an installation token control mints, which
 // the session's own runtime is restarted on when it runs low (installationSession.ts).
 // Control's scheduler sends one turn at a time for the whole project. The
 // coordinator plans, tracks and dispatches work: its tools are the task ledger,
 // the shared context and the project's workers, all kept by control, plus the
 // project's connectors that control sends with each turn, which act as the
-// member whoever pays for Copilot. No shell, no files.
+// member whoever pays for Copilot. No shell, no files. Every call a member's
+// session makes to control carries the key of that member's running turn, and
+// none is made outside it. A member who leaves the workspace has their session stopped.
 export function startCoordinator({ controlUrl, projectId, projectToken, copilot, retryMs = 2000, onBound }: CoordinatorOptions) {
   const base = `${controlUrl}/coordinator/${projectId}`;
   let project: Project | null = null;
@@ -51,23 +54,27 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   // `key` identifies both; `unsubscribe` stops its events reaching the chat.
   const sessions = new Map<UserId, { key: string; session: Promise<BotSession>; unsubscribe: () => void }>();
 
-  const tools = coordinatorTools(async (toolCall: CoordinatorToolCall) =>
-    (await link.fromControl("/tools", { method: "POST", body: JSON.stringify(toolCall) })).text(),
-  );
-  const toolNames = new Set<string>(tools.map(({ name }) => name));
+  // The running turn's key, for a call of the member's session: only in their own turn.
+  const keyOf = (userId: UserId) => {
+    if (activeMember !== userId) throw new Error("This member's turn is not running, so Chiefbot refuses this call.");
+    return link.turnKey();
+  };
 
   // Only the coordinator's own tools and its session's connectors run; the
   // empty-mode runtime offers no others anyway.
   const permissionFor =
-    (connectors: AgentConnector[]): PermissionHandler =>
+    (toolNames: Set<string>, connectors: AgentConnector[]): PermissionHandler =>
     async (request) =>
       (request.kind === "custom-tool" && toolNames.has(request.toolName)) ||
       (request.kind === "mcp" && connectors.some(({ name }) => name === request.serverName))
         ? { kind: "approve-once" }
         : { kind: "reject", feedback: "The coordinator can only use its task, context and worker tools and the project's connectors." };
 
-  async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[]) {
-    const key = JSON.stringify({ payer: payer.kind, connectors });
+  async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[], turnKey: TurnKey) {
+    // A remote connector's server config carries the turn's key, so a session
+    // with one opens again (resumed) for each turn.
+    const remote = connectors.some(({ kind }) => kind === "remote");
+    const key = JSON.stringify({ payer: payer.kind, connectors, turnKey: remote ? turnKey : null });
     const open = sessions.get(member.userId);
     if (open?.key === key) return open.session;
     if (!project) throw new Error("A turn came before control said which project this is");
@@ -78,16 +85,20 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       open.unsubscribe();
       await replaced?.disconnect();
     }
+    const bearer = () => keyOf(member.userId);
+    const tools = coordinatorTools(async (toolCall: CoordinatorToolCall) =>
+      (await link.fromControl("/tools", bearer(), { method: "POST", body: JSON.stringify(toolCall) })).text(),
+    );
     const options = {
       sessionId: `${projectId}-${member.userId}`,
-      onPermissionRequest: permissionFor(connectors),
+      onPermissionRequest: permissionFor(new Set(tools.map(({ name }) => name)), connectors),
       tools,
       instructions: instructions(project, member),
-      mcpServers: connectorServers(connectors, { base, credential: projectToken }),
-      onMcpCall: link.reportCalls(connectors),
+      mcpServers: connectorServers(connectors, { base, credential: turnKey }),
+      onMcpCall: link.reportCalls(connectors, bearer),
     };
     // The member's own seat is brokered by control only while their turn runs.
-    const opening = link.openSession(copilot, payer.kind, options, `/github-token/${member.userId}`);
+    const opening = link.openSession(copilot, payer.kind, options, bearer);
     let stopEvents = () => {};
     const session = opening.then((opened) => {
       stopEvents = opened.on((event) => onSessionEvent(member.userId, event));
@@ -104,14 +115,27 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     if (activeMember === userId) link.sessionEvent(event);
   }
 
-  async function runTurn(turnId: TurnId, member: ProjectMember, text: string, payer: CopilotPayer, connectors: AgentConnector[]) {
-    link.begin(turnId);
+  async function runTurn({ turnId, turnKey, member, text, payer, connectors }: Extract<ControlToCoordinator, { type: "run-turn" }>) {
+    link.begin(turnId, turnKey);
     activeMember = member.userId;
     try {
-      await (await sessionFor(member, payer, connectors)).send(text);
+      await (await sessionFor(member, payer, connectors, turnKey)).send(text);
     } catch (error) {
       link.fail(turnId, error);
     }
+  }
+
+  // The member left the workspace: their session stops now, and closes (an
+  // organization's runtime stops with it). Control ended their turn already.
+  async function stopMember(userId: UserId) {
+    if (activeMember === userId) activeMember = null;
+    const open = sessions.get(userId);
+    sessions.delete(userId);
+    if (!open) return;
+    open.unsubscribe();
+    const session = await open.session.catch(() => null);
+    await session?.abort();
+    await session?.disconnect();
   }
 
   const link = controlLink({
@@ -120,10 +144,21 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     retryMs,
     parse: (json) => ControlToCoordinator.parse(json),
     onMessage(message) {
-      if (message.type === "bound") {
-        project = message.project;
-        onBound?.(message.project);
-      } else void runTurn(message.turnId, message.member, message.text, message.payer, message.connectors);
+      switch (message.type) {
+        case "bound":
+          project = message.project;
+          onBound?.(message.project);
+          break;
+        case "run-turn":
+          void runTurn(message);
+          break;
+        case "turn-key":
+          link.rekey(message.turnId, message.turnKey);
+          break;
+        case "member-removed":
+          void stopMember(message.userId);
+          break;
+      }
     },
   });
 

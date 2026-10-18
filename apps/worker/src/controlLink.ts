@@ -9,6 +9,7 @@ import {
   type ReportedConnectorCall,
   type TurnEvent,
   type TurnId,
+  type TurnKey,
   type WorkerToControl,
 } from "@chiefbot/contracts";
 import type { Clock } from "./clock.ts";
@@ -26,8 +27,10 @@ import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 // `begin`s a turn, streams its SDK session's events through `sessionEvent` (as
 // numbered TurnEvents), and a turn ends with `done`. Every event of the latest
 // turn is resent on each reconnect, then a hello names the turn still running
-// (control stores each event once). Its HTTP calls throw with control's reason
-// when control refuses.
+// (control stores each event once). Each turn comes with its key (contracts
+// ids.ts TurnKey), the bearer of every call to control in it; the computer's
+// credential is only for the WebSocket (and a bot's own model listing). Its HTTP
+// calls throw with control's reason when control refuses.
 export function controlLink<Message>({
   base,
   token,
@@ -51,8 +54,8 @@ export function controlLink<Message>({
   let stopped = false;
   // Every event of the latest turn, numbered by position.
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
-  // The turn running now, and what it has streamed so far.
-  let active: ({ turnId: TurnId } & TurnStream) | null = null;
+  // The turn running now, its key, and what it has streamed so far.
+  let active: ({ turnId: TurnId; key: TurnKey } & TurnStream) | null = null;
 
   // Turn events and hellos: what a bot's worker and a coordinator both send.
   function send(message: WorkerToControl) {
@@ -66,9 +69,10 @@ export function controlLink<Message>({
     if (event.type === "done" && active?.turnId === turnId) active = null;
   }
 
-  // Throws with control's reason when it refuses.
-  async function fromControl(path: string, init: RequestInit = {}) {
-    const res = await fetch(`${base}${path}`, { ...init, headers: { ...auth, "content-type": "application/json" } });
+  // Calls control at `path` with `bearer` (the turn's key, or the computer's
+  // credential). Throws with control's reason when it refuses.
+  async function fromControl(path: string, bearer: string, init: RequestInit = {}) {
+    const res = await fetch(`${base}${path}`, { ...init, headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" } });
     if (res.ok) return res;
     const body: unknown = await res.json().catch(() => null);
     if (BrokerRefusal.safeParse(body).success) throw new Error("Chiefbot has lost your GitHub sign-in. Sign in again in the Chiefbot app, then resend.");
@@ -76,10 +80,10 @@ export function controlLink<Message>({
     throw new Error(refusal.success ? (refusal.data.message ?? refusal.data.error) : `Control answered ${res.status}`);
   }
 
-  // A seat's short-lived GitHub access token for the SDK, from control's broker at
-  // `path`. The computer keeps no token: the SDK asks again when one has an hour or less left.
-  async function seatToken(path: string) {
-    const { accessToken, expiresAt } = BrokeredGitHubToken.parse(await (await fromControl(path)).json());
+  // A seat's short-lived GitHub access token for the SDK, from control's broker.
+  // The computer keeps no token: the SDK asks again when one has an hour or less left.
+  async function seatToken(bearer: string) {
+    const { accessToken, expiresAt } = BrokeredGitHubToken.parse(await (await fromControl("/github-token", bearer)).json());
     return { kind: "token" as const, accessToken, expiresIn: Math.floor((expiresAt - Date.now()) / 1000) };
   }
 
@@ -107,9 +111,20 @@ export function controlLink<Message>({
     // The turn running now, or null.
     activeTurnId: () => active?.turnId ?? null,
 
+    // The running turn's key. Throws outside a turn: nothing then may act for anyone.
+    turnKey(): TurnKey {
+      if (!active) throw new Error("No turn is running, so Chiefbot refuses this call.");
+      return active.key;
+    },
+
     // The runtime starts `turnId`: the session's events stream into it from now on.
-    begin(turnId: TurnId) {
-      active = { turnId, ...newTurnStream() };
+    begin(turnId: TurnId, key: TurnKey) {
+      active = { turnId, key, ...newTurnStream() };
+    },
+
+    // Control's new key for the running turn (it restarted, revoking the old one).
+    rekey(turnId: TurnId, key: TurnKey) {
+      if (active?.turnId === turnId) active.key = key;
     },
 
     // Maps one SDK session event to the running turn's TurnEvents. Sub-agent
@@ -127,27 +142,30 @@ export function controlLink<Message>({
     },
 
     // Opens a session on `payer`'s Copilot: a seat's, with tokens from control's
-    // broker at `seatPath`, or the organization's, on installation tokens control
-    // mints, on a runtime of its own (installationSession.ts), whose turns may be
-    // cut short for a new token (`onCut`).
+    // broker, or the organization's, on installation tokens control mints, on a
+    // runtime of its own (installationSession.ts), whose turns may be cut short
+    // for a new token (`onCut`). Each token is asked for with `bearer()`'s.
     openSession(
       copilot: Copilot,
       payer: CopilotPayer["kind"],
       { onCut, ...options }: Omit<Parameters<Copilot["openSession"]>[0], "auth"> & { onCut?: () => void },
-      seatPath: string,
+      bearer: () => string,
     ): Promise<BotSession> {
-      const token = async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token")).json());
+      const token = async () => CopilotInstallationToken.parse(await (await fromControl("/installation-token", bearer())).json());
       return payer === "org"
         ? installationSession({ ...options, copilot, token, ...(clock === undefined ? {} : { clock }), ...(onCut === undefined ? {} : { onCut }) })
-        : copilot.openSession({ ...options, auth: { kind: "seat", gitHubTokenProvider: () => seatToken(seatPath) } });
+        : copilot.openSession({ ...options, auth: { kind: "seat", gitHubTokenProvider: () => seatToken(bearer()) } });
     },
 
     // Control logs remote connectors' calls in its proxy; a command connector's
-    // call runs in the computer, so it is reported. A failed report does not stop the call.
-    reportCalls: (connectors: AgentConnector[]) => async (serverName: string, toolName: string) => {
+    // call runs in the computer, so it is reported with `bearer()`'s key. A failed
+    // report does not stop the call.
+    reportCalls: (connectors: AgentConnector[], bearer: () => string) => async (serverName: string, toolName: string) => {
       if (!connectors.some(({ name, kind }) => name === serverName && kind === "command")) return;
       const call: ReportedConnectorCall = { connector: serverName, tool: toolName };
-      await fromControl("/connector-calls", { method: "POST", body: JSON.stringify(call) }).catch(() => {});
+      await Promise.resolve()
+        .then(() => fromControl("/connector-calls", bearer(), { method: "POST", body: JSON.stringify(call) }))
+        .catch(() => {});
     },
 
     stop() {

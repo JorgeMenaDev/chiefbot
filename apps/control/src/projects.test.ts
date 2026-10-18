@@ -3,7 +3,7 @@ import { ApiError, BrokeredGitHubToken, ClientEvent, ContextFile, Project, Task,
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { fakeClock } from "@chiefbot/worker/clock";
-import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 afterEach(cleanUp);
 
@@ -211,33 +211,22 @@ test("a coordinator tool call that breaks the ledger's rules is refused with the
   expect(await tasksOf(owner, project)).toEqual([]);
 });
 
-test("a coordinator's credential reaches only its own project, and only the seat of the member whose turn runs", async () => {
-  const { url, owner, guest, project, computers, github, createProject, copilot } = await teamProject();
+test("a coordinator turn's key reaches only its own project", async () => {
+  const control = await teamProject();
+  const { url, owner, project, github, createProject } = control;
   github.createRepo("octo-org/api", { "chiefbot.project.yaml": "" });
   const other = Project.parse(await (await createProject("octo-org/api")).json());
-  // The credential control handed the project's computer.
-  const tokenOf = (id: ProjectId) => ({ authorization: `Bearer ${computers.computers.get(id)?.spec.env.CHIEFBOT_PROJECT_TOKEN}` });
-  const ownerId = User.parse(await (await owner.api("GET", "/me")).json()).id;
-  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
-  let release = () => {};
-  copilot.script = async function* () {
-    await new Promise<void>((resolve) => (release = resolve));
-    yield sdk.idle();
-  };
-  const listTasks = { method: "POST", body: JSON.stringify({ tool: "list_tasks" }) };
-
-  const idle = await fetch(`${url}/coordinator/${project.id}/tools`, { ...listTasks, headers: tokenOf(project.id) });
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
   await ask(owner, project, "hold on");
-  await eventually(() => copilot.sends.length === 1);
-  const crossed = await fetch(`${url}/coordinator/${project.id}/tools`, { ...listTasks, headers: tokenOf(other.id) });
-  const ownSeat = await fetch(`${url}/coordinator/${project.id}/github-token/${ownerId}`, { headers: tokenOf(project.id) });
-  const otherSeat = await fetch(`${url}/coordinator/${project.id}/github-token/${guestId}`, { headers: tokenOf(project.id) });
-  release();
+  const { turnKey } = await coordinator.nth("run-turn");
+  const listTasks = { method: "POST", body: JSON.stringify({ tool: "list_tasks" }), headers: { authorization: `Bearer ${turnKey}` } };
 
-  expect([idle.status, ApiError.parse(await idle.json())]).toEqual([409, { error: "invalid_tool_call", message: "No coordinator turn is running" }]);
-  expect(crossed.status).toBe(403);
-  expect([ownSeat.status, BrokeredGitHubToken.parse(await ownSeat.json()).accessToken]).toEqual([200, owner.tokens.accessToken]);
-  expect(otherSeat.status).toBe(404);
+  const own = await fetch(`${url}/coordinator/${project.id}/tools`, listTasks);
+  const crossed = await fetch(`${url}/coordinator/${other.id}/tools`, listTasks);
+
+  expect([own.status, await own.json()]).toEqual([200, []]);
+  expect([crossed.status, ApiError.parse(await crossed.json()).error]).toEqual([403, "invalid_turn_key"]);
 });
 
 test("two members asking for the same thing get one task: the project's scheduler runs one coordinator turn at a time", async () => {

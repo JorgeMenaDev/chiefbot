@@ -5,11 +5,12 @@ import type { z } from "zod";
 // A bot's tools as its owner's chief of staff: it hands work to a project of
 // one of its owner's workspaces and follows it. Control keeps the handoffs and
 // answers each call as JSON; a refusal throws, which the model sees as a failed call.
-export function chiefTools({ controlUrl, botId, botToken }: { controlUrl: string; botId: string; botToken: string }) {
+// Each call carries the running turn's key, from `turnKey`.
+export function chiefTools({ controlUrl, botId, turnKey }: { controlUrl: string; botId: string; turnKey: () => string }) {
   async function call(toolCall: ChiefToolCall) {
     const res = await fetch(`${controlUrl}/worker/${botId}/chief-tools`, {
       method: "POST",
-      headers: { authorization: `Bearer ${botToken}`, "content-type": "application/json" },
+      headers: { authorization: `Bearer ${turnKey()}`, "content-type": "application/json" },
       body: JSON.stringify(toolCall),
     });
     if (res.ok) return res.text();
