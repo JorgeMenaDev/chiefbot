@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import type { AgentConnection } from "@chiefbot/contracts";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { approvalFor } from "./approvals.ts";
@@ -79,6 +79,17 @@ test("each run of a connection's CLI is logged as the CLI and the subcommands it
   expect(staged.calls()).toEqual([]);
 });
 
+test("a forged or unreadable calls log gives no calls and never hangs", () => {
+  const root = join(tempDir(), "chiefbot");
+  const staged = stageConnections(root, [jira]);
+
+  appendFileSync(join(root, "calls"), "acli\0-2\0acli\0x\0");
+  expect(staged.calls()).toEqual([]);
+  rmSync(join(root, "calls"));
+  mkdirSync(join(root, "calls"));
+  expect(staged.calls()).toEqual([]);
+});
+
 test("no connection, no skill root", () => {
   const root = join(tempDir(), "chiefbot");
   expect(stageConnections(root, []).skillDirectories).toEqual([]);
@@ -102,6 +113,9 @@ test("a command of a connection's CLI that matches none of its read-only globs a
   // The CLI named anywhere the parsed segments do not show it running asks, with the whole command.
   expect(ask("env DEBUG=1 acli jira workitem view CHIEF-1")?.detail).toBe("Jira: env DEBUG=1 acli jira workitem view CHIEF-1");
   expect(ask('acli jira workitem view CHIEF-1 && sh -c "acli jira workitem delete --key CHIEF-1"')?.kind).toBe("connector");
+  expect(ask("env -Sacli jira workitem delete --key CHIEF-1")?.kind).toBe("connector");
+  // Any text with the CLI's name in it is looked at: a false alarm beats a missed write.
+  expect(ask("cat acli-notes.txt")?.kind).toBe("connector");
   // Without parsed segments, any command naming the CLI asks.
   for (const segments of [undefined, []]) {
     const unparsed = fakeRequest.shell("acli jira workitem view CHIEF-1");

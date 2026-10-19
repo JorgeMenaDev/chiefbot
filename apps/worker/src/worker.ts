@@ -98,6 +98,19 @@ export function startWorker({
   // Approvals the session waits on, each resolved by the user's answer, or with
   // null when its turn ends first.
   const waiting = new Map<ApprovalId, { turnId: TurnId; answer: (approved: boolean | null) => void }>();
+  // The latest turn whose session finished: it is ending, so it gets no more
+  // approvals, though its last reports and its done may still be on their way.
+  let finished: TurnId | null = null;
+  const live = (turn: Turn) => link.running(turn) && finished !== turn.turnId;
+  // Refuses `turnId`'s approvals still waiting, and any it would ask for later.
+  function closeApprovals(turnId: TurnId) {
+    finished = turnId;
+    for (const [approvalId, waiter] of waiting) {
+      if (waiter.turnId !== turnId) continue;
+      waiting.delete(approvalId);
+      waiter.answer(null);
+    }
+  }
   // The running turn's staged connections, removed when it ends, and the runs of
   // their CLIs not yet reported. Whatever a turn a crash cut short left behind goes now.
   let staged: (ReturnType<typeof stageConnections> & { turnId: TurnId; unreported: ReportedConnectionCall[] }) | null = null;
@@ -106,7 +119,7 @@ export function startWorker({
   // Puts an approval-request in the turn's chat and waits, however long, for the
   // user's answer. Null once that turn is over (or for no turn): nobody is there to answer.
   async function askUser(turn: Turn | null, ask: { kind: ApprovalKind; detail: string }): Promise<boolean | null> {
-    if (!turn || !link.running(turn)) return null;
+    if (!turn || !live(turn)) return null;
     const approvalId = ApprovalId.parse(`approval_${crypto.randomUUID()}`);
     const answered = new Promise<boolean | null>((answer) => waiting.set(approvalId, { turnId: turn.turnId, answer }));
     link.emit(turn.turnId, { type: "approval-request", approvalId, ...ask });
@@ -122,7 +135,7 @@ export function startWorker({
     (turn: Turn | null, connections: AgentConnection[] = []): PermissionHandler =>
     async (request) => {
       const over: PermissionRequestResult = { kind: "reject", feedback: "Nobody is here to approve this outside its turn." };
-      const ended = () => turn !== null && !link.running(turn);
+      const ended = () => turn !== null && !live(turn);
       await agentHasScreen();
       if (ended()) return over;
       const ask = approvalFor(request, connections);
@@ -135,21 +148,21 @@ export function startWorker({
     };
 
   // Reports the runs of the turn's connections' CLIs so far, oldest first, with
-  // the turn's key. One control refuses stays for the next report; the turn's
-  // last report (`last`) tries three times before giving up on what is left.
+  // the turn's key: best effort, in five seconds at most, and it never throws.
+  // What fails waits for the next report; after the turn's last (`last`) it is
+  // given up, with a console error.
   async function reportConnectionCalls(turn: Turn, last: boolean) {
     if (staged?.turnId !== turn.turnId) return;
     const { unreported } = staged;
     unreported.push(...staged.calls());
-    for (let attempt = 1; unreported.length > 0; attempt++) {
-      try {
-        await link.fromControl("/connection-calls", turn.key, { method: "POST", body: JSON.stringify(unreported[0]) });
+    const signal = AbortSignal.timeout(5000);
+    try {
+      while (unreported.length > 0) {
+        await link.fromControl("/connection-calls", turn.key, { method: "POST", body: JSON.stringify(unreported[0]), signal });
         unreported.shift();
-      } catch (error) {
-        if (!last) return;
-        if (attempt === 3) return console.error(`Chiefbot could not log ${unreported.length} connection call(s): ${error}`);
-        await Bun.sleep(1000);
       }
+    } catch (error) {
+      if (last) console.error(`Chiefbot could not log ${unreported.length} connection call(s): ${error}`);
     }
   }
 
@@ -220,12 +233,14 @@ export function startWorker({
     const tools = [pullRequestTool({ base, turnKey }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : [])];
     const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections), tools, skillDirectories };
     // A chief always runs on its owner's own Copilot seat.
-    // With connections, the runs of their CLIs are reported after each tool call
-    // and before the turn ends, so its key still works; its events keep their order.
+    // When the session finishes, the turn's approvals close at once. With
+    // connections, the runs of their CLIs are reported after each tool call and
+    // before the turn ends, so its key still works; its events keep their order.
     let reported = Promise.resolve();
     const forward = (turn: Turn) => (event: SessionEvent) => {
-      if (connections.length === 0) return link.sessionEvent(turn, event);
       const last = event.type === "session.idle" || event.type === "session.error";
+      if (last) closeApprovals(turn.turnId);
+      if (connections.length === 0) return link.sessionEvent(turn, event);
       reported = reported
         .then(() => (last || event.type === "tool.execution_complete" ? reportConnectionCalls(turn, last) : undefined))
         .then(() => link.sessionEvent(turn, event));
@@ -288,11 +303,7 @@ export function startWorker({
     parse: (json) => ControlToWorker.parse(json),
     // Nothing waits on an ended turn's approvals, and its connections go.
     onTurnEnd(turnId) {
-      for (const [approvalId, waiter] of waiting) {
-        if (waiter.turnId !== turnId) continue;
-        waiting.delete(approvalId);
-        waiter.answer(null);
-      }
+      closeApprovals(turnId);
       if (staged?.turnId !== turnId) return;
       staged.cleanup();
       staged = null;

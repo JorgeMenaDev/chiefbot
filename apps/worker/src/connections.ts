@@ -16,7 +16,8 @@ export const connectionsRoot = "/tmp/chiefbot";
 
 // Writes `connections` under `root` for the turn, replacing whatever was there.
 // Returns the session's skill roots (none without a connection), `calls`, which
-// gives the runs of the connections' CLIs since its last call, and `cleanup`,
+// gives the runs of the connections' CLIs since its last call (none when the log
+// cannot be read: the agent can write it, so it is never trusted), and `cleanup`,
 // which removes it all. A connection that is off has nothing here: its bare CLI
 // runs with no credential. Staging that fails removes what it wrote, then throws.
 export function stageConnections(root: string, connections: AgentConnection[]) {
@@ -32,13 +33,18 @@ export function stageConnections(root: string, connections: AgentConnection[]) {
   let seen = 0;
   return {
     skillDirectories: [join(root, "skills")],
-    calls() {
-      const runs = existsSync(join(root, "calls")) ? parseRuns(readFileSync(join(root, "calls"), "utf8")).slice(seen) : [];
-      seen += runs.length;
-      return runs.flatMap(([cli, ...args]) => {
-        const connection = connections.find((candidate) => candidate.cli === cli);
-        return connection ? [{ connection: connection.name, command: logged(connection, args) }] : [];
-      });
+    calls(): ReportedConnectionCall[] {
+      try {
+        const runs = existsSync(join(root, "calls")) ? parseRuns(readFileSync(join(root, "calls"), "utf8")).slice(seen) : [];
+        seen += runs.length;
+        return runs.flatMap(([cli, ...args]) => {
+          const connection = connections.find((candidate) => candidate.cli === cli);
+          return connection ? [{ connection: connection.name, command: logged(connection, args) }] : [];
+        });
+      } catch (error) {
+        console.error(`Chiefbot could not read the connection calls log: ${error}`);
+        return [];
+      }
     },
     cleanup,
   };
@@ -78,12 +84,13 @@ function write(root: string, connections: AgentConnection[]) {
 const quoted = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
 // The whole runs in the calls log, each as the CLI and its arguments. A run
-// still being written is left for a later read.
+// still being written is left for a later read; a malformed one ends the read.
 function parseRuns(text: string) {
   // The last field follows the last NUL: unfinished, or empty.
   const fields = text.split("\0");
   const runs: string[][] = [];
   for (let at = 0; at + 1 < fields.length; ) {
+    if (!/^\d{1,5}$/.test(fields[at + 1] ?? "")) break;
     const count = Number(fields[at + 1]);
     if (at + 2 + count >= fields.length) break;
     runs.push([fields[at] ?? "", ...fields.slice(at + 2, at + 2 + count)]);
@@ -112,14 +119,15 @@ function logged(connection: AgentConnection, args: string[]) {
 // What a shell request runs of `connections`' CLIs that needs the owner's
 // approval: each command that matches none of its connection's read-only globs
 // (leading variable assignments dropped, the CLI by its bare name). When the
-// request names a CLI anywhere the runtime's parsed segments do not show it
-// running (`env X=1 acli …`, `sh -c "…"`, no segments), the whole command asks.
+// request's text has a CLI's name in it anywhere the runtime's parsed segments do
+// not show it running (`env -Sacli …`, `sh -c "…"`, `cat acli.txt`, no segments),
+// the whole command asks: a false alarm beats a missed write.
 // A script that runs the CLI is not seen here: approvals are a guardrail.
 export function connectionWrites(request: PermissionRequest, connections: AgentConnection[]) {
   if (request.kind !== "shell") return [];
   const text = request.fullCommandText.trim();
   return connections.flatMap((connection) => {
-    const mentions = text.match(new RegExp(`(?<![\\w.-])${escape(connection.cli)}(?![\\w.-])`, "g"))?.length ?? 0;
+    const mentions = text.split(connection.cli).length - 1;
     if (mentions === 0) return [];
     const runs = (request.commandSegments ?? []).flatMap(({ identifier, fullCommandText }) => {
       if (basename(identifier) !== connection.cli) return [];

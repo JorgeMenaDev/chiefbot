@@ -161,4 +161,65 @@ test("an approval still pending when its turn ends is refused, and its command n
   expect(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json()).toEqual([]);
 });
 
+// Control's answers to the worker's connection-call reports, faked for one test:
+// `answer` gets each report's number (from 1) and gives the response, or throws.
+function interceptReports(answer: (n: number, real: () => Promise<Response>) => Promise<Response>) {
+  const real = globalThis.fetch;
+  let n = 0;
+  const intercepted = (input: string | URL | Request, init?: RequestInit) =>
+    String(input instanceof Request ? input.url : input).endsWith("/connection-calls") && init?.method === "POST"
+      ? answer(++n, () => real(input, init))
+      : real(input, init);
+  globalThis.fetch = Object.assign(intercepted, { preconnect: real.preconnect });
+  afterEach(() => void (globalThis.fetch = real));
+}
+
+test("reporting never holds up a turn's end: once reports start failing, the turn ends anyway", async () => {
+  const { api, computers, root, onlineBot, send, watchChat } = await setup();
+  await api("PUT", "/connections/harness", { fields: harness });
+  const bot = await onlineBot("Ada");
+  interceptReports(async (n, real) => {
+    if (n > 3) throw new Error("control is unreachable");
+    return real();
+  });
+  computers.copilot.script = async function* (_prompt, runtime) {
+    for (let i = 0; i < 5; i++) await runtime.shell("harness list pipeline");
+    yield sdk.idle();
+  };
+
+  await send(bot.id, "list");
+  await watchChat(bot.id).until(doneCount(1));
+
+  expect(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json()).toHaveLength(3);
+  expect(existsSync(root) ? readdirSync(root) : []).toEqual([]);
+});
+
+test("when a turn ends, its pending approval is refused before its calls are reported", async () => {
+  const { api, computers, onlineBot, send, watchChat } = await setup();
+  await api("PUT", "/connections/harness", { fields: harness });
+  const bot = await onlineBot("Ada");
+  let settled: { approved: boolean } | null = null;
+  const seenWhileReporting: Array<boolean | null> = [];
+  interceptReports(async (_n, real) => {
+    await Bun.sleep(100);
+    seenWhileReporting.push(settled?.approved ?? null);
+    return real();
+  });
+  const asked = Promise.withResolvers<void>();
+  computers.copilot.script = async function* (_prompt, runtime) {
+    await runtime.shell("harness list pipeline");
+    void runtime.shell("harness execute pipeline deploy").then((result) => (settled = result));
+    await asked.promise;
+    yield sdk.idle();
+  };
+  const chat = watchChat(bot.id);
+
+  await send(bot.id, "deploy");
+  await chat.until((events) => requestsIn(events).length === 1);
+  asked.resolve();
+  await chat.until(doneCount(1));
+
+  expect(seenWhileReporting).toEqual([false]);
+});
+
 const requestsIn = (events: ChatEvent[]) => events.filter((e) => e.event.type === "approval-request");
