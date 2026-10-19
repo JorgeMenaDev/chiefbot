@@ -1,6 +1,10 @@
 import { Routine, type Bot, type RoutineInput, type RoutineRun } from "@chiefbot/contracts";
+import { PlusIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
+import { ErrorText, Muted, Panel, Row } from "./Pane.tsx";
+import { Button } from "./components/ui/button.tsx";
+import { Input, Textarea } from "./components/ui/input.tsx";
 
 const RoutineList = z.array(Routine);
 
@@ -31,8 +35,8 @@ export function Routines({ bot }: { bot: Bot }) {
   }
 
   return (
-    <section className="routines">
-      {routines.length === 0 && editing === null && <p className="muted">No routines yet.</p>}
+    <Panel title="Routines">
+      {routines.length === 0 && editing === null && <Muted>No routines yet.</Muted>}
       {routines.map((routine) =>
         editing !== "new" && editing?.id === routine.id ? (
           <RoutineForm
@@ -42,21 +46,27 @@ export function Routines({ bot }: { bot: Bot }) {
             onCancel={() => setEditing(null)}
           />
         ) : (
-          <div key={routine.id} className="routine-row">
-            <div className="routine-text">
-              <strong>{routine.prompt}</strong>
-              <span className="muted">
-                <code>{routine.cron}</code> in {routine.timezone} · next {new Date(routine.nextDueAt).toLocaleString()}
-              </span>
-              {routine.lastRun && <LastRun run={routine.lastRun} />}
-            </div>
-            <div className="actions">
-              <button onClick={() => setEditing(routine)}>Edit</button>
-              <button className="danger" onClick={() => void act(() => api.remove(bot.id, routine.id))}>
-                Delete
-              </button>
-            </div>
-          </div>
+          <Row
+            key={routine.id}
+            title={routine.prompt}
+            meta={
+              <>
+                <code className="font-mono">{routine.cron}</code> in {routine.timezone} · next {new Date(routine.nextDueAt).toLocaleString()}
+              </>
+            }
+            actions={
+              <>
+                <Button size="xs" variant="ghost" onClick={() => setEditing(routine)}>
+                  Edit
+                </Button>
+                <Button size="xs" variant="ghost" className="text-destructive-foreground" onClick={() => void act(() => api.remove(bot.id, routine.id))}>
+                  Delete
+                </Button>
+              </>
+            }
+          >
+            {routine.lastRun && <LastRun run={routine.lastRun} />}
+          </Row>
         ),
       )}
       {editing === "new" ? (
@@ -66,19 +76,20 @@ export function Routines({ bot }: { bot: Bot }) {
           onCancel={() => setEditing(null)}
         />
       ) : (
-        <button className="link-button" onClick={() => setEditing("new")}>
-          + New routine
-        </button>
+        <Button size="xs" variant="ghost" className="mt-1 self-start text-muted-foreground" onClick={() => setEditing("new")}>
+          <PlusIcon />
+          New routine
+        </Button>
       )}
-      {error && <p className="error">{error}</p>}
-    </section>
+      <ErrorText message={error} />
+    </Panel>
   );
 }
 
 function LastRun({ run }: { run: RoutineRun }) {
   const when = new Date(run.dueAt).toLocaleString();
   return (
-    <span className={run.status === "failed" ? "error" : "muted"}>
+    <span className={run.status === "failed" ? "text-destructive-foreground text-xs" : "text-muted-foreground text-xs"}>
       Last run {when}: {run.status}
       {run.error && ` (${run.error})`}
     </span>
@@ -112,21 +123,22 @@ function RoutineForm({
   }
 
   return (
-    <form className="routine-form" onSubmit={(event) => void submit(event)}>
-      <textarea rows={2} placeholder="What should the bot do?" autoFocus {...field("prompt")} />
-      <div className="routine-schedule">
-        <label>
-          Cron <input placeholder="0 9 * * 1-5" {...field("cron")} />
+    <form className="flex flex-col gap-2 py-2.5" onSubmit={(event) => void submit(event)}>
+      <Textarea rows={2} placeholder="What should the bot do?" autoFocus {...field("prompt")} />
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="flex items-center gap-2 text-muted-foreground text-xs">
+          Cron <Input className="w-36 font-mono" placeholder="0 9 * * 1-5" {...field("cron")} />
         </label>
-        <label>
-          Timezone <input placeholder="Europe/London" {...field("timezone")} />
+        <label className="flex items-center gap-2 text-muted-foreground text-xs">
+          Timezone <Input className="w-40" placeholder="Europe/London" {...field("timezone")} />
         </label>
-        <button type="submit" disabled={busy || input.prompt.trim() === ""}>
-          Save
-        </button>
-        <button type="button" onClick={onCancel}>
+        <span className="flex-1" />
+        <Button size="sm" variant="ghost" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
+        <Button size="sm" type="submit" disabled={busy || input.prompt.trim() === ""}>
+          Save
+        </Button>
       </div>
     </form>
   );

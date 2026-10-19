@@ -10,8 +10,12 @@ import {
   type Project,
   type Workspace,
 } from "@chiefbot/contracts";
+import { CircleCheckIcon, CircleDashedIcon, PlugIcon, PlusIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
+import { ErrorText, Muted, PaneBody, PaneHeader, Panel, Row, Section } from "./Pane.tsx";
+import { Button } from "./components/ui/button.tsx";
+import { Input, Select } from "./components/ui/input.tsx";
 import { useAction } from "./Workspaces.tsx";
 
 const Checklist = z.array(ChecklistItem);
@@ -65,111 +69,139 @@ export function Connectors({ workspace }: { workspace: Workspace }) {
 
   const open = items.filter(({ status }) => status !== "ready");
   return (
-    <div className="bot-pane">
-      <header className="bot-header">
-        <div>
-          <h2>Connectors</h2>
-          <p className="muted">
-            The tools {workspace.name}'s projects declare in chiefbot.project.yaml. Agents get a connector once it is ready for
-            the member they work for.
-          </p>
-        </div>
-      </header>
-      <section className="routines">
-        <h3>Your checklist</h3>
-        {items.length === 0 && <p className="muted">No project in this workspace declares a connector.</p>}
-        {items.length > 0 && open.length === 0 && <p className="muted">All set: every connector your projects need is ready.</p>}
-        {[...open, ...items.filter(({ status }) => status === "ready")].map((item) => {
-          const preset = presetFor(item.name);
-          return (
-          <div key={item.name} className="routine-row">
-            <div className="routine-text">
-              <strong>{item.title ?? item.name}</strong>
-              <span className="muted">
-                {statusText(item.status, owner)} · needed by {item.projects.join(", ")}
-              </span>
-              {tokenFor === item.name && (
-                <TokenForm
-                  placeholder={`Your ${item.title ?? item.name} token`}
-                  busy={busy}
-                  onSave={(token) => run(() => api.setToken(workspace.id, item.name, token)).then((saved) => saved && setTokenFor(null))}
-                />
-              )}
-              {item.status === "workspace-secret" && owner && (
-                <TokenForm
-                  placeholder="The workspace's service token"
-                  busy={busy}
-                  onSave={(token) => run(() => api.setSecret(workspace.id, item.name, token))}
-                />
-              )}
-            </div>
-            {item.status === "connect" && (
-              <button disabled={busy || signingIn.includes(item.name)} onClick={() => void connect(item.name)}>
-                {signingIn.includes(item.name) ? "Finish in your browser…" : "Connect"}
-              </button>
-            )}
-            {item.status === "not-defined" && owner && preset && (
-              <button disabled={busy} onClick={() => void run(() => api.define(workspace.id, preset))}>
-                Add preset
-              </button>
-            )}
-          </div>
-          );
-        })}
-        {error && <p className="error">{error}</p>}
-      </section>
-      <section className="routines">
-        <h3>Workspace connectors</h3>
-        {connectors.map((connector) => (
-          <div key={connector.name} className="routine-row">
-            <div className="routine-text">
-              <strong>
-                {connector.title} <span className="muted">({connector.name})</span>
-              </strong>
-              <span className="muted">
-                {connector.server.kind === "remote" ? connector.server.url : [connector.server.command, ...connector.server.args].join(" ")} ·{" "}
-                {authText[connector.auth]}
-                {connector.auth === "workspace-secret" && (connector.hasWorkspaceSecret ? " (set)" : " (not set)")}
-                {connector.server.kind === "remote" &&
-                  (connector.writesWithoutApproval ? " · tools that may write run without asking" : " · tools that may write ask the member first")}
-              </span>
+    <>
+      <PaneHeader
+        icon={<PlugIcon className="size-4 text-muted-foreground" />}
+        title="Connectors"
+        note={workspace.name}
+      />
+      <PaneBody>
+        <Section
+          title="Your checklist"
+          description={`The tools ${workspace.name}'s projects declare in chiefbot.project.yaml. Agents get a connector once it is ready for the member they work for.`}
+        >
+          {items.length === 0 && <Muted>No project in this workspace declares a connector.</Muted>}
+          {items.length > 0 && open.length === 0 && <Muted>All set: every connector your projects need is ready.</Muted>}
+          {[...open, ...items.filter(({ status }) => status === "ready")].map((item) => {
+            const preset = presetFor(item.name);
+            return (
+              <Row
+                key={item.name}
+                title={
+                  <span className="flex items-center gap-2">
+                    {item.status === "ready" ? (
+                      <CircleCheckIcon className="size-4 shrink-0 text-success" aria-label="Ready" />
+                    ) : (
+                      <CircleDashedIcon className="size-4 shrink-0 text-warning" aria-label="Needs action" />
+                    )}
+                    {item.title ?? item.name}
+                  </span>
+                }
+                meta={
+                  <span className="ps-6">
+                    {statusText(item.status, owner)} · needed by {item.projects.join(", ")}
+                  </span>
+                }
+                actions={
+                  <>
+                    {item.status === "connect" && (
+                      <Button size="xs" disabled={busy || signingIn.includes(item.name)} onClick={() => void connect(item.name)}>
+                        {signingIn.includes(item.name) ? "Finish in your browser…" : "Connect"}
+                      </Button>
+                    )}
+                    {item.status === "not-defined" && owner && preset && (
+                      <Button size="xs" variant="outline" disabled={busy} onClick={() => void run(() => api.define(workspace.id, preset))}>
+                        Add preset
+                      </Button>
+                    )}
+                  </>
+                }
+              >
+                {tokenFor === item.name && (
+                  <TokenForm
+                    placeholder={`Your ${item.title ?? item.name} token`}
+                    busy={busy}
+                    onSave={(token) => run(() => api.setToken(workspace.id, item.name, token)).then((saved) => saved && setTokenFor(null))}
+                  />
+                )}
+                {item.status === "workspace-secret" && owner && (
+                  <TokenForm
+                    placeholder="The workspace's service token"
+                    busy={busy}
+                    onSave={(token) => run(() => api.setSecret(workspace.id, item.name, token))}
+                  />
+                )}
+              </Row>
+            );
+          })}
+          <ErrorText message={error} />
+        </Section>
+        <Section title="Workspace connectors">
+          {connectors.map((connector) => (
+            <Row
+              key={connector.name}
+              title={
+                <>
+                  {connector.title} <span className="font-normal text-muted-foreground">({connector.name})</span>
+                </>
+              }
+              meta={
+                <>
+                  <span className="font-mono">
+                    {connector.server.kind === "remote" ? connector.server.url : [connector.server.command, ...connector.server.args].join(" ")}
+                  </span>{" "}
+                  · {authText[connector.auth]}
+                  {connector.auth === "workspace-secret" && (connector.hasWorkspaceSecret ? " (set)" : " (not set)")}
+                  {connector.server.kind === "remote" &&
+                    (connector.writesWithoutApproval ? " · tools that may write run without asking" : " · tools that may write ask the member first")}
+                </>
+              }
+              actions={
+                owner && (
+                  <Button size="xs" variant="destructive-outline" disabled={busy} onClick={() => void run(() => api.remove(workspace.id, connector.name))}>
+                    Delete
+                  </Button>
+                )
+              }
+            >
               {owner && connector.server.kind === "remote" && (
-                <label className="muted">
+                <label className="flex items-center gap-2 text-muted-foreground text-xs">
                   <input
                     type="checkbox"
+                    className="size-3.5 accent-primary"
                     checked={connector.writesWithoutApproval}
                     disabled={busy}
                     onChange={(event) => void run(() => api.setWritesWithoutApproval(workspace.id, connector.name, event.target.checked))}
-                  />{" "}
+                  />
                   Writes allowed without approval
                 </label>
               )}
               {owner && connector.auth === "workspace-secret" && connector.hasWorkspaceSecret && (
                 <TokenForm placeholder="Replace the service token" busy={busy} onSave={(token) => run(() => api.setSecret(workspace.id, connector.name, token))} />
               )}
+            </Row>
+          ))}
+          {connectors.length === 0 && <Muted>No connectors yet.</Muted>}
+          {owner && (
+            <div className="flex flex-wrap gap-2 pt-3">
+              {connectorPresets
+                .filter(({ name }) => !connectors.some((connector) => connector.name === name))
+                .map((preset) => (
+                  <Button key={preset.name} size="xs" variant="outline" disabled={busy} onClick={() => void run(() => api.define(workspace.id, preset))}>
+                    <PlusIcon />
+                    {preset.title}
+                  </Button>
+                ))}
             </div>
-            {owner && (
-              <button className="danger" disabled={busy} onClick={() => void run(() => api.remove(workspace.id, connector.name))}>
-                Delete
-              </button>
-            )}
-          </div>
-        ))}
-        {connectors.length === 0 && <p className="muted">No connectors yet.</p>}
+          )}
+        </Section>
         {owner && (
-          <div className="actions">
-            {connectorPresets
-              .filter(({ name }) => !connectors.some((connector) => connector.name === name))
-              .map((preset) => (
-                <button key={preset.name} disabled={busy} onClick={() => void run(() => api.define(workspace.id, preset))}>
-                  + {preset.title}
-                </button>
-              ))}
-          </div>
+          <Section title="Add a connector" description="A remote MCP server's URL, or a command that runs on the agent's computer.">
+            <NewConnector busy={busy} onDefine={(input) => run(() => api.define(workspace.id, input))} />
+          </Section>
         )}
-        {owner && <NewConnector busy={busy} onDefine={(input) => run(() => api.define(workspace.id, input))} />}
-      </section>
-    </div>
+      </PaneBody>
+    </>
   );
 }
 
@@ -203,11 +235,11 @@ function TokenForm({ placeholder, busy, onSave }: { placeholder: string; busy: b
     setToken("");
   }
   return (
-    <form className="routine-schedule" onSubmit={(event) => void submit(event)}>
-      <input type="password" placeholder={placeholder} value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} />
-      <button type="submit" disabled={busy || token.trim() === ""}>
+    <form className="flex max-w-md gap-2 pt-1" onSubmit={(event) => void submit(event)}>
+      <Input type="password" placeholder={placeholder} value={token} disabled={busy} onChange={(event) => setToken(event.target.value)} />
+      <Button type="submit" variant="outline" disabled={busy || token.trim() === ""}>
         Save
-      </button>
+      </Button>
     </form>
   );
 }
@@ -242,34 +274,32 @@ function NewConnector({ busy, onDefine }: { busy: boolean; onDefine: (input: Con
   }
 
   return (
-    <form className="routine-form" onSubmit={(event) => void submit(event)}>
-      <div className="routine-schedule">
-        <input placeholder="name, e.g. gitlab" {...field("name")} />
-        <input placeholder="Title" {...field("title")} />
-        <select {...field("kind")}>
+    <form className="flex flex-col gap-2 pb-2" onSubmit={(event) => void submit(event)}>
+      <div className="flex gap-2">
+        <Input placeholder="name, e.g. gitlab" {...field("name")} />
+        <Input placeholder="Title" {...field("title")} />
+        <Select className="shrink-0" {...field("kind")}>
           <option value="remote">Remote URL</option>
           <option value="command">Command</option>
-        </select>
+        </Select>
       </div>
-      <div className="routine-schedule">
-        <input placeholder={form.kind === "remote" ? "https://…/mcp" : "npx -y some-mcp-server"} {...field("target")} />
-      </div>
-      <div className="routine-schedule">
+      <Input className="font-mono" placeholder={form.kind === "remote" ? "https://…/mcp" : "npx -y some-mcp-server"} {...field("target")} />
+      <div className="flex items-center gap-2">
         {form.kind === "remote" ? (
           <>
-            <select {...field("auth")}>
+            <Select className="shrink-0" {...field("auth")}>
               <option value="personal-oauth">Each member's own account</option>
               <option value="workspace-secret">Workspace service token</option>
               <option value="none">No credential</option>
-            </select>
-            <input placeholder="OAuth scope (optional)" {...field("scope")} />
+            </Select>
+            <Input placeholder="OAuth scope (optional)" {...field("scope")} />
           </>
         ) : (
-          <span className="muted">Runs on the agent's computer with no credential</span>
+          <span className="flex-1 text-muted-foreground text-xs">Runs on the agent's computer with no credential</span>
         )}
-        <button type="submit" disabled={busy || !input.success}>
+        <Button type="submit" className="shrink-0" disabled={busy || !input.success}>
           Add connector
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -282,21 +312,24 @@ export function ConnectorCalls({ project }: { project: Project }) {
     void window.chiefbot.connectors.calls(project.id).then((next) => setCalls(CallList.parse(next)));
   }, [project.id]);
   return (
-    <section className="routines">
-      {calls.length === 0 && <p className="muted">No connector calls yet.</p>}
+    <Panel title="Connector calls">
+      {calls.length === 0 && <Muted>No connector calls yet.</Muted>}
       {[...calls].reverse().map((call, index) => (
-        <div key={index} className="routine-row">
-          <div className="routine-text">
-            <strong>
-              {call.connector} · {call.tool}
-            </strong>
-            <span className="muted">
+        <Row
+          key={index}
+          title={
+            <>
+              {call.connector} <span className="text-muted-foreground">·</span> <span className="font-mono">{call.tool}</span>
+            </>
+          }
+          meta={
+            <>
               {new Date(call.at).toLocaleString()} · asked by {call.requester} · as{" "}
               {call.identity === "personal" ? call.requester : call.identity === "workspace" ? "the workspace" : "no one"} · run {call.run}
-            </span>
-          </div>
-        </div>
+            </>
+          }
+        />
       ))}
-    </section>
+    </Panel>
   );
 }

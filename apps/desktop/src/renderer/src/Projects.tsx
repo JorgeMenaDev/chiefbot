@@ -13,11 +13,19 @@ import {
   type TaskWorkerState,
   type Workspace,
 } from "@chiefbot/contracts";
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { FolderGit2Icon, ListChecksIcon, PlugIcon, PlusIcon, RadioIcon, Trash2Icon } from "lucide-react";
+import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
+import { AssistantMessage, ChatEmpty, Composer, ErrorMessage, Timeline, ToolRow, UserMessage, Working } from "./Chat.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
+import { ErrorText, PaneHeader } from "./Pane.tsx";
 import { ListeningTo } from "./Subscriptions.tsx";
+import { Badge } from "./components/ui/badge.tsx";
+import { Button } from "./components/ui/button.tsx";
+import { Input } from "./components/ui/input.tsx";
+import { SidebarRow } from "./components/ui/sidebar.tsx";
+import { Spinner } from "./components/ui/spinner.tsx";
 
 const ProjectList = z.array(Project);
 const TaskList = z.array(Task);
@@ -61,14 +69,15 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
 
   if (!open) {
     return (
-      <button className="new-bot" onClick={() => setOpen(true)}>
-        + New project
-      </button>
+      <SidebarRow className="text-sidebar-muted-foreground" onClick={() => setOpen(true)}>
+        <PlusIcon />
+        <span>New project</span>
+      </SidebarRow>
     );
   }
   return (
-    <form className="new-bot-form" onSubmit={(event) => void submit(event)}>
-      <input
+    <form className="flex flex-col gap-1.5 px-0.5 py-1" onSubmit={(event) => void submit(event)}>
+      <Input
         autoFocus
         placeholder="owner/repo"
         value={repo}
@@ -76,9 +85,16 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
         onChange={(event) => setRepo(event.target.value)}
         onKeyDown={(event) => event.key === "Escape" && setOpen(false)}
       />
-      {busy && <p className="muted">Reading chiefbot.project.yaml and starting the coordinator…</p>}
-      {!busy && repo !== "" && !CreateProjectRequest.safeParse({ repo }).success && <p className="muted">Write it as owner/repo.</p>}
-      {error && <p className="error">{error}</p>}
+      {busy && (
+        <p className="flex items-center gap-1.5 px-1 text-muted-foreground text-xs">
+          <Spinner className="size-3 shrink-0" />
+          Reading chiefbot.project.yaml and starting the coordinator…
+        </p>
+      )}
+      {!busy && repo !== "" && !CreateProjectRequest.safeParse({ repo }).success && (
+        <p className="px-1 text-muted-foreground text-xs">Write it as owner/repo.</p>
+      )}
+      <ErrorText message={error} />
     </form>
   );
 }
@@ -109,34 +125,39 @@ export function ProjectPane({
     }
   }
   return (
-    <div className="bot-pane">
-      <header className="bot-header">
-        <div>
-          <h2>{project.name}</h2>
-          <p className="muted">
-            {project.repo}
-            {commands.build && ` · build: ${commands.build}`}
-            {commands.test && ` · test: ${commands.test}`}
-          </p>
-          {error && <p className="error">{error}</p>}
+    <>
+      <PaneHeader
+        icon={<FolderGit2Icon className="size-4 text-muted-foreground" />}
+        title={project.name}
+        note={`${project.repo}${commands.build ? ` · build: ${commands.build}` : ""}${commands.test ? ` · test: ${commands.test}` : ""}`}
+      >
+        <Button size="xs" variant="outline" pressed={showListening} onClick={() => setShowListening(!showListening)}>
+          <RadioIcon />
+          Listening to
+        </Button>
+        <Button size="xs" variant="outline" pressed={showCalls} onClick={() => setShowCalls(!showCalls)}>
+          <PlugIcon />
+          Connector calls
+        </Button>
+        {workspace.role === "owner" && (
+          <Button size="xs" variant="destructive-outline" onClick={() => void remove()}>
+            <Trash2Icon />
+            Delete
+          </Button>
+        )}
+      </PaneHeader>
+      {error && (
+        <div className="border-b px-5 py-2">
+          <ErrorText message={error} />
         </div>
-        <div className="actions">
-          <button onClick={() => setShowListening(!showListening)}>{showListening ? "Hide listening" : "Listening to"}</button>
-          <button onClick={() => setShowCalls(!showCalls)}>{showCalls ? "Hide connector calls" : "Connector calls"}</button>
-          {workspace.role === "owner" && (
-            <button className="danger" onClick={() => void remove()}>
-              Delete
-            </button>
-          )}
-        </div>
-      </header>
+      )}
       {showListening && <ListeningTo project={project} />}
       {showCalls && <ConnectorCalls project={project} />}
-      <div className="bot-body">
+      <div className="flex min-h-0 flex-1">
         <CoordinatorChat project={project} />
         <TaskLedger project={project} login={login} />
       </div>
-    </div>
+    </>
   );
 }
 
@@ -160,16 +181,10 @@ function CoordinatorChat({ project }: { project: Project }) {
   const view = useCoordinatorChat(project.id);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const end = useRef<HTMLDivElement>(null);
   const working = view.working !== null;
   const canSend = !working && draft.trim() !== "";
 
-  useEffect(() => {
-    void end.current?.scrollIntoView({ block: "end" });
-  }, [view]);
-
-  async function submit(event?: FormEvent) {
-    event?.preventDefault();
+  async function submit() {
     if (!canSend) return;
     setError(null);
     try {
@@ -180,41 +195,25 @@ function CoordinatorChat({ project }: { project: Project }) {
     }
   }
 
-  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-    event.preventDefault();
-    void submit();
-  }
-
   return (
-    <section className="chat">
-      <div className="messages">
-        <div className="lane">
-          {view.items.length === 0 && (
-            <p className="muted empty">Ask the coordinator to plan work on {project.name}. It tracks it as tasks every member sees.</p>
-          )}
-          {view.items.map((item) => (
-            <ChatRow key={item.id} project={project} item={item} />
-          ))}
-          {working && <p className="working">{view.working || "Waiting for the coordinator"}…</p>}
-          <div ref={end} />
-        </div>
-      </div>
-      <form className="composer lane" onSubmit={(event) => void submit(event)}>
-        <textarea
-          rows={3}
-          placeholder="Message the coordinator"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={onKeyDown}
-        />
-        <div className="composer-row">
-          {error ? <span className="error composer-error">{error}</span> : <span />}
-          <button type="submit" disabled={!canSend}>
-            Send
-          </button>
-        </div>
-      </form>
+    <section className="flex min-w-0 flex-1 flex-col">
+      <Timeline follow={view}>
+        {view.items.length === 0 && (
+          <ChatEmpty>Ask the coordinator to plan work on {project.name}. It tracks it as tasks every member sees.</ChatEmpty>
+        )}
+        {view.items.map((item) => (
+          <ChatRow key={item.id} project={project} item={item} />
+        ))}
+        {working && <Working>{view.working || "Waiting for the coordinator"}</Working>}
+      </Timeline>
+      <Composer
+        placeholder="Message the coordinator"
+        draft={draft}
+        onDraft={setDraft}
+        onSend={() => void submit()}
+        canSend={canSend}
+        error={error}
+      />
     </section>
   );
 }
@@ -225,15 +224,15 @@ function CoordinatorChat({ project }: { project: Project }) {
 function ChatRow({ project, item }: { project: Project; item: ChatItem }) {
   switch (item.kind) {
     case "user":
-      return <div className="message user">{item.text}</div>;
+      return <UserMessage text={item.text} />;
     case "assistant":
-      return <div className="message assistant">{item.text}</div>;
+      return <AssistantMessage text={item.text} />;
     case "tool":
-      return <div className={`tool-row ${item.status}`}>{item.name}</div>;
+      return <ToolRow name={item.name} status={item.status} />;
     case "error":
-      return <div className="message error">{item.message}</div>;
+      return <ErrorMessage message={item.message} />;
     case "payer":
-      return <p className="muted payer">{payerText(item.payer)}</p>;
+      return <p className="text-muted-foreground text-xs">{payerText(item.payer)}</p>;
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
     case "notice":
@@ -264,30 +263,35 @@ function TaskLedger({ project, login }: { project: Project; login: string }) {
   }, [project.id]);
 
   return (
-    <aside className="screen-pane ledger">
-      <header className="screen-header">
-        <strong>Tasks</strong>
-        <span className="muted">{tasks.filter(({ status }) => status !== "done" && status !== "abandoned").length} open</span>
-      </header>
-      {tasks.length === 0 && <p className="muted">No tasks yet. The coordinator adds them as members ask for work.</p>}
-      {tasks.map((task) => (
-        <div key={task.number} className="ledger-task">
-          <div className="routine-text">
-            <strong>
-              #{task.number} {task.title}
-            </strong>
-            <span className="muted">
-              {statusText[task.status]}
-              {task.owner && ` · owner ${task.owner}`} · asked by {task.requestedBy}
-            </span>
+    <aside className="flex w-[34%] min-w-[280px] shrink-0 flex-col border-l bg-card/40">
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b px-3">
+        <ListChecksIcon className="size-3.5 text-muted-foreground" />
+        <span className="font-medium text-xs">Tasks</span>
+        <Badge variant="secondary" className="ms-auto">
+          {tasks.filter(({ status }) => status !== "done" && status !== "abandoned").length} open
+        </Badge>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+        {tasks.length === 0 && <p className="py-6 text-center text-muted-foreground text-xs">No tasks yet. The coordinator adds them as members ask for work.</p>}
+        {tasks.map((task) => (
+          <div key={task.number} className="flex flex-col gap-2 rounded-xl border bg-card p-3">
+            <div className="flex flex-col gap-1.5">
+              <span className="font-medium text-sm">
+                <span className="text-muted-foreground">#{task.number}</span> {task.title}
+              </span>
+              <span className="flex flex-wrap items-center gap-1.5 text-muted-foreground text-xs">
+                <Badge variant={statusBadge[task.status]}>{statusText[task.status]}</Badge>
+                {task.owner && `owner ${task.owner} ·`} asked by {task.requestedBy}
+              </span>
+            </div>
+            {workers
+              .filter(({ taskNumber }) => taskNumber === task.number)
+              .map((worker) => (
+                <WorkerRow key={worker.id} project={project} worker={worker} login={login} />
+              ))}
           </div>
-          {workers
-            .filter(({ taskNumber }) => taskNumber === task.number)
-            .map((worker) => (
-              <WorkerRow key={worker.id} project={project} worker={worker} login={login} />
-            ))}
-        </div>
-      ))}
+        ))}
+      </div>
     </aside>
   );
 }
@@ -301,14 +305,14 @@ function payerText(payer: CopilotPayer) {
 // the member who asked for it answers its approvals; the others see who must.
 function WorkerRow({ project, worker, login }: { project: Project; worker: TaskWorker; login: string }) {
   return (
-    <div className="worker-row">
-      <span className="muted">
+    <div className="flex flex-col gap-2 border-l-2 ps-3">
+      <span className="text-muted-foreground text-xs">
         Worker: {workerStateText[worker.state]}
         {worker.payer && ` · ${payerText(worker.payer)}`}
         {worker.pullRequest && (
           <>
             {" · "}
-            <a href={worker.pullRequest} target="_blank" rel="noreferrer">
+            <a className="text-primary underline-offset-4 hover:underline" href={worker.pullRequest} target="_blank" rel="noreferrer">
               pull request
             </a>
           </>
@@ -322,7 +326,7 @@ function WorkerRow({ project, worker, login }: { project: Project; worker: TaskW
             onAnswer={(approved) => window.chiefbot.projects.answer(project.id, worker.id, approvalId, approved)}
           />
         ) : (
-          <span key={approvalId} className="muted">
+          <span key={approvalId} className="text-muted-foreground text-xs">
             Waiting for {worker.requestedBy} to approve: {detail.split("\n")[0]}
           </span>
         ),
@@ -337,6 +341,14 @@ const workerStateText: Record<TaskWorkerState, string> = {
   finished: "finished",
   failed: "failed",
   stopped: "stopped",
+};
+
+const statusBadge: Record<TaskStatus, "outline" | "info" | "warning" | "success" | "secondary"> = {
+  open: "outline",
+  in_progress: "info",
+  needs_input: "warning",
+  done: "success",
+  abandoned: "secondary",
 };
 
 const statusText: Record<TaskStatus, string> = {

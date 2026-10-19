@@ -1,6 +1,12 @@
 import { CopilotMode, InviteRequest, Workspace, WorkspaceDetail, WorkspaceInvite, type User } from "@chiefbot/contracts";
+import { ChevronsUpDownIcon, UsersIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
+import { ErrorText, PaneBody, PaneHeader, Row, Section } from "./Pane.tsx";
+import { Badge } from "./components/ui/badge.tsx";
+import { Button } from "./components/ui/button.tsx";
+import { Input, Select } from "./components/ui/input.tsx";
+import { SidebarRow } from "./components/ui/sidebar.tsx";
 
 const WorkspaceList = z.array(Workspace);
 const InviteList = z.array(WorkspaceInvite);
@@ -77,45 +83,46 @@ export function WorkspaceSwitcher({
   }
 
   return (
-    <div className="switcher">
+    <div className="relative">
       <button
-        className="switcher-button"
+        type="button"
+        aria-expanded={open}
+        className="flex h-9 w-full cursor-pointer items-center gap-2 rounded-[var(--control-radius)] border border-sidebar-border px-2 text-left font-medium text-sm transition-colors hover:bg-sidebar-row-hover aria-expanded:bg-sidebar-row-hover"
         onClick={() => {
           if (!open) void reload();
           setOpen(!open);
         }}
       >
-        <span className="bot-name">{current?.name ?? "Personal"}</span>
-        {invites.length > 0 && <span className="badge">{invites.length}</span>}
-        <span className="muted">▾</span>
+        <span className="flex size-5 shrink-0 items-center justify-center rounded-md bg-primary font-semibold text-[11px] text-primary-foreground uppercase">
+          {(current?.name ?? "Personal").slice(0, 1)}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{current?.name ?? "Personal"}</span>
+        {invites.length > 0 && <Badge>{invites.length}</Badge>}
+        <ChevronsUpDownIcon className="size-3.5 shrink-0 text-sidebar-muted-foreground" />
       </button>
       {open && (
-        <div className="switcher-menu">
-          <button className={current === null ? "bot-row selected" : "bot-row"} onClick={() => choose(null)}>
-            <span className="bot-name">Personal</span>
-          </button>
+        <div className="absolute inset-x-0 top-full z-20 mt-1 flex flex-col gap-0.5 rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg/10">
+          <SidebarRow active={current === null} onClick={() => choose(null)}>
+            <span className="min-w-0 flex-1 truncate">Personal</span>
+          </SidebarRow>
           {workspaces.map((workspace) => (
-            <button
-              key={workspace.id}
-              className={workspace.id === current?.id ? "bot-row selected" : "bot-row"}
-              onClick={() => choose(workspace)}
-            >
-              <span className="bot-name">{workspace.name}</span>
-              <span className="bot-status">{workspace.role}</span>
-            </button>
+            <SidebarRow key={workspace.id} active={workspace.id === current?.id} onClick={() => choose(workspace)}>
+              <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
+              <span className="shrink-0 font-normal text-muted-foreground text-xs">{workspace.role}</span>
+            </SidebarRow>
           ))}
           {invites.map((invite) => (
-            <div key={invite.id} className="invite-row">
-              <span className="muted">
-                {invite.invitedBy} invited you to <strong>{invite.workspaceName}</strong>
+            <div key={invite.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5 text-xs">
+              <span className="text-muted-foreground">
+                {invite.invitedBy} invited you to <strong className="text-foreground">{invite.workspaceName}</strong>
               </span>
-              <button disabled={busy} onClick={() => void accept(invite)}>
+              <Button size="xs" disabled={busy} onClick={() => void accept(invite)}>
                 Accept
-              </button>
+              </Button>
             </div>
           ))}
-          <form className="new-bot-form" onSubmit={(event) => void create(event)}>
-            <input
+          <form className="mt-0.5 border-t pt-1.5" onSubmit={(event) => void create(event)}>
+            <Input
               placeholder="+ New workspace"
               value={name}
               maxLength={60}
@@ -124,7 +131,9 @@ export function WorkspaceSwitcher({
               onKeyDown={(event) => event.key === "Escape" && setOpen(false)}
             />
           </form>
-          {error && <p className="error">{error}</p>}
+          <div className="px-1">
+            <ErrorText message={error} />
+          </div>
         </div>
       )}
     </div>
@@ -157,79 +166,82 @@ export function Members({ workspace, user, onLeft }: { workspace: Workspace; use
   }
 
   return (
-    <div className="bot-pane">
-      <header className="bot-header">
-        <div>
-          <h2>{workspace.name}</h2>
-          <p className="muted">Members share this workspace's projects. Personal bots stay with their owner.</p>
-        </div>
+    <>
+      <PaneHeader icon={<UsersIcon className="size-4 text-muted-foreground" />} title={workspace.name} note="Members">
         {!owner && (
-          <div className="actions">
-            <button className="danger" disabled={busy} onClick={() => void leave()}>
-              Leave
-            </button>
-          </div>
+          <Button size="xs" variant="destructive-outline" disabled={busy} onClick={() => void leave()}>
+            Leave
+          </Button>
         )}
-      </header>
-      <section className="routines">
-        {detail?.members.map((member) => (
-          <div key={member.userId} className="routine-row">
-            <div className="routine-text">
-              <strong>
-                {member.login}
-                {member.userId === user.id && " (you)"}
-              </strong>
-              <span className="muted">{member.role}</span>
-            </div>
-            {owner && member.role === "member" && (
-              <button className="danger" disabled={busy} onClick={() => void run(() => api.removeMember(workspace.id, member.userId))}>
-                Remove
-              </button>
-            )}
-          </div>
-        ))}
-        {detail?.invites.map((pending) => (
-          <div key={pending.id} className="routine-row">
-            <div className="routine-text">
-              <strong>{pending.login}</strong>
-              <span className="muted">invited by {pending.invitedBy}; joins once they sign in and accept</span>
-            </div>
-            {owner && (
-              <button disabled={busy} onClick={() => void run(() => api.revokeInvite(workspace.id, pending.id))}>
-                Withdraw
-              </button>
-            )}
-          </div>
-        ))}
+      </PaneHeader>
+      <PaneBody>
+        <Section title="Members" description="Members share this workspace's projects. Personal bots stay with their owner.">
+          {detail?.members.map((member) => (
+            <Row
+              key={member.userId}
+              title={
+                <>
+                  {member.login}
+                  {member.userId === user.id && <span className="font-normal text-muted-foreground"> (you)</span>}
+                </>
+              }
+              meta={member.role}
+              actions={
+                owner &&
+                member.role === "member" && (
+                  <Button size="xs" variant="destructive-outline" disabled={busy} onClick={() => void run(() => api.removeMember(workspace.id, member.userId))}>
+                    Remove
+                  </Button>
+                )
+              }
+            />
+          ))}
+          {detail?.invites.map((pending) => (
+            <Row
+              key={pending.id}
+              title={pending.login}
+              meta={`invited by ${pending.invitedBy}; joins once they sign in and accept`}
+              actions={
+                owner && (
+                  <Button size="xs" variant="outline" disabled={busy} onClick={() => void run(() => api.revokeInvite(workspace.id, pending.id))}>
+                    Withdraw
+                  </Button>
+                )
+              }
+            />
+          ))}
+          {owner && (
+            <form className="flex gap-2 pt-3" onSubmit={(event) => void invite(event)}>
+              <Input placeholder="GitHub login" value={login} disabled={busy} onChange={(event) => setLogin(event.target.value)} />
+              <Button type="submit" variant="outline" disabled={busy || !InviteRequest.safeParse({ login }).success}>
+                Invite
+              </Button>
+            </form>
+          )}
+        </Section>
         {detail && (
-          <div className="routine-row">
-            <div className="routine-text">
-              <strong>Copilot for projects</strong>
-              <span className="muted">{copilotModeText[detail.copilotMode]} Chiefs always run on their owner's seat.</span>
-            </div>
-            {owner && (
-              <select
-                value={detail.copilotMode}
-                disabled={busy}
-                onChange={(event) => void run(() => api.setCopilotMode(workspace.id, CopilotMode.parse(event.target.value)))}
-              >
-                <option value="personal">Each member's seat</option>
-                <option value="org">The organization</option>
-              </select>
-            )}
-          </div>
+          <Section title="Copilot for projects">
+            <Row
+              title={detail.copilotMode === "personal" ? "Each member's seat" : "The organization"}
+              meta={`${copilotModeText[detail.copilotMode]} Chiefs always run on their owner's seat.`}
+              actions={
+                owner && (
+                  <Select
+                    value={detail.copilotMode}
+                    disabled={busy}
+                    onChange={(event) => void run(() => api.setCopilotMode(workspace.id, CopilotMode.parse(event.target.value)))}
+                  >
+                    <option value="personal">Each member's seat</option>
+                    <option value="org">The organization</option>
+                  </Select>
+                )
+              }
+            />
+          </Section>
         )}
-        {owner && (
-          <form className="routine-schedule" onSubmit={(event) => void invite(event)}>
-            <input placeholder="GitHub login" value={login} disabled={busy} onChange={(event) => setLogin(event.target.value)} />
-            <button type="submit" disabled={busy || !InviteRequest.safeParse({ login }).success}>
-              Invite
-            </button>
-          </form>
-        )}
-        {error && <p className="error">{error}</p>}
-      </section>
-    </div>
+        <ErrorText message={error} />
+      </PaneBody>
+    </>
   );
 }
 

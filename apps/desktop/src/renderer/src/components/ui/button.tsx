@@ -52,7 +52,7 @@ export function Button({
       data-slot="button"
       data-pressed={pressed ? "" : undefined}
       aria-pressed={pressed}
-      className={cn(buttonVariants({ size, variant }), className)}
+      className={cn(buttonVariants({ size, variant }), pressed && "border-primary/40 bg-primary/10 dark:bg-primary/16", className)}
       {...props}
     />
   );

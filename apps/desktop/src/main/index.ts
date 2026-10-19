@@ -282,6 +282,8 @@ app.whenReady().then(async () => {
     width: 1100,
     height: 760,
     title: "Chiefbot",
+    // T3 Code's chrome on macOS: no title bar, the window buttons inset in the sidebar's top bar.
+    ...(process.platform === "darwin" ? ({ titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 18 } } as const) : {}),
     webPreferences: { preload: join(import.meta.dirname, "../preload/index.cjs") },
   });
   // Links (the GitHub device page) open in the default browser, never in the app.
