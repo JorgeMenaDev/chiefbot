@@ -40,9 +40,9 @@ export function Column({ children }: { children: ReactNode }) {
 
 // The full-height panel right of a chat (a bot's details, a project's tasks),
 // with its own top bar, after Grok's bot panel.
-export function SidePanel({ bar, children }: { bar: ReactNode; children: ReactNode }) {
+export function SidePanel({ bar, hidden, children }: { bar: ReactNode; hidden?: boolean; children: ReactNode }) {
   return (
-    <aside className="flex w-[38%] min-w-[340px] shrink-0 flex-col border-l bg-card/40">
+    <aside hidden={hidden} className="flex w-[38%] min-w-[340px] shrink-0 flex-col border-l bg-card/40">
       <div className="drag-region flex h-(--topbar-height) shrink-0 items-center gap-2 border-b px-3">{bar}</div>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
     </aside>
