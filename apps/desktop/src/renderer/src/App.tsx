@@ -1,5 +1,5 @@
 import { AuthState, Bot, type BotStatus, type User } from "@chiefbot/contracts";
-import { BotIcon, CheckIcon, CopyIcon, FolderGit2Icon, ListChecksIcon, LogOutIcon, PlugIcon, PlusIcon, PowerIcon, PowerOffIcon, Trash2Icon, TriangleAlertIcon, UnplugIcon, UsersIcon } from "lucide-react";
+import { BotIcon, CheckIcon, CopyIcon, FolderGit2Icon, ListChecksIcon, LogOutIcon, PlugIcon, PlusIcon, PowerIcon, PowerOffIcon, Trash2Icon, TriangleAlertIcon, UnplugIcon, UsersIcon, XIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { z } from "zod";
 import { Chat } from "./Chat.tsx";
@@ -16,6 +16,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "./
 import { Input } from "./components/ui/input.tsx";
 import { SidebarGroupLabel, SidebarRow } from "./components/ui/sidebar.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
+import { copyText } from "./lib/clipboard.ts";
 import { cn } from "./lib/utils.ts";
 
 const BotList = z.array(Bot);
@@ -66,10 +67,7 @@ function AuthPanel({ state }: { state: Exclude<AuthState, { status: "signed-in" 
       return (
         <>
           <p className="text-center text-muted-foreground text-sm">Enter this code on GitHub:</p>
-          <div className="flex items-center gap-2 rounded-xl border bg-background py-2.5 ps-4 pe-2.5 dark:bg-input/32">
-            <code className="flex-1 text-center font-mono font-semibold text-2xl tracking-[0.2em]">{state.userCode}</code>
-            <CopyButton text={state.userCode} />
-          </div>
+          <DeviceCode code={state.userCode} />
           <a className={buttonVariants({ size: "lg", className: "w-full" })} href={state.verificationUri} target="_blank" rel="noreferrer">
             <GitHubMark />
             Open {state.verificationUri.replace(/^https?:\/\//, "")}
@@ -96,24 +94,27 @@ function AuthPanel({ state }: { state: Exclude<AuthState, { status: "signed-in" 
   }
 }
 
-// Copies `text`, then says "Copied" for two seconds (after T3 Code's MessageCopyButton).
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
+// The device code with a Copy button (after T3 Code's MessageCopyButton). The
+// button says "Copied" for two seconds. A failed copy stays shown, with a line
+// asking the user to select the code (one click selects it whole), until a retry works.
+function DeviceCode({ code }: { code: string }) {
+  const [copied, setCopied] = useState<boolean | null>(null);
   useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), 2000);
+    if (copied !== true) return;
+    const timer = setTimeout(() => setCopied(null), 2000);
     return () => clearTimeout(timer);
   }, [copied]);
   return (
-    <Button
-      size="sm"
-      variant="outline"
-      aria-live="polite"
-      onClick={() => void navigator.clipboard.writeText(text).then(() => setCopied(true), (error: unknown) => console.error(error))}
-    >
-      {copied ? <CheckIcon className="text-success" /> : <CopyIcon />}
-      {copied ? "Copied" : "Copy"}
-    </Button>
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-2 rounded-xl border bg-background py-2.5 ps-4 pe-2.5 dark:bg-input/32">
+        <code className="flex-1 select-all text-center font-mono font-semibold text-2xl tracking-[0.2em]">{code}</code>
+        <Button size="sm" variant="outline" aria-live="polite" onClick={() => void copyText(code, navigator.clipboard).then(setCopied)}>
+          {copied === true ? <CheckIcon className="text-success" /> : copied === false ? <XIcon className="text-destructive" /> : <CopyIcon />}
+          {copied === true ? "Copied" : copied === false ? "Copy failed" : "Copy"}
+        </Button>
+      </div>
+      {copied === false && <p className="text-center text-destructive-foreground text-xs">Copy failed, select the code and copy it.</p>}
+    </div>
   );
 }
 
