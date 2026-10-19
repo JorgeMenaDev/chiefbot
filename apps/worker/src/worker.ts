@@ -327,7 +327,13 @@ export function startWorker({
 
   return {
     screenControl: () => screenControl,
+    // Also on SIGTERM (index.ts): approvals still waiting are refused and the
+    // staged connections removed, so a stopped computer keeps no credential.
     stop() {
+      for (const { answer } of waiting.values()) answer(null);
+      waiting.clear();
+      stageConnections(connectionsRoot, []);
+      staged = null;
       link.stop();
       for (const close of streams) close();
       git?.stop(true);

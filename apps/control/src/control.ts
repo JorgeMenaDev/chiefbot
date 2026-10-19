@@ -356,10 +356,15 @@ export function startControl({
   };
 
   // A stop marks the bot stopping first, so no new work lands on a computer about to go.
+  // Stopping ends the bot's unfinished turn first, so its approvals expire and
+  // its key stops working while the computer shuts down.
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
     if (!running) {
       stopping.add(botId);
       publish(userId);
+      for (const turnId of store.unfinishedTurns(botId)) {
+        for (const event of store.abandonTurn(botId, turnId, "The bot was stopped before it finished this message.")) turns.publishChat(botId, event);
+      }
     }
     try {
       await (running ? computers.start(botId) : computers.stop(botId));

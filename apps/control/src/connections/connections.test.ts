@@ -226,4 +226,26 @@ test("control logs a turn's calls only while that turn is unfinished: never for 
   expect(calls.map(({ command, run }) => [command, run])).toEqual([["harness list", ended]]);
 });
 
+test("Stop mid-turn ends the turn: its approval expires, the agent is refused, and its connections are gone", async () => {
+  const { api, computers, root, onlineBot, send, watchChat } = await setup();
+  await api("PUT", "/connections/harness", { fields: harness });
+  const bot = await onlineBot("Ada");
+  const results: boolean[] = [];
+  computers.copilot.script = async function* (_prompt, runtime) {
+    results.push((await runtime.shell("harness execute pipeline deploy")).approved);
+    yield sdk.idle();
+  };
+  const chat = watchChat(bot.id);
+  await send(bot.id, "deploy");
+  const [request] = (await chat.until((events) => requestsIn(events).length === 1)).flatMap((e) => (e.event.type === "approval-request" ? [e.event] : []));
+  expect(readdirSync(root).sort()).toEqual(["bin", "calls", "connections", "skills"]);
+
+  expect((await api("POST", `/bots/${bot.id}/stop`)).status).toBe(200);
+  await chat.until(doneCount(1));
+
+  expect(results).toEqual([false]);
+  expect(existsSync(root) ? readdirSync(root) : []).toEqual([]);
+  expect((await api("POST", `/bots/${bot.id}/approvals/${request?.approvalId}`, { approved: true })).status).toBe(409);
+});
+
 const requestsIn = (events: ChatEvent[]) => events.filter((e) => e.event.type === "approval-request");
