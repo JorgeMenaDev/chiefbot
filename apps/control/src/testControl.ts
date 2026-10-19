@@ -21,6 +21,7 @@ import type { Clock } from "@chiefbot/worker/clock";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
+import { loadConnections, repoConnections } from "./connections/catalog.ts";
 import { startControl } from "./control.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 
@@ -50,6 +51,8 @@ export type TestControlOptions = {
   copilot?: FakeCopilot;
   // Where the workers serve git's credential helper (fakeComputers).
   gitSocket?: string;
+  // Where the bots' workers stage connections for a turn (fakeComputers).
+  connectionsRoot?: string;
   // Wraps the fake provider, e.g. to make start fail.
   provider?: (fake: ComputerProvider) => ComputerProvider;
   // The bot a new user gets at their first sign-in. Default: none.
@@ -72,6 +75,7 @@ export async function startTestControl({
   user: githubUser,
   copilot = fakeCopilot(),
   gitSocket,
+  connectionsRoot,
   provider,
   firstBot,
   clock,
@@ -82,13 +86,20 @@ export async function startTestControl({
   refreshTokenLeftMs = 180 * 24 * hour,
 }: TestControlOptions = {}) {
   const github = startFakeGitHub(githubUser ? { user: githubUser } : {});
-  const computers = fakeComputers({ copilot, ...(gitSocket === undefined ? {} : { gitSocket }), ...(clock === undefined ? {} : { clock }) });
+  const computers = fakeComputers({
+    copilot,
+    ...(gitSocket === undefined ? {} : { gitSocket }),
+    ...(connectionsRoot === undefined ? {} : { connectionsRoot }),
+    ...(clock === undefined ? {} : { clock }),
+  });
   const options = {
     port: 0,
     dbPath: persistent ? join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite") : ":memory:",
     githubApiUrl: github.url,
     githubClientId: "test-client",
     githubApp: github.app,
+    // The connections the repo ships.
+    connections: loadConnections(repoConnections),
     computers: provider ? provider(computers.provider) : computers.provider,
     ...(firstBot === undefined ? {} : { firstBot }),
     ...(clock === undefined ? {} : { clock }),

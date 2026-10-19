@@ -27,6 +27,7 @@ import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./
 import type { GitHubIdentity } from "./github.ts";
 import { handoffStore } from "./handoffStore.ts";
 import { nextDueAt } from "./schedule.ts";
+import { connectionStore } from "./connections/connectionStore.ts";
 import { connectorStore } from "./connectors/connectorStore.ts";
 import { projectStore } from "./projectStore.ts";
 import { subscriptionStore } from "./subscriptionStore.ts";
@@ -213,6 +214,7 @@ export function openStore(path: string) {
   const workspaces = workspaceStore(db);
   const projects = projectStore(db, hash);
   const connectors = connectorStore(db);
+  const connections = connectionStore(db);
   const subscriptions = subscriptionStore(db, projects);
   // A note from control in a bot's chat, in a turn of its own that is done already.
   const postNotice = (botId: BotId, notice: HandoffUpdate) => {
@@ -229,8 +231,10 @@ export function openStore(path: string) {
     workspaces,
     // Projects, task ledgers and coordinator chats (projectStore.ts).
     projects,
-    // Connectors, members' connections and the call log (connectors/connectorStore.ts).
+    // Connectors, members' sign-ins to them and their call log (connectors/connectorStore.ts).
     connectors,
+    // People's connections and their bots' call log (connections/connectionStore.ts).
+    connections,
     // What chiefs of staff handed to projects (handoffStore.ts).
     handoffs,
     // Projects' subscriptions and the events they saw (subscriptionStore.ts).

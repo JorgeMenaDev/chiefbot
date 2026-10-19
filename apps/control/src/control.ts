@@ -41,6 +41,8 @@ import { repoAccess, type RepoAgent } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
+import type { CatalogConnection } from "./connections/catalog.ts";
+import { connectionHost } from "./connections/connections.ts";
 import { connectorHost } from "./connectors/connectors.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
@@ -92,6 +94,8 @@ export type ControlOptions = {
   // The name of the bot a new user gets at their first sign-in, once: deleting
   // it is for good. None when unset; index.ts passes one.
   firstBot?: string;
+  // The connections people may turn on (connections/catalog.ts loadConnections). Default: none.
+  connections?: CatalogConnection[];
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -163,6 +167,9 @@ type SocketData =
 //                             (connectors/connectors.ts)
 //   …      /projects/:id/subscriptions  what a project listens to: CI runs, issue queries and
 //                             schedules, each event handled once (subscriptions.ts)
+//   …      /connections, /bots/:id/connection-calls, /worker/:botId/connection-calls  people's
+//                             connections (CLIs their bots use as them) and the calls made with them
+//                             (connections/connections.ts)
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
 //                             turn's key: handing work to projects and watching it (handoffs.ts)
 //
@@ -188,6 +195,7 @@ export function startControl({
   copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
   publicUrl,
   firstBot,
+  connections: catalog = [],
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -207,9 +215,12 @@ export function startControl({
   const stopping = new Set<BotId>();
   // Who drives each screen and the viewers' streams (screens.ts).
   const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
+  // People's connections, which their bots' turns carry (connections/connections.ts).
+  const connections = connectionHost({ store, secrets, catalog });
   // Starting turns, the chat topics and worker hellos (turns.ts).
   const turns = chatTurns({
     store,
+    connectionsFor: connections.forTurn,
     publish: (topic, message) => server.publish(topic, message),
     workerOf: (botId) => workers.get(botId),
     humanHasScreen: (botId) => screens.controlOf(botId) === "human",
@@ -412,6 +423,7 @@ export function startControl({
       ...projects.routes,
       ...taskWorkers.routes,
       ...connectors.routes,
+      ...connections.routes,
       ...chiefs.routes,
       ...subscriptions.routes,
       "/sessions": {

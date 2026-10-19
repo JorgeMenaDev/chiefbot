@@ -1,4 +1,7 @@
 import type { TCPSocketListener } from "bun";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startWorker } from "@chiefbot/worker";
 import { startCoordinator } from "@chiefbot/worker/coordinator";
 import type { Clock } from "@chiefbot/worker/clock";
@@ -13,7 +16,14 @@ import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 // server on TCP: it greets like one and records what it receives. With
 // gitSocket, the workers serve git's credential helper there (one bot at a
 // time: they share the path). Workers renew organizations' tokens on `clock`.
-export function fakeComputers({ copilot = fakeCopilot(), gitSocket, clock }: { copilot?: FakeCopilot; gitSocket?: string; clock?: Clock } = {}) {
+// Bots' workers stage their turns' connections under `connectionsRoot` (a new
+// temporary folder by default), never the real computer's /tmp/chiefbot.
+export function fakeComputers({
+  copilot = fakeCopilot(),
+  gitSocket,
+  clock,
+  connectionsRoot = mkdtempSync(join(tmpdir(), "chiefbot-connections-")),
+}: { copilot?: FakeCopilot; gitSocket?: string; clock?: Clock; connectionsRoot?: string } = {}) {
   type FakeComputer = {
     spec: ComputerSpec;
     worker: ReturnType<typeof startWorker> | null;
@@ -92,6 +102,7 @@ export function fakeComputers({ copilot = fakeCopilot(), gitSocket, clock }: { c
         screen: { hostname: "127.0.0.1", port: computer.screen.port },
         ...(gitSocket === undefined ? {} : { gitSocket }),
         ...(clock === undefined ? {} : { clock }),
+        connectionsRoot,
         retryMs: 20,
       });
     },
