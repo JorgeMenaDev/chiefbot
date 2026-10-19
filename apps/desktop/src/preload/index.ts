@@ -85,6 +85,14 @@ const api = {
     // { projectId, workers } whenever one of a project's workers changes.
     onWorkers: (listener: (workers: unknown) => void) => subscribe("projects:workers", listener),
   },
+  // The user's own connections (Connect apps) and a bot's calls with them.
+  connections: {
+    list: (): Promise<unknown> => ipcRenderer.invoke("connections:list"),
+    // Saves every field, secret ones included, which turns it on.
+    connect: (name: string, fields: Record<string, string>): Promise<unknown> => ipcRenderer.invoke("connections:connect", name, fields),
+    disconnect: (name: string): Promise<void> => ipcRenderer.invoke("connections:disconnect", name),
+    calls: (botId: string): Promise<unknown> => ipcRenderer.invoke("connections:calls", botId),
+  },
   connectors: {
     list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("connectors:list", workspaceId),
     define: (workspaceId: string, input: ConnectorInput): Promise<unknown> => ipcRenderer.invoke("connectors:define", workspaceId, input),

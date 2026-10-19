@@ -3,6 +3,8 @@ import {
   AnswerApprovalRequest,
   ApprovalId,
   BotId,
+  ConnectionName,
+  ConnectRequest,
   ConnectorApprovalRequest,
   ConnectorInput,
   ConnectorName,
@@ -32,6 +34,7 @@ import { join } from "node:path";
 import { createAuth, type SessionStore } from "./auth.ts";
 import { createBots } from "./bots.ts";
 import { createChats } from "./chat.ts";
+import { createConnections } from "./connections.ts";
 import { createConnectors } from "./connectors.ts";
 import { createProjects } from "./projects.ts";
 import { createRoutines } from "./routines.ts";
@@ -91,6 +94,8 @@ const routines = createRoutines({ controlUrl, session: sessionStore.load });
 const workspaces = createWorkspaces({ controlUrl, session: sessionStore.load });
 
 const connectors = createConnectors({ controlUrl, session: sessionStore.load });
+
+const connections = createConnections({ controlUrl, session: sessionStore.load });
 
 const projects = createProjects({
   controlUrl,
@@ -214,6 +219,12 @@ ipcMain.handle("projects:subscribe", (_event, id: unknown, input: unknown) =>
 ipcMain.handle("projects:unsubscribe", (_event, id: unknown, subscriptionId: unknown) =>
   projects.unsubscribe(ProjectId.parse(id), SubscriptionId.parse(subscriptionId)),
 );
+ipcMain.handle("connections:list", () => connections.list());
+ipcMain.handle("connections:connect", (_event, name: unknown, fields: unknown) =>
+  connections.connect(ConnectionName.parse(name), ConnectRequest.parse({ fields }).fields),
+);
+ipcMain.handle("connections:disconnect", (_event, name: unknown) => connections.disconnect(ConnectionName.parse(name)));
+ipcMain.handle("connections:calls", (_event, botId: unknown) => connections.calls(BotId.parse(botId)));
 ipcMain.handle("connectors:list", (_event, workspaceId: unknown) => connectors.list(WorkspaceId.parse(workspaceId)));
 ipcMain.handle("connectors:define", (_event, workspaceId: unknown, input: unknown) =>
   connectors.define(WorkspaceId.parse(workspaceId), ConnectorInput.parse(input)),
