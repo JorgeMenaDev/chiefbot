@@ -1,7 +1,9 @@
 import { Database } from "bun:sqlite";
 import {
+  BotAvatar,
   BotId,
   AUTO_MODEL,
+  DEFAULT_AVATAR,
   CopilotPlan,
   Routine,
   RoutineId,
@@ -106,6 +108,9 @@ export function openStore(path: string) {
   // Columns added after the tables first shipped.
   // The bot's Copilot model id.
   addColumn(db, "bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
+  // The bot's face (contracts BotAvatar). Bots from before faces wear the default.
+  addColumn(db, "bots", "avatar_shape", `TEXT NOT NULL DEFAULT '${DEFAULT_AVATAR.shape}'`);
+  addColumn(db, "bots", "avatar_color", `TEXT NOT NULL DEFAULT '${DEFAULT_AVATAR.color}'`);
   // The latest ModelReport (JSON) a worker of the user's bots sent: control's cache of their plan's models.
   addColumn(db, "users", "copilot_models", "TEXT");
   // 0 until the user's first bot is claimed (claimFirstBot). Users from before first bots count as claimed.
@@ -139,10 +144,12 @@ export function openStore(path: string) {
     PRIMARY KEY (routine_id, due_at)
   )`);
 
-  type BotRow = { id: string; name: string; running: number; model: string };
+  type BotRow = { id: string; name: string; running: number; model: string; avatar_shape: string; avatar_color: string };
+  const botColumns = "id, name, running, model, avatar_shape, avatar_color";
   const toBotRecord = (row: BotRow) => ({
     id: BotId.parse(row.id),
     name: row.name,
+    avatar: BotAvatar.parse({ shape: row.avatar_shape, color: row.avatar_color }),
     running: row.running === 1,
     model: row.model,
   });
@@ -305,20 +312,20 @@ export function openStore(path: string) {
     },
 
     // A new bot whose computer should run.
-    createBot(userId: UserId, name: string, botToken: BotToken) {
+    createBot(userId: UserId, name: string, avatar: BotAvatar, botToken: BotToken) {
       const row = db
-        .query<BotRow, [string, string, string, string, number]>(
-          `INSERT INTO bots (id, user_id, name, token_hash, running, created_at) VALUES (?1, ?2, ?3, ?4, 1, ?5)
-           RETURNING id, name, running, model`,
+        .query<BotRow, [string, string, string, string, number, string, string]>(
+          `INSERT INTO bots (id, user_id, name, token_hash, running, created_at, avatar_shape, avatar_color)
+           VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7) RETURNING ${botColumns}`,
         )
-        .get(`bot_${crypto.randomUUID()}`, userId, name, hash(botToken), Date.now());
+        .get(`bot_${crypto.randomUUID()}`, userId, name, hash(botToken), Date.now(), avatar.shape, avatar.color);
       if (!row) throw new Error("bot insert returned no row");
       return toBotRecord(row);
     },
 
     botsFor(userId: UserId) {
       return db
-        .query<BotRow, [string]>("SELECT id, name, running, model FROM bots WHERE user_id = ?1 ORDER BY created_at, id")
+        .query<BotRow, [string]>(`SELECT ${botColumns} FROM bots WHERE user_id = ?1 ORDER BY created_at, id`)
         .all(userId)
         .map(toBotRecord);
     },
@@ -326,7 +333,7 @@ export function openStore(path: string) {
     // Only the owner's bot: another user's bot id reads as missing.
     botFor(userId: UserId, botId: string) {
       const row = db
-        .query<BotRow, [string, string]>("SELECT id, name, running, model FROM bots WHERE user_id = ?1 AND id = ?2")
+        .query<BotRow, [string, string]>(`SELECT ${botColumns} FROM bots WHERE user_id = ?1 AND id = ?2`)
         .get(userId, botId);
       return row ? toBotRecord(row) : null;
     },

@@ -26,12 +26,30 @@ export type BotStatus = z.infer<typeof BotStatus>;
 export const ScreenControl = z.enum(["agent", "human"]);
 export type ScreenControl = z.infer<typeof ScreenControl>;
 
+// A bot's face: one of a fixed set of shapes, all with the same two eyes, in one
+// of a fixed set of colours. The desktop draws them (renderer Avatar.tsx).
+export const AvatarShape = z.enum(["chief", "circle", "card", "cloud", "hexagon", "flower", "star", "drop", "pill", "seal", "arch", "blob"]);
+export type AvatarShape = z.infer<typeof AvatarShape>;
+export const AvatarColor = z.enum(["blue", "red", "yellow", "green", "teal", "purple", "pink", "orange", "brown", "graphite"]);
+export type AvatarColor = z.infer<typeof AvatarColor>;
+export const BotAvatar = z.object({ shape: AvatarShape, color: AvatarColor });
+export type BotAvatar = z.infer<typeof BotAvatar>;
+// Chiefbot's own chief, in blue: the face of a bot created without one.
+export const DEFAULT_AVATAR: BotAvatar = { shape: "chief", color: "blue" };
+
 // `model` is the Copilot model id the bot's turns run on (AUTO_MODEL until the user picks one).
-export const Bot = z.object({ id: BotId, name: z.string(), status: BotStatus, screenControl: ScreenControl, model: z.string() });
+export const Bot = z.object({
+  id: BotId,
+  name: z.string(),
+  avatar: BotAvatar,
+  status: BotStatus,
+  screenControl: ScreenControl,
+  model: z.string(),
+});
 export type Bot = z.infer<typeof Bot>;
 
 // Body of POST /bots.
-export const CreateBotRequest = z.object({ name: z.string().trim().min(1).max(60) });
+export const CreateBotRequest = z.object({ name: z.string().trim().min(1).max(60), avatar: BotAvatar.default(DEFAULT_AVATAR) });
 export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 
 // Control → desktop on the /events WebSocket.
