@@ -53,7 +53,6 @@ export type TestControlOptions = {
   provider?: (fake: ComputerProvider) => ComputerProvider;
   // The bot a new user gets at their first sign-in. Default: none.
   firstBot?: string;
-  launchTimeoutMinutes?: number;
   clock?: Clock;
   idleStopMinutes?: number;
   // Mints organizations' Copilot tokens. Default: the repo app's, against the fake GitHub.
@@ -74,7 +73,6 @@ export async function startTestControl({
   gitSocket,
   provider,
   firstBot,
-  launchTimeoutMinutes,
   clock,
   idleStopMinutes,
   copilotTokens,
@@ -92,7 +90,6 @@ export async function startTestControl({
     githubApp: github.app,
     computers: provider ? provider(computers.provider) : computers.provider,
     ...(firstBot === undefined ? {} : { firstBot }),
-    ...(launchTimeoutMinutes === undefined ? {} : { launchTimeoutMinutes }),
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),
     ...(copilotTokens === undefined ? {} : { copilotTokens }),

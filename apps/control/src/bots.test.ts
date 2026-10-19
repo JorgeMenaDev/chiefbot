@@ -1,7 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Bot, type BotId } from "@chiefbot/contracts";
-import type { ComputerProvider } from "./computers/computer.ts";
-import { atCleanUp, cleanUp, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
+import { atCleanUp, cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
 
 afterEach(cleanUp);
 
@@ -96,6 +95,15 @@ test("a new user's first sign-in brings a first bot online, and signing in again
   expect((await again.bots()).map(({ id }) => id)).toEqual(first.map(({ id }) => id));
 });
 
+test("a new user signing in twice at once gets one first bot", async () => {
+  const { signIn } = await setup({ firstBot: "Chief of Staff" });
+  const newUser = { id: 7171, login: "octo-newcomer", copilot: null };
+
+  const [first] = await Promise.all([signIn(newUser), signIn(newUser)]);
+
+  expect(await first.bots()).toMatchObject([{ name: "Chief of Staff" }]);
+});
+
 test("a deleted first bot stays deleted", async () => {
   const { api, signIn, watchBots } = await setup({ firstBot: "Chief of Staff" });
   const [chief] = await watchBots().until((bots) => bots.length === 1);
@@ -117,90 +125,6 @@ test("a first bot whose computer fails to start is tried again at the next sign-
   const again = await signIn();
 
   expect(await again.watchBots().until((bots) => bots[0]?.status === "online")).toMatchObject([{ name: "Chief of Staff" }]);
-});
-
-// A provider whose computers are made only once the test opens the gate (if
-// ever); making them fails if `fail`.
-function gatedCreate(fail = false) {
-  let open = () => {};
-  const opened = new Promise<void>((resolve) => (open = resolve));
-  const provider = (fake: ComputerProvider): ComputerProvider => ({
-    ...fake,
-    create: async (spec) => {
-      await opened;
-      return fail ? Promise.reject(new Error("quota exceeded")) : fake.create(spec);
-    },
-  });
-  return { provider, open };
-}
-
-// The user's one bot, once it is listed.
-async function onlyBot(watch: TestUser["watchBots"]) {
-  const [bot] = await watch().until((bots) => bots.length === 1);
-  if (!bot) throw new Error("no bot");
-  return bot;
-}
-
-test("Start, Stop and Delete refuse a bot whose computer is still being made", async () => {
-  const gate = gatedCreate();
-  const { api, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider });
-  const { id } = await onlyBot(watchBots);
-
-  for (const [method, path] of [["POST", "start"], ["POST", "stop"], ["DELETE", ""]] as const) {
-    const res = await api(method, `/bots/${id}${path ? `/${path}` : ""}`);
-    expect(res.status).toBe(409);
-    expect(await res.json()).toMatchObject({ error: "bot_starting" });
-  }
-  gate.open();
-  await watchBots().until((bots) => statusOf(id)(bots) === "online");
-  expect((await api("DELETE", `/bots/${id}`)).status).toBe(204);
-});
-
-test("a first bot whose computer is not made in time is dropped, its late computer destroyed, and the next sign-in tries again", async () => {
-  const gate = gatedCreate();
-  const { signIn, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider, launchTimeoutMinutes: 0.002 });
-  const { id } = await onlyBot(watchBots);
-  await watchBots().until((bots) => bots.length === 0);
-
-  gate.open();
-  const again = await signIn();
-
-  await eventually(async () => (await computers.provider.status(id)) === "absent");
-  expect(await again.watchBots().until((bots) => bots[0]?.status === "online")).toMatchObject([{ name: "Chief of Staff" }]);
-});
-
-test("a computer whose making fails after the deadline is destroyed again, for what it left behind", async () => {
-  const gate = gatedCreate(true);
-  const { computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider, launchTimeoutMinutes: 0.002 });
-  const { id } = await onlyBot(watchBots);
-  await watchBots().until((bots) => bots.length === 0);
-  await eventually(() => computers.destroyed.length === 1);
-
-  gate.open();
-
-  await eventually(() => computers.destroyed.length === 2);
-  expect(computers.destroyed).toEqual([
-    { id, deleteData: true },
-    { id, deleteData: true },
-  ]);
-});
-
-test("stopping control mid-launch cancels the deadline: nothing is destroyed and the bot is there after a restart", async () => {
-  const gate = gatedCreate();
-  const { stopControl, startControl, watchBots, signIn, computers } = await setup({
-    persistent: true,
-    firstBot: "Chief of Staff",
-    provider: gate.provider,
-    launchTimeoutMinutes: 0.002,
-  });
-  await onlyBot(watchBots);
-
-  stopControl();
-  await Bun.sleep(300);
-  startControl();
-
-  expect(computers.destroyed).toEqual([]);
-  expect(await (await signIn()).bots()).toMatchObject([{ name: "Chief of Staff" }]);
 });
 
 test("a worker credential works only for its own bot", async () => {

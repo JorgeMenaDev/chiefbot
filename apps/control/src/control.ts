@@ -91,9 +91,6 @@ export type ControlOptions = {
   // The name of the bot a new user gets at their first sign-in, once: deleting
   // it is for good. None when unset; index.ts passes one.
   firstBot?: string;
-  // A bot's computer that is not made and started within this long counts as
-  // failed to start, and is destroyed. Default 10.
-  launchTimeoutMinutes?: number;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -190,7 +187,6 @@ export function startControl({
   copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
   publicUrl,
   firstBot,
-  launchTimeoutMinutes = 10,
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -325,47 +321,23 @@ export function startControl({
     return Response.json(botOf(user.id, botId));
   }
 
-  // Bots whose computer is being made and started. Start, Stop and Delete
-  // refuse them (409) until the launch ends.
-  const launching = new Set<BotId>();
-  // Each launch's deadline; control.stop() clears them before closing the store.
-  const launchTimers = new Set<ReturnType<typeof setTimeout>>();
-
   // Adds a bot to the user's list at once and starts its computer. If the
-  // computer fails to start, or is not started within launchTimeoutMinutes, the
-  // bot is gone again and this throws. Its computer is destroyed then, and again
-  // once a launch past its deadline ends either way (destroy is fine on a
-  // computer partly made or absent).
+  // computer fails to start, the bot is gone again and this throws.
   const launchBot = async (userId: UserId, name: string) => {
     const botToken = BotToken.parse(randomToken());
     const { id } = store.createBot(userId, name, botToken);
-    launching.add(id);
-    const provision = (async () => {
+    try {
       await computers.create({
         id,
         env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_ID: id, CHIEFBOT_BOT_TOKEN: botToken },
       });
       await computers.start(id);
-    })();
-    const late = new Error("the computer did not start in time");
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(late), launchTimeoutMinutes * 60_000);
-      launchTimers.add(timer);
-    });
-    try {
-      await Promise.race([provision, deadline]);
       return id;
     } catch (error) {
-      const destroy = () => computers.destroy(id, { deleteData: true }).catch(() => {});
-      void destroy();
-      if (error === late) void provision.then(destroy, destroy);
       store.deleteBot(id);
+      await computers.destroy(id, { deleteData: true }).catch(() => {});
       throw error;
     } finally {
-      clearTimeout(timer);
-      if (timer) launchTimers.delete(timer);
-      launching.delete(id);
       publish(userId);
     }
   };
@@ -502,14 +474,12 @@ export function startControl({
       },
       "/bots/:id/start": {
         POST: ownBot(async (user, botId) => {
-          if (launching.has(botId)) return apiError(409, "bot_starting");
           await setRunning(user.id, botId, true);
           return Response.json(botOf(user.id, botId));
         }),
       },
       "/bots/:id/stop": {
         POST: ownBot(async (user, botId) => {
-          if (launching.has(botId)) return apiError(409, "bot_starting");
           await setRunning(user.id, botId, false);
           return Response.json(botOf(user.id, botId));
         }),
@@ -529,7 +499,6 @@ export function startControl({
       },
       "/bots/:id": {
         DELETE: ownBot(async (user, botId, req) => {
-          if (launching.has(botId)) return apiError(409, "bot_starting");
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
           await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
@@ -762,7 +731,6 @@ export function startControl({
   return {
     url: server.url.origin,
     stop: () => {
-      for (const timer of launchTimers) clearTimeout(timer);
       idle.stop();
       coordinatorIdle.stop();
       taskWorkers.stop();
