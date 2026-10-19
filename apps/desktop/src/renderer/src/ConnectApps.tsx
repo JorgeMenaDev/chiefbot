@@ -18,13 +18,14 @@ const CallList = z.array(ConnectionCall);
 // asks for every field again.
 export function ConnectApps() {
   const api = window.chiefbot.connections;
-  const [connections, setConnections] = useState<Connection[]>([]);
+  // Null until the first list arrives.
+  const [connections, setConnections] = useState<Connection[] | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const reload = async () => setConnections(ConnectionList.parse(await api.list()));
   const { run, busy, error } = useAction(reload);
 
   useEffect(() => {
-    void reload();
+    void run(async () => {});
   }, []);
 
   return (
@@ -35,8 +36,9 @@ export function ConnectApps() {
           title="Your connections"
           description="Turn one on with your own token. Your bots use the app as you, from their next message, and ask before a command that changes something. That check is a guardrail, not a boundary: paste a token with only the access they need, and one that expires."
         >
-          {connections.length === 0 && <Muted>No connections ship with this Chiefbot.</Muted>}
-          {connections.map((connection) => (
+          {connections === null && !error && <Muted>Loading…</Muted>}
+          {connections?.length === 0 && <Muted>No connections ship with this Chiefbot.</Muted>}
+          {connections?.map((connection) => (
             <Row
               key={connection.name}
               title={
