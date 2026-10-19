@@ -5,7 +5,8 @@ import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "./compo
 // settings panels: a slim top bar, panels that open under it, list rows, cards.
 
 // The top bar: the screen's name (and a quiet note), its actions on the right.
-// It is the window's drag handle, as macOS hides the title bar.
+// It is the window's drag handle, as macOS hides the title bar. While the sidebar
+// is hidden it starts after the window buttons and the sidebar toggle.
 export function PaneHeader({
   title,
   icon,
@@ -18,7 +19,7 @@ export function PaneHeader({
   children?: ReactNode;
 }) {
   return (
-    <header className="drag-region flex h-(--topbar-height) shrink-0 items-center gap-3 border-b px-5">
+    <header className="drag-region flex h-(--topbar-height) shrink-0 items-center gap-3 border-b px-5 transition-[padding] duration-200 ease-out motion-reduce:transition-none [[data-sidebar-state=collapsed]_&]:ps-(--sidebar-content-left)">
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {icon}
         <h2 className="min-w-0 truncate font-medium text-sm">{title}</h2>
