@@ -12,19 +12,24 @@
     "@chiefbot/contracts": "workspace:*",
     "@chiefbot/setup": "workspace:*",
     "@novnc/novnc": "^1.7.0",
+    "class-variance-authority": "^0.7.1",
+    "lucide-react": "^1.59.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
+    "tailwind-merge": "^3.7.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@chiefbot/control": "workspace:*",
     "@chiefbot/fake-github": "workspace:*",
     "@chiefbot/worker": "workspace:*",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^44.7.2",
     "electron-vite": "^6.0.0",
+    "tailwindcss": "^4.3.3",
     "vite": "^8.3.4"
   },
   "main": "out/main/index.js"
