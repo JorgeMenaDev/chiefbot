@@ -1,3 +1,4 @@
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "electron-vite";
 
@@ -13,5 +14,5 @@ export default defineConfig({
       rollupOptions: { output: { format: "cjs", entryFileNames: "[name].cjs" } },
     },
   },
-  renderer: { plugins: [react()] },
+  renderer: { plugins: [react(), tailwindcss()] },
 });

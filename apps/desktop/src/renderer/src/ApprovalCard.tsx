@@ -1,5 +1,7 @@
 import type { ChatItem } from "@chiefbot/contracts";
 import { useState } from "react";
+import { Button } from "./components/ui/button.tsx";
+import { cn } from "./lib/utils.ts";
 
 export type ApprovalItem = Extract<ChatItem, { kind: "approval" }>;
 
@@ -41,23 +43,31 @@ export function ApprovalCard({ item, onAnswer }: { item: ApprovalItem; onAnswer:
 
   if (item.state !== "pending") {
     return (
-      <div className={`approval-row ${item.state}`}>
-        {approvalLabel[item.request]}: {approvalOutcome[item.state]} <code>{item.detail.split("\n")[0]}</code>
+      <div className={cn("flex min-w-0 items-center gap-1.5 text-xs", item.state === "approved" ? "text-success-foreground" : "text-destructive-foreground")}>
+        <span className="shrink-0">
+          {approvalLabel[item.request]}: {approvalOutcome[item.state]}
+        </span>
+        <code className="truncate font-mono text-muted-foreground">{item.detail.split("\n")[0]}</code>
       </div>
     );
   }
   return (
-    <div className="approval-card" role="group" aria-label={approvalLabel[item.request]}>
-      <span className="approval-label">{approvalLabel[item.request]}</span>
-      <code className="approval-detail">{item.detail}</code>
-      <div className="approval-actions">
-        {error && <span className="error">{error}</span>}
-        <button className="outline" disabled={busy} onClick={() => void answer(false)}>
+    <div role="group" aria-label={approvalLabel[item.request]} className="rounded-xl border border-warning/40 bg-warning/4 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-[11px] text-warning-foreground uppercase tracking-[0.2em]">Pending approval</span>
+        <span className="font-medium text-sm">{approvalLabel[item.request]}</span>
+      </div>
+      <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-border/65 bg-background/70 p-3 font-mono text-xs leading-relaxed">
+        {item.detail}
+      </pre>
+      <div className="mt-3 flex items-center justify-end gap-2">
+        {error && <span className="me-auto text-destructive-foreground text-xs">{error}</span>}
+        <Button size="sm" variant="destructive-outline" disabled={busy} onClick={() => void answer(false)}>
           Decline
-        </button>
-        <button disabled={busy} onClick={() => void answer(true)}>
+        </Button>
+        <Button size="sm" disabled={busy} onClick={() => void answer(true)}>
           Approve
-        </button>
+        </Button>
       </div>
     </div>
   );

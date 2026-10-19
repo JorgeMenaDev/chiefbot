@@ -1,6 +1,10 @@
 import { DEFAULT_POLL_SECONDS, MIN_POLL_SECONDS, Subscription, SubscriptionKind, type Project, type SubscriptionInput } from "@chiefbot/contracts";
+import { PlusIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
+import { ErrorText, Muted, Panel, Row } from "./Pane.tsx";
+import { Button } from "./components/ui/button.tsx";
+import { Input, Select, Textarea } from "./components/ui/input.tsx";
 
 const SubscriptionList = z.array(Subscription);
 
@@ -32,30 +36,30 @@ export function ListeningTo({ project }: { project: Project }) {
   }
 
   return (
-    <section className="routines">
-      {subscriptions.length === 0 && !adding && <p className="muted">Not listening to anything yet.</p>}
+    <Panel title="Listening to">
+      {subscriptions.length === 0 && !adding && <Muted>Not listening to anything yet.</Muted>}
       {subscriptions.map((subscription) => (
-        <div key={subscription.id} className="routine-row">
-          <div className="routine-text">
-            <strong>{describe(subscription.source)}</strong>
-            <span className={subscription.lastError ? "error" : "muted"}>{status(subscription)}</span>
-          </div>
-          <div className="actions">
-            <button className="danger" onClick={() => void act(() => api.unsubscribe(project.id, subscription.id))}>
+        <Row
+          key={subscription.id}
+          title={describe(subscription.source)}
+          meta={<span className={subscription.lastError ? "text-destructive-foreground" : undefined}>{status(subscription)}</span>}
+          actions={
+            <Button size="xs" variant="ghost" className="text-destructive-foreground" onClick={() => void act(() => api.unsubscribe(project.id, subscription.id))}>
               Remove
-            </button>
-          </div>
-        </div>
+            </Button>
+          }
+        />
       ))}
       {adding ? (
         <SubscriptionForm project={project} onSave={(input) => act(() => api.subscribe(project.id, input))} onCancel={() => setAdding(false)} />
       ) : (
-        <button className="link-button" onClick={() => setAdding(true)}>
-          + Listen to…
-        </button>
+        <Button size="xs" variant="ghost" className="mt-1 self-start text-muted-foreground" onClick={() => setAdding(true)}>
+          <PlusIcon />
+          Listen to…
+        </Button>
       )}
-      {error && <p className="error">{error}</p>}
-    </section>
+      <ErrorText message={error} />
+    </Panel>
   );
 }
 
@@ -120,60 +124,62 @@ function SubscriptionForm({ project, onSave, onCancel }: { project: Project; onS
     setBusy(false);
   }
 
+  const label = "flex items-center gap-2 text-muted-foreground text-xs";
   return (
-    <form className="routine-form" onSubmit={(event) => void submit(event)}>
-      <div className="routine-schedule">
-        <select value={kind} disabled={busy} onChange={(event) => setKind(SubscriptionKind.parse(event.target.value))}>
+    <form className="flex flex-col gap-2 py-2.5" onSubmit={(event) => void submit(event)}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={kind} disabled={busy} onChange={(event) => setKind(SubscriptionKind.parse(event.target.value))}>
           <option value="ci-status">CI failures on a branch</option>
           <option value="issue-query">An issue query</option>
           <option value="schedule">A schedule</option>
-        </select>
+        </Select>
         {kind !== "schedule" && (
-          <label>
+          <label className={label}>
             Connector{" "}
-            <select {...field("connector")}>
+            <Select {...field("connector")}>
               {declared.map((name) => (
                 <option key={name}>{name}</option>
               ))}
-            </select>
+            </Select>
           </label>
         )}
       </div>
       {kind === "ci-status" && (
-        <label>
-          Branch <input placeholder="main" {...field("branch")} />
+        <label className={label}>
+          Branch <Input className="w-48" placeholder="main" {...field("branch")} />
         </label>
       )}
       {kind === "issue-query" && (
         <>
-          <input placeholder="repo:owner/name label:bug is:open, or JQL for Jira" autoFocus {...field("query")} />
-          <input placeholder="Jira only: your-site.atlassian.net" {...field("site")} />
+          <Input placeholder="repo:owner/name label:bug is:open, or JQL for Jira" autoFocus {...field("query")} />
+          <Input placeholder="Jira only: your-site.atlassian.net" {...field("site")} />
         </>
       )}
-      {kind === "schedule" && <textarea rows={2} placeholder="What should the coordinator do?" autoFocus {...field("prompt")} />}
-      <div className="routine-schedule">
+      {kind === "schedule" && <Textarea rows={2} placeholder="What should the coordinator do?" autoFocus {...field("prompt")} />}
+      <div className="flex flex-wrap items-center gap-2">
         {kind === "schedule" ? (
           <>
-            <label>
-              Cron <input placeholder="0 9 * * 1-5" {...field("cron")} />
+            <label className={label}>
+              Cron <Input className="w-36 font-mono" placeholder="0 9 * * 1-5" {...field("cron")} />
             </label>
-            <label>
-              Timezone <input placeholder="Europe/London" {...field("timezone")} />
+            <label className={label}>
+              Timezone <Input className="w-40" placeholder="Europe/London" {...field("timezone")} />
             </label>
           </>
         ) : (
-          <label>
-            Check every <input type="number" min={MIN_POLL_SECONDS / 60} {...field("minutes")} /> min
+          <label className={label}>
+            Check every <Input className="w-20" type="number" min={MIN_POLL_SECONDS / 60} {...field("minutes")} /> min
           </label>
         )}
-        <button type="submit" disabled={busy || tooOften || (kind !== "schedule" && declared.length === 0)}>
-          Save
-        </button>
-        <button type="button" onClick={onCancel}>
+        <span className="flex-1" />
+        <Button size="sm" variant="ghost" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
+        <Button size="sm" type="submit" disabled={busy || tooOften || (kind !== "schedule" && declared.length === 0)}>
+          Save
+        </Button>
       </div>
-      {kind !== "schedule" && declared.length === 0 && <p className="muted">{project.name}'s chiefbot.project.yaml declares no connectors.</p>}
+      {kind !== "schedule" && declared.length === 0 && <Muted>{project.name}'s chiefbot.project.yaml declares no connectors.</Muted>}
     </form>
   );
 }

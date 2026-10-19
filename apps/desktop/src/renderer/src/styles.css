@@ -1,701 +1,211 @@
+/* T3 Code's design system (https://github.com/pingdotgg/t3code, MIT), from
+   apps/web/src/index.css: the same colour roles, radii, fonts and sidebar
+   palette. Light or dark follows the system, as T3 Code does by default. */
+@import "tailwindcss" source(".");
+
+@custom-variant dark (@media (prefers-color-scheme: dark));
+
+@theme {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@theme inline {
+  --color-zinc-25: oklch(99.2% 0 0);
+  --animate-status-ping: status-ping 2s infinite;
+  --animate-working: working 1.6s ease-in-out infinite;
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning: var(--warning);
+  --color-warning-surface: var(--warning-surface);
+  --color-error-foreground: var(--error-foreground);
+  --color-error: var(--error);
+  --color-error-surface: var(--error-surface);
+  --color-success-foreground: var(--success-foreground);
+  --color-success: var(--success);
+  --color-info-foreground: var(--info-foreground);
+  --color-info: var(--info);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --color-message: var(--message-surface);
+  --color-message-foreground: var(--message-foreground);
+  --color-message-action: var(--message-action);
+  --color-message-action-foreground: var(--message-action-foreground);
+  --color-message-action-hover: var(--message-action-hover);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-muted-foreground: var(--sidebar-muted-foreground);
+  --color-sidebar-row-hover: var(--sidebar-row-hover);
+  --color-sidebar-row-active: var(--sidebar-row-active);
+  --color-sidebar-row-selected: var(--sidebar-row-selected);
+  --color-sidebar-border: var(--sidebar-border);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  /* Burst first, then hold invisible for the rest of the cycle (T3 Code's status ping). */
+  @keyframes status-ping {
+    0% {
+      opacity: 0.9;
+      scale: 0.75;
+      animation-timing-function: steps(8);
+    }
+    40%,
+    100% {
+      opacity: 0;
+      scale: 2;
+    }
+  }
+  @keyframes working {
+    50% {
+      opacity: 0.45;
+    }
+  }
+}
+
 :root {
-  color-scheme: dark;
-  font-family: system-ui, sans-serif;
-  background: #0b0b0c;
-  color: #e7e7e9;
-}
-.screen {
-  display: grid;
-  place-items: center;
-  align-content: center;
-  gap: 24px;
-  min-height: 100vh;
-  margin: 0;
-}
-.card {
-  display: grid;
-  gap: 12px;
-  justify-items: center;
-}
-.code {
-  font-size: 32px;
-  letter-spacing: 4px;
-}
-.error {
-  color: #ff7b72;
-}
-button {
-  padding: 8px 16px;
-  font: inherit;
-  cursor: pointer;
-}
-a {
-  color: #79c0ff;
-}
-body {
-  margin: 0;
-}
-.muted {
-  color: #8b8b93;
-}
+  color-scheme: light;
+  --radius: 0.625rem;
+  --control-radius: 0.5rem;
+  --sidebar-control-gap: 0.5rem;
+  --sidebar-row-content-inset: 0.625rem;
+  --sidebar-icon-color: color-mix(in srgb, var(--sidebar-muted-foreground) 60%, var(--sidebar));
+  --topbar-height: 52px;
+  --app-scrollbar-thumb: rgb(217 217 217);
+  --app-scrollbar-thumb-hover: rgb(191 191 191);
+  --background: var(--color-zinc-25);
+  --foreground: var(--color-zinc-800);
+  --card: var(--color-white);
+  --card-foreground: var(--color-zinc-800);
+  --popover: var(--color-white);
+  --popover-foreground: var(--color-zinc-800);
+  --primary: oklch(0.488 0.217 264);
+  --primary-foreground: var(--color-white);
+  --secondary: var(--color-zinc-50);
+  --secondary-foreground: var(--color-zinc-800);
+  --muted: var(--color-zinc-50);
+  --muted-foreground: var(--color-zinc-500);
+  --message-surface: var(--accent);
+  --message-foreground: var(--foreground);
+  --message-action: var(--primary);
+  --message-action-foreground: var(--primary-foreground);
+  --message-action-hover: color-mix(in srgb, var(--primary) 90%, var(--background));
+  --accent: var(--color-zinc-100);
+  --accent-foreground: var(--color-zinc-900);
+  --error: var(--color-red-500);
+  --error-foreground: var(--color-red-700);
+  --error-surface: color-mix(in srgb, var(--error) 8%, transparent);
+  --destructive: var(--error);
+  --destructive-foreground: var(--error-foreground);
+  --border: var(--color-zinc-200);
+  --input: var(--color-zinc-300);
+  --ring: oklch(0.488 0.217 264);
+  --info: var(--color-blue-500);
+  --info-foreground: var(--color-blue-700);
+  --success: var(--color-emerald-500);
+  --success-foreground: var(--color-emerald-700);
+  --warning: var(--color-amber-500);
+  --warning-foreground: var(--color-amber-700);
+  --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
+  --sidebar: var(--color-zinc-50);
+  --sidebar-foreground: var(--foreground);
+  --sidebar-muted-foreground: var(--muted-foreground);
+  --sidebar-row-hover: var(--color-zinc-100);
+  --sidebar-row-active: var(--color-white);
+  --sidebar-row-selected: var(--color-white);
+  --sidebar-border: var(--border);
 
-/* Signed-in layout, after T3 Code: bot sidebar on the left, the selected bot on the right. */
-.workspace {
-  display: grid;
-  grid-template-columns: 260px 1fr;
-  height: 100vh;
-}
-.sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 8px;
-  border-right: 1px solid #1f1f23;
-  background: #111113;
-}
-.new-bot {
-  text-align: left;
-  background: transparent;
-  border: 1px dashed #2c2c31;
-  border-radius: 6px;
-  color: inherit;
-}
-.new-bot-form input {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 6px 8px;
-  font: inherit;
-  color: inherit;
-  background: #0b0b0c;
-  border: 1px solid #2c2c31;
-  border-radius: 6px;
-}
-.new-bot-form p {
-  margin: 6px 2px;
-  font-size: 12px;
-}
-.bot-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  overflow-y: auto;
-}
-.bot-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  background: transparent;
-  border: 0;
-  border-radius: 6px;
-  color: inherit;
-  text-align: left;
-}
-.bot-row:hover {
-  background: #1a1a1d;
-}
-.bot-row.selected {
-  background: #222226;
-}
-.bot-name {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.bot-status {
-  font-size: 11px;
-  color: #8b8b93;
-}
-.sidebar-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 4px 0;
-  border-top: 1px solid #1f1f23;
-  font-size: 12px;
-}
-.account {
-  display: grid;
-  gap: 2px;
-}
-.account-actions {
-  display: grid;
-  gap: 4px;
-  justify-items: end;
-}
-.github-notice {
-  display: grid;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid #5a3e1b;
-  border-radius: 6px;
-  background: #2a1f10;
-  font-size: 12px;
-}
-.github-notice p {
-  margin: 0;
-}
-.link-button {
-  white-space: nowrap;
-  padding: 0;
-  background: none;
-  border: 0;
-  color: #79c0ff;
-  font-size: 12px;
-}
-.pane {
-  min-height: 0;
-  padding: 24px 32px 16px;
-}
-.bot-pane {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-.bot-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #1f1f23;
-}
-.bot-header p {
-  margin: 0;
-}
-.bot-pane h2 {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 0 4px;
-}
-.actions {
-  display: flex;
-  gap: 8px;
-}
-.danger {
-  color: #ff7b72;
-}
-
-/* Status dot: green online, amber with a ping while starting, grey with a ping while stopping, grey stopped. */
-.status-dot {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-}
-.status-dot .dot,
-.status-dot .ping {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-.status-dot .ping {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  animation: status-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
-}
-.status-dot.online .dot {
-  background: #3fb950;
-}
-.status-dot.starting .dot {
-  background: #d29922;
-}
-.status-dot.starting .ping {
-  background: rgb(210 153 34 / 0.6);
-}
-.status-dot.stopping .ping {
-  background: rgb(139 139 147 / 0.4);
-}
-.status-dot.stopping .dot,
-.status-dot.stopped .dot {
-  background: rgb(139 139 147 / 0.5);
-}
-@keyframes status-ping {
-  75%,
-  100% {
-    transform: scale(2);
-    opacity: 0;
+  @variant dark {
+    color-scheme: dark;
+    --app-scrollbar-thumb: rgb(255 255 255 / 8%);
+    --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
+    --background: var(--color-neutral-950);
+    --foreground: var(--color-neutral-100);
+    --card: color-mix(in srgb, var(--background) 97%, var(--color-white));
+    --card-foreground: var(--color-neutral-100);
+    --popover: color-mix(in srgb, var(--background) 94%, var(--color-white));
+    --popover-foreground: var(--color-neutral-100);
+    --primary: oklch(0.588 0.217 264);
+    --secondary: --alpha(var(--color-white) / 4%);
+    --secondary-foreground: var(--color-neutral-100);
+    --muted: --alpha(var(--color-white) / 4%);
+    --muted-foreground: color-mix(in srgb, var(--color-neutral-500) 90%, var(--color-white));
+    --accent: --alpha(var(--color-white) / 4%);
+    --accent-foreground: var(--color-neutral-100);
+    --error: color-mix(in srgb, var(--color-red-500) 90%, var(--color-white));
+    --error-foreground: var(--color-red-400);
+    --error-surface: color-mix(in srgb, var(--error) 16%, transparent);
+    --border: --alpha(var(--color-white) / 6%);
+    --input: --alpha(var(--color-white) / 8%);
+    --ring: oklch(0.588 0.217 264);
+    --info-foreground: var(--color-blue-400);
+    --success-foreground: var(--color-emerald-400);
+    --warning-foreground: var(--color-amber-400);
+    --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
+    /* T3 Code's dark sidebar: pure black, rows lit by a wash of the foreground. */
+    --sidebar: #000;
+    --sidebar-foreground: #f1f3f7;
+    --sidebar-muted-foreground: #a3a3a3;
+    --sidebar-row-hover: color-mix(in srgb, #f1f3f7 8%, transparent);
+    --sidebar-row-active: color-mix(in srgb, #f1f3f7 11%, transparent);
+    --sidebar-row-selected: color-mix(in srgb, #f1f3f7 7%, transparent);
+    --sidebar-border: rgb(255 255 255 / 8%);
   }
 }
 
-/* Chat, after T3 Code: one centred lane for messages and the composer. */
-.chat {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-}
-.lane {
-  width: 100%;
-  max-width: 760px;
-  margin: 0 auto;
-  box-sizing: border-box;
-}
-.messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 0;
-}
-.messages .lane {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.empty {
-  text-align: center;
-}
-.message {
-  white-space: pre-wrap;
-  line-height: 1.5;
-}
-.message.user {
-  align-self: flex-end;
-  max-width: 80%;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: #222226;
-}
-.message.error {
-  padding: 8px 12px;
-  border: 1px solid rgb(255 123 114 / 0.4);
-  border-radius: 8px;
-}
-/* Control's note about a handoff to a project: needs input, or done. */
-.message.notice {
-  padding: 8px 12px;
-  border: 1px solid rgb(121 192 255 / 0.4);
-  border-radius: 8px;
-  font-size: 13px;
-}
-.tool-row {
-  font-size: 12px;
-  color: #8b8b93;
-  font-family: ui-monospace, monospace;
-}
-.tool-row.failed .tool-mark {
-  color: #ff7b72;
-}
-.tool-row.succeeded .tool-mark {
-  color: #3fb950;
-}
-/* Who pays for a project turn's Copilot, above the coordinator's answer. */
-.payer {
-  margin: 0;
-  font-size: 12px;
-}
-.working {
-  margin: 0;
-  font-size: 12px;
-  color: #8b8b93;
-  animation: working-pulse 1.6s ease-in-out infinite;
-}
-@keyframes working-pulse {
-  50% {
-    opacity: 0.4;
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body {
+    @apply h-full bg-background font-sans text-foreground antialiased;
+  }
+  /* App-chrome grain, as T3 Code bakes it into the body. */
+  body {
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+    background-size: 256px 256px;
+  }
+  #root {
+    @apply h-full;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--app-scrollbar-thumb);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--app-scrollbar-thumb-hover);
   }
 }
-.composer {
-  display: grid;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid #2c2c31;
-  border-radius: 12px;
-  background: #111113;
-}
-.composer textarea {
-  resize: none;
-  font: inherit;
-  color: inherit;
-  background: transparent;
-  border: 0;
-  outline: none;
-}
-.composer-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-}
 
-/* Model picker, after T3 Code's ProviderModelPicker and ModelListRow: a quiet
-   trigger in the composer row and a searchable glass list that opens upwards. */
-.icon {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+/* The window moves by its top bars (macOS hides the title bar); controls in them stay clickable. */
+.drag-region {
+  -webkit-app-region: drag;
 }
-.icon.small {
-  width: 12px;
-  height: 12px;
-}
-.icon.filled {
-  fill: currentColor;
-  stroke: none;
-}
-.model-picker {
-  position: relative;
-  min-width: 0;
-}
-.model-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 224px;
-  height: 28px;
-  padding: 0 10px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: #b4b4bb;
-  font-size: 13px;
-  font-weight: 500;
-}
-.model-trigger:hover {
-  background: #1f1f23;
-  color: #e7e7e9;
-}
-.model-trigger-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.model-trigger .chevron {
-  width: 14px;
-  height: 14px;
-  color: #6e6e76;
-}
-.model-popup {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  z-index: 10;
-  display: flex;
-  flex-direction: column;
-  width: 360px;
-  max-height: 346px;
-  border: 1px solid #2c2c31;
-  border-radius: 8px;
-  background: rgb(24 24 27 / 0.94);
-  backdrop-filter: blur(16px);
-  box-shadow: 0 18px 44px -18px rgb(0 0 0 / 0.8);
-  overflow: hidden;
-}
-.model-search {
-  margin: 10px 12px 0;
-  padding: 0 0 6px;
-  border: 0;
-  border-bottom: 1px solid rgb(44 44 49 / 0.7);
-  outline: none;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 13px;
-}
-.model-search:focus {
-  border-bottom-color: #79c0ff;
-}
-.model-list {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 6px 1px 6px 8px;
-}
-.model-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 28px;
-  margin-bottom: 2px;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-}
-.model-row:hover {
-  background: #222226;
-}
-.model-row.selected {
-  background: rgb(255 255 255 / 0.08);
-}
-.model-row.locked {
-  opacity: 0.64;
-  cursor: not-allowed;
-}
-.model-row.locked:hover {
-  background: transparent;
-}
-.model-row-text {
-  display: grid;
-  gap: 4px;
-  flex: 1;
-  min-width: 0;
-}
-.model-row-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  font-weight: 500;
-}
-.model-row-provider {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: rgb(139 139 147 / 0.8);
-}
-.model-row > .icon {
-  color: #8b8b93;
-}
-.model-empty {
-  margin: 0;
-  padding: 12px 8px;
-  text-align: center;
-  font-size: 12px;
-}
-.composer-error {
-  flex: 1;
-}
-
-/* Below the bot header: the chat, with the bot's live screen (noVNC) in a side
-   pane. 16:10 like the 1280×800 Xvfb screen. */
-.bot-body {
-  display: flex;
-  gap: 24px;
-  flex: 1;
-  min-height: 0;
-}
-.screen-pane {
-  display: grid;
-  align-content: start;
-  gap: 8px;
-  width: 42%;
-  min-width: 360px;
-  padding-top: 16px;
-}
-.screen-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
-}
-.screen-view {
-  position: relative;
-  aspect-ratio: 16 / 10;
-  background: #000;
-  border: 1px solid #2c2c31;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.screen-view.interactive {
-  border-color: #3fb950;
-}
-.screen-canvas {
-  width: 100%;
-  height: 100%;
-}
-.screen-empty,
-.screen-overlay {
-  display: grid;
-  place-items: center;
-  margin: 0;
-  font-size: 13px;
-}
-.screen-overlay {
-  position: absolute;
-  inset: 0;
-}
-
-/* Approval card, after T3 Code's pending approval panel: amber label, the exact
-   command in monospace, Decline and Approve. */
-.approval-card {
-  display: grid;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid rgb(210 153 34 / 0.45);
-  border-radius: 10px;
-  background: rgb(210 153 34 / 0.06);
-}
-.approval-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #d29922;
-}
-.approval-detail {
-  display: block;
-  max-height: 80px;
-  overflow: auto;
-  white-space: pre;
-  font-size: 12px;
-  font-family: ui-monospace, monospace;
-}
-.approval-actions {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 8px;
-}
-.approval-actions .error {
-  margin-right: auto;
-  font-size: 12px;
-}
-.outline {
-  background: transparent;
-  border: 1px solid #2c2c31;
-}
-.approval-row {
-  font-size: 12px;
-  color: #8b8b93;
-}
-.approval-row code {
-  font-family: ui-monospace, monospace;
-}
-.approval-row.approved {
-  color: #3fb950;
-}
-.approval-row.declined,
-.approval-row.expired,
-.approval-row.withdrawn {
-  color: #ff7b72;
-}
-
-/* A bot's routines, shown above its chat when opened. */
-.routines {
-  display: grid;
-  gap: 8px;
-  padding: 12px 24px;
-  border-bottom: 1px solid #1f1f23;
-}
-.routine-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-.routine-text {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-.routine-text strong {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-.routine-form {
-  display: grid;
-  gap: 8px;
-}
-.routine-form textarea,
-.routine-form input {
-  font: inherit;
-  padding: 6px 8px;
-}
-.routine-schedule {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-.routines .link-button {
-  justify-self: start;
-}
-
-/* Workspace switcher at the top of the sidebar, and its menu. */
-.switcher {
-  position: relative;
-}
-.switcher-button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px;
-  background: #1a1a1d;
-  border: 1px solid #2c2c31;
-  border-radius: 6px;
-  color: inherit;
-  font-weight: 600;
-  text-align: left;
-}
-.switcher-menu {
-  position: absolute;
-  z-index: 10;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px;
-  background: #151517;
-  border: 1px solid #2c2c31;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 0.5);
-}
-.switcher-menu .new-bot-form {
-  margin-top: 4px;
-}
-.switcher-menu .error {
-  margin: 4px;
-  font-size: 12px;
-}
-.badge {
-  padding: 0 6px;
-  border-radius: 999px;
-  background: #1f6feb;
-  color: #fff;
-  font-size: 11px;
-}
-.invite-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px;
-  font-size: 12px;
-}
-.invite-row button {
-  padding: 4px 10px;
-}
-
-/* A project's sidebar rows sit above the bots; its task ledger beside the coordinator chat. */
-.bot-list.projects {
-  flex: 0 0 auto;
-  padding-bottom: 8px;
-  border-bottom: 1px solid #1f1f23;
-}
-.ledger {
-  width: 34%;
-  min-width: 280px;
-  overflow-y: auto;
-}
-.ledger-task {
-  display: grid;
-  gap: 6px;
-}
-.worker-row {
-  display: grid;
-  gap: 6px;
-  padding-left: 12px;
-  border-left: 2px solid #1f1f23;
+.drag-region :is(button, input, textarea, select, a) {
+  -webkit-app-region: no-drag;
 }
