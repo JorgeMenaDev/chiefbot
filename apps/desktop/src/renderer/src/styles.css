@@ -88,6 +88,12 @@
   --sidebar-row-content-inset: 0.625rem;
   --sidebar-icon-color: color-mix(in srgb, var(--sidebar-muted-foreground) 60%, var(--sidebar));
   --topbar-height: 52px;
+  /* The sidebar's width and its toggle's size (T3 Code's --workspace-titlebar-control-size). */
+  --sidebar-width: 16rem;
+  --sidebar-control-size: 1.75rem;
+  --glass-blur: 12px;
+  --glass-opacity: 80%;
+  --glass-saturation: 1.14;
   --app-scrollbar-thumb: rgb(217 217 217);
   --app-scrollbar-thumb-hover: rgb(191 191 191);
   --background: var(--color-zinc-25);
@@ -136,6 +142,8 @@
     color-scheme: dark;
     --app-scrollbar-thumb: rgb(255 255 255 / 8%);
     --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
+    --glass-blur: 16px;
+    --glass-saturation: 1.08;
     --background: var(--color-neutral-950);
     --foreground: var(--color-neutral-100);
     --card: color-mix(in srgb, var(--background) 97%, var(--color-white));
@@ -200,6 +208,14 @@
   ::-webkit-scrollbar-thumb:hover {
     background: var(--app-scrollbar-thumb-hover);
   }
+}
+
+/* Menus: a frosted popover surface (T3 Code's dropdown-glass). */
+@utility dropdown-glass {
+  background: color-mix(in srgb, var(--popover) 18%, color-mix(in srgb, var(--popover) var(--glass-opacity), transparent));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  border: 1px solid color-mix(in srgb, var(--foreground) 10%, transparent);
 }
 
 /* The window moves by its top bars (macOS hides the title bar); controls in them stay clickable. */
