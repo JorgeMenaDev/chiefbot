@@ -1,5 +1,5 @@
 // Adapted from T3 Code (https://github.com/pingdotgg/t3code, MIT), apps/web/src/components/ui/alert.tsx.
-// Children sort into slots: an icon first, then AlertTitle/AlertDescription, then AlertAction on the right.
+// Children sort into slots: an icon first, then AlertTitle/AlertDescription.
 import { cva, type VariantProps } from "class-variance-authority";
 import { Children, isValidElement, type ComponentProps, type ReactNode } from "react";
 import { cn } from "../../lib/utils.ts";
@@ -19,16 +19,13 @@ const alertVariants = cva("relative rounded-xl border px-3.5 py-3 text-card-fore
   },
 });
 
-const slots = new Map<unknown, "content" | "action">();
+const contentSlots = new Set<unknown>();
 
 export function Alert({ className, variant, children, ...props }: ComponentProps<"div"> & VariantProps<typeof alertVariants>) {
   const icon: ReactNode[] = [];
   const content: ReactNode[] = [];
-  const action: ReactNode[] = [];
   Children.forEach(children, (child) => {
-    if (!isValidElement(child)) content.push(child);
-    else if (slots.get(child.type) === "action") action.push(child);
-    else if (slots.get(child.type) === "content") content.push(child);
+    if (!isValidElement(child) || contentSlots.has(child.type)) content.push(child);
     else icon.push(child);
   });
 
@@ -37,7 +34,6 @@ export function Alert({ className, variant, children, ...props }: ComponentProps
       <div className="flex items-start gap-2">
         {icon.length > 0 && <div className="flex h-lh w-4 shrink-0 items-center justify-center [&>svg]:size-4">{icon}</div>}
         {content.length > 0 && <div className="flex min-w-0 flex-1 flex-col gap-0.5">{content}</div>}
-        {action.length > 0 && <div className="flex shrink-0 items-center self-center">{action}</div>}
       </div>
     </div>
   );
@@ -51,8 +47,4 @@ export function AlertDescription({ className, ...props }: ComponentProps<"div">)
   return <div data-slot="alert-description" className={cn("flex flex-col gap-2.5 text-muted-foreground", className)} {...props} />;
 }
 
-export function AlertAction({ className, ...props }: ComponentProps<"div">) {
-  return <div data-slot="alert-action" className={cn("flex gap-1", className)} {...props} />;
-}
-
-slots.set(AlertTitle, "content").set(AlertDescription, "content").set(AlertAction, "action");
+contentSlots.add(AlertTitle).add(AlertDescription);

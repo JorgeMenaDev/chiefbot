@@ -21,7 +21,7 @@ export function CardHeader({ className, ...props }: ComponentProps<"div">) {
     <div
       data-slot="card-header"
       className={cn(
-        "grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 p-6 in-[[data-slot=card]:has(>[data-slot=card-panel])]:pb-4 has-data-[slot=card-action]:grid-cols-[1fr_auto]",
+        "grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 p-6 in-[[data-slot=card]:has(>[data-slot=card-panel])]:pb-4",
         className,
       )}
       {...props}
@@ -35,16 +35,6 @@ export function CardTitle({ className, ...props }: ComponentProps<"div">) {
 
 export function CardDescription({ className, ...props }: ComponentProps<"div">) {
   return <div data-slot="card-description" className={cn("text-muted-foreground text-sm", className)} {...props} />;
-}
-
-export function CardAction({ className, ...props }: ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="card-action"
-      className={cn("col-start-2 row-span-2 row-start-1 self-start justify-self-end inline-flex gap-2", className)}
-      {...props}
-    />
-  );
 }
 
 export function CardPanel({ className, ...props }: ComponentProps<"div">) {

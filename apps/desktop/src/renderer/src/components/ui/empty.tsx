@@ -43,13 +43,3 @@ export function EmptyDescription({ className, ...props }: ComponentProps<"div">)
     />
   );
 }
-
-export function EmptyContent({ className, ...props }: ComponentProps<"div">) {
-  return (
-    <div
-      data-slot="empty-content"
-      className={cn("flex w-full min-w-0 max-w-sm flex-col items-center gap-4 text-balance text-sm", className)}
-      {...props}
-    />
-  );
-}
