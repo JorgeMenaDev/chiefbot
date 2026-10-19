@@ -108,6 +108,8 @@ export function openStore(path: string) {
   addColumn(db, "bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
   // The latest ModelReport (JSON) a worker of the user's bots sent: control's cache of their plan's models.
   addColumn(db, "users", "copilot_models", "TEXT");
+  // 0 until the user's first bot is claimed (claimFirstBot). Users from before first bots count as claimed.
+  addColumn(db, "users", "first_bot_claimed", "INTEGER NOT NULL DEFAULT 1");
   // What each approval asked and when, as for task workers and coordinators.
   addColumn(db, "approvals", "kind", "TEXT NOT NULL DEFAULT 'tool'");
   addColumn(db, "approvals", "detail", "TEXT NOT NULL DEFAULT ''");
@@ -235,7 +237,7 @@ export function openStore(path: string) {
     upsertUser(identity: GitHubIdentity): UserId {
       const row = db
         .query<{ id: string }, [string, number, string, string]>(
-          `INSERT INTO users (id, github_id, login, copilot_plan) VALUES (?1, ?2, ?3, ?4)
+          `INSERT INTO users (id, github_id, login, copilot_plan, first_bot_claimed) VALUES (?1, ?2, ?3, ?4, 0)
            ON CONFLICT (github_id) DO UPDATE SET login = excluded.login, copilot_plan = excluded.copilot_plan
            RETURNING id`,
         )
@@ -290,6 +292,16 @@ export function openStore(path: string) {
 
     endSession(sessionToken: string) {
       db.query("DELETE FROM sessions WHERE token_hash = ?1").run(hash(sessionToken));
+    },
+
+    // Whether the user still had their first bot to get, claiming it: true once per
+    // user, so concurrent sign-ins make one bot. releaseFirstBot gives it back.
+    claimFirstBot(userId: UserId) {
+      return db.query("UPDATE users SET first_bot_claimed = 1 WHERE id = ?1 AND first_bot_claimed = 0").run(userId).changes === 1;
+    },
+
+    releaseFirstBot(userId: UserId) {
+      db.query("UPDATE users SET first_bot_claimed = 0 WHERE id = ?1").run(userId);
     },
 
     // A new bot whose computer should run.

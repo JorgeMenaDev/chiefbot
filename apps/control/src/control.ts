@@ -88,6 +88,9 @@ export type ControlOptions = {
   copilotTokens?: CopilotTokenMinter;
   // Control's URL as users' browsers reach it, for OAuth callbacks. Defaults to the URL control listens on.
   publicUrl?: string;
+  // The name of the bot a new user gets at their first sign-in, once: deleting
+  // it is for good. None when unset; index.ts passes one.
+  firstBot?: string;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -183,6 +186,7 @@ export function startControl({
   context,
   copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
   publicUrl,
+  firstBot,
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -318,6 +322,27 @@ export function startControl({
   }
 
   // A stop marks the bot stopping first, so no new work lands on a computer about to go.
+  // Adds a bot to the user's list at once and starts its computer. If the
+  // computer fails to start, the bot is gone again and this throws.
+  const launchBot = async (userId: UserId, name: string) => {
+    const botToken = BotToken.parse(randomToken());
+    const { id } = store.createBot(userId, name, botToken);
+    try {
+      await computers.create({
+        id,
+        env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_ID: id, CHIEFBOT_BOT_TOKEN: botToken },
+      });
+      await computers.start(id);
+      return id;
+    } catch (error) {
+      store.deleteBot(id);
+      await computers.destroy(id, { deleteData: true }).catch(() => {});
+      throw error;
+    } finally {
+      publish(userId);
+    }
+  };
+
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
     if (!running) {
       stopping.add(botId);
@@ -397,6 +422,11 @@ export function startControl({
             const userId = store.upsertUser(identity);
             await broker.signIn(userId, tokens.data);
             store.openSession(userId, sessionToken);
+            // The first bot shows in the list now; its computer starts after sign-in
+            // returns. A failed start leaves it to the next sign-in.
+            if (firstBot && store.claimFirstBot(userId)) {
+              launchBot(userId, firstBot).catch(() => store.releaseFirstBot(userId));
+            }
             return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
             if (error instanceof GitHubAuthError) return apiError(401, "github_rejected_token");
@@ -434,25 +464,12 @@ export function startControl({
           if (!user) return unauthorized();
           const body = CreateBotRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return apiError(400, "invalid_bot");
-          const botToken = BotToken.parse(randomToken());
-          const { id } = store.createBot(user.id, body.data.name, botToken);
           try {
-            await computers.create({
-              id,
-              env: {
-                CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin,
-                CHIEFBOT_BOT_ID: id,
-                CHIEFBOT_BOT_TOKEN: botToken,
-              },
-            });
-            await computers.start(id);
+            const id = await launchBot(user.id, body.data.name);
+            return Response.json(botOf(user.id, id), { status: 201 });
           } catch (error) {
-            store.deleteBot(id);
-            await computers.destroy(id, { deleteData: true }).catch(() => {});
             return apiError(502, "computer_failed", String(error));
           }
-          publish(user.id);
-          return Response.json(botOf(user.id, id), { status: 201 });
         },
       },
       "/bots/:id/start": {

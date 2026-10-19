@@ -51,6 +51,8 @@ export type TestControlOptions = {
   gitSocket?: string;
   // Wraps the fake provider, e.g. to make start fail.
   provider?: (fake: ComputerProvider) => ComputerProvider;
+  // The bot a new user gets at their first sign-in. Default: none.
+  firstBot?: string;
   clock?: Clock;
   idleStopMinutes?: number;
   // Mints organizations' Copilot tokens. Default: the repo app's, against the fake GitHub.
@@ -70,6 +72,7 @@ export async function startTestControl({
   copilot = fakeCopilot(),
   gitSocket,
   provider,
+  firstBot,
   clock,
   idleStopMinutes,
   copilotTokens,
@@ -86,6 +89,7 @@ export async function startTestControl({
     githubClientId: "test-client",
     githubApp: github.app,
     computers: provider ? provider(computers.provider) : computers.provider,
+    ...(firstBot === undefined ? {} : { firstBot }),
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),
     ...(copilotTokens === undefined ? {} : { copilotTokens }),
