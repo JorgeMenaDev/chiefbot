@@ -21,9 +21,9 @@ export function PaneHeader({
     <header className="drag-region flex h-(--topbar-height) shrink-0 items-center gap-3 border-b px-5">
       <div className="flex min-w-0 flex-1 items-center gap-2">
         {icon}
-        <h2 className="shrink-0 truncate font-medium text-sm">{title}</h2>
+        <h2 className="min-w-0 truncate font-medium text-sm">{title}</h2>
         {note && (
-          <span className="min-w-0 truncate text-muted-foreground text-xs" title={note}>
+          <span className="min-w-0 flex-1 basis-0 truncate text-muted-foreground text-xs" title={note}>
             {note}
           </span>
         )}
