@@ -3,7 +3,7 @@ import { PanelRightIcon, PowerIcon, PowerOffIcon, Trash2Icon, XIcon } from "luci
 import { useId, useState, type KeyboardEvent } from "react";
 import { Chat } from "./Chat.tsx";
 import { ScreenPane } from "./LiveScreen.tsx";
-import { Column, PaneHeader, PanelSection, SidePanel } from "./Pane.tsx";
+import { Column, ErrorText, PaneHeader, PanelSection, SidePanel } from "./Pane.tsx";
 import { Routines } from "./Routines.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { cn } from "./lib/utils.ts";
@@ -55,6 +55,13 @@ type Tab = (typeof tabs)[number][0];
 function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClose: () => void }) {
   const { start, stop, remove } = window.chiefbot.bots;
   const [tab, setTab] = useState<Tab>("details");
+  const [error, setError] = useState<string | null>(null);
+  // Runs Start, Stop or Delete. Control's refusal (such as while the bot's
+  // computer is still being made) shows under its status.
+  const act = (change: () => Promise<unknown>) => {
+    setError(null);
+    change().catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)));
+  };
   const id = useId();
   const tabId = (key: Tab) => `${id}-tab-${key}`;
   const panelId = (key: Tab) => `${id}-panel-${key}`;
@@ -113,21 +120,22 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
             <StatusDot status={bot.status} />
             <p className="min-w-0 flex-1 text-muted-foreground text-xs">{statusText[bot.status]}</p>
             {bot.status === "stopped" ? (
-              <Button size="xs" variant="outline" onClick={() => void start(bot.id)}>
+              <Button size="xs" variant="outline" onClick={() => act(() => start(bot.id))}>
                 <PowerIcon />
                 Start
               </Button>
             ) : (
-              <Button size="xs" variant="outline" onClick={() => void stop(bot.id)} disabled={bot.status === "stopping"}>
+              <Button size="xs" variant="outline" onClick={() => act(() => stop(bot.id))} disabled={bot.status === "stopping"}>
                 <PowerOffIcon />
                 Stop
               </Button>
             )}
           </div>
+          <ErrorText message={error} />
         </PanelSection>
         <Routines bot={bot} />
         <PanelSection title="Delete">
-          <Button size="xs" variant="destructive-outline" className="self-start" onClick={() => void remove(bot.id)}>
+          <Button size="xs" variant="destructive-outline" className="self-start" onClick={() => act(() => remove(bot.id))}>
             <Trash2Icon />
             Delete {bot.name}
           </Button>
