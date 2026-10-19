@@ -49,9 +49,9 @@ const tabs = [
 type Tab = (typeof tabs)[number][0];
 
 // The bot's avatar and name over two tabs: Details (status, routines, delete)
-// and Computer (its live screen). Both tabs stay mounted, the other one hidden:
-// an open screen counts as activity, so the selected bot does not idle-stop
-// while the user is on Details or has closed the panel.
+// and Computer (its live screen). Both tabs stay mounted, the other one hidden
+// (the routines list aside): an open screen counts as activity, so the selected
+// bot does not idle-stop while the user is on Details or has closed the panel.
 function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClose: () => void }) {
   const { start, stop, remove } = window.chiefbot.bots;
   const [tab, setTab] = useState<Tab>("details");
@@ -133,7 +133,8 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
           </div>
           <ErrorText message={error} />
         </PanelSection>
-        <Routines bot={bot} />
+        {/* Mounted only while shown, so it reloads each time Details shows (a routine may have run). */}
+        {!hidden && tab === "details" && <Routines bot={bot} />}
         <PanelSection title="Delete">
           <Button size="xs" variant="destructive-outline" className="self-start" onClick={() => act(() => remove(bot.id))}>
             <Trash2Icon />
