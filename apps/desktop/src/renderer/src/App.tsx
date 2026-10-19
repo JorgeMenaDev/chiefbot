@@ -174,8 +174,10 @@ function Workspace({ user }: { user: User }) {
   // Bumped by each click on Members or Connectors, which remounts (reloads) the
   // screen: control sends no member or connector events.
   const [membersVisit, setMembersVisit] = useState(0);
-  // The new-bot or new-project form open in the sidebar, if any.
-  const [creating, setCreating] = useState<"bot" | "project" | null>(null);
+  // Whether the sidebar's new-bot and new-project forms are open. Each is its own,
+  // so one finishing never closes the other.
+  const [creatingBot, setCreatingBot] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   // The search row filters the sidebar's projects and bots by name.
   const [query, setQuery] = useState("");
   const current = teams.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -208,11 +210,11 @@ function Workspace({ user }: { user: User }) {
           <div className="flex items-center gap-0.5">
             <SidebarSearch icon={<SearchIcon />} placeholder="Search" aria-label="Search projects and bots" value={query} onChange={(event) => setQuery(event.target.value)} />
             {current && (
-              <SidebarIconButton label="New project" onClick={() => setCreating("project")}>
+              <SidebarIconButton label="New project" onClick={() => setCreatingProject(true)}>
                 <FolderPlusIcon />
               </SidebarIconButton>
             )}
-            <SidebarIconButton label="New bot" onClick={() => setCreating("bot")}>
+            <SidebarIconButton label="New bot" onClick={() => setCreatingBot(true)}>
               <SquarePenIcon />
             </SidebarIconButton>
           </div>
@@ -245,7 +247,7 @@ function Workspace({ user }: { user: User }) {
               </SidebarRow>
             </>
           )}
-          {current && (shownProjects.length > 0 || !searching || creating === "project") && (
+          {current && (shownProjects.length > 0 || !searching || creatingProject) && (
             <>
               <SidebarGroupLabel>Projects</SidebarGroupLabel>
               {shownProjects.map(({ id, name, repo }) => (
@@ -255,21 +257,21 @@ function Workspace({ user }: { user: User }) {
                   <RowNote>{repo.split("/")[0]}</RowNote>
                 </SidebarRow>
               ))}
-              {creating === "project" ? (
+              {creatingProject ? (
                 <NewProject
                   workspace={current}
-                  onClose={() => setCreating(null)}
+                  onClose={() => setCreatingProject(false)}
                   onCreated={(created) => {
                     void reloadProjects();
                     setSelectedId(created.id);
                   }}
                 />
               ) : (
-                projects.length === 0 && <NewRow label="New project" onClick={() => setCreating("project")} />
+                projects.length === 0 && <NewRow label="New project" onClick={() => setCreatingProject(true)} />
               )}
             </>
           )}
-          {(shownBots.length > 0 || !searching || creating === "bot") && (
+          {(shownBots.length > 0 || !searching || creatingBot) && (
             <>
               <SidebarGroupLabel>Bots</SidebarGroupLabel>
               {shownBots.map((bot) => (
@@ -283,14 +285,14 @@ function Workspace({ user }: { user: User }) {
                   <RowNote>{bot.status}</RowNote>
                 </SidebarRow>
               ))}
-              {creating === "bot" ? (
-                <NewBot onCreated={setSelectedId} onClose={() => setCreating(null)} />
+              {creatingBot ? (
+                <NewBot onCreated={setSelectedId} onClose={() => setCreatingBot(false)} />
               ) : (
-                bots.length === 0 && <NewRow label="New bot" onClick={() => setCreating("bot")} />
+                bots.length === 0 && <NewRow label="New bot" onClick={() => setCreatingBot(true)} />
               )}
             </>
           )}
-          {searching && shownProjects.length === 0 && shownBots.length === 0 && creating === null && (
+          {searching && shownProjects.length === 0 && shownBots.length === 0 && !creatingBot && !creatingProject && (
             <p className="px-2.5 py-2 text-sidebar-muted-foreground text-xs">No projects or bots match.</p>
           )}
         </nav>
