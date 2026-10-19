@@ -92,7 +92,7 @@ export type ControlOptions = {
   // it is for good. None when unset; index.ts passes one.
   firstBot?: string;
   // A bot's computer that is not made and started within this long counts as
-  // failed to start, and is destroyed if it comes later. Default 10.
+  // failed to start, and is destroyed. Default 10.
   launchTimeoutMinutes?: number;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
@@ -325,21 +325,21 @@ export function startControl({
     return Response.json(botOf(user.id, botId));
   }
 
-  // Bots whose computer is being made and started, and what the user asked for
-  // meanwhile. Start, Stop and Delete only record it, so they return at once
-  // even if the provider hangs; the launch's end acts on it.
-  type Launch = { intent: "run" | "stop" | "delete"; deleteData: boolean };
-  const launching = new Map<BotId, Launch>();
+  // Bots whose computer is being made and started. Start, Stop and Delete
+  // refuse them (409) until the launch ends.
+  const launching = new Set<BotId>();
+  // Each launch's deadline; control.stop() clears them before closing the store.
+  const launchTimers = new Set<ReturnType<typeof setTimeout>>();
 
   // Adds a bot to the user's list at once and starts its computer. If the
   // computer fails to start, or is not started within launchTimeoutMinutes, the
-  // bot is gone again, `onFailure` runs (unless the user deleted the bot) and
-  // this throws. A computer made after the deadline is destroyed.
-  const launchBot = (userId: UserId, name: string, onFailure = () => {}) => {
+  // bot is gone again and this throws. Its computer is destroyed then, and again
+  // once a launch past its deadline ends either way (destroy is fine on a
+  // computer partly made or absent).
+  const launchBot = async (userId: UserId, name: string) => {
     const botToken = BotToken.parse(randomToken());
     const { id } = store.createBot(userId, name, botToken);
-    const launch: Launch = { intent: "run", deleteData: false };
-    launching.set(id, launch);
+    launching.add(id);
     const provision = (async () => {
       await computers.create({
         id,
@@ -347,43 +347,31 @@ export function startControl({
       });
       await computers.start(id);
     })();
+    const late = new Error("the computer did not start in time");
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("the computer did not start in time")), launchTimeoutMinutes * 60_000);
+      timer = setTimeout(() => reject(late), launchTimeoutMinutes * 60_000);
+      launchTimers.add(timer);
     });
-    return Promise.race([provision, deadline]).then(
-      () => {
-        clearTimeout(timer);
-        launching.delete(id);
-        if (launch.intent === "stop") void computers.stop(id).catch(() => {});
-        if (launch.intent === "delete") void computers.destroy(id, { deleteData: launch.deleteData }).catch(() => {});
-        publish(userId);
-        return id;
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        launching.delete(id);
-        const deleted = launch.intent === "delete";
-        if (!deleted) store.deleteBot(id);
-        // Not awaited: the provider may hang here too.
-        void computers.destroy(id, { deleteData: true }).catch(() => {});
-        void provision.then(() => computers.destroy(id, { deleteData: true })).catch(() => {});
-        if (!deleted) onFailure();
-        publish(userId);
-        throw error;
-      },
-    );
+    try {
+      await Promise.race([provision, deadline]);
+      return id;
+    } catch (error) {
+      const destroy = () => computers.destroy(id, { deleteData: true }).catch(() => {});
+      void destroy();
+      if (error === late) void provision.then(destroy, destroy);
+      store.deleteBot(id);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      if (timer) launchTimers.delete(timer);
+      launching.delete(id);
+      publish(userId);
+    }
   };
 
   // A stop marks the bot stopping first, so no new work lands on a computer about to go.
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
-    const launch = launching.get(botId);
-    if (launch) {
-      launch.intent = running ? "run" : "stop";
-      store.setRunning(botId, running);
-      publish(userId);
-      return;
-    }
     if (!running) {
       stopping.add(botId);
       publish(userId);
@@ -463,10 +451,9 @@ export function startControl({
             await broker.signIn(userId, tokens.data);
             store.openSession(userId, sessionToken);
             // The first bot shows in the list now; its computer starts after sign-in
-            // returns. A failed start leaves it to the next sign-in, unless the user
-            // deleted it meanwhile.
+            // returns. A failed start leaves it to the next sign-in.
             if (firstBot && store.claimFirstBot(userId)) {
-              launchBot(userId, firstBot, () => store.releaseFirstBot(userId)).catch(() => {});
+              launchBot(userId, firstBot).catch(() => store.releaseFirstBot(userId));
             }
             return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
@@ -506,8 +493,8 @@ export function startControl({
           const body = CreateBotRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return apiError(400, "invalid_bot");
           try {
-            const bot = botOf(user.id, await launchBot(user.id, body.data.name));
-            return bot ? Response.json(bot, { status: 201 }) : apiError(404, "not_found");
+            const id = await launchBot(user.id, body.data.name);
+            return Response.json(botOf(user.id, id), { status: 201 });
           } catch (error) {
             return apiError(502, "computer_failed", String(error));
           }
@@ -515,12 +502,14 @@ export function startControl({
       },
       "/bots/:id/start": {
         POST: ownBot(async (user, botId) => {
+          if (launching.has(botId)) return apiError(409, "bot_starting");
           await setRunning(user.id, botId, true);
           return Response.json(botOf(user.id, botId));
         }),
       },
       "/bots/:id/stop": {
         POST: ownBot(async (user, botId) => {
+          if (launching.has(botId)) return apiError(409, "bot_starting");
           await setRunning(user.id, botId, false);
           return Response.json(botOf(user.id, botId));
         }),
@@ -540,10 +529,9 @@ export function startControl({
       },
       "/bots/:id": {
         DELETE: ownBot(async (user, botId, req) => {
+          if (launching.has(botId)) return apiError(409, "bot_starting");
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
-          const launch = launching.get(botId);
-          if (launch) Object.assign(launch, { intent: "delete", deleteData });
-          else await computers.destroy(botId, { deleteData });
+          await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
           screens.forget(botId);
           workers.get(botId)?.close();
@@ -774,6 +762,7 @@ export function startControl({
   return {
     url: server.url.origin,
     stop: () => {
+      for (const timer of launchTimers) clearTimeout(timer);
       idle.stop();
       coordinatorIdle.stop();
       taskWorkers.stop();

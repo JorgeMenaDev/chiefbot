@@ -70,6 +70,7 @@ export const ApiErrorCode = z.enum([
   "computer_failed",
   "bot_offline",
   "bot_stopping",
+  "bot_starting",
   "turn_running",
   "human_has_screen",
   "not_pending",
