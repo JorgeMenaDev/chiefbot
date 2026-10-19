@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { approvalFor } from "./approvals.ts";
-import { connectionCalls, stageConnections } from "./connections.ts";
+import { stageConnections } from "./connections.ts";
 import { fakeRequest } from "./fakeCopilot.ts";
 
 const dirs: string[] = [];
@@ -49,6 +49,36 @@ test("a turn's connection is staged as owner-only files, a skill and a wrapper t
   expect(existsSync(root)).toBe(false);
 });
 
+test("staging that fails partway leaves no credential behind", () => {
+  const root = join(tempDir(), "chiefbot");
+  const broken: AgentConnection = { ...jira, name: "broken", cli: "broken", fields: { "no/such/field": "x" } };
+
+  expect(() => stageConnections(root, [jira, broken])).toThrow();
+  expect(existsSync(root)).toBe(false);
+});
+
+test("each run of a connection's CLI is logged as the CLI and the subcommands its read-only globs name, never a value", () => {
+  const root = join(tempDir(), "chiefbot");
+  const tools = tempDir();
+  writeFileSync(join(tools, "acli"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(tools, "acli"), 0o755);
+  const staged = stageConnections(root, [jira]);
+  const run = (command: string) => Bun.spawnSync(["sh", "-c", command], { env: { PATH: `${root}/bin:${tools}:/usr/bin:/bin` } });
+
+  run("acli jira workitem view CHIEF-1 | head -5");
+  run('false && acli jira workitem delete --key CHIEF-1; acli jira workitem create --summary "line one\nline two" --project CHIEF');
+  const first = staged.calls();
+  run("acli jira project list");
+
+  expect(first).toEqual([
+    { connection: "jira", command: "acli jira workitem view" },
+    { connection: "jira", command: "acli jira workitem" },
+  ]);
+  // Only runs since the last read.
+  expect(staged.calls()).toEqual([{ connection: "jira", command: "acli jira" }]);
+  expect(staged.calls()).toEqual([]);
+});
+
 test("no connection, no skill root", () => {
   const root = join(tempDir(), "chiefbot");
   expect(stageConnections(root, []).skillDirectories).toEqual([]);
@@ -63,19 +93,22 @@ test("a command of a connection's CLI that matches none of its read-only globs a
   });
   expect(ask("acli jira workitem view CHIEF-1")).toBeNull();
   expect(ask("acli jira auth login --site x --email y --token < /tmp/chiefbot/connections/jira/token")).toBeNull();
+  expect(ask("acli jira workitem view CHIEF-1 | head -5")).toBeNull();
   expect(ask("ls -la && git status")).toBeNull();
   // Every segment counts, whatever runs before it, and however the CLI is named.
   expect(ask("acli jira workitem view CHIEF-1 && acli jira workitem delete --key CHIEF-1")?.detail).toBe("Jira: acli jira workitem delete --key CHIEF-1");
   expect(ask("/tmp/chiefbot/bin/acli jira workitem transition --key CHIEF-1 --status Done")?.kind).toBe("connector");
   expect(ask("DEBUG=1 acli jira workitem edit --key CHIEF-1")?.kind).toBe("connector");
+  // The CLI named anywhere the parsed segments do not show it running asks, with the whole command.
+  expect(ask("env DEBUG=1 acli jira workitem view CHIEF-1")?.detail).toBe("Jira: env DEBUG=1 acli jira workitem view CHIEF-1");
+  expect(ask('acli jira workitem view CHIEF-1 && sh -c "acli jira workitem delete --key CHIEF-1"')?.kind).toBe("connector");
   // Without parsed segments, any command naming the CLI asks.
-  const unparsed = fakeRequest.shell("acli jira workitem view CHIEF-1");
-  if (unparsed.kind === "shell") delete unparsed.commandSegments;
-  expect(approvalFor(unparsed, [jira])?.kind).toBe("connector");
-});
-
-test("each command of a connection's CLI is logged as the CLI and its subcommands, without flags or values", () => {
-  expect(connectionCalls(fakeRequest.shell("acli jira workitem view CHIEF-1 | head -5 ; git log"), [jira])).toEqual([
-    { connection: jira, command: "acli jira workitem view CHIEF-1", logged: "acli jira workitem view", readOnly: true },
-  ]);
+  for (const segments of [undefined, []]) {
+    const unparsed = fakeRequest.shell("acli jira workitem view CHIEF-1");
+    if (unparsed.kind === "shell") {
+      if (segments) unparsed.commandSegments = segments;
+      else delete unparsed.commandSegments;
+    }
+    expect(approvalFor(unparsed, [jira])?.kind).toBe("connector");
+  }
 });

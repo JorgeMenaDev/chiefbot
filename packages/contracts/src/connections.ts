@@ -79,9 +79,9 @@ export const AgentConnection = z.object({
 });
 export type AgentConnection = z.infer<typeof AgentConnection>;
 
-// Body of POST /worker/:botId/connection-calls: a command of a connection's CLI the
-// agent ran, as the CLI and its subcommands (its leading lower-case words, at most
-// four, so never a flag), reported for the log with the turn's key.
+// Body of POST /worker/:botId/connection-calls: a run of a connection's CLI, as the
+// CLI and the leading subcommands one of its read-only globs names (never a flag or
+// a value; a command no glob names is the bare CLI), reported with the turn's key.
 export const ReportedConnectionCall = z.object({ connection: ConnectionName, command: z.string().min(1).max(200) });
 export type ReportedConnectionCall = z.infer<typeof ReportedConnectionCall>;
 

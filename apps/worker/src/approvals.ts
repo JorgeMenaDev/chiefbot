@@ -1,6 +1,6 @@
 import type { PermissionRequest } from "@github/copilot-sdk";
 import type { AgentConnection, ApprovalKind } from "@chiefbot/contracts";
-import { connectionCalls } from "./connections.ts";
+import { connectionWrites } from "./connections.ts";
 
 // What the user must approve, in the bot's computer, before the Copilot runtime
 // may do `request`, or null when it runs without asking. Pushes and pull
@@ -13,7 +13,7 @@ import { connectionCalls } from "./connections.ts";
 // `connections`' CLIs that matches none of its read-only globs (connections.ts).
 export function approvalFor(request: PermissionRequest, connections: AgentConnection[] = []): { kind: ApprovalKind; detail: string } | null {
   if (request.kind === "mcp" && !request.readOnly) return { kind: "tool", detail: `${request.serverName}: ${request.toolTitle}` };
-  const writes = connectionCalls(request, connections).filter(({ readOnly }) => !readOnly);
+  const writes = connectionWrites(request, connections);
   if (writes.length > 0) return { kind: "connector", detail: writes.map(({ connection, command }) => `${connection.title}: ${command}`).join("; ") };
   return null;
 }

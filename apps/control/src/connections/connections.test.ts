@@ -101,13 +101,18 @@ test("the owner's bot gets an enabled connection for the turn only: its skill, i
   expect(seen.at(-1)?.output).toBe("harness list pipeline key= account=\n");
 });
 
-test("a command of the CLI that may write waits for the owner; reads run; every command that runs is logged", async () => {
+test("a command of the CLI that may write waits for the owner; reads run; every run of the CLI is logged, as its subcommands", async () => {
   const { api, computers, onlineBot, send, watchChat } = await setup();
   await api("PUT", "/connections/harness", { fields: harness });
   const bot = await onlineBot("Ada");
   const ran: string[] = [];
   computers.copilot.script = async function* (_prompt, runtime) {
-    for (const command of ["harness list pipeline --org default", "harness execute pipeline deploy", "harness delete pipeline deploy"]) {
+    for (const command of [
+      "harness get secret production-db",
+      "false && harness execute pipeline deploy",
+      "harness delete pipeline deploy",
+      "env DEBUG=1 harness execute pipeline deploy",
+    ]) {
       if ((await runtime.shell(command)).approved) ran.push(command);
     }
     yield sdk.idle();
@@ -123,16 +128,37 @@ test("a command of the CLI that may write waits for the owner; reads run; every 
 
   const first = await answer(1, true);
   const second = await answer(2, false);
+  const third = await answer(3, true);
   await chat.until(doneCount(1));
 
   expect([first?.kind, first?.detail]).toEqual(["connector", "Harness: harness execute pipeline deploy"]);
   expect(second?.detail).toBe("Harness: harness delete pipeline deploy");
-  expect(ran).toEqual(["harness list pipeline --org default", "harness execute pipeline deploy"]);
+  expect(third?.detail).toBe("Harness: env DEBUG=1 harness execute pipeline deploy");
+  expect(ran).toEqual(["harness get secret production-db", "false && harness execute pipeline deploy", "env DEBUG=1 harness execute pipeline deploy"]);
+  // Only what ran: the approved deploy behind `false &&` never did. A read names its subcommands, a write only the CLI.
   const calls = ConnectionCall.array().parse(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json());
   expect(calls.map(({ connection, command, run }) => [connection, command, run])).toEqual([
-    ["harness", "harness list pipeline", turnId],
-    ["harness", "harness execute pipeline deploy", turnId],
+    ["harness", "harness get", turnId],
+    ["harness", "harness", turnId],
   ]);
+});
+
+test("an approval still pending when its turn ends is refused, and its command never runs", async () => {
+  const { api, computers, onlineBot, send, watchChat } = await setup();
+  await api("PUT", "/connections/harness", { fields: harness });
+  const bot = await onlineBot("Ada");
+  const late = Promise.withResolvers<{ approved: boolean }>();
+  computers.copilot.script = async function* (_prompt, runtime) {
+    const pending = runtime.shell("harness execute pipeline deploy");
+    yield sdk.idle();
+    late.resolve(await pending);
+  };
+  const chat = watchChat(bot.id);
+  await send(bot.id, "deploy");
+  await chat.until(doneCount(1));
+
+  expect((await late.promise).approved).toBe(false);
+  expect(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json()).toEqual([]);
 });
 
 const requestsIn = (events: ChatEvent[]) => events.filter((e) => e.event.type === "approval-request");

@@ -10,7 +10,7 @@ Connections differ from connectors (`docs/connectors.md`): a connector is an MCP
 2. Click **Connect** on the app's row and fill in its fields. Paste a token with only the access your bots need, and one that expires (below).
 3. Click **Save**. The row says **On**.
 
-**Edit** asks for every field again: control never sends a saved value back. **Disconnect** turns it off and deletes your fields. The bot's **Details** tab lists its **Connection calls**: each command of a connection's CLI it ran, and when (the CLI and its subcommands only, never flags or values).
+**Edit** asks for every field again: control never sends a saved value back. **Disconnect** turns it off and deletes your fields. The bot's **Details** tab lists its **Connection calls**: each run of a connection's CLI, and when. A run shows as the CLI and the subcommands its `readOnly` list names (`harness get`, `acli jira workitem`), never flags or values; a command no read-only entry names shows as the bare CLI.
 
 | App | Fields |
 | --- | --- |
@@ -23,11 +23,11 @@ Control keeps the plain fields in its database and the secret ones in its `Secre
 
 - `connections/<name>/<field>`: one file per field, readable only by user `bot` (mode 600).
 - `skills/<name>/SKILL.md`: the connection's skill, which tells the agent how to use the CLI. The Copilot SDK loads skills only from this folder.
-- `bin/<cli>`: a wrapper first on the agent's PATH. It sets the connection's environment (the token, and a config folder inside the turn's folder), then runs the real CLI.
+- `bin/<cli>`: a wrapper first on the agent's PATH. It notes the run in `calls`, sets the connection's environment (the token, and a config folder inside the turn's folder), then runs the real CLI.
 
 When the turn ends, however it ends, the worker deletes `/tmp/chiefbot`, and again when it starts. Between turns there is nothing on the computer, and the Copilot runtime's own environment never holds the token.
 
-Before a shell command runs, the worker checks each command of a connection's CLI in it against the connection's `readOnly` list. A match runs. Anything else waits for your approval: the chat shows a **Connector approval** card with the app and the command. Each command that runs is logged in control (`GET /bots/:id/connection-calls`); a declined one is not.
+Before a shell command runs, the worker checks each command of a connection's CLI in it against the connection's `readOnly` list. A match runs. Anything else waits for your approval: the chat shows a **Connector approval** card with the app and the command. A command that names the CLI where the worker cannot see it run (`env X=1 acli …`, `sh -c "…"`) asks too, for the whole command. An approval still pending when the turn ends is refused. The worker reports each run the wrapper noted to control (`GET /bots/:id/connection-calls`) after each tool call and before the turn ends, so a declined command, or one that never ran, is not logged.
 
 ## Security position
 
