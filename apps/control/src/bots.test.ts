@@ -119,7 +119,8 @@ test("a first bot whose computer fails to start is tried again at the next sign-
   expect(await again.watchBots().until((bots) => bots[0]?.status === "online")).toMatchObject([{ name: "Chief of Staff" }]);
 });
 
-// A provider that makes computers only once the test opens the gate; the first start fails if `fail`.
+// A provider whose computers are made only once the test opens the gate (if
+// ever); the first start fails if `fail`.
 function gatedStart(fail = false) {
   let starts = 0;
   let open = () => {};
@@ -132,8 +133,7 @@ function gatedStart(fail = false) {
     },
     start: (id) => (fail && ++starts === 1 ? Promise.reject(new Error("no such image")) : fake.start(id)),
   });
-  // Opens the gate once control has had time to take the request just sent.
-  return { provider, open: () => Bun.sleep(100).then(open) };
+  return { provider, open };
 }
 
 // The user's one bot, once it is listed.
@@ -143,44 +143,53 @@ async function onlyBot(watch: TestUser["watchBots"]) {
   return bot;
 }
 
-test("deleting the first bot while its computer starts leaves no computer, and it stays deleted", async () => {
+test("Delete returns while the first bot's computer is still being made, and the late computer is destroyed", async () => {
   const gate = gatedStart();
   const { api, signIn, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider });
   const { id } = await onlyBot(watchBots);
 
-  const deleted = api("DELETE", `/bots/${id}`);
-  await gate.open();
+  expect((await api("DELETE", `/bots/${id}`)).status).toBe(204);
+  gate.open();
 
-  expect((await deleted).status).toBe(204);
-  expect(await computers.provider.status(id)).toBe("absent");
+  await eventually(async () => (await computers.provider.status(id)) === "absent" && computers.destroyed.length === 1);
   expect(await (await signIn()).bots()).toEqual([]);
 });
 
-test("deleting the first bot while its computer fails to start keeps it deleted", async () => {
+test("a first bot deleted while its computer fails to start stays deleted", async () => {
   const gate = gatedStart(true);
   const { api, signIn, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider });
   const { id } = await onlyBot(watchBots);
 
-  const deleted = api("DELETE", `/bots/${id}`);
-  await gate.open();
-  await deleted;
-  // Both the failed start and the Delete destroyed the computer.
-  await eventually(() => computers.destroyed.length === 2);
+  await api("DELETE", `/bots/${id}`);
+  gate.open();
+  await eventually(() => computers.destroyed.length === 1);
 
   expect(await (await signIn()).bots()).toEqual([]);
 });
 
-test("stopping the first bot while its computer starts leaves it stopped", async () => {
+test("Stop returns while the first bot's computer is still being made, and the late computer is stopped", async () => {
   const gate = gatedStart();
   const { api, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider });
   const { id } = await onlyBot(watchBots);
 
-  const stopped = api("POST", `/bots/${id}/stop`);
-  await gate.open();
-
-  expect((await stopped).status).toBe(200);
-  expect(await computers.provider.status(id)).toBe("stopped");
+  expect((await api("POST", `/bots/${id}/stop`)).status).toBe(200);
   await watchBots().until((bots) => statusOf(id)(bots) === "stopped");
+  gate.open();
+
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
+});
+
+test("a first bot whose computer is not made in time is dropped, its late computer destroyed, and the next sign-in tries again", async () => {
+  const gate = gatedStart();
+  const { signIn, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider, launchTimeoutMinutes: 0.002 });
+  const { id } = await onlyBot(watchBots);
+  await watchBots().until((bots) => bots.length === 0);
+
+  gate.open();
+  const again = await signIn();
+
+  await eventually(async () => (await computers.provider.status(id)) === "absent");
+  expect(await again.watchBots().until((bots) => bots[0]?.status === "online")).toMatchObject([{ name: "Chief of Staff" }]);
 });
 
 test("a worker credential works only for its own bot", async () => {

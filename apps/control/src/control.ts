@@ -91,6 +91,9 @@ export type ControlOptions = {
   // The name of the bot a new user gets at their first sign-in, once: deleting
   // it is for good. None when unset; index.ts passes one.
   firstBot?: string;
+  // A bot's computer that is not made and started within this long counts as
+  // failed to start, and is destroyed if it comes later. Default 10.
+  launchTimeoutMinutes?: number;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -187,6 +190,7 @@ export function startControl({
   copilotTokens = (repo) => copilotRequestsToken(githubApiUrl, githubApp, repo),
   publicUrl,
   firstBot,
+  launchTimeoutMinutes = 10,
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -321,42 +325,65 @@ export function startControl({
     return Response.json(botOf(user.id, botId));
   }
 
-  // A stop marks the bot stopping first, so no new work lands on a computer about to go.
-  // Bots whose computer is being made and started. Start, Stop and Delete wait
-  // for it, so they act last.
-  const launching = new Map<BotId, Promise<unknown>>();
-  // Bots a Delete is waiting on.
-  const deleting = new Set<BotId>();
+  // Bots whose computer is being made and started, and what the user asked for
+  // meanwhile. Start, Stop and Delete only record it, so they return at once
+  // even if the provider hangs; the launch's end acts on it.
+  type Launch = { intent: "run" | "stop" | "delete"; deleteData: boolean };
+  const launching = new Map<BotId, Launch>();
 
   // Adds a bot to the user's list at once and starts its computer. If the
-  // computer fails to start, the bot is gone again, `onFailure` runs and this throws.
-  const launchBot = async (userId: UserId, name: string, onFailure = (_id: BotId) => {}) => {
+  // computer fails to start, or is not started within launchTimeoutMinutes, the
+  // bot is gone again, `onFailure` runs (unless the user deleted the bot) and
+  // this throws. A computer made after the deadline is destroyed.
+  const launchBot = (userId: UserId, name: string, onFailure = () => {}) => {
     const botToken = BotToken.parse(randomToken());
     const { id } = store.createBot(userId, name, botToken);
-    const launch = (async () => {
-      try {
-        await computers.create({
-          id,
-          env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_ID: id, CHIEFBOT_BOT_TOKEN: botToken },
-        });
-        await computers.start(id);
-      } catch (error) {
-        store.deleteBot(id);
-        await computers.destroy(id, { deleteData: true }).catch(() => {});
-        onFailure(id);
-        throw error;
-      } finally {
-        launching.delete(id);
-        publish(userId);
-      }
+    const launch: Launch = { intent: "run", deleteData: false };
+    launching.set(id, launch);
+    const provision = (async () => {
+      await computers.create({
+        id,
+        env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_ID: id, CHIEFBOT_BOT_TOKEN: botToken },
+      });
+      await computers.start(id);
     })();
-    launching.set(id, launch.catch(() => {}));
-    await launch;
-    return id;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("the computer did not start in time")), launchTimeoutMinutes * 60_000);
+    });
+    return Promise.race([provision, deadline]).then(
+      () => {
+        clearTimeout(timer);
+        launching.delete(id);
+        if (launch.intent === "stop") void computers.stop(id).catch(() => {});
+        if (launch.intent === "delete") void computers.destroy(id, { deleteData: launch.deleteData }).catch(() => {});
+        publish(userId);
+        return id;
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        launching.delete(id);
+        const deleted = launch.intent === "delete";
+        if (!deleted) store.deleteBot(id);
+        // Not awaited: the provider may hang here too.
+        void computers.destroy(id, { deleteData: true }).catch(() => {});
+        void provision.then(() => computers.destroy(id, { deleteData: true })).catch(() => {});
+        if (!deleted) onFailure();
+        publish(userId);
+        throw error;
+      },
+    );
   };
 
+  // A stop marks the bot stopping first, so no new work lands on a computer about to go.
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
-    await launching.get(botId);
+    const launch = launching.get(botId);
+    if (launch) {
+      launch.intent = running ? "run" : "stop";
+      store.setRunning(botId, running);
+      publish(userId);
+      return;
+    }
     if (!running) {
       stopping.add(botId);
       publish(userId);
@@ -439,7 +466,7 @@ export function startControl({
             // returns. A failed start leaves it to the next sign-in, unless the user
             // deleted it meanwhile.
             if (firstBot && store.claimFirstBot(userId)) {
-              launchBot(userId, firstBot, (id) => deleting.has(id) || store.releaseFirstBot(userId)).catch(() => {});
+              launchBot(userId, firstBot, () => store.releaseFirstBot(userId)).catch(() => {});
             }
             return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
@@ -479,8 +506,8 @@ export function startControl({
           const body = CreateBotRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return apiError(400, "invalid_bot");
           try {
-            const id = await launchBot(user.id, body.data.name);
-            return Response.json(botOf(user.id, id), { status: 201 });
+            const bot = botOf(user.id, await launchBot(user.id, body.data.name));
+            return bot ? Response.json(bot, { status: 201 }) : apiError(404, "not_found");
           } catch (error) {
             return apiError(502, "computer_failed", String(error));
           }
@@ -514,10 +541,9 @@ export function startControl({
       "/bots/:id": {
         DELETE: ownBot(async (user, botId, req) => {
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
-          deleting.add(botId);
-          await launching.get(botId);
-          deleting.delete(botId);
-          await computers.destroy(botId, { deleteData });
+          const launch = launching.get(botId);
+          if (launch) Object.assign(launch, { intent: "delete", deleteData });
+          else await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
           screens.forget(botId);
           workers.get(botId)?.close();
