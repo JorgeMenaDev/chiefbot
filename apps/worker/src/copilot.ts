@@ -17,6 +17,8 @@ export type Copilot = {
   // custom tools. `instructions` are added to the system message. `mcpServers`
   // are the session's MCP servers (a project's connectors), by name; `onMcpCall`
   // runs before each of their tool calls (the SDK's onPreMcpToolCall hook).
+  // `skillDirectories` are the roots of the skills it may load (a bot's turn's
+  // connections); every session names them, so none carry over from an earlier one.
   openSession(options: {
     sessionId: string;
     auth: CopilotAuth;
@@ -25,6 +27,7 @@ export type Copilot = {
     instructions?: string;
     mcpServers?: Record<string, MCPServerConfig>;
     onMcpCall?: (serverName: string, toolName: string) => Promise<void>;
+    skillDirectories?: string[];
   }): Promise<BotSession>;
 };
 

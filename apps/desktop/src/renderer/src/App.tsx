@@ -1,5 +1,6 @@
 import { AuthState, Bot, type User } from "@chiefbot/contracts";
 import {
+  BlocksIcon,
   BotIcon,
   CheckIcon,
   CopyIcon,
@@ -20,6 +21,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { z } from "zod";
 import { BotFace, BotPane } from "./BotPane.tsx";
+import { ConnectApps } from "./ConnectApps.tsx";
 import { Connectors } from "./Connectors.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
@@ -172,8 +174,8 @@ function Workspace({ user }: { user: User }) {
   const sidebar = useSidebarOpen();
   const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem(currentWorkspaceKey));
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Bumped by each click on Members or Connectors, which remounts (reloads) the
-  // screen: control sends no member or connector events.
+  // Bumped by each click on Members, Connectors or Connect apps, which remounts
+  // (reloads) the screen: control sends no member or connector events.
   const [membersVisit, setMembersVisit] = useState(0);
   // Whether the new-bot dialog and the sidebar's new-project form are open. Each is
   // its own, so one finishing never closes the other.
@@ -192,6 +194,8 @@ function Workspace({ user }: { user: User }) {
   const { projects, reload: reloadProjects } = useProjects(current);
   const showMembers = current !== null && selectedId === "members";
   const showConnectors = current !== null && selectedId === "connectors";
+  // Connect apps (from the gear menu) is the person's own, in any workspace.
+  const showConnectApps = selectedId === "connect-apps";
   const project = projects.find(({ id }) => id === selectedId);
   const selected = bots.find((bot) => bot.id === selectedId) ?? bots[0];
   const searching = query.trim() !== "";
@@ -285,7 +289,7 @@ function Workspace({ user }: { user: User }) {
               {shownBots.map((bot) => (
                 <SidebarRow
                   key={bot.id}
-                  active={!showMembers && !showConnectors && !project && bot.id === selected?.id}
+                  active={!showMembers && !showConnectors && !showConnectApps && !project && bot.id === selected?.id}
                   onClick={() => setSelectedId(bot.id)}
                 >
                   <BotFace bot={bot} className="size-4.5" dotClassName="-end-1 -bottom-1 scale-75 bg-sidebar" />
@@ -319,11 +323,21 @@ function Workspace({ user }: { user: User }) {
           </div>
         )}
         <footer className="flex shrink-0 items-center px-2 pt-1 pb-2">
-          <SettingsMenu user={user} />
+          <SettingsMenu
+            user={user}
+            onConnectApps={() => {
+              setSelectedId("connect-apps");
+              setMembersVisit(membersVisit + 1);
+            }}
+          />
         </footer>
       </Sidebar>
       <main className="flex min-w-0 flex-1">
-        {showMembers ? (
+        {showConnectApps ? (
+          <Column>
+            <ConnectApps key={membersVisit} />
+          </Column>
+        ) : showMembers ? (
           <Column>
             <Members
               key={`${current.id}:${membersVisit}`}
@@ -372,9 +386,9 @@ function Workspace({ user }: { user: User }) {
 }
 
 // Bottom left, after T3 Code's settings button: a menu with the signed-in GitHub
-// user and their Copilot plan, Disconnect GitHub and Sign out. The menu sits in the
-// top layer, so it is never clipped, whatever the window's height.
-function SettingsMenu({ user }: { user: User }) {
+// user and their Copilot plan, Connect apps, Disconnect GitHub and Sign out. The
+// menu sits in the top layer, so it is never clipped, whatever the window's height.
+function SettingsMenu({ user, onConnectApps }: { user: User; onConnectApps: () => void }) {
   const menu = "settings-menu";
   const { disconnectGitHub, signOut } = window.chiefbot.auth;
   return (
@@ -395,6 +409,13 @@ function SettingsMenu({ user }: { user: User }) {
           </div>
         </div>
         <MenuSeparator />
+        <MenuItem menu={menu} onClick={onConnectApps}>
+          <BlocksIcon />
+          <span className="flex flex-col">
+            Connect apps
+            <span className="text-muted-foreground text-xs">Tools and skills for your Chief of Staff</span>
+          </span>
+        </MenuItem>
         {!user.needsGitHubSignIn && (
           <MenuItem menu={menu} onClick={() => void disconnectGitHub()}>
             <UnplugIcon />

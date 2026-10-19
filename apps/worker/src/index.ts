@@ -43,7 +43,7 @@ if (controlUrl && projectId && projectToken) {
   if (!controlUrl || !agent) {
     throw new Error("CHIEFBOT_CONTROL_URL and CHIEFBOT_BOT_ID with CHIEFBOT_BOT_TOKEN (or the task worker's) must be set");
   }
-  startWorker({
+  const worker = startWorker({
     controlUrl,
     ...agent,
     // The bot's workspace on its own disk (the image's WORKDIR). Git in the agent's
@@ -53,4 +53,12 @@ if (controlUrl && projectId && projectToken) {
     onBound: () => console.log(`worker connected to ${controlUrl} as ${agent.id}`),
     onModelsError: (error) => console.error("could not list Copilot models:", error),
   });
+  // A stop (SIGTERM from tini) refuses the running turn's approvals and removes
+  // its connections before exiting. A kill skips this: the next start clears them.
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, () => {
+      worker.stop();
+      process.exit(0);
+    });
+  }
 }

@@ -79,3 +79,18 @@ test("a worker session gets its connectors' MCP servers and reports each call", 
   expect(Object.keys(config.mcpServers ?? {})).toEqual(["jira"]);
   expect(reported).toEqual(["jira/search"]);
 });
+
+test("a worker session loads skills only from the roots its turn names, and names none without them", () => {
+  const options = {
+    sessionId: "bot_1",
+    auth: { kind: "seat" as const, gitHubTokenProvider: async () => ({ kind: "token" as const, accessToken: "gho_a", expiresIn: 3600 }) },
+    onPermissionRequest: async () => ({ kind: "reject" as const }),
+    tools: [],
+  };
+
+  const withSkills = workerSessionConfig("/home/bot/workspace")({ ...options, skillDirectories: ["/tmp/chiefbot/skills"] });
+  const without = workerSessionConfig("/home/bot/workspace")(options);
+
+  expect([withSkills.enableSkills, withSkills.skillDirectories]).toEqual([true, ["/tmp/chiefbot/skills"]]);
+  expect(without.skillDirectories).toEqual([]);
+});

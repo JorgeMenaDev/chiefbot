@@ -48,6 +48,7 @@ export function controlLink<Message>({
   clock,
   parse,
   onMessage,
+  onTurnEnd,
 }: {
   base: string;
   token: string;
@@ -57,6 +58,8 @@ export function controlLink<Message>({
   // Reads one message from control's WebSocket.
   parse: (json: unknown) => Message;
   onMessage: (message: Message) => void;
+  // A turn is ending: called just before its `done` goes to control.
+  onTurnEnd?: (turnId: TurnId) => void;
 }) {
   const auth = { authorization: `Bearer ${token}` };
   let socket: WebSocket | null = null;
@@ -80,6 +83,7 @@ export function controlLink<Message>({
   }
 
   function emit(turnId: TurnId, event: TurnEvent) {
+    if (event.type === "done") onTurnEnd?.(turnId);
     if (latest?.turnId !== turnId) latest = { turnId, events: [] };
     latest.events.push(event);
     send({ type: "turn-event", turnId, index: latest.events.length - 1, event });

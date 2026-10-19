@@ -47,11 +47,13 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const sessionIds: string[] = [];
   // Each opened session's MCP servers, in the order sessions opened.
   const mcpServers: Array<Record<string, MCPServerConfig>> = [];
+  // Each opened session's skill roots, in the order sessions opened.
+  const skillDirectories: string[][] = [];
   // Every turn started, with the model its session was on ("default" before any setModel).
   const sends: Array<{ sessionId: string; prompt: string; model: string }> = [];
 
   const copilot: Copilot = {
-    async openSession({ sessionId, auth, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall }) {
+    async openSession({ sessionId, auth, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall, skillDirectories: skills = [] }) {
       if (auth.kind === "installation") tokens.push(auth.token);
       else {
         const token = await auth.gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
@@ -59,6 +61,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       }
       sessionIds.push(sessionId);
       mcpServers.push(servers);
+      skillDirectories.push(skills);
       const handlers = new Set<(event: SessionEvent) => void>();
       const allowed = async (request: PermissionRequest) =>
         (await onPermissionRequest(request, { sessionId })).kind === "approve-once";
@@ -145,7 +148,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
     },
   };
 
-  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, sends, script, shell };
+  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, sends, script, shell };
   return fake;
 }
 
@@ -197,6 +200,16 @@ export const sdk = {
   idle: (): SessionEvent => ({ ...envelope(), ephemeral: true, type: "session.idle", data: {} }),
 };
 
+// A shell command's segments as the runtime parses them, roughly: split on
+// &&, ||, ; and |, each named by its first word after any VAR=value.
+function segmentsOf(fullCommandText: string) {
+  return fullCommandText.split(/&&|\|\||;|\||\n/).flatMap((segment) => {
+    const words = segment.trim().split(/\s+/).filter((word) => word !== "");
+    const identifier = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+    return identifier ? [{ identifier, fullCommandText: segment.trim() }] : [];
+  });
+}
+
 // Permission requests shaped like the ones the Copilot runtime sends.
 export const fakeRequest = {
   shell: (fullCommandText: string, toolCallId?: string): PermissionRequest => ({
@@ -204,7 +217,8 @@ export const fakeRequest = {
     ...(toolCallId === undefined ? {} : { toolCallId }),
     fullCommandText,
     intention: "Run a command",
-    commands: [],
+    commandSegments: segmentsOf(fullCommandText),
+    commands: segmentsOf(fullCommandText).map(({ identifier }) => ({ identifier, readOnly: false })),
     possiblePaths: [],
     possibleUrls: [],
     hasWriteFileRedirection: false,

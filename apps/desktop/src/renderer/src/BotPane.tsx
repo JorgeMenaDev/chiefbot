@@ -3,6 +3,7 @@ import { PanelRightIcon, PowerIcon, PowerOffIcon, Trash2Icon, XIcon } from "luci
 import { useId, useState, type KeyboardEvent } from "react";
 import { Avatar } from "./Avatar.tsx";
 import { Chat } from "./Chat.tsx";
+import { ConnectionCalls } from "./ConnectApps.tsx";
 import { ScreenPane } from "./LiveScreen.tsx";
 import { Column, ErrorText, PaneHeader, PanelSection, SidePanel } from "./Pane.tsx";
 import { Routines } from "./Routines.tsx";
@@ -147,6 +148,7 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
         </PanelSection>
         {/* Mounted only while shown, so it reloads each time Details shows (a routine may have run). */}
         {!hidden && tab === "details" && <Routines bot={bot} />}
+        {!hidden && tab === "details" && <ConnectionCalls bot={bot} />}
         <PanelSection title="Delete">
           <Button size="xs" variant="destructive-outline" className="self-start" onClick={() => act(() => remove(bot.id))}>
             <Trash2Icon />

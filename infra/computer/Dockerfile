@@ -3,7 +3,8 @@
 # root: `docker build -f infra/computer/Dockerfile .`. The first stage bundles
 # the worker into dist/worker.js and pins the Copilot SDK in dist/package.json
 # (infra/computer/build.ts). start.sh brings up the screen (Xvfb, Openbox,
-# Chromium, x11vnc on loopback) and then runs the worker.
+# Chromium, x11vnc on loopback) and then runs the worker. The image carries every
+# connection's CLI (connections/), never a connection's fields.
 FROM oven/bun:1-slim AS dist
 WORKDIR /src
 COPY . .
@@ -15,6 +16,16 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates \
      xvfb openbox x11vnc chromium fonts-liberation \
   && rm -rf /var/lib/apt/lists/*
+
+# Every connection's CLI, from its connections/<name>/install.sh (run as root,
+# each pinned to a version and checked against the vendor's SHA-256). A bot's
+# turn brings its owner's credential for them (apps/worker/src/connections.ts).
+COPY connections /tmp/connections
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl \
+  && for install in /tmp/connections/*/install.sh; do sh "$install"; done \
+  && apt-get purge -y --auto-remove curl \
+  && rm -rf /tmp/connections /var/lib/apt/lists/*
 
 # The bot's home is its own named volume (mounted at /home/bot by the
 # ComputerProvider). A new volume copies this directory, owner included.

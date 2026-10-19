@@ -1,4 +1,5 @@
 import { CopilotClient, type CopilotClientOptions, type MCPServerConfig, type ResumeSessionConfig, type SessionHooks } from "@github/copilot-sdk";
+import { connectionsRoot } from "./connections.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 
 // The real Copilot SDK in copilot-cli mode: the bundled runtime runs in the bot
@@ -6,27 +7,37 @@ import type { BotSession, Copilot } from "./copilot.ts";
 // Session history lives under ~/.copilot, on the bot's own disk.
 // GitHub identity comes only from each session's auth (copilot.ts), never from a
 // logged-in user or an ambient env token. The runtime's shell inherits agentEnv()
-// plus `gitConfig`, the GIT_CONFIG_* variables that send git to control's proxy.
+// plus `gitConfig`, the GIT_CONFIG_* variables that send git to control's proxy,
+// with the turn's connection wrappers first on its PATH (connections.ts).
 // An organization's installation token is the exception: GitHub wants it in the
 // runtime's own environment, so that runtime's shell sees it. It may only make
 // Copilot requests, never read or write a repo.
 export function copilotSdk({ workingDirectory, gitConfig }: { workingDirectory: string; gitConfig: Record<string, string> }): Copilot {
   return sdkCopilot(
-    { mode: "copilot-cli", workingDirectory, useLoggedInUser: false, env: { ...agentEnv(process.env), ...gitConfig } },
+    {
+      mode: "copilot-cli",
+      workingDirectory,
+      useLoggedInUser: false,
+      env: { ...agentEnv(process.env), ...gitConfig, PATH: `${connectionsRoot}/bin:${process.env.PATH ?? ""}` },
+    },
     workerSessionConfig(workingDirectory),
   );
 }
 
 // A bot's or task worker's session config: the runtime's full tool set, its
-// custom tools and its connectors' MCP servers. No model here: the worker sets
-// the bot's model before each turn that needs it.
+// custom tools, its connectors' MCP servers and its turn's skill roots (a bot's
+// connections), always named, so a resumed session keeps none of an earlier
+// turn's. No ambient config discovery. No model here: the worker sets the bot's
+// model before each turn that needs it.
 export const workerSessionConfig =
   (workingDirectory: string) =>
-  ({ onPermissionRequest, tools, mcpServers, onMcpCall }: Parameters<Copilot["openSession"]>[0]) => ({
+  ({ onPermissionRequest, tools, mcpServers, onMcpCall, skillDirectories = [] }: Parameters<Copilot["openSession"]>[0]) => ({
     workingDirectory,
     streaming: true,
     onPermissionRequest,
     tools,
+    enableSkills: true,
+    skillDirectories,
     ...connectorConfig(mcpServers, onMcpCall),
   });
 

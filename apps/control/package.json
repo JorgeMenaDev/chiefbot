@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/control.ts",
+    "./connections": "./src/connections/catalog.ts",
     "./fake-computers": "./src/computers/fakeComputers.ts"
   },
   "scripts": {

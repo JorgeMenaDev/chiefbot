@@ -1,8 +1,17 @@
-import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
-import { ApprovalId, ControlToWorker, type ApprovalKind, type ScreenControl, type TurnId, type TurnKey } from "@chiefbot/contracts";
+import type { PermissionHandler, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
+import {
+  ApprovalId,
+  ControlToWorker,
+  type AgentConnection,
+  type ApprovalKind,
+  type ScreenControl,
+  type TurnId,
+  type TurnKey,
+} from "@chiefbot/contracts";
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
+import { connectionsRoot as defaultConnectionsRoot, stageConnections } from "./connections.ts";
 import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
@@ -35,6 +44,8 @@ export type WorkerOptions = {
   clock?: Clock;
   // Listing the plan's models failed; control keeps its last report.
   onModelsError?: (error: unknown) => void;
+  // Where a bot's turns stage its owner's connections. Default: /tmp/chiefbot (connections.ts).
+  connectionsRoot?: string;
 };
 
 // Dials out to control's /worker/:id WebSocket with the bot's credential (or a task
@@ -48,6 +59,9 @@ export type WorkerOptions = {
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
 // Pushes and pull requests go through control, which asks the user itself.
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
+// A bot's turn brings its owner's connections: staged for that turn only, their
+// skills given to its session, their CLIs' commands that may write asked first and
+// every run of them sent to control with the turn's end (connections.ts).
 // Every call to control in a turn (git's, tools', a task's tokens and connectors)
 // carries that turn's key; none is made outside a turn. Only a bot's own Copilot
 // seat token is asked for with the bot's credential: its model listing runs between turns.
@@ -63,6 +77,7 @@ export function startWorker({
   onBound,
   onModelsError,
   clock,
+  connectionsRoot = defaultConnectionsRoot,
 }: WorkerOptions) {
   // Every control route of this computer starts here.
   const base = `${controlUrl}/${route}/${id}`;
@@ -79,41 +94,50 @@ export function startWorker({
   let open: { turn: Turn | null; session: Promise<BotSession> } | null = null;
   // The model set on the open session, or null before a turn sets one.
   let sessionModel: string | null = null;
-  // Approvals the session waits on, each resolved by the user's answer.
-  const waiting = new Map<ApprovalId, (approved: boolean) => void>();
+  // Approvals the session waits on, each resolved by the user's answer, or with
+  // null when its turn ends first.
+  const waiting = new Map<ApprovalId, { turnId: TurnId; answer: (approved: boolean | null) => void }>();
+  // The running turn's staged connections, removed when it ends. Whatever a
+  // turn a crash cut short left behind goes now.
+  let staged: (ReturnType<typeof stageConnections> & { turnId: TurnId }) | null = null;
+  stageConnections(connectionsRoot, []);
 
   // Puts an approval-request in the turn's chat and waits, however long, for the
   // user's answer. Null once that turn is over (or for no turn): nobody is there to answer.
   async function askUser(turn: Turn | null, ask: { kind: ApprovalKind; detail: string }): Promise<boolean | null> {
     if (!turn || !link.running(turn)) return null;
     const approvalId = ApprovalId.parse(`approval_${crypto.randomUUID()}`);
-    const answered = new Promise<boolean>((resolve) => waiting.set(approvalId, resolve));
+    const answered = new Promise<boolean | null>((answer) => waiting.set(approvalId, { turnId: turn.turnId, answer }));
     link.emit(turn.turnId, { type: "approval-request", approvalId, ...ask });
     return answered;
   }
 
-  // The permission handler of `turn`'s session. It runs safe tool calls once
-  // the agent has the screen. A risky one becomes an approval-request in that
-  // turn, and the session waits until the user answers. The human may take over
-  // while it waits, so an approved call waits for hand-back too.
+  // The permission handler of `turn`'s session, with the turn's `connections`.
+  // It runs safe tool calls once the agent has the screen. A risky one becomes an
+  // approval-request in that turn, and the session waits until the user answers.
+  // The human may take over while it waits, so an approved call waits for
+  // hand-back too. Whatever it waited on, nothing is granted once its turn is over.
   const permissionFor =
-    (turn: Turn | null): PermissionHandler =>
+    (turn: Turn | null, connections: AgentConnection[] = []): PermissionHandler =>
     async (request) => {
+      const over: PermissionRequestResult = { kind: "reject", feedback: "Nobody is here to approve this outside its turn." };
+      const ended = () => turn !== null && !link.running(turn);
       await agentHasScreen();
-      const ask = approvalFor(request);
+      if (ended()) return over;
+      const ask = approvalFor(request, connections);
       if (!ask) return { kind: "approve-once" };
       const approved = await askUser(turn, ask);
-      if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside its turn." };
+      if (approved === null || ended()) return over;
       if (!approved) return { kind: "reject", feedback: "The user declined this." };
       await agentHasScreen();
-      return { kind: "approve-once", approvedInteractively: true };
+      return ended() ? over : { kind: "approve-once", approvedInteractively: true };
     };
 
   // A task worker's turn was cut short to renew the organization's token
   // (installationSession.ts): the permission requests its runtime waited on are
   // gone, so their approvals are withdrawn. Continuing, the agent asks again if it still needs them.
   function withdrawApprovals(turn: Turn) {
-    for (const [approvalId, answer] of waiting) {
+    for (const [approvalId, { answer }] of waiting) {
       if (link.running(turn)) link.emit(turn.turnId, { type: "approval-withdrawn", approvalId });
       answer(false);
     }
@@ -160,8 +184,13 @@ export function startWorker({
   // its id is the bot's, or task worker's), in place of the open one. Every
   // callback in it holds that turn, so a late one acts in no other. A bot's
   // session for no turn lists its models when the worker binds; a task worker's
-  // is opened by its task (`task`).
-  async function openSession(turn: Turn | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
+  // is opened by its task (`task`). A bot's turn's session gets its staged
+  // connections (`connections`, and the skill roots they are under).
+  async function openSession(
+    turn: Turn | null,
+    task?: Extract<ControlToWorker, { type: "run-task" }>,
+    { connections, skillDirectories }: { connections: AgentConnection[]; skillDirectories: string[] } = { connections: [], skillDirectories: [] },
+  ) {
     const previous = open;
     open = null;
     sessionModel = null;
@@ -169,7 +198,7 @@ export function startWorker({
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
     const tools = [pullRequestTool({ base, turnKey }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : [])];
-    const options = { sessionId: id, onPermissionRequest: permissionFor(turn), tools };
+    const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections), tools, skillDirectories };
     // A chief always runs on its owner's own Copilot seat.
     const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
       if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
@@ -196,12 +225,21 @@ export function startWorker({
   // Control sends a turn only once the previous one is done. Each turn opens its
   // session (above), with the bot's model set first, so switching
   // mid-conversation keeps the history. A task worker's one turn (`task`) runs on
-  // the default model. Git's credential helper hands git this turn's key from now on.
-  async function runTurn(turnId: TurnId, turnKey: TurnKey, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
+  // the default model. Git's credential helper hands git this turn's key from
+  // now on. A bot's turn stages its owner's `connections` until it ends.
+  async function runTurn(
+    turnId: TurnId,
+    turnKey: TurnKey,
+    text: string,
+    model: string | null,
+    { task, connections = [] }: { task?: Extract<ControlToWorker, { type: "run-task" }>; connections?: AgentConnection[] } = {},
+  ) {
     const turn = link.begin(turnId, turnKey);
     git?.reload({ fetch: gitCredential(turn) });
     try {
-      const opened = await openSession(turn, task);
+      staged = { ...stageConnections(connectionsRoot, connections), turnId };
+      const { skillDirectories } = staged;
+      const opened = await openSession(turn, task, { connections, skillDirectories });
       if (model !== null && sessionModel !== model) {
         await opened.setModel(model);
         sessionModel = model;
@@ -218,6 +256,25 @@ export function startWorker({
     retryMs,
     ...(clock === undefined ? {} : { clock }),
     parse: (json) => ControlToWorker.parse(json),
+    // Called synchronously just before the turn's done goes out, so nothing can
+    // run in between: its approvals still waiting are refused, the runs of its
+    // connections' CLIs go to control in one message ahead of the done (read
+    // once, bounded, never throwing: connections.ts), and its connections go.
+    onTurnEnd(turnId) {
+      for (const [approvalId, waiter] of waiting) {
+        if (waiter.turnId !== turnId) continue;
+        waiting.delete(approvalId);
+        waiter.answer(null);
+      }
+      if (staged?.turnId !== turnId) return;
+      try {
+        const calls = staged.calls();
+        if (calls.length > 0) link.send({ type: "connection-calls", turnId, calls });
+      } finally {
+        staged.cleanup();
+        staged = null;
+      }
+    },
     onMessage(message) {
       switch (message.type) {
         case "bound":
@@ -226,10 +283,10 @@ export function startWorker({
           if (route === "worker") void reportModels();
           break;
         case "run-turn":
-          void runTurn(message.turnId, message.turnKey, message.text, message.model);
+          void runTurn(message.turnId, message.turnKey, message.text, message.model, { connections: message.connections });
           break;
         case "run-task":
-          void runTurn(message.turnId, message.turnKey, message.text, null, message);
+          void runTurn(message.turnId, message.turnKey, message.text, null, { task: message });
           break;
         case "turn-key":
           link.rekey(message.turnId, message.turnKey);
@@ -247,7 +304,7 @@ export function startWorker({
           break;
         }
         case "approval-answer":
-          waiting.get(message.approvalId)?.(message.approved);
+          waiting.get(message.approvalId)?.answer(message.approved);
           waiting.delete(message.approvalId);
           break;
       }
@@ -270,7 +327,13 @@ export function startWorker({
 
   return {
     screenControl: () => screenControl,
+    // Also on SIGTERM (index.ts): approvals still waiting are refused and the
+    // staged connections removed, so a stopped computer keeps no credential.
     stop() {
+      for (const { answer } of waiting.values()) answer(null);
+      waiting.clear();
+      stageConnections(connectionsRoot, []);
+      staged = null;
       link.stop();
       for (const close of streams) close();
       git?.stop(true);
