@@ -1,5 +1,5 @@
 import { Bot, type BotAvatar, DEFAULT_AVATAR } from "@chiefbot/contracts";
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Avatar, avatarColorOptions, avatarShapes } from "./Avatar.tsx";
 import { ErrorText } from "./Pane.tsx";
 import { Button } from "./components/ui/button.tsx";
@@ -20,6 +20,15 @@ export function NewBot({ onCreated, onClose }: { onCreated: (id: string) => void
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const titleId = useId();
+  // Whether this dialog was dismissed while its bot was still being made. The bot still
+  // gets made and selected, but closing then must not close a New bot dialog opened since.
+  const dismissed = useRef(false);
+  useEffect(() => {
+    dismissed.current = false;
+    return () => {
+      dismissed.current = true;
+    };
+  }, []);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -28,7 +37,7 @@ export function NewBot({ onCreated, onClose }: { onCreated: (id: string) => void
     try {
       const bot = Bot.parse(await window.chiefbot.bots.create({ name, avatar }));
       onCreated(bot.id);
-      onClose();
+      if (!dismissed.current) onClose();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {

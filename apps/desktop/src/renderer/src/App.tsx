@@ -16,7 +16,8 @@ import {
   UsersIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { z } from "zod";
 import { BotFace, BotPane } from "./BotPane.tsx";
 import { Connectors } from "./Connectors.tsx";
@@ -178,6 +179,13 @@ function Workspace({ user }: { user: User }) {
   // its own, so one finishing never closes the other.
   const [creatingBot, setCreatingBot] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
+  // The dialog hands focus back to what opened it, but the empty list's New bot row is
+  // gone by then, so focus lands on the search row's New bot button instead.
+  const newBotButton = useRef<HTMLButtonElement>(null);
+  const closeNewBot = () => {
+    flushSync(() => setCreatingBot(false));
+    newBotButton.current?.focus();
+  };
   // The search row filters the sidebar's projects and bots by name.
   const [query, setQuery] = useState("");
   const current = teams.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -214,7 +222,7 @@ function Workspace({ user }: { user: User }) {
                 <FolderPlusIcon />
               </SidebarIconButton>
             )}
-            <SidebarIconButton label="New bot" onClick={() => setCreatingBot(true)}>
+            <SidebarIconButton ref={newBotButton} label="New bot" onClick={() => setCreatingBot(true)}>
               <SquarePenIcon />
             </SidebarIconButton>
           </div>
@@ -286,7 +294,7 @@ function Workspace({ user }: { user: User }) {
                 </SidebarRow>
               ))}
               {creatingBot ? (
-                <NewBot onCreated={setSelectedId} onClose={() => setCreatingBot(false)} />
+                <NewBot onCreated={setSelectedId} onClose={closeNewBot} />
               ) : (
                 bots.length === 0 && <NewRow label="New bot" onClick={() => setCreatingBot(true)} />
               )}
