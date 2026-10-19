@@ -1,6 +1,7 @@
 import type { Bot, BotStatus } from "@chiefbot/contracts";
 import { PanelRightIcon, PowerIcon, PowerOffIcon, Trash2Icon, XIcon } from "lucide-react";
 import { useId, useState, type KeyboardEvent } from "react";
+import { Avatar } from "./Avatar.tsx";
 import { Chat } from "./Chat.tsx";
 import { ScreenPane } from "./LiveScreen.tsx";
 import { Column, ErrorText, PaneHeader, PanelSection, SidePanel } from "./Pane.tsx";
@@ -21,7 +22,7 @@ export function BotPane({ bot }: { bot: Bot }) {
   return (
     <>
       <Column>
-        <PaneHeader icon={<StatusDot status={bot.status} />} title={bot.name} note={`${statusText[bot.status]} · runs on your Copilot seat`}>
+        <PaneHeader icon={<BotFace bot={bot} className="size-6" dotClassName="-end-1 -bottom-1 bg-background" />} title={bot.name} note={`${statusText[bot.status]} · runs on your Copilot seat`}>
           <Button
             size="icon-xs"
             variant="ghost"
@@ -38,6 +39,19 @@ export function BotPane({ bot }: { bot: Bot }) {
       {/* Closed, the panel stays mounted but hidden, so the bot's screen stays open. */}
       <BotDetails bot={bot} hidden={!details} onClose={() => showDetails(false)} />
     </>
+  );
+}
+
+// A bot's face with its status dot pinned to the corner (chat header, sidebar rows).
+// `className` sizes the face; `dotClassName` places the dot and backs it with the colour behind it.
+export function BotFace({ bot, className, dotClassName }: { bot: Bot; className: string; dotClassName: string }) {
+  return (
+    <span className="relative shrink-0">
+      <Avatar avatar={bot.avatar} className={className} />
+      <span className={cn("absolute rounded-full", dotClassName)}>
+        <StatusDot status={bot.status} />
+      </span>
+    </span>
   );
 }
 
@@ -86,9 +100,7 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
       }
     >
       <div className="flex flex-col items-center gap-3 px-5 pt-6 pb-5 text-center">
-        <span className="flex size-20 items-center justify-center rounded-full border bg-muted font-semibold text-3xl uppercase">
-          {bot.name.slice(0, 1)}
-        </span>
+        <Avatar avatar={bot.avatar} className="size-20" />
         <h2 className="max-w-full truncate font-semibold text-lg">{bot.name}</h2>
         <div role="tablist" aria-label="Bot" className="flex w-full rounded-lg bg-muted p-0.5" onKeyDown={onTabKey}>
           {tabs.map(([key, label]) => (

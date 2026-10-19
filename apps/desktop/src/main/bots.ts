@@ -1,4 +1,4 @@
-import { Bot, ClientEvent, ModelOption, type BotId, type ProjectId, type Task, type TaskWorker, type User } from "@chiefbot/contracts";
+import { Bot, ClientEvent, ModelOption, type BotId, type CreateBotRequest, type ProjectId, type Task, type TaskWorker, type User } from "@chiefbot/contracts";
 import { z } from "zod";
 import { controlCaller } from "./controlApi.ts";
 
@@ -70,7 +70,7 @@ export function createBots({ controlUrl, session, onChange, onUser, onTasks, onW
       set([]);
     },
 
-    create: async (name: string) => Bot.parse(await (await call("POST", "/bots", { name })).json()),
+    create: async (request: CreateBotRequest) => Bot.parse(await (await call("POST", "/bots", request)).json()),
     start: async (botId: BotId) => void (await call("POST", `/bots/${botId}/start`)),
     stop: async (botId: BotId) => void (await call("POST", `/bots/${botId}/stop`)),
     remove: async (botId: BotId, { deleteData }: { deleteData: boolean }) =>

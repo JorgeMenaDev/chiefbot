@@ -225,3 +225,28 @@
 .drag-region :is(button, input, textarea, select, a) {
   -webkit-app-region: no-drag;
 }
+
+/* T3 Code's dialog glass and backdrop (apps/web/src/index.css dialog-glass, dialog-backdrop), on a native <dialog>. */
+@utility dialog-glass {
+  background: color-mix(in srgb, var(--background) 80%, transparent);
+  backdrop-filter: blur(12px) saturate(1.14);
+  border-color: color-mix(in srgb, var(--foreground) 10%, transparent);
+  box-shadow: 0 24px 64px -24px rgb(0 0 0 / 65%);
+
+  &::backdrop {
+    background: color-mix(in srgb, var(--background) 60%, transparent);
+    backdrop-filter: blur(4px);
+  }
+
+  @variant dark {
+    backdrop-filter: blur(16px) saturate(1.08);
+    border-color: color-mix(in srgb, var(--color-white) 8%, transparent);
+    box-shadow:
+      inset 0 1px rgb(255 255 255 / 4%),
+      0 24px 72px -20px rgb(0 0 0 / 90%);
+
+    &::backdrop {
+      background: color-mix(in srgb, var(--background) 64%, transparent);
+    }
+  }
+}

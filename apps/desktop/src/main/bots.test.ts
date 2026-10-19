@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { SignInResponse, type Bot, type User } from "@chiefbot/contracts";
+import { DEFAULT_AVATAR, SignInResponse, type Bot, type User } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
@@ -43,7 +43,7 @@ test("the bot list follows control live: a new bot goes starting → online, and
 
   bots.connect();
   await until(() => seen.length > 0);
-  const bot = await bots.create("Ada");
+  const bot = await bots.create({ name: "Ada", avatar: DEFAULT_AVATAR });
   await until((list) => list[0]?.status === "online");
   await bots.remove(bot.id, { deleteData: true });
   await until((list) => list.length === 0);
@@ -75,7 +75,7 @@ test("take over and hand back show in the live list", async () => {
       changed();
     });
   bots.connect();
-  const bot = await bots.create("Ada");
+  const bot = await bots.create({ name: "Ada", avatar: DEFAULT_AVATAR });
 
   await bots.takeOver(bot.id);
   await until((list) => list[0]?.screenControl === "human");
@@ -89,7 +89,7 @@ test("create fails with control's reason when control refuses it", async () => {
   stops.push(github.stop, control.stop);
   const bots = createBots({ controlUrl: control.url, session: () => "not-a-session", onChange: () => {} });
 
-  await expect(bots.create("Ada")).rejects.toThrow("unauthorized");
+  await expect(bots.create({ name: "Ada", avatar: DEFAULT_AVATAR })).rejects.toThrow("unauthorized");
 });
 
 test("a lost GitHub sign-in reaches the desktop live", async () => {
@@ -138,7 +138,7 @@ test("the model picker reads the plan's models from control, and a refused pick 
   });
   const { sessionToken } = SignInResponse.parse(await signIn.json());
   const bots = createBots({ controlUrl: control.url, session: () => sessionToken, onChange: () => {} });
-  const bot = await bots.create("Ada");
+  const bot = await bots.create({ name: "Ada", avatar: DEFAULT_AVATAR });
 
   // The worker reports the plan's models just after it connects.
   let models = await bots.models();

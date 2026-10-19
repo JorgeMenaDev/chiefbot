@@ -120,7 +120,7 @@ ipcMain.handle("auth:disconnect-github", () => auth.disconnectGitHub());
 
 // Renderer arguments are untrusted, so each is parsed before it reaches control.
 ipcMain.handle("bots:get", () => bots.list());
-ipcMain.handle("bots:create", (_event, name: unknown) => bots.create(CreateBotRequest.parse({ name }).name));
+ipcMain.handle("bots:create", (_event, request: unknown) => bots.create(CreateBotRequest.parse(request)));
 ipcMain.handle("bots:start", (_event, id: unknown) => bots.start(BotId.parse(id)));
 ipcMain.handle("bots:stop", (_event, id: unknown) => bots.stop(BotId.parse(id)));
 ipcMain.handle("bots:models", () => bots.models());

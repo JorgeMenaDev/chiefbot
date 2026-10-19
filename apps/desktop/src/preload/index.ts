@@ -1,4 +1,4 @@
-import type { ConnectorInput, RoutineInput, SubscriptionInput } from "@chiefbot/contracts";
+import type { BotAvatar, ConnectorInput, RoutineInput, SubscriptionInput } from "@chiefbot/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 // Subscribes to one main → renderer channel; returns the unsubscribe.
@@ -20,7 +20,7 @@ const api = {
   },
   bots: {
     get: (): Promise<unknown> => ipcRenderer.invoke("bots:get"),
-    create: (name: string): Promise<unknown> => ipcRenderer.invoke("bots:create", name),
+    create: (request: { name: string; avatar: BotAvatar }): Promise<unknown> => ipcRenderer.invoke("bots:create", request),
     start: (id: string): Promise<void> => ipcRenderer.invoke("bots:start", id),
     stop: (id: string): Promise<void> => ipcRenderer.invoke("bots:stop", id),
     remove: (id: string): Promise<void> => ipcRenderer.invoke("bots:delete", id),

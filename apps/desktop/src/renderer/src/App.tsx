@@ -16,18 +16,18 @@ import {
   UsersIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { z } from "zod";
-import { BotPane, StatusDot } from "./BotPane.tsx";
+import { BotFace, BotPane } from "./BotPane.tsx";
 import { Connectors } from "./Connectors.tsx";
+import { NewBot } from "./NewBot.tsx";
 import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
-import { Column, ErrorText, PaneHeader } from "./Pane.tsx";
+import { Column, PaneHeader } from "./Pane.tsx";
 import { Members, useWorkspaces, WorkspaceSwitcher } from "./Workspaces.tsx";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert.tsx";
 import { Button, buttonVariants } from "./components/ui/button.tsx";
 import { Card, CardDescription, CardHeader, CardPanel } from "./components/ui/card.tsx";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "./components/ui/empty.tsx";
-import { Input } from "./components/ui/input.tsx";
 import { MenuItem, MenuPopup, MenuSeparator } from "./components/ui/menu.tsx";
 import {
   Sidebar,
@@ -174,8 +174,8 @@ function Workspace({ user }: { user: User }) {
   // Bumped by each click on Members or Connectors, which remounts (reloads) the
   // screen: control sends no member or connector events.
   const [membersVisit, setMembersVisit] = useState(0);
-  // Whether the sidebar's new-bot and new-project forms are open. Each is its own,
-  // so one finishing never closes the other.
+  // Whether the new-bot dialog and the sidebar's new-project form are open. Each is
+  // its own, so one finishing never closes the other.
   const [creatingBot, setCreatingBot] = useState(false);
   const [creatingProject, setCreatingProject] = useState(false);
   // The search row filters the sidebar's projects and bots by name.
@@ -280,7 +280,7 @@ function Workspace({ user }: { user: User }) {
                   active={!showMembers && !showConnectors && !project && bot.id === selected?.id}
                   onClick={() => setSelectedId(bot.id)}
                 >
-                  <StatusDot status={bot.status} />
+                  <BotFace bot={bot} className="size-4.5" dotClassName="-end-1 -bottom-1 scale-75 bg-sidebar" />
                   <span className="min-w-0 flex-1 truncate">{bot.name}</span>
                   <RowNote>{bot.status}</RowNote>
                 </SidebarRow>
@@ -415,47 +415,4 @@ function NewRow({ label, onClick }: { label: string; onClick: () => void }) {
 // A sidebar row's quiet trailing note (a status, a role, a repo owner).
 function RowNote({ children }: { children: ReactNode }) {
   return <span className="shrink-0 font-normal text-sidebar-muted-foreground text-xs">{children}</span>;
-}
-
-// The sidebar's new-bot form. Escape or a made bot closes it (`onClose`).
-function NewBot({ onCreated, onClose }: { onCreated: (id: string) => void; onClose: () => void }) {
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const bot = Bot.parse(await window.chiefbot.bots.create(name));
-      onCreated(bot.id);
-      onClose();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <form className="flex flex-col gap-1.5 px-0.5 py-1" onSubmit={(event) => void submit(event)}>
-      <Input
-        autoFocus
-        placeholder="Bot name"
-        value={name}
-        maxLength={60}
-        disabled={busy}
-        onChange={(event) => setName(event.target.value)}
-        onKeyDown={(event) => event.key === "Escape" && onClose()}
-      />
-      {busy && (
-        <p className="flex items-center gap-1.5 px-1 text-muted-foreground text-xs">
-          <Spinner className="size-3" />
-          Starting its computer…
-        </p>
-      )}
-      <ErrorText message={error} />
-    </form>
-  );
 }
