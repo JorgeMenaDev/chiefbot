@@ -42,7 +42,7 @@ To own the apps in an organization, run `bun run setup --org <organization>`. Bo
 3. Tick **Enable Device Flow** and click **Register application**. Copy the **Client ID**. No client secret is needed.
 4. Run `bun run setup --oauth-client-id <client ID>`. It keeps your repo app (or registers it first) and records the OAuth App as the sign-in app. Sign in again in the desktop: it asks GitHub for `read:user` and `offline_access`, so tokens expire after 8 hours and refresh like the sign-in app's.
 
-In the desktop app, click **Sign in with GitHub**. Your first sign-in brings a bot named **Chief of Staff**, once: delete it and it stays deleted. **+ New bot** adds more.
+In the desktop app, click **Sign in with GitHub**. Your first sign-in brings a bot named **Chief of Staff**, once: delete it and it stays deleted. **New bot** (the pen icon beside **Search** in the sidebar) adds more. The sidebar hides with the button beside the window buttons, or Cmd+B. The gear at its bottom left opens a menu with your GitHub login, your Copilot plan, **Disconnect GitHub** and **Sign out**.
 
 Timing, measured on a fresh clone on an Apple-silicon Mac: `bun install` with an empty Bun cache took 5 s and `bun run computer:build` 69 s with the `oven/bun` base image already pulled (allow about 2 minutes without it). Setup is about a minute of clicking on github.com.
 
@@ -68,7 +68,7 @@ Creating a bot needs Docker and the `chiefbot-computer:dev` image. Each bot is a
 
 **Workspaces.** A workspace is a team. Anyone signed in can create one and is its owner. The owner invites people by GitHub login; an invite waits until someone with that login signs in to Chiefbot and accepts it from the workspace switcher at the top of the sidebar. The **Members** screen lists members and pending invites: the owner invites, withdraws invites and removes members, and a member can leave. There are two roles, owner and member, and the owner cannot leave. Removing a member, or leaving, ends at once what runs for them in the workspace's projects: their project chats close, their queued messages to coordinators go, their running coordinator turn ends, the workers they asked for stop, and control refuses every token, connector and worker request made for them. Every workspace route answers 404 to anyone who is not a member, so outsiders cannot tell a workspace exists. Projects and connectors belong to a workspace; bots stay personal.
 
-**Projects.** A project binds one GitHub repo to a workspace. Any member creates one from the sidebar (**+ New project**, `owner/repo`). Control reads the repo's `chiefbot.project.yaml` from its default branch through the GitHub API with your repo app, once it shows that member may read the repo, so the repo app must be installed on the repo (a public repo also works without it). The file is checked with a Zod schema (`ProjectFile` in `packages/contracts/src/projects.ts`); unknown keys are errors, and a missing or invalid file is refused with what is wrong and where:
+**Projects.** A project binds one GitHub repo to a workspace. Any member creates one from the sidebar (**New project**, the folder icon beside **Search**, then `owner/repo`). Control reads the repo's `chiefbot.project.yaml` from its default branch through the GitHub API with your repo app, once it shows that member may read the repo, so the repo app must be installed on the repo (a public repo also works without it). The file is checked with a Zod schema (`ProjectFile` in `packages/contracts/src/projects.ts`); unknown keys are errors, and a missing or invalid file is refused with what is wrong and where:
 
 ```yaml
 connectors: [github, jira]   # the connectors (MCP servers) its agents need, by name
@@ -141,7 +141,7 @@ Tests use a fake GitHub. This check uses the real one and makes no Copilot chat 
 3. Click the link, sign in on github.com/login/device, type the code and approve.
 4. Within a few seconds the window shows your login and your Copilot plan (for Copilot Free: `individual (free_limited_copilot)`).
 5. Quit and start `bun run dev` again. You are still signed in.
-6. Click **Sign out**. The window goes back to **Sign in with GitHub**.
+6. Open the gear menu at the bottom left of the sidebar and click **Sign out**. The window goes back to **Sign in with GitHub**.
 
 The desktop keeps only control's session token (in the app's user-data folder). GitHub tokens live in `apps/control/.data/control.sqlite`, the refresh token encrypted.
 
@@ -161,7 +161,7 @@ Uses the real GitHub and makes no Copilot calls. Needs Docker, `sqlite3` and `jq
 
    It answers `200` with `expiresAt` about 8 hours after sign-in.
 3. Make the stored access token look old: `sqlite3 apps/control/.data/control.sqlite "UPDATE github_access SET access_token_expires_at = 0"`. Run `broker` again. It answers `200` with `expiresAt` about 8 hours from now: control refreshed with GitHub, without a client secret.
-4. Click **Disconnect GitHub** in the sidebar. The **Sign in again** notice appears. `broker` answers `{"error":"reauth_needed"} 403`.
+4. Click **Disconnect GitHub** in the gear menu at the bottom left of the sidebar. The **Sign in again** notice appears. `broker` answers `{"error":"reauth_needed"} 403`.
 5. Click **Sign in again** and finish the device flow. The notice goes away and `broker` answers `200`.
 6. Revoke your Chiefbot sign-in app at github.com/settings/apps/authorizations, then repeat step 3. `broker` answers `403` and the notice appears without a reload.
 7. Clean up: delete the bot with **Also delete its files**, then `docker rmi chiefbot-computer:dev`.
@@ -171,7 +171,7 @@ Uses the real GitHub and makes no Copilot calls. Needs Docker, `sqlite3` and `jq
 Needs Docker running. Makes no Copilot calls.
 
 1. Run `bun run computer:build`, then `bun run dev`, and sign in.
-2. Click **+ New bot**, type a name and press Enter. The bot appears in the sidebar and turns green (**online**) within a few seconds.
+2. Click **New bot** (the pen icon beside **Search**), type a name and press Enter. The bot appears in the sidebar and turns green (**online**) within a few seconds.
 3. `docker ps` shows `chiefbot-bot_…` running. `docker logs <name>` says `worker connected to http://host.docker.internal:7410 as bot_…`.
 4. Click **Stop**. The bot shows **stopped** and the container has exited. Click **Start**. It comes back **online**.
 5. Restart control (save a file in `apps/control`). The bot goes back **online** without a click.
@@ -270,7 +270,7 @@ Tests use a fake Copilot. This check makes 3 live Copilot calls on the real GitH
 
 1. In a repo your repo app is installed on, commit a `chiefbot.project.yaml` at the root with `commands: { test: bun test }`. In a second repo, commit one with a typo: `conectors: [github]`.
 2. Run control and the desktop apart (`bun run --cwd apps/control dev`, `bun run --cwd apps/desktop dev`) and sign in as the workspace owner. Pick the workspace in the switcher.
-3. Click **+ New project** and type the second repo as `owner/repo`. The form shows `invalid_project_file` with `Unrecognized key: "conectors"`, and no project appears.
+3. Click **New project** (the folder icon beside **Search**) and type the second repo as `owner/repo`. The form shows `invalid_project_file` with `Unrecognized key: "conectors"`, and no project appears.
 4. Create a project from the first repo. It opens with its build and test commands under its name, an empty chat and **Tasks: 0 open**.
 5. Send: "We need a dark mode toggle in settings. Track it as a task." The reply comes back and the task appears under **Tasks** as #1, asked by you.
 6. Start a second desktop as the member (`bun run --cwd apps/desktop dev -- --user-data-dir=/tmp/chiefbot-second`), open the project and send: "Can we get dark mode in the settings page?" The coordinator answers that task #1 already covers it. The ledger still shows one task in both desktops.
