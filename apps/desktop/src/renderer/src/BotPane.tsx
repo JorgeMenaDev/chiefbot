@@ -6,6 +6,7 @@ import { ScreenPane } from "./LiveScreen.tsx";
 import { Column, ErrorText, PaneHeader, PanelSection, SidePanel } from "./Pane.tsx";
 import { Routines } from "./Routines.tsx";
 import { Button } from "./components/ui/button.tsx";
+import { Spinner } from "./components/ui/spinner.tsx";
 import { cn } from "./lib/utils.ts";
 
 // Whether the bot details panel is open survives a restart and applies to every bot.
@@ -119,7 +120,13 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
           <div className="flex items-center gap-3">
             <StatusDot status={bot.status} />
             <p className="min-w-0 flex-1 text-muted-foreground text-xs">{statusText[bot.status]}</p>
-            {bot.status === "stopped" ? (
+            {bot.status === "starting" ? (
+              // Start, Stop and Delete wait until the bot is online.
+              <Button size="xs" variant="outline" disabled>
+                <Spinner className="size-3" />
+                Starting…
+              </Button>
+            ) : bot.status === "stopped" ? (
               <Button size="xs" variant="outline" onClick={() => act(() => start(bot.id))}>
                 <PowerIcon />
                 Start
@@ -135,7 +142,14 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
         </PanelSection>
         <Routines bot={bot} />
         <PanelSection title="Delete">
-          <Button size="xs" variant="destructive-outline" className="self-start" onClick={() => act(() => remove(bot.id))}>
+          <Button
+            size="xs"
+            variant="destructive-outline"
+            className="self-start"
+            disabled={bot.status === "starting"}
+            title={bot.status === "starting" ? "Starting…" : undefined}
+            onClick={() => act(() => remove(bot.id))}
+          >
             <Trash2Icon />
             Delete {bot.name}
           </Button>
