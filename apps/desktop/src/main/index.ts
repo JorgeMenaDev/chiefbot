@@ -1,3 +1,4 @@
+/// <reference types="electron-vite/node" />
 import {
   AnswerApprovalRequest,
   ApprovalId,
@@ -35,6 +36,8 @@ import { createConnectors } from "./connectors.ts";
 import { createProjects } from "./projects.ts";
 import { createRoutines } from "./routines.ts";
 import { createWorkspaces } from "./workspaces.ts";
+// The app icon (docs/brand). `?asset` makes electron-vite copy it next to the build and import its path.
+import icon from "../../../../docs/brand/icon-512.png?asset";
 
 // Env:
 //   CHIEFBOT_CONTROL_URL      default http://127.0.0.1:7410
@@ -278,10 +281,13 @@ app.whenReady().then(async () => {
       callback({ requestHeaders: token ? { ...requestHeaders, Authorization: `Bearer ${token}` } : requestHeaders });
     },
   );
+  // Unpackaged, macOS shows Electron's icon in the Dock; this shows ours.
+  app.dock?.setIcon(icon);
   window = new BrowserWindow({
     width: 1100,
     height: 760,
     title: "Chiefbot",
+    icon, // the window and taskbar icon on Windows and Linux
     // T3 Code's chrome on macOS: no title bar, the window buttons inset in the sidebar's top bar.
     ...(process.platform === "darwin" ? ({ titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 18 } } as const) : {}),
     webPreferences: { preload: join(import.meta.dirname, "../preload/index.cjs") },

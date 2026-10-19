@@ -18,6 +18,8 @@ import { SidebarGroupLabel, SidebarRow } from "./components/ui/sidebar.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
 import { copyText } from "./lib/clipboard.ts";
 import { cn } from "./lib/utils.ts";
+import appIcon from "../../../../../docs/brand/icon.svg";
+import glyph from "../../../../../docs/brand/glyph.svg";
 
 const BotList = z.array(Bot);
 
@@ -41,9 +43,7 @@ export function App() {
       <div className="drag-region absolute inset-x-0 top-0 h-(--topbar-height)" />
       <Card className="w-full max-w-sm">
         <CardHeader className="justify-items-center pb-5 text-center">
-          <EmptyMedia className="mb-3">
-            <BotIcon />
-          </EmptyMedia>
+          <img src={appIcon} alt="" className="mb-1 size-20" />
           <h1 className="font-semibold text-xl">Chiefbot</h1>
           <CardDescription>Bots with their own computers, on your GitHub Copilot plan.</CardDescription>
         </CardHeader>
@@ -170,7 +170,10 @@ function Workspace({ user }: { user: User }) {
     <div className="flex h-full">
       <aside className="flex w-64 shrink-0 flex-col border-sidebar-border border-r bg-sidebar text-sidebar-foreground">
         <div className={cn("drag-region flex h-(--topbar-height) shrink-0 items-center px-4", isMac && "ps-[84px]")}>
-          <span className="font-semibold text-sm tracking-tight">Chiefbot</span>
+          <span className="flex items-center gap-2 font-semibold text-sm tracking-tight">
+            <img src={glyph} alt="" className="size-5" />
+            Chiefbot
+          </span>
         </div>
         <div className="px-2 pb-1">
           <WorkspaceSwitcher {...teams} current={current} onSelect={(workspace) => selectWorkspace(workspace?.id ?? null)} />
