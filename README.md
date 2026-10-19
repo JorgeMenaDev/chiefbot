@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/lockup-dark.svg">
+  <img alt="Chiefbot" src="docs/brand/lockup-light.svg" width="320">
+</picture>
+
 # Chiefbot
 
 Personal chief-of-staff bots, each with its own computer, powered by the GitHub Copilot SDK on your own Copilot plan.
