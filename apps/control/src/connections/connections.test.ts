@@ -32,19 +32,19 @@ async function setup() {
   return { ...control, ...control.user, root, connectionSecrets };
 }
 
-const harness = { account: "acct-123", token: "pat.secret-token" };
+const harness = { account: "acct-123", org: "default", project: "shop", token: "pat.secret-token" };
 
 test("a person turns a connection on with their own fields; its secrets stay in control and never come back", async () => {
   const { api, signIn, connectionSecrets } = await setup();
   const list = async (as = api) => Connection.array().parse(await (await as("GET", "/connections")).json());
 
-  const missing = await api("PUT", "/connections/harness", { fields: { account: "acct-123" } });
-  const unknown = await api("PUT", "/connections/harness", { fields: { ...harness, org: "default" } });
+  const missing = await api("PUT", "/connections/harness", { fields: { account: "acct-123", org: "default", project: "shop" } });
+  const unknown = await api("PUT", "/connections/harness", { fields: { ...harness, region: "eu" } });
   const nowhere = await api("PUT", "/connections/gitlab", { fields: harness });
   const saved = await api("PUT", "/connections/harness", { fields: harness });
 
   expect([missing.status, ApiError.parse(await missing.json())]).toEqual([400, { error: "invalid_connection", message: "token is missing" }]);
-  expect([unknown.status, ApiError.parse(await unknown.json())]).toEqual([400, { error: "invalid_connection", message: "harness has no field org" }]);
+  expect([unknown.status, ApiError.parse(await unknown.json())]).toEqual([400, { error: "invalid_connection", message: "harness has no field region" }]);
   expect(nowhere.status).toBe(404);
   expect(saved.status).toBe(200);
   const rows = await list();

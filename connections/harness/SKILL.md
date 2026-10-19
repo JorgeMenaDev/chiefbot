@@ -7,14 +7,14 @@ description: Read Harness pipelines, executions, services and logs, and run pipe
 
 The `harness` command is signed in as the user for this turn: their token is in its environment. Never print it or copy it anywhere.
 
-Most commands need an organisation and a project: pass `--org <org> --project <project>`. If you do not know them, ask the user, or run `harness list org` and `harness list project --org <org>`.
+Commands run in the user's default organisation and project (`harness auth status` shows them). For another one, add `--org <org> --project <project>`; `harness list org` and `harness list project --org <org>` find them.
 
 Reading runs without asking:
 
-- `harness list pipeline --org <org> --project <project>`
-- `harness get pipeline <id> --org <org> --project <project>`
-- `harness list execution --org <org> --project <project> --limit 10`
-- `harness get execution <pipeline>/<execution id> --org <org> --project <project>`
+- `harness list pipeline`
+- `harness get pipeline <id>`
+- `harness list execution --limit 10`
+- `harness get execution <pipeline>/<execution id>`
 
 Add `--format json` when you need to read fields. Anything else (`execute`, `create`, `update`, `delete`) waits for the user's approval in the chat: say what you are about to do first.
 
