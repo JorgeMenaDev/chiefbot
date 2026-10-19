@@ -1,4 +1,4 @@
-import { Connection, ConnectionCall, type Bot } from "@chiefbot/contracts";
+import { ChatView, Connection, ConnectionCall, type Bot } from "@chiefbot/contracts";
 import { BlocksIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
@@ -130,11 +130,19 @@ function FieldsForm({
 }
 
 // A bot's connection calls in its Details tab, newest first: each command of a
-// connection's CLI it ran, and when.
+// connection's CLI it ran, and when. Reloaded each time one of its turns ends.
 export function ConnectionCalls({ bot }: { bot: Bot }) {
   const [calls, setCalls] = useState<ConnectionCall[]>([]);
   useEffect(() => {
-    void window.chiefbot.connections.calls(bot.id).then((next) => setCalls(CallList.parse(next)));
+    const reload = () => void window.chiefbot.connections.calls(bot.id).then((next) => setCalls(CallList.parse(next)));
+    let working = false;
+    reload();
+    return window.chiefbot.chat.onChange((next) => {
+      const view = ChatView.parse(next);
+      if (view.botId !== bot.id) return;
+      if (working && view.working === null) reload();
+      working = view.working !== null;
+    });
   }, [bot.id]);
   return (
     <PanelSection title="Connection calls">
