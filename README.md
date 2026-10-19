@@ -42,7 +42,7 @@ To own the apps in an organization, run `bun run setup --org <organization>`. Bo
 3. Tick **Enable Device Flow** and click **Register application**. Copy the **Client ID**. No client secret is needed.
 4. Run `bun run setup --oauth-client-id <client ID>`. It keeps your repo app (or registers it first) and records the OAuth App as the sign-in app. Sign in again in the desktop: it asks GitHub for `read:user` and `offline_access`, so tokens expire after 8 hours and refresh like the sign-in app's.
 
-In the desktop app, click **Sign in with GitHub**. Your first sign-in brings a bot named **Chief of Staff**, once: delete it and it stays deleted. **New bot** (the pen icon beside **Search** in the sidebar) adds more, each with the face and colour you pick. The sidebar hides with the button beside the window buttons, or Cmd+B. The gear at its bottom left opens a menu with your GitHub login, your Copilot plan, **Disconnect GitHub** and **Sign out**.
+In the desktop app, click **Sign in with GitHub**. Your first sign-in brings a bot named **Chief of Staff**, once: delete it and it stays deleted. **New bot** (the pen icon beside **Search** in the sidebar) adds more, each with the face and colour you pick. The sidebar hides with the button beside the window buttons, or Cmd+B. The gear at its bottom left opens a menu with your GitHub login, your Copilot plan, **Connect apps**, **Disconnect GitHub** and **Sign out**.
 
 Timing, measured on a fresh clone on an Apple-silicon Mac: `bun install` with an empty Bun cache took 5 s and `bun run computer:build` 69 s with the `oven/bun` base image already pulled (allow about 2 minutes without it). Setup is about a minute of clicking on github.com.
 
@@ -61,6 +61,8 @@ Creating a bot needs Docker and the `chiefbot-computer:dev` image. Each bot is a
 **Model per bot.** Each bot has its own Copilot model, chosen in the composer's model picker. Once a bot's worker connects, it lists the models the owner's Copilot plan offers on the bot's SDK session and reports them to control. Control keeps the latest list per user in SQLite (`GET /models`). Picking a model saves it on the bot (`PUT /bots/:id/model`). Every turn carries the bot's model, and the worker switches the session before the turn, so the conversation is kept. On Copilot Free only Auto can be picked: the SDK accepts a switch but every turn still runs on Auto, so the other models in Copilot's catalog show as locked rows with "Needs a paid Copilot plan". On a paid plan, models a Copilot policy turns off show locked too.
 
 **Routines.** A routine is a prompt plus a schedule: a cron expression (5 fields, or 6 with seconds) read in an IANA timezone, parsed by `croner`. The **Details** tab of a bot's panel (right of its chat) lists them, to add, edit or delete. Control runs them whether or not the desktop is open: at the due time it starts the bot's computer if it is stopped, waits up to 5 minutes for the worker, sends the prompt as a chat turn (30 minutes at most) and stops the computer again if the run started it. The reply lands in the bot's chat, and the routine shows its last run: succeeded, failed (with the reason, such as a lost GitHub sign-in) or skipped (the bot was busy, or someone had taken over its screen; no retry). A bot runs one routine at a time. Each (routine, due time) runs at most once, even across control restarts: a run cut short by a restart is marked failed and its computer stopped again, and due times missed while control was down run once when it is back.
+
+**Connections.** **Connect apps** in the gear menu turns on command-line tools for your own bots, signed in as you: Jira (Atlassian's `acli`) and Harness (the `harness` CLI). Each is a folder under `connections/`: a definition, a skill for the agent and an install step for the computer image. Your fields go to control (secret ones to its `SecretStore`); only during a turn of one of your bots does its worker write them to `/tmp/chiefbot` with the skill and a wrapper for the CLI, and it deletes them when the turn ends. A command of the CLI that may write waits for your approval, and each one that runs shows under **Connection calls** in the bot's **Details** tab. The approval is a guardrail, not a boundary: use scoped tokens that expire. See `docs/connections.md`.
 
 **Idle stop.** Control stops a bot's computer after 30 minutes (`CHIEFBOT_IDLE_STOP_MINUTES`) with no running turn, no pending approval, no screen viewer and no routine run in progress, with Docker and on GCP alike. **Start** in the app or a due routine starts it again. A project's coordinator computer stops the same way after 30 minutes with no turn running or queued, and the next message for it (from a member, a handoff or a subscription) starts it again.
 
@@ -113,6 +115,7 @@ The desktop dev script unsets `ELECTRON_RUN_AS_NODE`. Shells started by T3 Code 
 | `CHIEFBOT_WORKER_CONTROL_URL` | control | `http://host.docker.internal:<port>` (control as a computer reaches it; compose sets the public URL) |
 | `CHIEFBOT_IDLE_STOP_MINUTES` | control | `30`: a bot's computer stops after this long with no running turn, no pending approval, no screen viewer and no routine run; a coordinator's with no turn running or queued |
 | `CHIEFBOT_APPROVAL_WAIT_MINUTES` | control | `60`: a project's worker waiting this long on one approval fails and its computer stops, keeping its disk. The limit survives a control restart |
+| `CHIEFBOT_CONNECTIONS_DIR` | control | The repo's `connections` (`/opt/chiefbot/connections` in the control image): the connections **Connect apps** offers, read at startup |
 | `CHIEFBOT_PUBLIC_URL` | control | `http://127.0.0.1:<port>`: control as members' browsers reach it. Connector OAuth sign-ins return to `<it>/connectors/oauth/callback` |
 | `CHIEFBOT_CONTROL_URL` | desktop | `http://127.0.0.1:7410` |
 | `CHIEFBOT_GITHUB_URL` | desktop | `https://github.com` |
@@ -292,6 +295,18 @@ Tests use a fake MCP server and a fake Copilot. This check uses the real GitHub 
 9. Check that your GitHub token never reached the coordinator's computer: `docker exec chiefbot-<project id> sh -c 'env | grep -c github_pat_; grep -rl github_pat_ /home/bot 2>/dev/null'` prints `0` and no file.
 10. In a second desktop signed in as a member (as in the check above), open **Connectors**: GitHub and Jira say **Connect your own account**, since your connections are yours alone.
 11. Clean up: delete both connectors as the owner (their tokens go too), delete the Jira issue, and revoke the GitHub token on github.com.
+
+## Manual check: a bot uses Jira through a connection
+
+Tests use a fake CLI and a fake Copilot. This check uses a real Jira site and makes 2 to 3 live Copilot calls. It needs Docker, the computer image rebuilt with this code (`bun run computer:build`), a bot made after the rebuild, and a Jira project you may write to.
+
+1. Open the gear menu, click **Connect apps**, then **Connect** on Jira. Fill in your site, email and an API token with scopes, and click **Save**. Jira shows **On**.
+2. Send the bot: "List my open Jira issues." It signs in with `acli` and lists them, with no approval card.
+3. Send: "Create a Jira issue in <project key> titled Chiefbot connection check." A **Connector approval** card shows `Jira: acli jira workitem create …`, and Jira has no such issue yet. Click **Approve**: the issue appears.
+4. Once the turn ends, check nothing of it is left: `docker exec chiefbot-<bot id> ls /tmp/chiefbot` says no such file, and `docker exec chiefbot-<bot id> grep -rl <first 12 characters of the token> /home/bot` prints nothing.
+5. Open the bot's **Details** tab. **Connection calls** lists `acli jira auth login`, `acli jira workitem search` and `acli jira workitem create`.
+6. Click **Disconnect** on Jira and send "List my open Jira issues" again. The bot has no Jira skill and `acli` is not signed in.
+7. Clean up: delete the issue in Jira.
 
 ## Manual check: a chief of staff hands work to a project
 

@@ -8,6 +8,8 @@ connectors: [github, github-actions, jira]
 
 Control gives each agent session only those connectors, and only the ones ready for the member the session works for. Every call is logged.
 
+A **connection** (`docs/connections.md`) is different: a command-line tool, like Jira's `acli`, signed in with one person's own token for their own bots only, set up under **Connect apps** in the gear menu. Its credential is on the bot's computer during that person's turns, which a connector's never is.
+
 ## A connector
 
 | Field | Meaning |
@@ -64,7 +66,7 @@ Add these with the custom connector form. Check each vendor's documentation for 
 | Tool | Connector |
 | --- | --- |
 | GitLab | Remote `https://<your GitLab host>/api/v4/mcp`, `personal-oauth`, scope `mcp`. GitLab's MCP server signs members in with OAuth and dynamic client registration. |
-| Harness | Remote: Harness's hosted MCP server (github.com/harness/mcp-server documents its URL), `workspace-secret` with a Harness API key. |
+| Harness | Remote: Harness's hosted MCP server (github.com/harness/mcp-server documents its URL), `workspace-secret` with a Harness API key. For your own bots, the Harness connection (`docs/connections.md`) is simpler. |
 | Dynatrace | Remote: the MCP server Dynatrace hosts for each environment, `workspace-secret` with a platform token (github.com/dynatrace-oss/dynatrace-mcp). |
 
 Any other MCP server works the same way: a remote URL with an auth type and a scope, or a command that needs no credential.
