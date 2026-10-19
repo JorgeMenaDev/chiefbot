@@ -7,7 +7,7 @@ Spec (v0.2, teams and projects): https://github.com/JorgeMenaDev/chiefbot/issues
 ## Architecture
 
 ```
-apps/desktop  Electron + React + Vite. GitHub device-flow sign-in, bot sidebar, chat, model picker, live screen (noVNC).
+apps/desktop  Electron + React + Vite. GitHub device-flow sign-in, bot sidebar, chat, model picker, bot details panel with the live screen (noVNC).
 apps/control  Control plane: Node/TS HTTP + WebSocket, SQLite. Users, bots, runs, schedules, token broker, ComputerProvider.
 apps/worker   Runs inside each bot computer. Dials out to control, runs Copilot SDK sessions (copilot-cli mode).
 packages/contracts  Zod schemas for every message that crosses a process boundary. Types are inferred from them.

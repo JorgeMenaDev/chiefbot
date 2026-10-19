@@ -42,7 +42,7 @@ To own the apps in an organization, run `bun run setup --org <organization>`. Bo
 3. Tick **Enable Device Flow** and click **Register application**. Copy the **Client ID**. No client secret is needed.
 4. Run `bun run setup --oauth-client-id <client ID>`. It keeps your repo app (or registers it first) and records the OAuth App as the sign-in app. Sign in again in the desktop: it asks GitHub for `read:user` and `offline_access`, so tokens expire after 8 hours and refresh like the sign-in app's.
 
-In the desktop app, click **Sign in with GitHub**, then **+ New bot**.
+In the desktop app, click **Sign in with GitHub**. Your first sign-in brings a bot named **Chief of Staff**, once: delete it and it stays deleted. **+ New bot** adds more.
 
 Timing, measured on a fresh clone on an Apple-silicon Mac: `bun install` with an empty Bun cache took 5 s and `bun run computer:build` 69 s with the `oven/bun` base image already pulled (allow about 2 minutes without it). Setup is about a minute of clicking on github.com.
 
@@ -60,7 +60,7 @@ Creating a bot needs Docker and the `chiefbot-computer:dev` image. Each bot is a
 
 **Model per bot.** Each bot has its own Copilot model, chosen in the composer's model picker. Once a bot's worker connects, it lists the models the owner's Copilot plan offers on the bot's SDK session and reports them to control. Control keeps the latest list per user in SQLite (`GET /models`). Picking a model saves it on the bot (`PUT /bots/:id/model`). Every turn carries the bot's model, and the worker switches the session before the turn, so the conversation is kept. On Copilot Free only Auto can be picked: the SDK accepts a switch but every turn still runs on Auto, so the other models in Copilot's catalog show as locked rows with "Needs a paid Copilot plan". On a paid plan, models a Copilot policy turns off show locked too.
 
-**Routines.** A routine is a prompt plus a schedule: a cron expression (5 fields, or 6 with seconds) read in an IANA timezone, parsed by `croner`. Open **Routines** on a bot to add, edit or delete them. Control runs them whether or not the desktop is open: at the due time it starts the bot's computer if it is stopped, waits up to 5 minutes for the worker, sends the prompt as a chat turn (30 minutes at most) and stops the computer again if the run started it. The reply lands in the bot's chat, and the routine shows its last run: succeeded, failed (with the reason, such as a lost GitHub sign-in) or skipped (the bot was busy, or someone had taken over its screen; no retry). A bot runs one routine at a time. Each (routine, due time) runs at most once, even across control restarts: a run cut short by a restart is marked failed and its computer stopped again, and due times missed while control was down run once when it is back.
+**Routines.** A routine is a prompt plus a schedule: a cron expression (5 fields, or 6 with seconds) read in an IANA timezone, parsed by `croner`. The **Details** tab of a bot's panel (right of its chat) lists them, to add, edit or delete. Control runs them whether or not the desktop is open: at the due time it starts the bot's computer if it is stopped, waits up to 5 minutes for the worker, sends the prompt as a chat turn (30 minutes at most) and stops the computer again if the run started it. The reply lands in the bot's chat, and the routine shows its last run: succeeded, failed (with the reason, such as a lost GitHub sign-in) or skipped (the bot was busy, or someone had taken over its screen; no retry). A bot runs one routine at a time. Each (routine, due time) runs at most once, even across control restarts: a run cut short by a restart is marked failed and its computer stopped again, and due times missed while control was down run once when it is back.
 
 **Idle stop.** Control stops a bot's computer after 30 minutes (`CHIEFBOT_IDLE_STOP_MINUTES`) with no running turn, no pending approval, no screen viewer and no routine run in progress, with Docker and on GCP alike. **Start** in the app or a due routine starts it again. A project's coordinator computer stops the same way after 30 minutes with no turn running or queued, and the next message for it (from a member, a handoff or a subscription) starts it again.
 
@@ -183,7 +183,7 @@ Needs Docker running. Makes no Copilot calls.
 Needs Docker running. Makes no Copilot calls.
 
 1. Run `bun run computer:build`, then `bun run dev`, sign in and create a bot.
-2. When the bot is **online**, the side pane shows its screen: Chromium on a 1280×800 desktop. The pane says **Watching. The bot drives.** Clicks and keys in the pane do nothing.
+2. When the bot is **online**, the **Computer** tab of its panel (right of its chat) shows its screen: Chromium on a 1280×800 desktop. The pane says **Watching. The bot drives.** Clicks and keys in the pane do nothing.
 3. `docker ps` shows no published port for the bot's container.
 4. Click **Take over**. The pane turns green and says **You have control. The bot waits.** Click Chromium's address bar in the pane and type. The text appears. The chat box says **Hand the screen back to message …** and will not send.
 5. Click **Hand back**. Typing in the pane does nothing again, and the chat sends.
@@ -206,10 +206,10 @@ Tests use a fake Copilot. This check makes **one** real Copilot chat on your pla
 Tests use a fake clock and a fake Copilot, and a fake-Copilot run of this flow passed in the desktop app. This check makes **one** real Copilot chat on your plan.
 
 1. Run `bun run computer:build`, then `bun run dev`. Sign in and create a bot. Once it is **online**, click **Stop**.
-2. Click **Routines**, then **+ New routine**. Prompt: `Reply with one short sentence: what time is it where you are?`. Cron: two minutes from now, for example `32 14 * * *` at 14:30. Timezone: yours (filled in). Click **Save**. The row shows the next run time in your local time.
+2. In the bot's panel, on **Details**, click **+ New routine**. Prompt: `Reply with one short sentence: what time is it where you are?`. Cron: two minutes from now, for example `32 14 * * *` at 14:30. Timezone: yours (filled in). Click **Save**. The row shows the next run time in your local time.
 3. Quit the desktop app.
 4. Wait a few minutes past the due time. `docker ps -a` shows the bot's container exited again.
-5. Start the desktop app and open the bot. The chat shows the prompt and the reply, and **Routines** shows `Last run …: succeeded`.
+5. Start the desktop app and open the bot. The chat shows the prompt and the reply, and its routine under **Details** shows `Last run …: succeeded`.
 6. Delete the routine.
 
 ## Manual check: the model picker on a real plan

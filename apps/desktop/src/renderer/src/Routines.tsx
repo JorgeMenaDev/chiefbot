@@ -2,7 +2,7 @@ import { Routine, type Bot, type RoutineInput, type RoutineRun } from "@chiefbot
 import { PlusIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
-import { ErrorText, Muted, Panel, Row } from "./Pane.tsx";
+import { ErrorText, Muted, PanelSection, Row } from "./Pane.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input, Textarea } from "./components/ui/input.tsx";
 
@@ -35,7 +35,7 @@ export function Routines({ bot }: { bot: Bot }) {
   }
 
   return (
-    <Panel title="Routines">
+    <PanelSection title="Routines">
       {routines.length === 0 && editing === null && <Muted>No routines yet.</Muted>}
       {routines.map((routine) =>
         editing !== "new" && editing?.id === routine.id ? (
@@ -76,13 +76,13 @@ export function Routines({ bot }: { bot: Bot }) {
           onCancel={() => setEditing(null)}
         />
       ) : (
-        <Button size="xs" variant="ghost" className="mt-1 self-start text-muted-foreground" onClick={() => setEditing("new")}>
+        <Button size="xs" variant="ghost" className="self-start text-muted-foreground" onClick={() => setEditing("new")}>
           <PlusIcon />
           New routine
         </Button>
       )}
       <ErrorText message={error} />
-    </Panel>
+    </PanelSection>
   );
 }
 

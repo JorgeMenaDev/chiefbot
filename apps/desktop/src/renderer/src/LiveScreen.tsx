@@ -6,14 +6,14 @@ import { Button } from "./components/ui/button.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
 import { cn } from "./lib/utils.ts";
 
-// The bot's live screen, through control. The user watches until they take
+// The bot's live screen, through control (the details panel's Computer tab). The user watches until they take
 // over; then mouse and keyboard go to the bot's computer and the agent waits.
 export function ScreenPane({ bot }: { bot: Bot }) {
   const { takeOver, handBack } = window.chiefbot.bots;
   const human = bot.screenControl === "human";
   return (
-    <aside className="flex w-[42%] min-w-[360px] shrink-0 flex-col border-l bg-card/40">
-      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b px-3">
+    <div className="flex flex-col gap-3 border-t px-5 py-4">
+      <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-2 text-muted-foreground text-xs">
           <MonitorIcon className="size-3.5 shrink-0" />
           <span className="truncate">{human ? "You have control. The bot waits." : "Watching. The bot drives."}</span>
@@ -28,16 +28,14 @@ export function ScreenPane({ bot }: { bot: Bot }) {
           </Button>
         )}
       </div>
-      <div className="p-3">
-        {bot.status === "online" ? (
-          <LiveScreen key={bot.id} botId={bot.id} interactive={human} />
-        ) : (
-          <div className="grid aspect-[16/10] place-items-center rounded-lg border border-dashed text-muted-foreground text-xs">
-            The screen shows when the bot is online.
-          </div>
-        )}
-      </div>
-    </aside>
+      {bot.status === "online" ? (
+        <LiveScreen key={bot.id} botId={bot.id} interactive={human} />
+      ) : (
+        <div className="grid aspect-[16/10] place-items-center rounded-lg border border-dashed text-muted-foreground text-xs">
+          The screen shows when the bot is online.
+        </div>
+      )}
+    </div>
   );
 }
 

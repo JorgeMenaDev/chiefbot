@@ -85,6 +85,48 @@ test("a bot whose computer fails to start is not kept", async () => {
   expect(computers.destroyed).toHaveLength(1);
 });
 
+test("a new user's first sign-in brings a first bot online, and signing in again adds none", async () => {
+  const { signIn, watchBots } = await setup({ firstBot: "Chief of Staff" });
+
+  const first = await watchBots().until((bots) => bots[0]?.status === "online");
+  const again = await signIn();
+
+  expect(first).toMatchObject([{ name: "Chief of Staff" }]);
+  expect((await again.bots()).map(({ id }) => id)).toEqual(first.map(({ id }) => id));
+});
+
+test("a new user signing in twice at once gets one first bot", async () => {
+  const { signIn } = await setup({ firstBot: "Chief of Staff" });
+  const newUser = { id: 7171, login: "octo-newcomer", copilot: null };
+
+  const [first] = await Promise.all([signIn(newUser), signIn(newUser)]);
+
+  expect(await first.bots()).toMatchObject([{ name: "Chief of Staff" }]);
+});
+
+test("a deleted first bot stays deleted", async () => {
+  const { api, signIn, watchBots } = await setup({ firstBot: "Chief of Staff" });
+  const [chief] = await watchBots().until((bots) => bots.length === 1);
+
+  await api("DELETE", `/bots/${chief?.id}`);
+  const again = await signIn();
+
+  expect(await again.bots()).toEqual([]);
+});
+
+test("a first bot whose computer fails to start is tried again at the next sign-in", async () => {
+  let starts = 0;
+  const { signIn, computers } = await setup({
+    firstBot: "Chief of Staff",
+    provider: (fake) => ({ ...fake, start: (id) => (++starts === 1 ? Promise.reject(new Error("no such image")) : fake.start(id)) }),
+  });
+  await eventually(() => computers.destroyed.length === 1);
+
+  const again = await signIn();
+
+  expect(await again.watchBots().until((bots) => bots[0]?.status === "online")).toMatchObject([{ name: "Chief of Staff" }]);
+});
+
 test("a worker credential works only for its own bot", async () => {
   const { url, botToken, createBot } = await setup();
   const ada = await createBot("Ada");

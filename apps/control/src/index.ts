@@ -71,5 +71,6 @@ const control = startControl({
   idleStopMinutes,
   approvalWaitMinutes,
   ...(process.env.CHIEFBOT_PUBLIC_URL ? { publicUrl: process.env.CHIEFBOT_PUBLIC_URL } : {}),
+  firstBot: "Chief of Staff",
 });
 console.log(`control listening on ${control.url} with ${config.provider} computers`);

@@ -1,13 +1,11 @@
-import { AuthState, Bot, type BotStatus, type User } from "@chiefbot/contracts";
-import { BotIcon, CheckIcon, CopyIcon, FolderGit2Icon, ListChecksIcon, LogOutIcon, PlugIcon, PlusIcon, PowerIcon, PowerOffIcon, Trash2Icon, TriangleAlertIcon, UnplugIcon, UsersIcon, XIcon } from "lucide-react";
+import { AuthState, Bot, type User } from "@chiefbot/contracts";
+import { BotIcon, CheckIcon, CopyIcon, FolderGit2Icon, LogOutIcon, PlugIcon, PlusIcon, TriangleAlertIcon, UnplugIcon, UsersIcon, XIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { z } from "zod";
-import { Chat } from "./Chat.tsx";
+import { BotPane, StatusDot } from "./BotPane.tsx";
 import { Connectors } from "./Connectors.tsx";
-import { Routines } from "./Routines.tsx";
-import { ScreenPane } from "./LiveScreen.tsx";
 import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
-import { ErrorText, PaneHeader } from "./Pane.tsx";
+import { Column, ErrorText, PaneHeader } from "./Pane.tsx";
 import { Members, useWorkspaces, WorkspaceSwitcher } from "./Workspaces.tsx";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert.tsx";
 import { Button, buttonVariants } from "./components/ui/button.tsx";
@@ -140,7 +138,8 @@ function useBots() {
 // The current workspace survives a restart; none means "Personal".
 const currentWorkspaceKey = "chiefbot.workspace";
 
-// T3 Code's layout: a sidebar of bots on the left, the selected bot on the right.
+// T3 Code's layout: a sidebar of bots on the left, the selected bot's chat in the
+// middle and its details panel on the right.
 // The switcher on top picks the current workspace, whose members screen and
 // projects open from the sidebar. Bots are personal, so the bot list is the same
 // in every workspace.
@@ -277,19 +276,23 @@ function Workspace({ user }: { user: User }) {
           )}
         </footer>
       </aside>
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="flex min-w-0 flex-1">
         {showMembers ? (
-          <Members
-            key={`${current.id}:${membersVisit}`}
-            workspace={current}
-            user={user}
-            onLeft={() => {
-              selectWorkspace(null);
-              void teams.reload();
-            }}
-          />
+          <Column>
+            <Members
+              key={`${current.id}:${membersVisit}`}
+              workspace={current}
+              user={user}
+              onLeft={() => {
+                selectWorkspace(null);
+                void teams.reload();
+              }}
+            />
+          </Column>
         ) : showConnectors ? (
-          <Connectors key={`${current.id}:${membersVisit}`} workspace={current} />
+          <Column>
+            <Connectors key={`${current.id}:${membersVisit}`} workspace={current} />
+          </Column>
         ) : project && current ? (
           <ProjectPane
             key={project.id}
@@ -304,7 +307,7 @@ function Workspace({ user }: { user: User }) {
         ) : selected ? (
           <BotPane key={selected.id} bot={selected} />
         ) : (
-          <>
+          <Column>
             <PaneHeader title="Chiefbot" />
             <Empty>
               <EmptyHeader>
@@ -315,7 +318,7 @@ function Workspace({ user }: { user: User }) {
                 <EmptyDescription>Create a bot to start.</EmptyDescription>
               </EmptyHeader>
             </Empty>
-          </>
+          </Column>
         )}
       </main>
     </div>
@@ -376,72 +379,5 @@ function NewBot({ onCreated }: { onCreated: (id: string) => void }) {
       )}
       <ErrorText message={error} />
     </form>
-  );
-}
-
-// The selected bot: its controls, with its live screen in a side pane.
-function BotPane({ bot }: { bot: Bot }) {
-  const { start, stop, remove } = window.chiefbot.bots;
-  const [showRoutines, setShowRoutines] = useState(false);
-  return (
-    <>
-      <PaneHeader icon={<StatusDot status={bot.status} />} title={bot.name} note={`${statusText[bot.status]} · runs on your Copilot seat`}>
-        {bot.status === "stopped" ? (
-          <Button size="xs" variant="outline" onClick={() => void start(bot.id)}>
-            <PowerIcon />
-            Start
-          </Button>
-        ) : (
-          <Button size="xs" variant="outline" onClick={() => void stop(bot.id)} disabled={bot.status === "stopping"}>
-            <PowerOffIcon />
-            Stop
-          </Button>
-        )}
-        <Button size="xs" variant="outline" pressed={showRoutines} onClick={() => setShowRoutines(!showRoutines)}>
-          <ListChecksIcon />
-          Routines
-        </Button>
-        <Button size="xs" variant="destructive-outline" onClick={() => void remove(bot.id)}>
-          <Trash2Icon />
-          Delete
-        </Button>
-      </PaneHeader>
-      {showRoutines && <Routines bot={bot} />}
-      <div className="flex min-h-0 flex-1">
-        <Chat bot={bot} />
-        <ScreenPane bot={bot} />
-      </div>
-    </>
-  );
-}
-
-const statusText: Record<BotStatus, string> = {
-  starting: "Its computer is starting. The bot comes online when its worker connects.",
-  online: "Online. Its worker is connected.",
-  stopping: "Its computer is stopping. It takes no new messages, routine runs or screen viewers.",
-  stopped: "Stopped. Its files are kept.",
-};
-
-// Colour per status, with a ping while starting or stopping (after T3 Code's ConnectionStatusDot).
-const dotColor: Record<BotStatus, string> = {
-  online: "bg-success",
-  starting: "bg-warning",
-  stopping: "bg-muted-foreground/40",
-  stopped: "bg-muted-foreground/40",
-};
-const pingColor: Record<BotStatus, string | null> = {
-  online: null,
-  starting: "bg-warning/60",
-  stopping: "bg-muted-foreground/30",
-  stopped: null,
-};
-
-function StatusDot({ status }: { status: BotStatus }) {
-  const ping = pingColor[status];
-  return (
-    <span className="relative flex size-3 shrink-0 items-center justify-center" aria-label={status}>
-      {ping && <span className={cn("absolute inline-flex size-full animate-status-ping rounded-full", ping)} />}
-      <span className={cn("relative inline-flex size-2 rounded-full", dotColor[status])} />
-    </span>
   );
 }

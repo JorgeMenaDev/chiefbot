@@ -45,7 +45,7 @@ export function Chat({ bot }: { bot: Bot }) {
   }
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col">
       <Timeline follow={view}>
         {view.items.length === 0 && <ChatEmpty>Send {bot.name} a message to start.</ChatEmpty>}
         {view.items.map((item) => (
