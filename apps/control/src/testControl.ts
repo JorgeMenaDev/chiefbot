@@ -5,6 +5,7 @@ import {
   ControlToCoordinator,
   SendMessageResponse,
   SignInResponse,
+  type BotAvatar,
   type BotId,
   type CoordinatorToControl,
   type ProjectId,
@@ -148,7 +149,7 @@ function userApi(url: string, sessionToken: string) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
   const watchBots = () => watchBotList(url, auth);
-  const createBot = async (name: string) => Bot.parse(await (await api("POST", "/bots", { name })).json());
+  const createBot = async (name: string, avatar?: BotAvatar) => Bot.parse(await (await api("POST", "/bots", { name, avatar })).json());
   return {
     sessionToken,
     auth,

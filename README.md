@@ -42,7 +42,7 @@ To own the apps in an organization, run `bun run setup --org <organization>`. Bo
 3. Tick **Enable Device Flow** and click **Register application**. Copy the **Client ID**. No client secret is needed.
 4. Run `bun run setup --oauth-client-id <client ID>`. It keeps your repo app (or registers it first) and records the OAuth App as the sign-in app. Sign in again in the desktop: it asks GitHub for `read:user` and `offline_access`, so tokens expire after 8 hours and refresh like the sign-in app's.
 
-In the desktop app, click **Sign in with GitHub**. Your first sign-in brings a bot named **Chief of Staff**, once: delete it and it stays deleted. **New bot** (the pen icon beside **Search** in the sidebar) adds more. The sidebar hides with the button beside the window buttons, or Cmd+B. The gear at its bottom left opens a menu with your GitHub login, your Copilot plan, **Disconnect GitHub** and **Sign out**.
+In the desktop app, click **Sign in with GitHub**. Your first sign-in brings a bot named **Chief of Staff**, once: delete it and it stays deleted. **New bot** (the pen icon beside **Search** in the sidebar) adds more, each with the face and colour you pick. The sidebar hides with the button beside the window buttons, or Cmd+B. The gear at its bottom left opens a menu with your GitHub login, your Copilot plan, **Disconnect GitHub** and **Sign out**.
 
 Timing, measured on a fresh clone on an Apple-silicon Mac: `bun install` with an empty Bun cache took 5 s and `bun run computer:build` 69 s with the `oven/bun` base image already pulled (allow about 2 minutes without it). Setup is about a minute of clicking on github.com.
 
@@ -171,7 +171,7 @@ Uses the real GitHub and makes no Copilot calls. Needs Docker, `sqlite3` and `jq
 Needs Docker running. Makes no Copilot calls.
 
 1. Run `bun run computer:build`, then `bun run dev`, and sign in.
-2. Click **New bot** (the pen icon beside **Search**), type a name and press Enter. The bot appears in the sidebar and turns green (**online**) within a few seconds.
+2. Click **New bot** (the pen icon beside **Search**), type a name, pick a face and a colour (or keep the blue chief) and click **Create**. The bot appears in the sidebar and turns green (**online**) within a few seconds.
 3. `docker ps` shows `chiefbot-bot_…` running. `docker logs <name>` says `worker connected to http://host.docker.internal:7410 as bot_…`.
 4. Click **Stop**. The bot shows **stopped** and the container has exited. Click **Start**. It comes back **online**.
 5. Restart control (save a file in `apps/control`). The bot goes back **online** without a click.

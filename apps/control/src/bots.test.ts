@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Bot, type BotId } from "@chiefbot/contracts";
+import { Bot, DEFAULT_AVATAR, type BotId } from "@chiefbot/contracts";
 import { atCleanUp, cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
 
 afterEach(cleanUp);
@@ -22,6 +22,20 @@ test("a new bot gets its own computer, and its worker comes online with a bot cr
   expect(env.CHIEFBOT_BOT_TOKEN).toEqual(expect.any(String));
   expect(JSON.stringify(env)).not.toContain(accessToken);
   expect(JSON.stringify(env)).not.toContain(sessionToken);
+});
+
+test("a bot keeps the face it was created with; one created without a face gets the chief in blue", async () => {
+  const { api, createBot } = await setup();
+
+  const ada = await createBot("Ada", { shape: "flower", color: "red" });
+  const grace = await createBot("Grace");
+
+  expect(ada.avatar).toEqual({ shape: "flower", color: "red" });
+  expect(grace.avatar).toEqual(DEFAULT_AVATAR);
+  const listed = Bot.array().parse(await (await api("GET", "/bots")).json());
+  expect(listed.find(({ id }) => id === ada.id)?.avatar).toEqual({ shape: "flower", color: "red" });
+  expect(listed.find(({ id }) => id === grace.id)?.avatar).toEqual(DEFAULT_AVATAR);
+  expect((await api("POST", "/bots", { name: "Linus", avatar: { shape: "dragon", color: "blue" } })).status).toBe(400);
 });
 
 test("the worker endpoint refuses the user's session and GitHub tokens", async () => {
@@ -91,7 +105,7 @@ test("a new user's first sign-in brings a first bot online, and signing in again
   const first = await watchBots().until((bots) => bots[0]?.status === "online");
   const again = await signIn();
 
-  expect(first).toMatchObject([{ name: "Chief of Staff" }]);
+  expect(first).toMatchObject([{ name: "Chief of Staff", avatar: DEFAULT_AVATAR }]);
   expect((await again.bots()).map(({ id }) => id)).toEqual(first.map(({ id }) => id));
 });
 

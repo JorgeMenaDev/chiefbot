@@ -7,6 +7,7 @@ import {
   ApprovalId,
   BotToken,
   CreateBotRequest,
+  DEFAULT_AVATAR,
   GitHubTokens,
   PullRequestArgs,
   RoutineInput,
@@ -298,9 +299,10 @@ export function startControl({
   const subscriptions = subscriptionHost({ store, clock, connectors, projects });
 
   const botsOf = (userId: UserId): Bot[] =>
-    store.botsFor(userId).map(({ id, name, running, model }) => ({
+    store.botsFor(userId).map(({ id, name, avatar, running, model }) => ({
       id,
       name,
+      avatar,
       status: !running ? "stopped" : stopping.has(id) ? "stopping" : workers.has(id) ? "online" : "starting",
       model,
       screenControl: screens.controlOf(id),
@@ -323,9 +325,9 @@ export function startControl({
 
   // Adds a bot to the user's list at once and starts its computer. If the
   // computer fails to start, the bot is gone again and this throws.
-  const launchBot = async (userId: UserId, name: string) => {
+  const launchBot = async (userId: UserId, { name, avatar }: CreateBotRequest) => {
     const botToken = BotToken.parse(randomToken());
-    const { id } = store.createBot(userId, name, botToken);
+    const { id } = store.createBot(userId, name, avatar, botToken);
     try {
       await computers.create({
         id,
@@ -425,7 +427,7 @@ export function startControl({
             // The first bot shows in the list now; its computer starts after sign-in
             // returns. A failed start leaves it to the next sign-in.
             if (firstBot && store.claimFirstBot(userId)) {
-              launchBot(userId, firstBot).catch(() => store.releaseFirstBot(userId));
+              launchBot(userId, { name: firstBot, avatar: DEFAULT_AVATAR }).catch(() => store.releaseFirstBot(userId));
             }
             return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
@@ -465,7 +467,7 @@ export function startControl({
           const body = CreateBotRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return apiError(400, "invalid_bot");
           try {
-            const id = await launchBot(user.id, body.data.name);
+            const id = await launchBot(user.id, body.data);
             return Response.json(botOf(user.id, id), { status: 201 });
           } catch (error) {
             return apiError(502, "computer_failed", String(error));
