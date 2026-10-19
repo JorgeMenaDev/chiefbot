@@ -1,6 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { Bot, type BotId } from "@chiefbot/contracts";
-import { atCleanUp, cleanUp, eventually, startTestControl, type TestControlOptions } from "./testControl.ts";
+import type { ComputerProvider } from "./computers/computer.ts";
+import { atCleanUp, cleanUp, eventually, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 afterEach(cleanUp);
 
@@ -116,6 +117,70 @@ test("a first bot whose computer fails to start is tried again at the next sign-
   const again = await signIn();
 
   expect(await again.watchBots().until((bots) => bots[0]?.status === "online")).toMatchObject([{ name: "Chief of Staff" }]);
+});
+
+// A provider that makes computers only once the test opens the gate; the first start fails if `fail`.
+function gatedStart(fail = false) {
+  let starts = 0;
+  let open = () => {};
+  const opened = new Promise<void>((resolve) => (open = resolve));
+  const provider = (fake: ComputerProvider): ComputerProvider => ({
+    ...fake,
+    create: async (spec) => {
+      await opened;
+      return fake.create(spec);
+    },
+    start: (id) => (fail && ++starts === 1 ? Promise.reject(new Error("no such image")) : fake.start(id)),
+  });
+  // Opens the gate once control has had time to take the request just sent.
+  return { provider, open: () => Bun.sleep(100).then(open) };
+}
+
+// The user's one bot, once it is listed.
+async function onlyBot(watch: TestUser["watchBots"]) {
+  const [bot] = await watch().until((bots) => bots.length === 1);
+  if (!bot) throw new Error("no bot");
+  return bot;
+}
+
+test("deleting the first bot while its computer starts leaves no computer, and it stays deleted", async () => {
+  const gate = gatedStart();
+  const { api, signIn, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider });
+  const { id } = await onlyBot(watchBots);
+
+  const deleted = api("DELETE", `/bots/${id}`);
+  await gate.open();
+
+  expect((await deleted).status).toBe(204);
+  expect(await computers.provider.status(id)).toBe("absent");
+  expect(await (await signIn()).bots()).toEqual([]);
+});
+
+test("deleting the first bot while its computer fails to start keeps it deleted", async () => {
+  const gate = gatedStart(true);
+  const { api, signIn, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider });
+  const { id } = await onlyBot(watchBots);
+
+  const deleted = api("DELETE", `/bots/${id}`);
+  await gate.open();
+  await deleted;
+  // Both the failed start and the Delete destroyed the computer.
+  await eventually(() => computers.destroyed.length === 2);
+
+  expect(await (await signIn()).bots()).toEqual([]);
+});
+
+test("stopping the first bot while its computer starts leaves it stopped", async () => {
+  const gate = gatedStart();
+  const { api, computers, watchBots } = await setup({ firstBot: "Chief of Staff", provider: gate.provider });
+  const { id } = await onlyBot(watchBots);
+
+  const stopped = api("POST", `/bots/${id}/stop`);
+  await gate.open();
+
+  expect((await stopped).status).toBe(200);
+  expect(await computers.provider.status(id)).toBe("stopped");
+  await watchBots().until((bots) => statusOf(id)(bots) === "stopped");
 });
 
 test("a worker credential works only for its own bot", async () => {

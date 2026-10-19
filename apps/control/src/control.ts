@@ -322,28 +322,41 @@ export function startControl({
   }
 
   // A stop marks the bot stopping first, so no new work lands on a computer about to go.
+  // Bots whose computer is being made and started. Start, Stop and Delete wait
+  // for it, so they act last.
+  const launching = new Map<BotId, Promise<unknown>>();
+  // Bots a Delete is waiting on.
+  const deleting = new Set<BotId>();
+
   // Adds a bot to the user's list at once and starts its computer. If the
-  // computer fails to start, the bot is gone again and this throws.
-  const launchBot = async (userId: UserId, name: string) => {
+  // computer fails to start, the bot is gone again, `onFailure` runs and this throws.
+  const launchBot = async (userId: UserId, name: string, onFailure = (_id: BotId) => {}) => {
     const botToken = BotToken.parse(randomToken());
     const { id } = store.createBot(userId, name, botToken);
-    try {
-      await computers.create({
-        id,
-        env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_ID: id, CHIEFBOT_BOT_TOKEN: botToken },
-      });
-      await computers.start(id);
-      return id;
-    } catch (error) {
-      store.deleteBot(id);
-      await computers.destroy(id, { deleteData: true }).catch(() => {});
-      throw error;
-    } finally {
-      publish(userId);
-    }
+    const launch = (async () => {
+      try {
+        await computers.create({
+          id,
+          env: { CHIEFBOT_CONTROL_URL: workerControlUrl ?? server.url.origin, CHIEFBOT_BOT_ID: id, CHIEFBOT_BOT_TOKEN: botToken },
+        });
+        await computers.start(id);
+      } catch (error) {
+        store.deleteBot(id);
+        await computers.destroy(id, { deleteData: true }).catch(() => {});
+        onFailure(id);
+        throw error;
+      } finally {
+        launching.delete(id);
+        publish(userId);
+      }
+    })();
+    launching.set(id, launch.catch(() => {}));
+    await launch;
+    return id;
   };
 
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
+    await launching.get(botId);
     if (!running) {
       stopping.add(botId);
       publish(userId);
@@ -423,9 +436,10 @@ export function startControl({
             await broker.signIn(userId, tokens.data);
             store.openSession(userId, sessionToken);
             // The first bot shows in the list now; its computer starts after sign-in
-            // returns. A failed start leaves it to the next sign-in.
+            // returns. A failed start leaves it to the next sign-in, unless the user
+            // deleted it meanwhile.
             if (firstBot && store.claimFirstBot(userId)) {
-              launchBot(userId, firstBot).catch(() => store.releaseFirstBot(userId));
+              launchBot(userId, firstBot, (id) => deleting.has(id) || store.releaseFirstBot(userId)).catch(() => {});
             }
             return Response.json({ sessionToken, user: store.user(userId) } satisfies SignInResponse);
           } catch (error) {
@@ -500,6 +514,9 @@ export function startControl({
       "/bots/:id": {
         DELETE: ownBot(async (user, botId, req) => {
           const deleteData = new URL(req.url).searchParams.get("deleteData") === "true";
+          deleting.add(botId);
+          await launching.get(botId);
+          deleting.delete(botId);
           await computers.destroy(botId, { deleteData });
           store.deleteBot(botId);
           screens.forget(botId);
