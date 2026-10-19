@@ -1,0 +1,22 @@
+# Harness through the harness CLI (github.com/harness/cli; docs/connections.md).
+# The CLI reads its credential from HARNESS_API_KEY with the account ID (its README
+# names that HARNESS_ACCOUNT_ID, its platform docs HARNESS_ACCOUNT: both are set),
+# and keeps anything else it writes under HARNESS_CONFIG_HOME, in the turn's folder.
+title: Harness
+description: Harness pipelines, executions and services through the harness CLI.
+cli: harness
+fields:
+  account: { label: "Account ID (Account Settings, Overview)" }
+  token: { label: "Personal access token or service account token, with only the roles it needs", secret: true }
+env:
+  HARNESS_API_KEY: "{token}"
+  HARNESS_ACCOUNT_ID: "{account}"
+  HARNESS_ACCOUNT: "{account}"
+  HARNESS_CONFIG_HOME: "{dir}"
+readOnly:
+  - "harness --version"
+  - "harness version*"
+  - "harness * --help"
+  - "harness list *"
+  - "harness get *"
+  - "harness auth status*"

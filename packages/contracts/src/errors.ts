@@ -41,6 +41,7 @@ import { z } from "zod";
 //   invalid_connector     a connector definition, token or connect request failed its schema or its
 //                         connector's auth type; `message` says why (400)
 //   connector_exists      the workspace already has a connector of that name (409)
+//   invalid_connection    a connection's fields are missing, unknown or empty; `message` says which (400)
 //   connector_not_ready   a connector call has no credential: the workspace secret is unset, or the
 //                         member has not connected (403)
 //   invalid_subscription  a subscription failed its schema, or names a connector that is not a remote
@@ -90,6 +91,7 @@ export const ApiErrorCode = z.enum([
   "copilot_token_failed",
   "invalid_connector",
   "connector_exists",
+  "invalid_connection",
   "connector_not_ready",
   "invalid_subscription",
   "invalid_turn_key",

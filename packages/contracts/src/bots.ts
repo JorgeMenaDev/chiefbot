@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { User } from "./auth.ts";
 import { TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
+import { AgentConnection } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport } from "./models.ts";
@@ -69,7 +70,8 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //   bound           control accepted the credential; sent right after. The connection belongs to
 //                   that one bot (or, on /task-worker, that one task worker).
 //   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time.
-//                   `turnKey` is the turn's key (ids.ts TurnKey): the bearer of every call to control in it
+//                   `turnKey` is the turn's key (ids.ts TurnKey): the bearer of every call to control in it.
+//                   `connections` are the owner's connections that are on (connections.ts), for this turn only
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
 //                   (control's proxy runs them as the member who asked), and its `turnKey`. Sent once,
 //                   after its first hello.
@@ -81,7 +83,14 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //                   active turn's answered approvals; the worker ignores repeats.
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound") }),
-  z.object({ type: z.literal("run-turn"), turnId: TurnId, turnKey: TurnKey, text: z.string(), model: z.string() }),
+  z.object({
+    type: z.literal("run-turn"),
+    turnId: TurnId,
+    turnKey: TurnKey,
+    text: z.string(),
+    model: z.string(),
+    connections: z.array(AgentConnection).default([]),
+  }),
   z.object({
     type: z.literal("run-task"),
     turnId: TurnId,

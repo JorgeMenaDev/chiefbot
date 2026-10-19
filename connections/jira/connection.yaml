@@ -1,0 +1,21 @@
+# Jira through the Atlassian CLI, acli (docs/connections.md).
+# acli reads no credential from its environment: the skill signs it in once per
+# turn from the token file. It keeps that login under its home folder, so HOME
+# points into the turn's folder, which goes when the turn ends.
+title: Jira
+description: Jira work items through the Atlassian CLI (acli), as you.
+cli: acli
+fields:
+  site: { label: "Site, like mysite.atlassian.net" }
+  email: { label: "Atlassian account email" }
+  token: { label: "Atlassian API token (one with scopes, from id.atlassian.com)", secret: true }
+env:
+  HOME: "{dir}"
+readOnly:
+  - "acli --version"
+  - "acli * --help"
+  - "acli jira auth *"
+  - "acli jira workitem view *"
+  - "acli jira workitem search *"
+  - "acli jira project list*"
+  - "acli jira project view *"

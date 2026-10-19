@@ -1,8 +1,18 @@
 import type { PermissionHandler, SessionEvent } from "@github/copilot-sdk";
-import { ApprovalId, ControlToWorker, type ApprovalKind, type ScreenControl, type TurnId, type TurnKey } from "@chiefbot/contracts";
+import {
+  ApprovalId,
+  ControlToWorker,
+  type AgentConnection,
+  type ApprovalKind,
+  type ReportedConnectionCall,
+  type ScreenControl,
+  type TurnId,
+  type TurnKey,
+} from "@chiefbot/contracts";
 import { rmSync } from "node:fs";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
+import { connectionCalls, connectionsRoot as defaultConnectionsRoot, stageConnections } from "./connections.ts";
 import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
@@ -35,6 +45,8 @@ export type WorkerOptions = {
   clock?: Clock;
   // Listing the plan's models failed; control keeps its last report.
   onModelsError?: (error: unknown) => void;
+  // Where a bot's turns stage its owner's connections. Default: /tmp/chiefbot (connections.ts).
+  connectionsRoot?: string;
 };
 
 // Dials out to control's /worker/:id WebSocket with the bot's credential (or a task
@@ -48,6 +60,9 @@ export type WorkerOptions = {
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
 // Pushes and pull requests go through control, which asks the user itself.
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
+// A bot's turn brings its owner's connections: staged for that turn only, their
+// skills given to its session, their CLIs' commands that may write asked first and
+// every one that runs reported for the log (connections.ts).
 // Every call to control in a turn (git's, tools', a task's tokens and connectors)
 // carries that turn's key; none is made outside a turn. Only a bot's own Copilot
 // seat token is asked for with the bot's credential: its model listing runs between turns.
@@ -63,6 +78,7 @@ export function startWorker({
   onBound,
   onModelsError,
   clock,
+  connectionsRoot = defaultConnectionsRoot,
 }: WorkerOptions) {
   // Every control route of this computer starts here.
   const base = `${controlUrl}/${route}/${id}`;
@@ -81,6 +97,10 @@ export function startWorker({
   let sessionModel: string | null = null;
   // Approvals the session waits on, each resolved by the user's answer.
   const waiting = new Map<ApprovalId, (approved: boolean) => void>();
+  // The running turn's staged connections, removed when it ends. Whatever a
+  // turn a crash cut short left behind goes now.
+  let staged: { turnId: TurnId; cleanup: () => void } | null = null;
+  stageConnections(connectionsRoot, []);
 
   // Puts an approval-request in the turn's chat and waits, however long, for the
   // user's answer. Null once that turn is over (or for no turn): nobody is there to answer.
@@ -92,21 +112,28 @@ export function startWorker({
     return answered;
   }
 
-  // The permission handler of `turn`'s session. It runs safe tool calls once
-  // the agent has the screen. A risky one becomes an approval-request in that
-  // turn, and the session waits until the user answers. The human may take over
-  // while it waits, so an approved call waits for hand-back too.
+  // The permission handler of `turn`'s session, with the turn's `connections`.
+  // It runs safe tool calls once the agent has the screen. A risky one becomes an
+  // approval-request in that turn, and the session waits until the user answers.
+  // The human may take over while it waits, so an approved call waits for
+  // hand-back too. Each command of a connection's CLI that may run is reported
+  // for the log first; a failed report does not stop it.
   const permissionFor =
-    (turn: Turn | null): PermissionHandler =>
+    (turn: Turn | null, connections: AgentConnection[] = []): PermissionHandler =>
     async (request) => {
       await agentHasScreen();
-      const ask = approvalFor(request);
-      if (!ask) return { kind: "approve-once" };
-      const approved = await askUser(turn, ask);
-      if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside its turn." };
-      if (!approved) return { kind: "reject", feedback: "The user declined this." };
-      await agentHasScreen();
-      return { kind: "approve-once", approvedInteractively: true };
+      const ask = approvalFor(request, connections);
+      if (ask) {
+        const approved = await askUser(turn, ask);
+        if (approved === null) return { kind: "reject", feedback: "Nobody is here to approve this outside its turn." };
+        if (!approved) return { kind: "reject", feedback: "The user declined this." };
+        await agentHasScreen();
+      }
+      for (const { connection, logged } of connectionCalls(request, connections)) {
+        const call: ReportedConnectionCall = { connection: connection.name, command: logged };
+        if (turn) await link.fromControl("/connection-calls", turn.key, { method: "POST", body: JSON.stringify(call) }).catch(() => {});
+      }
+      return ask ? { kind: "approve-once", approvedInteractively: true } : { kind: "approve-once" };
     };
 
   // A task worker's turn was cut short to renew the organization's token
@@ -160,8 +187,13 @@ export function startWorker({
   // its id is the bot's, or task worker's), in place of the open one. Every
   // callback in it holds that turn, so a late one acts in no other. A bot's
   // session for no turn lists its models when the worker binds; a task worker's
-  // is opened by its task (`task`).
-  async function openSession(turn: Turn | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
+  // is opened by its task (`task`). A bot's turn's session gets its staged
+  // connections (`connections`, and the skill roots they are under).
+  async function openSession(
+    turn: Turn | null,
+    task?: Extract<ControlToWorker, { type: "run-task" }>,
+    { connections, skillDirectories }: { connections: AgentConnection[]; skillDirectories: string[] } = { connections: [], skillDirectories: [] },
+  ) {
     const previous = open;
     open = null;
     sessionModel = null;
@@ -169,7 +201,7 @@ export function startWorker({
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
     const tools = [pullRequestTool({ base, turnKey }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : [])];
-    const options = { sessionId: id, onPermissionRequest: permissionFor(turn), tools };
+    const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections), tools, skillDirectories };
     // A chief always runs on its owner's own Copilot seat.
     const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
       if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
@@ -196,12 +228,21 @@ export function startWorker({
   // Control sends a turn only once the previous one is done. Each turn opens its
   // session (above), with the bot's model set first, so switching
   // mid-conversation keeps the history. A task worker's one turn (`task`) runs on
-  // the default model. Git's credential helper hands git this turn's key from now on.
-  async function runTurn(turnId: TurnId, turnKey: TurnKey, text: string, model: string | null, task?: Extract<ControlToWorker, { type: "run-task" }>) {
+  // the default model. Git's credential helper hands git this turn's key from
+  // now on. A bot's turn stages its owner's `connections` until it ends.
+  async function runTurn(
+    turnId: TurnId,
+    turnKey: TurnKey,
+    text: string,
+    model: string | null,
+    { task, connections = [] }: { task?: Extract<ControlToWorker, { type: "run-task" }>; connections?: AgentConnection[] } = {},
+  ) {
     const turn = link.begin(turnId, turnKey);
     git?.reload({ fetch: gitCredential(turn) });
     try {
-      const opened = await openSession(turn, task);
+      const { skillDirectories, cleanup } = stageConnections(connectionsRoot, connections);
+      staged = { turnId, cleanup };
+      const opened = await openSession(turn, task, { connections, skillDirectories });
       if (model !== null && sessionModel !== model) {
         await opened.setModel(model);
         sessionModel = model;
@@ -218,6 +259,11 @@ export function startWorker({
     retryMs,
     ...(clock === undefined ? {} : { clock }),
     parse: (json) => ControlToWorker.parse(json),
+    onTurnEnd(turnId) {
+      if (staged?.turnId !== turnId) return;
+      staged.cleanup();
+      staged = null;
+    },
     onMessage(message) {
       switch (message.type) {
         case "bound":
@@ -226,10 +272,10 @@ export function startWorker({
           if (route === "worker") void reportModels();
           break;
         case "run-turn":
-          void runTurn(message.turnId, message.turnKey, message.text, message.model);
+          void runTurn(message.turnId, message.turnKey, message.text, message.model, { connections: message.connections });
           break;
         case "run-task":
-          void runTurn(message.turnId, message.turnKey, message.text, null, message);
+          void runTurn(message.turnId, message.turnKey, message.text, null, { task: message });
           break;
         case "turn-key":
           link.rekey(message.turnId, message.turnKey);
