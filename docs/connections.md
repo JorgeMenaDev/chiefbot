@@ -10,7 +10,7 @@ Connections differ from connectors (`docs/connectors.md`): a connector is an MCP
 2. Click **Connect** on the app's row and fill in its fields. Paste a token with only the access your bots need, and one that expires (below).
 3. Click **Save**. The row says **On**.
 
-**Edit** asks for every field again: control never sends a saved value back. **Disconnect** turns it off and deletes your fields. The bot's **Details** tab lists its **Connection calls**: each run of a connection's CLI, and when. A run shows as the CLI and the subcommands its `readOnly` list names (`harness get`, `acli jira workitem`), never flags or values; a command no read-only entry names shows as the bare CLI.
+**Edit** asks for every field again: control never sends a saved value back. **Disconnect** turns it off and deletes your fields. The bot's **Details** tab lists its **Connection calls**: each run of a connection's CLI, and when, added as each turn ends. A run shows as the CLI and the subcommands its `readOnly` list names (`harness get`, `acli jira workitem`), never flags or values; a command no read-only entry names shows as the bare CLI.
 
 | App | Fields |
 | --- | --- |
@@ -27,7 +27,7 @@ Control keeps the plain fields in its database and the secret ones in its `Secre
 
 When the turn ends, however it ends, the worker deletes `/tmp/chiefbot`, and again when it starts. Between turns there is nothing on the computer, and the Copilot runtime's own environment never holds the token.
 
-Before a shell command runs, the worker checks each command of a connection's CLI in it against the connection's `readOnly` list. A match runs. Anything else waits for your approval: the chat shows a **Connector approval** card with the app and the command. A command whose text has the CLI's name anywhere the worker cannot see it run (`env -Sacli …`, `sh -c "…"`, even `cat acli.txt`) asks too, for the whole command: a false alarm beats a missed write. When the agent finishes, approvals still pending are refused. The worker reports each run the wrapper noted to control (`GET /bots/:id/connection-calls`) after each tool call and before the turn ends, so a declined command, or one that never ran, is not logged. Reporting is best effort and never holds up the turn: a report that fails is tried again with the next one, and given up, with an error in the worker's log, when the turn ends.
+Before a shell command runs, the worker checks each command of a connection's CLI in it against the connection's `readOnly` list. A match runs. Anything else waits for your approval: the chat shows a **Connector approval** card with the app and the command. A command whose text has the CLI's name anywhere the worker cannot see it run (`env -Sacli …`, `sh -c "…"`, even `cat acli.txt`) asks too, for the whole command: a false alarm beats a missed write. When the turn ends, approvals still pending are refused. Then the worker reads the runs the wrapper noted, once, and sends them to control on its connection, just before the message that ends the turn; control logs them under that turn (`GET /bots/:id/connection-calls`). So a declined command, or one that never ran, is not logged, and the log fills in when the turn ends, not while it runs. The agent can write that file, so the worker reads at most its first 256 KB and 500 runs, only if it is a regular file, and never waits on it: anything wrong logs fewer calls, never a stuck turn. Control takes calls only for a turn of that bot that has not ended.
 
 ## Security position
 

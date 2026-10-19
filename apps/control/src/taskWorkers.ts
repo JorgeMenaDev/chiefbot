@@ -479,8 +479,9 @@ export function taskWorkerHost({
         if (["done", "approval-request", "approval-withdrawn"].includes(message.event.type)) publish(worker.projectId);
         return;
       }
-      // The models report is for a bot's model picker; a task worker has none.
-      if (message.type === "models") return;
+      // The models report is for a bot's model picker, and connection calls for a
+      // bot's turn: a task worker sends neither.
+      if (message.type === "models" || message.type === "connection-calls") return;
       // Hello. The first one starts the task; after that, the worker lost the
       // task unless it says it still runs it, and may have missed answers.
       if (worker.state === "launching") {

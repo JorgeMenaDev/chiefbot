@@ -1,8 +1,9 @@
 import {
   ConnectRequest,
-  ReportedConnectionCall,
   type AgentConnection,
+  type BotId,
   type Connection,
+  type ConnectionCallsMessage,
   type ConnectionCall,
   type UserId,
 } from "@chiefbot/contracts";
@@ -10,7 +11,6 @@ import { z } from "zod";
 import { apiError, bearer, unauthorized } from "../http.ts";
 import type { SecretStore } from "../secrets/secretStore.ts";
 import type { openStore } from "../store.ts";
-import { botTurn, heldTurn } from "../turnKeys.ts";
 import type { CatalogConnection } from "./catalog.ts";
 
 // The SecretStore name of a person's secret fields of one connection, as one JSON object.
@@ -28,8 +28,7 @@ const SecretFields = z.record(z.string(), z.string());
 //                                       400 invalid_connection for a missing or unknown field)
 //   DELETE /connections/:name           → 204; its fields go, secret ones too
 //   GET    /bots/:id/connection-calls   → ConnectionCall[]: the bot's call log, oldest first
-// Worker route (bearer: the key of the bot's running turn; 403 invalid_turn_key otherwise):
-//   POST   /worker/:botId/connection-calls  body ReportedConnectionCall → 204, logged for that turn
+// The bot's worker sends a turn's calls on its WebSocket before the turn's done (`logCalls`).
 export function connectionHost({ store, secrets, catalog }: { store: ReturnType<typeof openStore>; secrets: SecretStore; catalog: CatalogConnection[] }) {
   const found = (name: string) => catalog.find((connection) => connection.name === name);
 
@@ -87,21 +86,18 @@ export function connectionHost({ store, secrets, catalog }: { store: ReturnType<
         return bot ? Response.json(store.connections.calls(bot.id) satisfies ConnectionCall[]) : apiError(404, "not_found");
       }),
     },
-    "/worker/:botId/connection-calls": {
-      POST: async (req: Bun.BunRequest<"/worker/:botId/connection-calls">) => {
-        const turn = heldTurn(store.turnKeys, req, botTurn(req.params.botId));
-        if (turn instanceof Response) return turn;
-        const body = ReportedConnectionCall.safeParse(await req.json().catch(() => null));
-        if (!body.success) return apiError(400, "invalid_connection", z.prettifyError(body.error));
-        if (!found(body.data.connection)) return apiError(404, "not_found");
-        store.connections.logCall(turn.botId, turn.turnId, body.data);
-        return new Response(null, { status: 204 });
-      },
-    },
   };
 
   return {
     routes,
+
+    // A bot's worker's calls of its turn `turnId`, sent just before the turn's
+    // done: logged only while that turn is one of the bot's unfinished ones, and
+    // only for connections in the catalog.
+    logCalls(botId: BotId, { turnId, calls }: ConnectionCallsMessage) {
+      if (!store.unfinishedTurns(botId).includes(turnId)) return;
+      for (const call of calls) if (found(call.connection)) store.connections.logCall(botId, turnId, call);
+    },
 
     // The person's connections that are on, as their bot's computer gets them for
     // a turn: every saved field and the catalog's env templates, skill and

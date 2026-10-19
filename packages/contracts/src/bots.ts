@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { User } from "./auth.ts";
 import { TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
-import { AgentConnection } from "./connections.ts";
+import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport } from "./models.ts";
@@ -109,9 +109,11 @@ export type ControlToWorker = z.infer<typeof ControlToWorker>;
 // Worker → control on the /worker WebSocket.
 //   turn-event, hello  see chat.ts
 //   models      the models the bot owner's Copilot plan offers; sent after every bind
+//   connection-calls  see connections.ts
 export const WorkerToControl = z.discriminatedUnion("type", [
   TurnEventMessage,
   TurnHello,
   z.object({ type: z.literal("models"), report: ModelReport }),
+  ConnectionCallsMessage,
 ]);
 export type WorkerToControl = z.infer<typeof WorkerToControl>;

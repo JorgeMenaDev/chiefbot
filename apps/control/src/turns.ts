@@ -107,7 +107,7 @@ export function chatTurns({
     workerChanged: (botId: BotId) => void greeted.delete(botId),
 
     // A message from the worker of `userId`'s bot. `reply` answers on its connection.
-    fromWorker(userId: UserId, botId: BotId, message: Exclude<WorkerToControl, { type: "models" }>, reply: (message: ControlToWorker) => void) {
+    fromWorker(userId: UserId, botId: BotId, message: Exclude<WorkerToControl, { type: "models" | "connection-calls" }>, reply: (message: ControlToWorker) => void) {
       if (message.type === "turn-event") {
         return publishChat(botId, store.appendTurnEvent(botId, message.turnId, message.index, message.event));
       }

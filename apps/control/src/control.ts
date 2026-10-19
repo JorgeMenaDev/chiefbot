@@ -167,7 +167,7 @@ type SocketData =
 //                             (connectors/connectors.ts)
 //   …      /projects/:id/subscriptions  what a project listens to: CI runs, issue queries and
 //                             schedules, each event handled once (subscriptions.ts)
-//   …      /connections, /bots/:id/connection-calls, /worker/:botId/connection-calls  people's
+//   …      /connections, /bots/:id/connection-calls  people's
 //                             connections (CLIs their bots use as them) and the calls made with them
 //                             (connections/connections.ts)
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
@@ -699,6 +699,7 @@ export function startControl({
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));
         if (message.type === "models") return store.setModelReport(ws.data.userId, message.report);
+        if (message.type === "connection-calls") return connections.logCalls(ws.data.botId, message);
         turns.fromWorker(ws.data.userId, ws.data.botId, message, (reply) => ws.send(JSON.stringify(reply)));
       },
     },

@@ -1,6 +1,6 @@
 import type { PermissionRequest } from "@github/copilot-sdk";
 import type { AgentConnection, ReportedConnectionCall } from "@chiefbot/contracts";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 // Where a bot's computer stages its owner's connections for one turn: outside the
@@ -16,8 +16,7 @@ export const connectionsRoot = "/tmp/chiefbot";
 
 // Writes `connections` under `root` for the turn, replacing whatever was there.
 // Returns the session's skill roots (none without a connection), `calls`, which
-// gives the runs of the connections' CLIs since its last call (none when the log
-// cannot be read: the agent can write it, so it is never trusted), and `cleanup`,
+// reads the runs of the connections' CLIs once, at the turn's end, and `cleanup`,
 // which removes it all. A connection that is off has nothing here: its bare CLI
 // runs with no credential. Staging that fails removes what it wrote, then throws.
 export function stageConnections(root: string, connections: AgentConnection[]) {
@@ -30,24 +29,34 @@ export function stageConnections(root: string, connections: AgentConnection[]) {
     cleanup();
     throw error;
   }
-  let seen = 0;
   return {
     skillDirectories: [join(root, "skills")],
-    calls(): ReportedConnectionCall[] {
-      try {
-        const runs = existsSync(join(root, "calls")) ? parseRuns(readFileSync(join(root, "calls"), "utf8")).slice(seen) : [];
-        seen += runs.length;
-        return runs.flatMap(([cli, ...args]) => {
-          const connection = connections.find((candidate) => candidate.cli === cli);
-          return connection ? [{ connection: connection.name, command: logged(connection, args) }] : [];
-        });
-      } catch (error) {
-        console.error(`Chiefbot could not read the connection calls log: ${error}`);
-        return [];
-      }
-    },
+    calls: (): ReportedConnectionCall[] =>
+      readRuns(join(root, "calls")).flatMap(([cli, ...args]) => {
+        const connection = connections.find((candidate) => candidate.cli === cli);
+        return connection ? [{ connection: connection.name, command: logged(connection, args) }] : [];
+      }),
     cleanup,
   };
+}
+
+// The agent can write the calls log, so it is read with hard bounds: opened
+// without blocking (a FIFO), only if it is a regular file, its first 256 KB, its
+// first `maxCalls` runs. Anything wrong gives fewer runs or none, never a throw.
+const maxCalls = 500;
+function readRuns(path: string) {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NONBLOCK);
+    if (!fstatSync(fd).isFile()) throw new Error("it is not a regular file");
+    const buffer = Buffer.alloc(256 * 1024);
+    return parseRuns(buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, 0)).toString("utf8"));
+  } catch (error) {
+    console.error(`Chiefbot could not read the connection calls log: ${error}`);
+    return [];
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }
 
 function write(root: string, connections: AgentConnection[]) {
@@ -89,7 +98,7 @@ function parseRuns(text: string) {
   // The last field follows the last NUL: unfinished, or empty.
   const fields = text.split("\0");
   const runs: string[][] = [];
-  for (let at = 0; at + 1 < fields.length; ) {
+  for (let at = 0; at + 1 < fields.length && runs.length < maxCalls; ) {
     if (!/^\d{1,5}$/.test(fields[at + 1] ?? "")) break;
     const count = Number(fields[at + 1]);
     if (at + 2 + count >= fields.length) break;

@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import type { AgentConnection } from "@chiefbot/contracts";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { approvalFor } from "./approvals.ts";
@@ -67,26 +67,30 @@ test("each run of a connection's CLI is logged as the CLI and the subcommands it
 
   run("acli jira workitem view CHIEF-1 | head -5");
   run('false && acli jira workitem delete --key CHIEF-1; acli jira workitem create --summary "line one\nline two" --project CHIEF');
-  const first = staged.calls();
   run("acli jira project list");
 
-  expect(first).toEqual([
+  expect(staged.calls()).toEqual([
     { connection: "jira", command: "acli jira workitem view" },
     { connection: "jira", command: "acli jira workitem" },
+    { connection: "jira", command: "acli jira" },
   ]);
-  // Only runs since the last read.
-  expect(staged.calls()).toEqual([{ connection: "jira", command: "acli jira" }]);
-  expect(staged.calls()).toEqual([]);
 });
 
-test("a forged or unreadable calls log gives no calls and never hangs", () => {
+test("the calls log is read with hard bounds: a forged, huge or special file never hangs and gives at most 500 calls", () => {
   const root = join(tempDir(), "chiefbot");
   const staged = stageConnections(root, [jira]);
+  const log = join(root, "calls");
 
-  appendFileSync(join(root, "calls"), "acli\0-2\0acli\0x\0");
+  writeFileSync(log, "acli\0-2\0acli\0x\0");
   expect(staged.calls()).toEqual([]);
-  rmSync(join(root, "calls"));
-  mkdirSync(join(root, "calls"));
+  // A million valid runs (10 MB).
+  writeFileSync(log, "acli\x000\0".repeat(1_000_000));
+  expect(staged.calls()).toHaveLength(500);
+  rmSync(log);
+  mkdirSync(log);
+  expect(staged.calls()).toEqual([]);
+  rmSync(log, { recursive: true });
+  Bun.spawnSync(["mkfifo", log]);
   expect(staged.calls()).toEqual([]);
 });
 

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ConnectorName } from "./connectors.ts";
+import { TurnId } from "./ids.ts";
 
 // A connection: a CLI a person's own bots use as that person, with a credential
 // they paste (docs/connections.md). The repo ships one folder per connection,
@@ -79,11 +80,19 @@ export const AgentConnection = z.object({
 });
 export type AgentConnection = z.infer<typeof AgentConnection>;
 
-// Body of POST /worker/:botId/connection-calls: a run of a connection's CLI, as the
-// CLI and the leading subcommands one of its read-only globs names (never a flag or
-// a value; a command no glob names is the bare CLI), reported with the turn's key.
+// A run of a connection's CLI, as the CLI and the leading subcommands one of its
+// read-only globs names (never a flag or a value; a command no glob names is the bare CLI).
 export const ReportedConnectionCall = z.object({ connection: ConnectionName, command: z.string().min(1).max(200) });
 export type ReportedConnectionCall = z.infer<typeof ReportedConnectionCall>;
+
+// Worker → control, just before a bot's turn's done on the same WebSocket: the
+// runs of its connections' CLIs in that turn (at most 500), logged for that turn.
+export const ConnectionCallsMessage = z.object({
+  type: z.literal("connection-calls"),
+  turnId: TurnId,
+  calls: z.array(ReportedConnectionCall).max(500),
+});
+export type ConnectionCallsMessage = z.infer<typeof ConnectionCallsMessage>;
 
 // One logged connection call of a bot (GET /bots/:id/connection-calls). `run` is
 // the turn's id; `at` is epoch milliseconds.

@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { ApiError, Connection, ConnectionCall, type ChatEvent } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SecretStore } from "../secrets/secretStore.ts";
@@ -161,65 +161,69 @@ test("an approval still pending when its turn ends is refused, and its command n
   expect(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json()).toEqual([]);
 });
 
-// Control's answers to the worker's connection-call reports, faked for one test:
-// `answer` gets each report's number (from 1) and gives the response, or throws.
-function interceptReports(answer: (n: number, real: () => Promise<Response>) => Promise<Response>) {
-  const real = globalThis.fetch;
-  let n = 0;
-  const intercepted = (input: string | URL | Request, init?: RequestInit) =>
-    String(input instanceof Request ? input.url : input).endsWith("/connection-calls") && init?.method === "POST"
-      ? answer(++n, () => real(input, init))
-      : real(input, init);
-  globalThis.fetch = Object.assign(intercepted, { preconnect: real.preconnect });
-  afterEach(() => void (globalThis.fetch = real));
-}
-
-test("reporting never holds up a turn's end: once reports start failing, the turn ends anyway", async () => {
+test("a turn ends and cleans up at once whatever the agent left in the calls log; a million runs log 500", async () => {
   const { api, computers, root, onlineBot, send, watchChat } = await setup();
   await api("PUT", "/connections/harness", { fields: harness });
   const bot = await onlineBot("Ada");
-  interceptReports(async (n, real) => {
-    if (n > 3) throw new Error("control is unreachable");
-    return real();
-  });
-  computers.copilot.script = async function* (_prompt, runtime) {
-    for (let i = 0; i < 5; i++) await runtime.shell("harness list pipeline");
+  const chat = watchChat(bot.id);
+  const logs = [() => writeFileSync(join(root, "calls"), "harness\x000\0".repeat(1_000_000)), () => (rmSync(join(root, "calls")), Bun.spawnSync(["mkfifo", join(root, "calls")]))];
+  computers.copilot.script = async function* () {
+    logs.shift()?.();
     yield sdk.idle();
   };
 
-  await send(bot.id, "list");
-  await watchChat(bot.id).until(doneCount(1));
-
-  expect(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json()).toHaveLength(3);
+  const first = await send(bot.id, "a million runs");
+  await chat.until(doneCount(1));
   expect(existsSync(root) ? readdirSync(root) : []).toEqual([]);
+  await send(bot.id, "a FIFO");
+  await chat.until(doneCount(2));
+  expect(existsSync(root) ? readdirSync(root) : []).toEqual([]);
+
+  const calls = ConnectionCall.array().parse(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json());
+  expect([calls.length, new Set(calls.map(({ run }) => run))]).toEqual([500, new Set([first])]);
 });
 
-test("when a turn ends, its pending approval is refused before its calls are reported", async () => {
+test("a sub-agent's error does not end the turn's approvals", async () => {
   const { api, computers, onlineBot, send, watchChat } = await setup();
   await api("PUT", "/connections/harness", { fields: harness });
   const bot = await onlineBot("Ada");
-  let settled: { approved: boolean } | null = null;
-  const seenWhileReporting: Array<boolean | null> = [];
-  interceptReports(async (_n, real) => {
-    await Bun.sleep(100);
-    seenWhileReporting.push(settled?.approved ?? null);
-    return real();
-  });
-  const asked = Promise.withResolvers<void>();
+  const results: boolean[] = [];
   computers.copilot.script = async function* (_prompt, runtime) {
-    await runtime.shell("harness list pipeline");
-    void runtime.shell("harness execute pipeline deploy").then((result) => (settled = result));
-    await asked.promise;
+    const pending = runtime.shell("harness execute pipeline deploy");
+    yield { ...sdk.error("a sub-agent failed"), agentId: "sub-agent" };
+    results.push((await pending).approved);
     yield sdk.idle();
   };
   const chat = watchChat(bot.id);
-
   await send(bot.id, "deploy");
-  await chat.until((events) => requestsIn(events).length === 1);
-  asked.resolve();
+  const [request] = (await chat.until((events) => requestsIn(events).length === 1)).flatMap((e) => (e.event.type === "approval-request" ? [e.event] : []));
+  await Bun.sleep(100);
+  await api("POST", `/bots/${bot.id}/approvals/${request?.approvalId}`, { approved: true });
   await chat.until(doneCount(1));
 
-  expect(seenWhileReporting).toEqual([false]);
+  expect(results).toEqual([true]);
+});
+
+test("control logs a turn's calls only while that turn is unfinished: never for an ended or another turn", async () => {
+  const { api, url, botToken, computers, onlineBot, send, watchChat } = await setup();
+  await api("PUT", "/connections/harness", { fields: harness });
+  const bot = await onlineBot("Ada");
+  computers.copilot.script = async function* (_prompt, runtime) {
+    await runtime.shell("harness list pipeline");
+    yield sdk.idle();
+  };
+  const ended = await send(bot.id, "list");
+  await watchChat(bot.id).until(doneCount(1));
+
+  // A forged report on the bot's own worker socket, for its ended turn and for one that never was.
+  const socket = new WebSocket(`${url.replace("http", "ws")}/worker/${bot.id}`, { headers: { authorization: `Bearer ${botToken(bot.id)}` } });
+  await new Promise((resolve) => (socket.onopen = resolve));
+  for (const turnId of [ended, "turn_forged"]) socket.send(JSON.stringify({ type: "connection-calls", turnId, calls: [{ connection: "harness", command: "harness delete" }] }));
+  await Bun.sleep(200);
+  socket.close();
+
+  const calls = ConnectionCall.array().parse(await (await api("GET", `/bots/${bot.id}/connection-calls`)).json());
+  expect(calls.map(({ command, run }) => [command, run])).toEqual([["harness list", ended]]);
 });
 
 const requestsIn = (events: ChatEvent[]) => events.filter((e) => e.event.type === "approval-request");
