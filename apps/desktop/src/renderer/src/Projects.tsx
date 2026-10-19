@@ -19,7 +19,7 @@ import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
 import { AssistantMessage, ChatEmpty, Composer, ErrorMessage, Timeline, ToolRow, UserMessage, Working } from "./Chat.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
-import { ErrorText, PaneHeader } from "./Pane.tsx";
+import { Column, ErrorText, PaneHeader, SidePanel } from "./Pane.tsx";
 import { ListeningTo } from "./Subscriptions.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
@@ -126,37 +126,37 @@ export function ProjectPane({
   }
   return (
     <>
-      <PaneHeader
-        icon={<FolderGit2Icon className="size-4 text-muted-foreground" />}
-        title={project.name}
-        note={`${project.repo}${commands.build ? ` · build: ${commands.build}` : ""}${commands.test ? ` · test: ${commands.test}` : ""}`}
-      >
-        <Button size="xs" variant="outline" pressed={showListening} onClick={() => setShowListening(!showListening)}>
-          <RadioIcon />
-          Listening to
-        </Button>
-        <Button size="xs" variant="outline" pressed={showCalls} onClick={() => setShowCalls(!showCalls)}>
-          <PlugIcon />
-          Connector calls
-        </Button>
-        {workspace.role === "owner" && (
-          <Button size="xs" variant="destructive-outline" onClick={() => void remove()}>
-            <Trash2Icon />
-            Delete
+      <Column>
+        <PaneHeader
+          icon={<FolderGit2Icon className="size-4 text-muted-foreground" />}
+          title={project.name}
+          note={`${project.repo}${commands.build ? ` · build: ${commands.build}` : ""}${commands.test ? ` · test: ${commands.test}` : ""}`}
+        >
+          <Button size="xs" variant="outline" pressed={showListening} onClick={() => setShowListening(!showListening)}>
+            <RadioIcon />
+            Listening to
           </Button>
+          <Button size="xs" variant="outline" pressed={showCalls} onClick={() => setShowCalls(!showCalls)}>
+            <PlugIcon />
+            Connector calls
+          </Button>
+          {workspace.role === "owner" && (
+            <Button size="xs" variant="destructive-outline" onClick={() => void remove()}>
+              <Trash2Icon />
+              Delete
+            </Button>
+          )}
+        </PaneHeader>
+        {error && (
+          <div className="border-b px-5 py-2">
+            <ErrorText message={error} />
+          </div>
         )}
-      </PaneHeader>
-      {error && (
-        <div className="border-b px-5 py-2">
-          <ErrorText message={error} />
-        </div>
-      )}
-      {showListening && <ListeningTo project={project} />}
-      {showCalls && <ConnectorCalls project={project} />}
-      <div className="flex min-h-0 flex-1">
+        {showListening && <ListeningTo project={project} />}
+        {showCalls && <ConnectorCalls project={project} />}
         <CoordinatorChat project={project} />
-        <TaskLedger project={project} login={login} />
-      </div>
+      </Column>
+      <TaskLedger project={project} login={login} />
     </>
   );
 }
@@ -196,7 +196,7 @@ function CoordinatorChat({ project }: { project: Project }) {
   }
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col">
       <Timeline follow={view}>
         {view.items.length === 0 && (
           <ChatEmpty>Ask the coordinator to plan work on {project.name}. It tracks it as tasks every member sees.</ChatEmpty>
@@ -263,15 +263,18 @@ function TaskLedger({ project, login }: { project: Project; login: string }) {
   }, [project.id]);
 
   return (
-    <aside className="flex w-[34%] min-w-[280px] shrink-0 flex-col border-l bg-card/40">
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b px-3">
-        <ListChecksIcon className="size-3.5 text-muted-foreground" />
-        <span className="font-medium text-xs">Tasks</span>
-        <Badge variant="secondary" className="ms-auto">
-          {tasks.filter(({ status }) => status !== "done" && status !== "abandoned").length} open
-        </Badge>
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+    <SidePanel
+      bar={
+        <>
+          <ListChecksIcon className="size-4 text-muted-foreground" />
+          <span className="font-medium text-sm">Tasks</span>
+          <Badge variant="secondary" className="ms-auto">
+            {tasks.filter(({ status }) => status !== "done" && status !== "abandoned").length} open
+          </Badge>
+        </>
+      }
+    >
+      <div className="flex flex-col gap-2 p-3">
         {tasks.length === 0 && <p className="py-6 text-center text-muted-foreground text-xs">No tasks yet. The coordinator adds them as members ask for work.</p>}
         {tasks.map((task) => (
           <div key={task.number} className="flex flex-col gap-2 rounded-xl border bg-card p-3">
@@ -292,7 +295,7 @@ function TaskLedger({ project, login }: { project: Project; login: string }) {
           </div>
         ))}
       </div>
-    </aside>
+    </SidePanel>
   );
 }
 

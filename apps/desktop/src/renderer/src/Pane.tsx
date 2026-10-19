@@ -33,7 +33,33 @@ export function PaneHeader({
   );
 }
 
-// A strip that opens under the top bar (routines, what a project listens to, connector calls).
+// The main column: a screen's top bar over its body, left of any side panel.
+export function Column({ children }: { children: ReactNode }) {
+  return <div className="flex min-w-0 flex-1 flex-col">{children}</div>;
+}
+
+// The full-height panel right of a chat (a bot's details, a project's tasks),
+// with its own top bar, after Grok's bot panel.
+export function SidePanel({ bar, children }: { bar: ReactNode; children: ReactNode }) {
+  return (
+    <aside className="flex w-[38%] min-w-[340px] shrink-0 flex-col border-l bg-card/40">
+      <div className="drag-region flex h-(--topbar-height) shrink-0 items-center gap-2 border-b px-3">{bar}</div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
+    </aside>
+  );
+}
+
+// A titled part of a side panel (a bot's status, its routines).
+export function PanelSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-2 border-t px-5 py-4">
+      <h3 className="font-semibold text-sm">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+// A strip that opens under the top bar (what a project listens to, connector calls).
 export function Panel({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="max-h-[45%] shrink-0 overflow-y-auto border-b bg-card/60 px-5 py-3">
