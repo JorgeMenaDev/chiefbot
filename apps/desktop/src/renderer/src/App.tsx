@@ -1,5 +1,21 @@
 import { AuthState, Bot, type User } from "@chiefbot/contracts";
-import { BotIcon, CheckIcon, CopyIcon, FolderGit2Icon, LogOutIcon, PlugIcon, PlusIcon, TriangleAlertIcon, UnplugIcon, UsersIcon, XIcon } from "lucide-react";
+import {
+  BotIcon,
+  CheckIcon,
+  CopyIcon,
+  FolderGit2Icon,
+  FolderPlusIcon,
+  LogOutIcon,
+  PlugIcon,
+  PlusIcon,
+  SearchIcon,
+  SettingsIcon,
+  SquarePenIcon,
+  TriangleAlertIcon,
+  UnplugIcon,
+  UsersIcon,
+  XIcon,
+} from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { z } from "zod";
 import { BotPane, StatusDot } from "./BotPane.tsx";
@@ -12,17 +28,23 @@ import { Button, buttonVariants } from "./components/ui/button.tsx";
 import { Card, CardDescription, CardHeader, CardPanel } from "./components/ui/card.tsx";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "./components/ui/empty.tsx";
 import { Input } from "./components/ui/input.tsx";
-import { SidebarGroupLabel, SidebarRow } from "./components/ui/sidebar.tsx";
+import { MenuItem, MenuPopup, MenuSeparator } from "./components/ui/menu.tsx";
+import {
+  Sidebar,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarIconButton,
+  SidebarLayout,
+  SidebarRow,
+  SidebarSearch,
+  useSidebarOpen,
+} from "./components/ui/sidebar.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
 import { copyText } from "./lib/clipboard.ts";
-import { cn } from "./lib/utils.ts";
 import appIcon from "../../../../../docs/brand/icon.svg";
 import glyph from "../../../../../docs/brand/glyph.svg";
 
 const BotList = z.array(Bot);
-
-// macOS draws its window buttons over the sidebar's top bar, so the brand starts after them.
-const isMac = navigator.userAgent.includes("Mac");
 
 // Signed out: the sign-in screen. Signed in: the bot sidebar and the selected bot.
 export function App() {
@@ -139,24 +161,33 @@ function useBots() {
 const currentWorkspaceKey = "chiefbot.workspace";
 
 // T3 Code's layout: a sidebar of bots on the left, the selected bot's chat in the
-// middle and its details panel on the right.
+// middle and its details panel on the right. The sidebar hides with its toggle or Cmd+B.
 // The switcher on top picks the current workspace, whose members screen and
 // projects open from the sidebar. Bots are personal, so the bot list is the same
 // in every workspace.
 function Workspace({ user }: { user: User }) {
   const bots = useBots();
   const teams = useWorkspaces();
+  const sidebar = useSidebarOpen();
   const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem(currentWorkspaceKey));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // Bumped by each click on Members or Connectors, which remounts (reloads) the
   // screen: control sends no member or connector events.
   const [membersVisit, setMembersVisit] = useState(0);
+  // The new-bot or new-project form open in the sidebar, if any.
+  const [creating, setCreating] = useState<"bot" | "project" | null>(null);
+  // The search row filters the sidebar's projects and bots by name.
+  const [query, setQuery] = useState("");
   const current = teams.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const { projects, reload: reloadProjects } = useProjects(current);
   const showMembers = current !== null && selectedId === "members";
   const showConnectors = current !== null && selectedId === "connectors";
   const project = projects.find(({ id }) => id === selectedId);
   const selected = bots.find((bot) => bot.id === selectedId) ?? bots[0];
+  const searching = query.trim() !== "";
+  const matches = (...names: string[]) => names.some((name) => name.toLowerCase().includes(query.trim().toLowerCase()));
+  const shownProjects = projects.filter(({ name, repo }) => matches(name, repo));
+  const shownBots = bots.filter(({ name }) => matches(name));
 
   const selectWorkspace = (id: string | null) => {
     setWorkspaceId(id);
@@ -166,19 +197,28 @@ function Workspace({ user }: { user: User }) {
   };
 
   return (
-    <div className="flex h-full">
-      <aside className="flex w-64 shrink-0 flex-col border-sidebar-border border-r bg-sidebar text-sidebar-foreground">
-        <div className={cn("drag-region flex h-(--topbar-height) shrink-0 items-center px-4", isMac && "ps-[84px]")}>
-          <span className="flex items-center gap-2 font-semibold text-sm tracking-tight">
-            <img src={glyph} alt="" className="size-5" />
-            Chiefbot
-          </span>
-        </div>
-        <div className="px-2 pb-1">
+    <SidebarLayout open={sidebar.open} onToggle={sidebar.toggle}>
+      <Sidebar open={sidebar.open}>
+        <SidebarHeader>
+          <img src={glyph} alt="" className="size-5" />
+          Chiefbot
+        </SidebarHeader>
+        <div className="flex shrink-0 flex-col gap-1 px-2 pb-1">
           <WorkspaceSwitcher {...teams} current={current} onSelect={(workspace) => selectWorkspace(workspace?.id ?? null)} />
+          <div className="flex items-center gap-0.5">
+            <SidebarSearch icon={<SearchIcon />} placeholder="Search" aria-label="Search projects and bots" value={query} onChange={(event) => setQuery(event.target.value)} />
+            {current && (
+              <SidebarIconButton label="New project" onClick={() => setCreating("project")}>
+                <FolderPlusIcon />
+              </SidebarIconButton>
+            )}
+            <SidebarIconButton label="New bot" onClick={() => setCreating("bot")}>
+              <SquarePenIcon />
+            </SidebarIconButton>
+          </div>
         </div>
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-2">
-          {current && (
+          {current && !searching && (
             <>
               <SidebarGroupLabel>Workspace</SidebarGroupLabel>
               <SidebarRow
@@ -203,39 +243,59 @@ function Workspace({ user }: { user: User }) {
                 <span className="min-w-0 flex-1 truncate">Connectors</span>
                 <RowNote>checklist</RowNote>
               </SidebarRow>
+            </>
+          )}
+          {current && (shownProjects.length > 0 || !searching || creating === "project") && (
+            <>
               <SidebarGroupLabel>Projects</SidebarGroupLabel>
-              {projects.map(({ id, name, repo }) => (
+              {shownProjects.map(({ id, name, repo }) => (
                 <SidebarRow key={id} active={id === project?.id} onClick={() => setSelectedId(id)}>
                   <FolderGit2Icon />
                   <span className="min-w-0 flex-1 truncate">{name}</span>
                   <RowNote>{repo.split("/")[0]}</RowNote>
                 </SidebarRow>
               ))}
-              <NewProject
-                workspace={current}
-                onCreated={(created) => {
-                  void reloadProjects();
-                  setSelectedId(created.id);
-                }}
-              />
+              {creating === "project" ? (
+                <NewProject
+                  workspace={current}
+                  onClose={() => setCreating(null)}
+                  onCreated={(created) => {
+                    void reloadProjects();
+                    setSelectedId(created.id);
+                  }}
+                />
+              ) : (
+                projects.length === 0 && <NewRow label="New project" onClick={() => setCreating("project")} />
+              )}
             </>
           )}
-          <SidebarGroupLabel>Bots</SidebarGroupLabel>
-          {bots.map((bot) => (
-            <SidebarRow
-              key={bot.id}
-              active={!showMembers && !showConnectors && !project && bot.id === selected?.id}
-              onClick={() => setSelectedId(bot.id)}
-            >
-              <StatusDot status={bot.status} />
-              <span className="min-w-0 flex-1 truncate">{bot.name}</span>
-              <RowNote>{bot.status}</RowNote>
-            </SidebarRow>
-          ))}
-          <NewBot onCreated={setSelectedId} />
+          {(shownBots.length > 0 || !searching || creating === "bot") && (
+            <>
+              <SidebarGroupLabel>Bots</SidebarGroupLabel>
+              {shownBots.map((bot) => (
+                <SidebarRow
+                  key={bot.id}
+                  active={!showMembers && !showConnectors && !project && bot.id === selected?.id}
+                  onClick={() => setSelectedId(bot.id)}
+                >
+                  <StatusDot status={bot.status} />
+                  <span className="min-w-0 flex-1 truncate">{bot.name}</span>
+                  <RowNote>{bot.status}</RowNote>
+                </SidebarRow>
+              ))}
+              {creating === "bot" ? (
+                <NewBot onCreated={setSelectedId} onClose={() => setCreating(null)} />
+              ) : (
+                bots.length === 0 && <NewRow label="New bot" onClick={() => setCreating("bot")} />
+              )}
+            </>
+          )}
+          {searching && shownProjects.length === 0 && shownBots.length === 0 && creating === null && (
+            <p className="px-2.5 py-2 text-sidebar-muted-foreground text-xs">No projects or bots match.</p>
+          )}
         </nav>
         {user.needsGitHubSignIn && (
-          <div className="px-2 pb-2">
+          <div className="shrink-0 px-2 pb-1">
             <Alert variant="warning" className="text-xs">
               <TriangleAlertIcon />
               <AlertTitle>GitHub sign-in needed</AlertTitle>
@@ -248,34 +308,10 @@ function Workspace({ user }: { user: User }) {
             </Alert>
           </div>
         )}
-        <footer className="flex flex-col gap-0.5 border-sidebar-border border-t p-2">
-          <div className="flex items-center gap-2.5 px-1.5 py-1">
-            <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-sidebar-row-active font-medium text-xs uppercase">
-              {user.login.slice(0, 1)}
-            </span>
-            <div className="min-w-0 flex-1">
-              <div className="truncate font-medium text-sm">{user.login}</div>
-              <div className="truncate text-sidebar-muted-foreground text-xs">
-                Copilot: {user.copilotPlan ? `${user.copilotPlan.plan} (${user.copilotPlan.sku})` : "none"}
-              </div>
-            </div>
-            <Button size="icon-sm" variant="ghost" aria-label="Sign out" title="Sign out" onClick={() => void window.chiefbot.auth.signOut()}>
-              <LogOutIcon />
-            </Button>
-          </div>
-          {!user.needsGitHubSignIn && (
-            <Button
-              size="xs"
-              variant="ghost"
-              className="justify-start text-sidebar-muted-foreground"
-              onClick={() => void window.chiefbot.auth.disconnectGitHub()}
-            >
-              <UnplugIcon />
-              Disconnect GitHub
-            </Button>
-          )}
+        <footer className="flex shrink-0 items-center px-2 pt-1 pb-2">
+          <SettingsMenu user={user} />
         </footer>
-      </aside>
+      </Sidebar>
       <main className="flex min-w-0 flex-1">
         {showMembers ? (
           <Column>
@@ -321,7 +357,56 @@ function Workspace({ user }: { user: User }) {
           </Column>
         )}
       </main>
-    </div>
+    </SidebarLayout>
+  );
+}
+
+// Bottom left, after T3 Code's settings button: a menu with the signed-in GitHub
+// user and their Copilot plan, Disconnect GitHub and Sign out. The menu sits in the
+// top layer, so it is never clipped, whatever the window's height.
+function SettingsMenu({ user }: { user: User }) {
+  const menu = "settings-menu";
+  const { disconnectGitHub, signOut } = window.chiefbot.auth;
+  return (
+    <>
+      <SidebarIconButton label="Settings" popoverTarget={menu}>
+        <SettingsIcon />
+      </SidebarIconButton>
+      <MenuPopup id={menu} className="w-60">
+        <div className="flex items-center gap-2.5 px-2 py-1.5">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-full border bg-muted font-medium text-sm uppercase">
+            {user.login.slice(0, 1)}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium text-sm">{user.login}</div>
+            <div className="break-words text-muted-foreground text-xs">
+              Copilot: {user.copilotPlan ? `${user.copilotPlan.plan} (${user.copilotPlan.sku})` : "none"}
+            </div>
+          </div>
+        </div>
+        <MenuSeparator />
+        {!user.needsGitHubSignIn && (
+          <MenuItem menu={menu} onClick={() => void disconnectGitHub()}>
+            <UnplugIcon />
+            Disconnect GitHub
+          </MenuItem>
+        )}
+        <MenuItem menu={menu} onClick={() => void signOut()}>
+          <LogOutIcon />
+          Sign out
+        </MenuItem>
+      </MenuPopup>
+    </>
+  );
+}
+
+// The quiet "+ New …" row an empty section shows; the search row's icons open the same form.
+function NewRow({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <SidebarRow className="text-sidebar-muted-foreground" onClick={onClick}>
+      <PlusIcon />
+      <span>{label}</span>
+    </SidebarRow>
   );
 }
 
@@ -330,8 +415,8 @@ function RowNote({ children }: { children: ReactNode }) {
   return <span className="shrink-0 font-normal text-sidebar-muted-foreground text-xs">{children}</span>;
 }
 
-function NewBot({ onCreated }: { onCreated: (id: string) => void }) {
-  const [open, setOpen] = useState(false);
+// The sidebar's new-bot form. Escape or a made bot closes it (`onClose`).
+function NewBot({ onCreated, onClose }: { onCreated: (id: string) => void; onClose: () => void }) {
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -343,8 +428,7 @@ function NewBot({ onCreated }: { onCreated: (id: string) => void }) {
     try {
       const bot = Bot.parse(await window.chiefbot.bots.create(name));
       onCreated(bot.id);
-      setName("");
-      setOpen(false);
+      onClose();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -352,14 +436,6 @@ function NewBot({ onCreated }: { onCreated: (id: string) => void }) {
     }
   }
 
-  if (!open) {
-    return (
-      <SidebarRow className="text-sidebar-muted-foreground" onClick={() => setOpen(true)}>
-        <PlusIcon />
-        <span>New bot</span>
-      </SidebarRow>
-    );
-  }
   return (
     <form className="flex flex-col gap-1.5 px-0.5 py-1" onSubmit={(event) => void submit(event)}>
       <Input
@@ -369,7 +445,7 @@ function NewBot({ onCreated }: { onCreated: (id: string) => void }) {
         maxLength={60}
         disabled={busy}
         onChange={(event) => setName(event.target.value)}
-        onKeyDown={(event) => event.key === "Escape" && setOpen(false)}
+        onKeyDown={(event) => event.key === "Escape" && onClose()}
       />
       {busy && (
         <p className="flex items-center gap-1.5 px-1 text-muted-foreground text-xs">

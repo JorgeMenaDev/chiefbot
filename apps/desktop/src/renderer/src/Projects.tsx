@@ -13,7 +13,7 @@ import {
   type TaskWorkerState,
   type Workspace,
 } from "@chiefbot/contracts";
-import { FolderGit2Icon, ListChecksIcon, PlugIcon, PlusIcon, RadioIcon, Trash2Icon } from "lucide-react";
+import { FolderGit2Icon, ListChecksIcon, PlugIcon, RadioIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
@@ -24,7 +24,6 @@ import { ListeningTo } from "./Subscriptions.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input } from "./components/ui/input.tsx";
-import { SidebarRow } from "./components/ui/sidebar.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
 
 const ProjectList = z.array(Project);
@@ -46,8 +45,8 @@ export function useProjects(workspace: Workspace | null) {
 
 // The sidebar's new-project form: a repo as owner/name. Control reads the repo's
 // chiefbot.project.yaml, and its refusal (what is wrong with the file) shows here.
-export function NewProject({ workspace, onCreated }: { workspace: Workspace; onCreated: (project: Project) => void }) {
-  const [open, setOpen] = useState(false);
+// Escape or a made project closes it (`onClose`).
+export function NewProject({ workspace, onCreated, onClose }: { workspace: Workspace; onCreated: (project: Project) => void; onClose: () => void }) {
   const [repo, setRepo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -58,8 +57,7 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
     setError(null);
     try {
       onCreated(Project.parse(await window.chiefbot.projects.create(workspace.id, repo)));
-      setRepo("");
-      setOpen(false);
+      onClose();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -67,14 +65,6 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
     }
   }
 
-  if (!open) {
-    return (
-      <SidebarRow className="text-sidebar-muted-foreground" onClick={() => setOpen(true)}>
-        <PlusIcon />
-        <span>New project</span>
-      </SidebarRow>
-    );
-  }
   return (
     <form className="flex flex-col gap-1.5 px-0.5 py-1" onSubmit={(event) => void submit(event)}>
       <Input
@@ -83,7 +73,7 @@ export function NewProject({ workspace, onCreated }: { workspace: Workspace; onC
         value={repo}
         disabled={busy}
         onChange={(event) => setRepo(event.target.value)}
-        onKeyDown={(event) => event.key === "Escape" && setOpen(false)}
+        onKeyDown={(event) => event.key === "Escape" && onClose()}
       />
       {busy && (
         <p className="flex items-center gap-1.5 px-1 text-muted-foreground text-xs">

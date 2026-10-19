@@ -87,7 +87,7 @@ export function Sidebar({ open, children }: { open: boolean; children: ReactNode
 export function SidebarHeader({ children }: { children: ReactNode }) {
   return (
     <div className="drag-region flex h-(--topbar-height) shrink-0 items-center ps-(--sidebar-content-left) pe-3">
-      <span className="min-w-0 truncate font-semibold text-sm tracking-tight">{children}</span>
+      <span className="flex min-w-0 items-center gap-2 truncate font-semibold text-sm tracking-tight">{children}</span>
     </div>
   );
 }

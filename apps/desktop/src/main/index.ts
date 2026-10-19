@@ -288,8 +288,9 @@ app.whenReady().then(async () => {
     height: 760,
     title: "Chiefbot",
     icon, // the window and taskbar icon on Windows and Linux
-    // T3 Code's chrome on macOS: no title bar, the window buttons inset in the sidebar's top bar.
-    ...(process.platform === "darwin" ? ({ titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 18 } } as const) : {}),
+    // T3 Code's chrome on macOS: no title bar, the window buttons inset in the sidebar's top bar,
+    // centred in its 52px height (buttons are 12px) beside the sidebar toggle.
+    ...(process.platform === "darwin" ? ({ titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 20 } } as const) : {}),
     webPreferences: { preload: join(import.meta.dirname, "../preload/index.cjs") },
   });
   // Links (the GitHub device page) open in the default browser, never in the app.
