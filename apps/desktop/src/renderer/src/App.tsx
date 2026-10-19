@@ -374,7 +374,7 @@ function SettingsMenu({ user }: { user: User }) {
       <SidebarIconButton label="Settings" popoverTarget={menu}>
         <SettingsIcon />
       </SidebarIconButton>
-      <MenuPopup id={menu} className="w-60">
+      <MenuPopup id={menu} aria-label="Account" className="w-60">
         <div className="flex items-center gap-2.5 px-2 py-1.5">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-full border bg-muted font-medium text-sm uppercase">
             {user.login.slice(0, 1)}
