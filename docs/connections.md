@@ -7,18 +7,12 @@ Connections differ from connectors (`docs/connectors.md`): a connector is an MCP
 ## Turn one on
 
 1. Open the gear menu at the bottom left of the sidebar and click **Connect apps**.
-2. Click **Connect** on the app's row and fill in its fields. Paste a token with only the access your bots need, and one that expires (below).
+2. Click **Connect** on the app's row. The form lists the steps to get each value (the token, the roles or scopes it needs, where to find each ID), says what your bots then run without asking and what asks first, and shows help and an example under each field. Paste a token with only the access your bots need, and one that expires (below).
 3. Click **Save**. The row says **On**.
 
 **Edit** asks for every field again: control never sends a saved value back. **Disconnect** turns it off and deletes your fields. The bot's **Details** tab lists its **Connection calls**: each run of a connection's CLI, and when, added as each turn ends. A run shows as the CLI and the subcommands its `readOnly` list names (`harness get`, `acli jira workitem`), never flags or values; a command no read-only entry names shows as the bare CLI.
 
-| App | Fields |
-| --- | --- |
-| Jira | Site (like `mysite.atlassian.net`), your Atlassian email, an API token (id.atlassian.com, **Security**, **API tokens**; pick one with scopes and an expiry date). |
-| Dynatrace | Environment URL (like `https://abc12345.apps.dynatrace.com`) and a platform token (myaccount.dynatrace.com, **Platform tokens**; with an expiry date). Health checks need `storage:buckets:read`, `storage:events:read`, `storage:logs:read`, `storage:metrics:read` and `slo:slos:read`; dtctl's `docs/TOKEN_SCOPES.md` lists the rest. |
-| Google Cloud | A service account key JSON (IAM, **Service accounts**, **Keys**), or an `authorized_user` credentials JSON (what `gcloud auth application-default login` writes), with only the roles your bots need (like Viewer), and a default project ID. The key never leaves control: each turn gets a one-hour access token minted from it (below). |
-| Harness | Account ID, a default organization and project (the CLI refuses to run without them; `--org` and `--project` still choose another per command), and a personal access token or service account token with only the roles it needs. |
-| Looker | Instance URL, and an API client ID and secret (Admin, **Users**, **Edit keys**; or your own **Account** page on Looker (Google Cloud core)) of a user with only the permissions it needs. Its CLI, `looker`, is a small API client the folder ships (`connections/looker/looker.ts`). |
+Each app's steps and field help live in its `connection.yaml` (below). Looker's CLI, `looker`, is a small API client the folder ships (`connections/looker/looker.ts`).
 
 ## What happens in a turn
 
@@ -36,7 +30,7 @@ Before a shell command runs, the worker checks each command of a connection's CL
 
 Approvals here are a guardrail against mistakes, not a boundary.
 
-The credential is yours and the computer is your bot's, which acts only for you (`docs/isolation.md`). During a turn the agent can read the token file, run the CLI from a script, or call the vendor's API with the token directly, and the worker sees none of that as a command of the CLI. So a bot can do anything your token allows, as you could in your own terminal. That is why the screen asks for a scoped token that expires: an Atlassian API token with scopes, a Harness token or service account with only the roles it needs. The token is on the computer only while your turn runs. Google Cloud's is a one-hour access token: the key it comes from stays in control.
+The credential is yours and the computer is your bot's, which acts only for you (`docs/isolation.md`). During a turn the agent can read the token file, run the CLI from a script, or call the vendor's API with the token directly, and the worker sees none of that as a command of the CLI. So a bot can do anything your token allows, as you could in your own terminal. That is why the screen asks for a token that expires, with only the access it needs: a Harness token or service account with viewer roles, a Dynatrace token with read scopes, a Google service account with viewer roles. acli signs in only with an Atlassian API token without scopes, which can do whatever its account can, so for Jira the account itself is the limit. The token is on the computer only while your turn runs. Google Cloud's is a one-hour access token: the key it comes from stays in control.
 
 Connections reach only your own bots. A project's coordinator has no shell, and task workers do not get connections.
 
@@ -50,7 +44,9 @@ A connection is a folder, `connections/<name>/`, with three files. Control reads
 | --- | --- |
 | `title`, `description` | What **Connect apps** shows. The folder name is the connection's name: lower-case letters, digits and hyphens. |
 | `cli` | The command the agent runs, which gets the wrapper. |
-| `fields` | What the person fills in: `<field>: { label, secret }`. A `secret` field is a password input and is kept in the `SecretStore`. |
+| `setup` | 3 to 6 steps **Connect apps** numbers above the fields: how to get each value, and the roles or scopes it needs, read-only first. A step (or a field's `help`) may hold one link, written `[text](https://…)`, which opens in the system browser. |
+| `withoutAsking`, `asksFirst` | One line each, in words: what the bot runs without asking (the `readOnly` list) and what waits for approval. |
+| `fields` | What the person fills in: `<field>: { label, secret, help, placeholder }`. A `secret` field is a password input and is kept in the `SecretStore`. `help` shows under the input (what it is, where to get it); `placeholder` is an example value. |
 | `env` | Variables the wrapper sets. `{field}` is a field's value, `{dir}` the connection's folder for the turn. Point the CLI's config and login there, so they go with the turn. |
 | `exchange` | Optional. `google-access-token`: control turns the secret field `key` into the field `token`, a one-hour Google access token, before each turn; the key never reaches the computer. |
 | `readOnly` | Commands that run without asking. `*` matches any text, `?` one character, and the whole command must match. Leave out anything that may write. |

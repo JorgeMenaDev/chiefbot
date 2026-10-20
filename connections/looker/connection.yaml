@@ -10,10 +10,26 @@
 title: Looker
 description: Looker queries, schedules and database connections through its API, as you.
 cli: looker
+setup:
+  - "Ask a Looker admin for a user whose role grants only access_data, see_looks, see_user_dashboards, see_lookml_dashboards, see_schedules, see_system_activity, see_users and see_queries, plus see_admin if the bot should check database connections."
+  - "Ask the admin to turn on API keys for that user ([API keys](https://cloud.google.com/looker/docs/user-account))."
+  - "Signed in as that user, open your Account page. Under API Keys, click Manage, then Create New API Key."
+  - "Copy the client ID, then click Show secret and copy the client secret."
+withoutAsking: "Read the instance, users, connections, schedules, dashboards, Looks, models and folders, run System Activity queries and test database connections."
+asksFirst: "Run a Look or a query on your own models, any other read, and every change."
 fields:
-  url: { label: "Instance URL, like https://mycompany.cloud.looker.com" }
-  clientid: { label: "API client ID (Admin, Users, Edit keys; or your Account page)" }
-  secret: { label: "API client secret, of a user with only the permissions it needs", secret: true }
+  url:
+    label: "Instance URL"
+    placeholder: "https://mycompany.cloud.looker.com"
+    help: "Only https:// and the host, no path. Add a port such as :19999 only if your admin says the API uses one."
+  clientid:
+    label: "API client ID"
+    placeholder: "AbCdEf1234567890GhIj"
+    help: "From step 4."
+  secret:
+    label: "API client secret"
+    secret: true
+    help: "From step 4. It acts as that user, so the user's role decides what your bots can read."
 env:
   LOOKERSDK_BASE_URL: "{url}"
   LOOKERSDK_CLIENT_ID: "{clientid}"

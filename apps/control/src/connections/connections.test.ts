@@ -55,7 +55,7 @@ test("a person turns a connection on with their own fields; its secrets stay in 
     ["jira", false],
     ["looker", false],
   ]);
-  expect(rows.find(({ name }) => name === "harness")?.fields.token).toEqual({ label: expect.any(String), secret: true });
+  expect(rows.find(({ name }) => name === "harness")?.fields.token).toMatchObject({ label: expect.any(String), secret: true });
   expect(JSON.stringify(rows)).not.toContain(harness.token);
   expect(connectionSecrets().map(([, value]) => JSON.parse(value))).toEqual([{ token: harness.token }]);
   // Connections are a person's own.

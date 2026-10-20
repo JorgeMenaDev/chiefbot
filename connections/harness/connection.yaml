@@ -8,11 +8,31 @@
 title: Harness
 description: Harness pipelines, executions and services through the harness CLI.
 cli: harness
+setup:
+  - "In Harness, open your profile from your avatar. Under My API Keys, click + API Key, name it and save."
+  - "Under the new key, click + Token, set an expiration date, click Generate Token and copy it. Harness shows it once."
+  - "The token has your own roles. For read-only, make a [service account](https://developer.harness.io/docs/platform/role-based-access-control/add-and-manage-service-account) with the Project Viewer role and use its token instead."
+  - "Copy the account, organization and project IDs from Harness's address bar, after /account/, /orgs/ and /projects/."
+withoutAsking: "List and get pipelines, executions, services and other resources, and check its sign-in."
+asksFirst: "Run a pipeline, and create, update or delete anything."
 fields:
-  account: { label: "Account ID (Account Settings, Overview)" }
-  org: { label: "Default organization ID, like default" }
-  project: { label: "Default project ID" }
-  token: { label: "Personal access token or service account token, with only the roles it needs", secret: true }
+  account:
+    label: "Account ID"
+    placeholder: "Ab1Cd2Ef3Gh4Ij5Kl6Mn7O"
+    help: "Account Settings, Overview, or the part after /account/ in Harness's address bar."
+  org:
+    label: "Default organization ID"
+    placeholder: "default"
+    help: "The ID, not the name: the part after /orgs/ in the address bar. The bot can name another per command."
+  project:
+    label: "Default project ID"
+    placeholder: "my_project"
+    help: "The ID, not the name: the part after /projects/ in the address bar. The CLI needs one; the bot can name another per command."
+  token:
+    label: "API token"
+    placeholder: "pat.Ab1Cd2Ef3Gh4Ij5Kl6Mn7O...."
+    secret: true
+    help: "A personal access token (pat.) or a service account token (sat.) from steps 1 to 3, with an expiration date."
 env:
   HARNESS_API_KEY: "{token}"
   HARNESS_ACCOUNT_ID: "{account}"

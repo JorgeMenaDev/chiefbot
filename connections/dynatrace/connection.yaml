@@ -13,9 +13,24 @@
 title: Dynatrace
 description: Dynatrace problems, logs, services and SLOs through dtctl, as you.
 cli: dtctl
+setup:
+  - "Open [Platform tokens](https://myaccount.dynatrace.com/platformTokens) in Dynatrace Account Management and click Platform token to create one."
+  - "Name it, pick an expiration date, and limit it to the environment your bots read."
+  - "Select only these scopes: storage:buckets:read, storage:events:read, storage:logs:read, storage:metrics:read, slo:slos:read, slo:objective-templates:read."
+  - "Click Generate and copy the token. Dynatrace shows it once."
+  - "The token never does more than your own Dynatrace permissions allow. dtctl's [token scopes](https://github.com/dynatrace-oss/dtctl/blob/main/docs/TOKEN_SCOPES.md) list what other reads need."
+withoutAsking: "Read problems, logs, metrics, services and SLOs with get, describe, query, logs and the like."
+asksFirst: "Apply, create, edit or delete anything, and every exec, such as an SLO evaluation, a workflow or CoPilot."
 fields:
-  environment: { label: "Environment URL, like https://abc12345.apps.dynatrace.com" }
-  token: { label: "Platform token (dt0s16...) with only the scopes it needs, and an expiry", secret: true }
+  environment:
+    label: "Environment URL"
+    placeholder: "https://abc12345.apps.dynatrace.com"
+    help: "Your environment's address, as the browser shows it when Dynatrace is open, without a path."
+  token:
+    label: "Platform token"
+    placeholder: "dt0s16.ABCDEFGH...."
+    secret: true
+    help: "The token from step 4, with only the scopes in step 3 and an expiration date."
 env:
   DT_ENVIRONMENT_URL: "{environment}"
   DT_API_TOKEN: "{token}"

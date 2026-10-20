@@ -5,10 +5,27 @@
 title: Jira
 description: Jira work items through the Atlassian CLI (acli), as you.
 cli: acli
+setup:
+  - "Open [API tokens](https://id.atlassian.com/manage-profile/security/api-tokens) in your Atlassian account."
+  - "Click Create API token, the one without scopes. acli signs in only with that kind."
+  - "Name it Chiefbot, pick an expiry date, click Create and copy the token. Atlassian shows it once."
+  - "The token can do whatever your Jira account can. For read-only, make the token from an account that can only browse the projects your bots need."
+withoutAsking: "Search and view work items, and list and view projects."
+asksFirst: "Create, edit, assign, transition or comment on a work item, and anything else."
 fields:
-  site: { label: "Site, like mysite.atlassian.net" }
-  email: { label: "Atlassian account email" }
-  token: { label: "Atlassian API token (one with scopes, from id.atlassian.com)", secret: true }
+  site:
+    label: "Site"
+    placeholder: "mysite.atlassian.net"
+    help: "Your Jira site's address, as the browser shows it when Jira is open, without https://."
+  email:
+    label: "Atlassian account email"
+    placeholder: "you@example.com"
+    help: "The email you sign in to Atlassian with. The token belongs to this account."
+  token:
+    label: "API token"
+    placeholder: "ATATT3x..."
+    secret: true
+    help: "The token from step 3. Delete it on the API tokens page when you stop using Chiefbot."
 env:
   HOME: "{dir}"
 readOnly:
