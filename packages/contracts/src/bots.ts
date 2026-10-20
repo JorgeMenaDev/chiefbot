@@ -8,7 +8,7 @@ import { ModelReport, ReasoningEffort } from "./models.ts";
 import { ProjectStateChange, ProjectStates, ProjectTasks } from "./projects.ts";
 import { QuestionResult } from "./questions.ts";
 import { ScreenControl } from "./screens.ts";
-import { EngineerSetup, ProjectWorkers } from "./taskWorkers.ts";
+import { EngineerSetup, ProjectWorkers, TaskWorkerKind } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
@@ -96,7 +96,8 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //                   `attachments` are the files sent with the message: the worker reads each from control with the turn's key.
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
 //                   (control's proxy runs them as the member who asked), and its `turnKey`. It sets
-//                   up as `setup` says before its agent starts (taskWorkers.ts EngineerSetup). Sent
+//                   up as `setup` says before its agent starts (taskWorkers.ts EngineerSetup). A
+//                   `verifier` (its `kind`) gets report_verdict and no create_pull_request. Sent
 //                   once, after its first hello.
 //   turn-key        the running turn's new key (chat.ts TurnKeyMessage)
 //   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
@@ -121,6 +122,7 @@ export const ControlToWorker = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("run-task"),
+    kind: TaskWorkerKind.default("engineer"),
     turnId: TurnId,
     turnKey: TurnKey,
     text: z.string(),

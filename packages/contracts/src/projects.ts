@@ -304,6 +304,11 @@ export const WriteContextArgs = z.object({
   content: z.string().max(200_000).describe("The file's whole new content, in Markdown"),
 });
 
+export const DispatchVerifierArgs = z.object({
+  task: z.number().int().min(1).describe("The number of the task whose pull request the verifier checks"),
+  pullRequest: z.url().optional().describe("The task's pull request to check; left out, the latest it links"),
+  instructions: z.string().max(20_000).default("").describe("What the verifier should check beyond what the task asks"),
+});
 export const DispatchWorkerArgs = z.object({
   task: z.number().int().min(1).describe("The number of the task the worker does"),
   instructions: z.string().max(20_000).default("").describe("Anything the worker needs beyond the task's title and detail"),
@@ -332,9 +337,9 @@ export const RepoSearchArgs = z.object({
 // Body of POST /coordinator/:projectId/tools: one tool call of the running coordinator turn.
 // Its answer, as JSON: create_task and update_task → Task; list_tasks → Task[];
 // read_context → ContextFile[] without a path, { path, content } with one; write_context → ContextFile;
-// dispatch_worker, stop_worker and worker_status with a worker → TaskWorker; worker_status
+// dispatch_worker, dispatch_verifier, stop_worker and worker_status with a worker → TaskWorker; worker_status
 // without one → TaskWorker[]; worker_transcript → WorkerTranscript (taskWorkers.ts).
-// dispatch_worker's `creationId` is not the model's: the coordinator sets it from the
+// A dispatch's `creationId` is not the model's: the coordinator sets it from the
 // tool call's id, so a resent call starts no second worker.
 export const CoordinatorToolCall = z.discriminatedUnion("tool", [
   CreateTaskArgs.extend({ tool: z.literal("create_task") }),
@@ -343,6 +348,7 @@ export const CoordinatorToolCall = z.discriminatedUnion("tool", [
   ReadContextArgs.extend({ tool: z.literal("read_context") }),
   WriteContextArgs.extend({ tool: z.literal("write_context") }),
   DispatchWorkerArgs.extend({ tool: z.literal("dispatch_worker"), creationId: z.string().min(1).max(300) }),
+  DispatchVerifierArgs.extend({ tool: z.literal("dispatch_verifier"), creationId: z.string().min(1).max(300) }),
   WorkerStatusArgs.extend({ tool: z.literal("worker_status") }),
   WorkerTranscriptArgs.extend({ tool: z.literal("worker_transcript") }),
   StopWorkerArgs.extend({ tool: z.literal("stop_worker") }),

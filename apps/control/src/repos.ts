@@ -7,7 +7,7 @@ import {
   type UserId,
 } from "@chiefbot/contracts";
 import type { ApprovalOutcome } from "./approvals.ts";
-import { createPullRequest, installationToken, repoPermission, type GitHubAppKey } from "./github.ts";
+import { createPullRequest, installationToken, readPullRequest, repoPermission, type GitHubAppKey, type PullRequestHead } from "./github.ts";
 
 // Control's repo access, the boundary between bots and GitHub. Control holds the
 // only credential that may write (the deployer's repo app, through one-repo
@@ -19,7 +19,8 @@ import { createPullRequest, installationToken, repoPermission, type GitHubAppKey
 // owner is still signed in and, through the repo app, that they may do it themselves.
 // A project's task worker reaches repos the same way, with its turn's key: for
 // it, the "owner" is the member who asked for it. A project's coordinator only
-// fetches its own project's repo, into the copy it reads, as the turn's member.
+// fetches its own project's repo, into the copy it reads, as the turn's member,
+// and so does a verifier, into its clone: neither ever pushes.
 
 // Who a turn key acts for: whose GitHub account bounds its repo access, and
 // how to ask that person to approve, in that turn of the bot or task worker.
@@ -28,9 +29,9 @@ export type RepoAgent = {
   ask: (kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
 };
 
-// A project's coordinator in its turn: it may fetch `repo`, its project's, as
-// the turn's member, and nothing else.
-export type RepoReader = { userId: UserId; repo: string };
+// A project's coordinator or verifier in its turn: it may fetch `repo`, its
+// project's, as the turn's member, and nothing else. `who` names it in a refusal.
+export type RepoReader = { userId: UserId; repo: string; who: string };
 
 export type RepoAccessOptions = {
   // github.com (git) and api.github.com; fakes in tests.
@@ -108,7 +109,7 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
       }
       const push = service === "git-receive-pack";
       if ("repo" in bot && (push || bot.repo.toLowerCase() !== fullName.toLowerCase())) {
-        return text(403, `A project's coordinator may only fetch ${bot.repo}.`);
+        return text(403, `${bot.who} may only fetch ${bot.repo}.`);
       }
       const access = await grant(bot.userId, fullName, push ? "write" : "read");
       if ("error" in access) return text(access.status, access.message);
@@ -119,8 +120,8 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
       // takes, and control forwards exactly the bytes they approved. Only git's
       // probe before a large push (a bare flush packet) updates nothing and passes.
       if (push && body && !isProbe(body)) {
-        // Refused above already: nobody could approve a coordinator's push.
-        if (!("ask" in bot)) return text(403, "Only a bot or a worker may push.");
+        // Refused above already: nobody could approve a coordinator's or verifier's push.
+        if (!("ask" in bot)) return text(403, "Only a bot or an engineer may push.");
         const request = pushRequest(body, req.headers.get("content-encoding"));
         if (request === null) return text(415, "Chiefbot's git proxy reads only plain or gzip push requests.");
         server.timeout(req, 0);
@@ -148,6 +149,16 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
         if (value !== null) forwarded.set(name, value);
       }
       return new Response(res.body, { status: res.status, headers: forwarded });
+    },
+
+    // Pull request `number` of the repo as `userId` may read it: its head now,
+    // or why not (repo_not_found for one GitHub does not show them).
+    async pullRequestHead(userId: UserId, fullName: string, number: number): Promise<PullRequestHead | Refusal> {
+      const access = await grant(userId, fullName, "read");
+      if ("error" in access) return access;
+      const pr = await readPullRequest(githubApiUrl, access.token, fullName, number).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+      if (pr instanceof Error) return { error: "github_failed", status: 502, message: pr.message };
+      return pr ?? { error: "repo_not_found", status: 404, message: `${fullName} has no pull request #${number} your GitHub account can see.` };
     },
 
     // The create_pull_request tool (POST /worker/:botId/pull-requests, or a task worker's):

@@ -323,7 +323,19 @@ export function startFakeGitHub({
           if (!branches.includes(head)) return Response.json({ message: "Validation Failed" }, { status: 422 });
           const pr = { repository, number: pullRequests.length + 1, head, base, title, body, draft, by };
           pullRequests.push(pr);
-          return Response.json({ number: pr.number, html_url: `${new URL(req.url).origin}/${repository}/pull/${pr.number}` }, { status: 201 });
+          return Response.json({ number: pr.number, html_url: pullRequestUrl(pr) }, { status: 201 });
+        },
+      },
+      // One pull request, its head as its branch is now. Like GitHub, 404 for a
+      // repo the token cannot read.
+      "/repos/:owner/:repo/pulls/:number": {
+        GET: (req) => {
+          const repository = `${req.params.owner}/${req.params.repo}`;
+          const pr = pullRequests.find((candidate) => candidate.repository === repository && candidate.number === Number(req.params.number));
+          if (!pr || !reader(bearerToken(req), repository)) return Response.json({ message: "Not Found" }, { status: 404 });
+          const { number, title, body, head, base } = pr;
+          const sha = git(bareRepo(repository), ["rev-parse", `refs/heads/${head}`]);
+          return Response.json({ number, html_url: pullRequestUrl(pr), state: "open", title, body, head: { ref: head, sha }, base: { ref: base } });
         },
       },
     },
@@ -351,6 +363,11 @@ export function startFakeGitHub({
       return res;
     },
   });
+
+  // A pull request's page, as GitHub's html_url.
+  function pullRequestUrl({ repository, number }: FakePullRequest): string {
+    return `${server.url.origin}/${repository}/pull/${number}`;
+  }
 
   // Whether an installation token may read (or write) the repo's contents.
   function installationMay(token: string, repository: string, level: "read" | "write") {
@@ -450,8 +467,15 @@ export function startFakeGitHub({
       createBareRepo(repoRoot, fullName, files);
       repos.set(fullName, { id: 9000 + repos.size, installed, access });
     },
-    // A new commit on the repo's main holding `files`, as if someone pushed it.
-    commit: (fullName: string, files: Record<string, string>) => commitFiles(bareRepo(fullName), files),
+    // A new commit holding `files` on the repo's `branch` (main by default; a new
+    // one starts from main), as if someone pushed it: its SHA.
+    commit: (fullName: string, files: Record<string, string>, branch = "main") => commitFiles(bareRepo(fullName), files, branch),
+    // A pull request someone opened on github.com from `head`, by `login`: its URL.
+    openPullRequest(fullName: string, { head, base = "main", title, body = "" }: { head: string; base?: string; title: string; body?: string }, login = user.login) {
+      const pr = { repository: fullName, number: pullRequests.length + 1, head, base, title, body, draft: false, by: login };
+      pullRequests.push(pr);
+      return pullRequestUrl(pr);
+    },
     // Holds git's requests until `release` runs, as a slow GitHub would. `held` counts the requests that waited.
     holdGit() {
       let release = () => {};

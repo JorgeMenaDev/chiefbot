@@ -1095,3 +1095,84 @@ test("when the organization pays, a worker runs on its installation token", asyn
   // The (fake) coordinator asked for none: the worker's session took the first.
   expect(copilot.tokens).toEqual(["ghs_org_1"]);
 });
+
+// A project for octo-org/shop whose computers use real git: each worker's setup
+// and its agent's shell reach the fake GitHub through control's git proxy, with
+// the turn's key from the worker's credential helper, as in a real computer.
+async function gitProject(projectFile?: string) {
+  const home = mkdtempSync(join(tmpdir(), "chiefbot-home-"));
+  atCleanUp(() => rmSync(home, { recursive: true, force: true }));
+  // Short: a unix socket path must fit in about 100 bytes.
+  const socket = `/tmp/chiefbot-t64-${crypto.randomUUID().slice(0, 8)}.sock`;
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "",
+    HOME: home,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_AUTHOR_NAME: "Chiefbot",
+    GIT_AUTHOR_EMAIL: "chiefbot@example.com",
+    GIT_COMMITTER_NAME: "Chiefbot",
+    GIT_COMMITTER_EMAIL: "chiefbot@example.com",
+    CHIEFBOT_GIT_SOCKET: socket,
+  };
+  const control = await teamProject({ copilot: fakeCopilot({ shell: { cwd: home, env } }), setupShell: setupShell(env), gitSocket: socket }, projectFile);
+  const helper = join(import.meta.dir, "../../worker/src/gitCredential.ts");
+  Object.assign(env, gitProxyConfig({ controlUrl: control.url, helper: `"${process.execPath}" ${helper}` }));
+  return control;
+}
+
+// A pull request someone opened on the repo from the branch fix-typo, linked on
+// task #1 through the coordinator's `tool`: its URL and head commit.
+async function pullRequestOnTask(control: Awaited<ReturnType<typeof teamProject>>, tool: (call: Record<string, unknown>) => Promise<unknown>) {
+  const head = control.github.commit("octo-org/shop", { "README.md": "# Shop\nThe shop.\n" }, "fix-typo");
+  const url = control.github.openPullRequest("octo-org/shop", { head: "fix-typo", title: "Fix a typo", body: "Teh becomes The in the README." });
+  await tool({ tool: "update_task", number: 1, links: [{ kind: "pull-request", url }] });
+  return { url, head };
+}
+
+const isVerifier = (prompt: string) => prompt.startsWith("You are the verifier");
+
+test("a verifier checks the task's pull request at the head control pinned, on a fresh computer that is never the engineer's, and control refuses its pushes", async () => {
+  const control = await gitProject("commands:\n  dev: bun run dev\n  devUrl: http://localhost:3000\n");
+  const { owner, project, copilot, github, computers } = control;
+  let push = { exitCode: 0, output: "" };
+  let checkedOut = "";
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) {
+      const clone = copilot.workingDirectories.at(-1) ?? "";
+      checkedOut = (await runtime.shell(`cd ${clone} && git rev-parse HEAD`)).output.trim();
+      push = await runtime.shell(`cd ${clone} && git checkout -q -b more && git commit -q --allow-empty -m more && git push -q origin more`);
+    }
+    yield sdk.message("msg-1", "Checked.");
+    yield sdk.idle();
+  });
+  expect(await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-0" })).toEqual({
+    status: 400,
+    body: { error: "invalid_tool_call", message: "Task #1 links no pull request: an engineer opens one first, and a verifier checks it." },
+  });
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, engineer.id, ({ state }) => state === "finished");
+  const { url, head } = await pullRequestOnTask(control, tool);
+
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(verifier).toMatchObject({ kind: "verifier", taskNumber: 1, sha: head, pullRequest: url, requestedBy: "octo-user" });
+  expect(engineer.kind).toBe("engineer");
+  // A computer of its own: the engineer's stays stopped, keeping its disk.
+  expect(computers.computers.get(verifier.id)?.spec.env.CHIEFBOT_TASK_WORKER_ID).toBe(verifier.id);
+  expect(await computers.provider.status(engineer.id)).toBe("stopped");
+  const finished = await workerWhen(owner, project, verifier.id, ({ state }) => state === "finished");
+  expect(finished.setup.map(({ step, command, exitCode }) => [step, command, exitCode])).toEqual([
+    ["clone", "git clone https://github.com/octo-org/shop.git shop", 0],
+    ["checkout", `git fetch -q origin ${head} && git checkout -q --detach ${head}`, 0],
+  ]);
+  expect(checkedOut).toBe(head);
+  const brief = copilot.sends.find(({ sessionId }) => sessionId === verifier.id)?.prompt ?? "";
+  expect(brief).toContain(`Pull request: ${url}\nCommit: ${head}\nFix a typo\nTeh becomes The in the README.`);
+  expect(brief).toContain("1. Start the app: run `bun run dev` in the background in the clone, and wait until http://localhost:3000 answers.");
+  expect(brief).toContain("report_verdict");
+  expect(push.exitCode).not.toBe(0);
+  expect(push.output).toContain("A verifier may only fetch octo-org/shop.");
+  expect(github.pushes).toEqual([]);
+});

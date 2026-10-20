@@ -3,6 +3,7 @@ import {
   ACCESS_MODES,
   ATTACHMENTS,
   ENGINEER_SETUP,
+  VERIFIER,
   ApprovalId,
   ControlToWorker,
   DEFAULT_ACCESS,
@@ -415,7 +416,7 @@ export function startWorker({
     base,
     token,
     retryMs,
-    capabilities: [ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP],
+    capabilities: [ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, VERIFIER],
     ...(clock === undefined ? {} : { clock }),
     parse: (json) => ControlToWorker.parse(json),
     // Called synchronously just before the turn's done goes out, so nothing can

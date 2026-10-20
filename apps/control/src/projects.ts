@@ -342,6 +342,7 @@ export function projectHost({
       case "write_context":
         return Response.json((await context.write(projectId, call.path, call.content)) satisfies ContextFile);
       case "dispatch_worker":
+      case "dispatch_verifier":
       case "worker_status":
       case "worker_transcript":
       case "stop_worker":

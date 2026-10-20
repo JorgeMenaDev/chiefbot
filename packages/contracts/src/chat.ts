@@ -20,10 +20,11 @@ export const SETUP_LOG_MAX = 16_384;
 
 // One step of an engineer's setup (a project's task worker), before its agent
 // starts: the command it ran, how it ended and the end of its output.
-//   clone  clones the project's repo from its default branch, through control's git proxy
-//   setup  the project's commands.setup, in the clone, with the project's secrets in its environment
+//   clone     clones the project's repo from its default branch, through control's git proxy
+//   checkout  a verifier's: fetches the commit it checks and checks it out
+//   setup     the project's commands.setup, in the clone, with the project's secrets in its environment
 export const SetupStep = z.object({
-  step: z.enum(["clone", "setup"]),
+  step: z.enum(["clone", "checkout", "setup"]),
   command: z.string(),
   exitCode: z.int(),
   log: z.string().max(SETUP_LOG_MAX),
@@ -259,7 +260,7 @@ export type ChatView = z.infer<typeof ChatView>;
 //               each index once, so resends are harmless, then ends every other
 //               unfinished turn: the runtime lost it. `capabilities` name what the
 //               runtime does beyond the first protocol (ACCESS_MODES, ATTACHMENTS,
-//               ENGINEER_SETUP); an older one sends none.
+//               ENGINEER_SETUP, VERIFIER); an older one sends none.
 export const TurnEventMessage = z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent });
 export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable(), capabilities: z.array(z.string()).default([]) });
 
@@ -273,6 +274,10 @@ export const ATTACHMENTS = "attachments";
 // One without it would ignore the setup and start its agent bare, so control
 // gives it no task: it ends blocked, asking for a rebuilt computer image.
 export const ENGINEER_SETUP = "engineer-setup";
+// A task worker that can be a verifier: it checks out the commit its setup names,
+// has report_verdict and no create_pull_request. Control gives one without it no
+// verifier's task: it ends blocked, asking for a rebuilt computer image.
+export const VERIFIER = "verifier";
 
 // Control → an agent's runtime, after a hello naming a turn that still runs whose
 // key control no longer has (control restarted, which revokes every key): the

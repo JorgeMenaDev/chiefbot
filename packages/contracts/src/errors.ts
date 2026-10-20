@@ -120,6 +120,7 @@ export const ApiErrorCode = z.enum([
   "question_changed",
   "invalid_tool_call",
   "requester_only",
+  "verifier_read_only",
   "copilot_token_failed",
   "invalid_connector",
   "connector_exists",
