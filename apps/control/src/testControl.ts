@@ -195,6 +195,9 @@ function userApi(url: string, sessionToken: string) {
     watchChat: (botId: BotId, after = 0) => watchChat(url, auth, `/bots/${botId}/chat?after=${after}`),
     // The user's own chat with a project's coordinator.
     watchProjectChat: (projectId: ProjectId, after = 0) => watchChat(url, auth, `/projects/${projectId}/chat?after=${after}`),
+    // What one of a project's workers did, as a member follows it.
+    watchWorkerTranscript: (projectId: ProjectId, workerId: string, after = 0) =>
+      watchChat(url, auth, `/projects/${projectId}/workers/${workerId}/transcript?after=${after}`),
     // A new bot, once its worker is connected.
     async onlineBot(name: string) {
       const bot = await createBot(name);

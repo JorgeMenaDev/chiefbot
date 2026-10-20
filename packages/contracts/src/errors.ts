@@ -10,8 +10,8 @@ import { z } from "zod";
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
-//   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request, invalid_copilot_mode
-//                         the body or query failed its schema (400)
+//   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request, invalid_copilot_mode,
+//   invalid_path          the body or query failed its schema (400)
 //   invalid_schedule      a routine's or schedule subscription's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
 //   effort_unavailable    the model does not support that reasoning effort (400)
@@ -63,6 +63,9 @@ import { z } from "zod";
 //   invalid_subscription  a subscription failed its schema, or names a connector that is not a remote
 //                         one the project declares; `message` says why (400)
 //   requester_only        only the member who asked for a project's worker answers its approvals (403)
+//   worker_offline        a project's worker has no screen to watch: its worker is not connected (409)
+//   screen_taken          another member has control of the engineer's screen (409)
+//   screen_not_open       taking control of an engineer's screen needs the member's own view of it open (409)
 //   invalid_turn_key      a call from an agent's computer carried no turn key, an unknown one, another
 //                         agent's, or one whose turn ended (403). Never answered with anyone else's turn.
 //   expected_websocket    a WebSocket route got a plain request (400)
@@ -77,6 +80,7 @@ export const ApiErrorCode = z.enum([
   "invalid_answer",
   "invalid_routine",
   "invalid_after",
+  "invalid_path",
   "invalid_pull_request",
   "invalid_workspace",
   "invalid_invite",
@@ -89,6 +93,9 @@ export const ApiErrorCode = z.enum([
   "computer_failed",
   "bot_offline",
   "bot_stopping",
+  "worker_offline",
+  "screen_taken",
+  "screen_not_open",
   "turn_running",
   "human_has_screen",
   "computer_outdated",

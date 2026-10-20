@@ -218,7 +218,7 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       );
       return { ...view, working: stillWaiting(items), items };
     }
-    // Only engineers set up, and no chat shows an engineer's turn.
+    // Only engineers set up: their task shows each step (EngineerDetails), not their transcript.
     case "setup-step":
     case "setup-done":
       return view;

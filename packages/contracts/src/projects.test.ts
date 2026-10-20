@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { effectiveConfig, ProjectFile } from "./projects.ts";
+import { ApprovalId, ProjectId, TaskWorkerId } from "./ids.ts";
+import { effectiveConfig, ProjectFile, projectState, type Task, type TaskStatus } from "./projects.ts";
+import type { TaskWorker, TaskWorkerState } from "./taskWorkers.ts";
 
 test("a project file takes every key, each optional, and refuses unknown ones", () => {
   const full = {
@@ -68,4 +70,52 @@ test("with no project file, the settings and the defaults make the config", () =
     sources: {},
   });
   expect(effectiveConfig(null, { verify: "verify-app" })).toMatchObject({ config: { verify: "verify-app" }, sources: { verify: "settings" } });
+});
+
+test("a project's dot says what most needs a member: their answer, then work going on, then whether it sleeps", () => {
+  const task = (status: TaskStatus, requestedBy = "octo-user"): Task => ({
+    projectId: ProjectId.parse("project_00000001-0000-4000-8000-000000000000"),
+    number: 1,
+    title: "Fix the typo",
+    detail: "",
+    status,
+    question: status === "needs_input" ? "Which page?" : null,
+    owner: null,
+    requestedBy,
+    links: [],
+    createdAt: 0,
+    updatedAt: 0,
+  });
+  const engineer = (state: TaskWorkerState, pending = false, requestedBy = "octo-user"): TaskWorker => ({
+    id: TaskWorkerId.parse("worker_00000001-0000-4000-8000-000000000000"),
+    projectId: ProjectId.parse("project_00000001-0000-4000-8000-000000000000"),
+    taskNumber: 1,
+    requestedBy,
+    payer: null,
+    state,
+    result: null,
+    pullRequest: null,
+    pendingApprovals: pending ? [{ approvalId: ApprovalId.parse("approval_1"), kind: "push", detail: "Push fix-typo" }] : [],
+    computerRemoved: false,
+    screenHolder: null,
+    setup: [],
+    createdAt: 0,
+    updatedAt: 0,
+  });
+  const quiet = { login: "octo-user", awake: true, busy: false, tasks: [], workers: [] };
+
+  expect(projectState(quiet)).toBe("idle");
+  expect(projectState({ ...quiet, awake: false })).toBe("sleeping");
+  // A message waiting for the project agent wakes it, so it counts as work.
+  expect(projectState({ ...quiet, awake: false, busy: true })).toBe("working");
+  expect(projectState({ ...quiet, workers: [engineer("working")] })).toBe("working");
+  expect(projectState({ ...quiet, workers: [engineer("launching")] })).toBe("working");
+  expect(projectState({ ...quiet, workers: [engineer("setting_up")] })).toBe("working");
+  expect(projectState({ ...quiet, workers: [engineer("queued")] })).toBe("idle");
+  expect(projectState({ ...quiet, workers: [engineer("finished")], tasks: [task("in_progress")] })).toBe("idle");
+  // Only the member who asked answers: a teammate sees the work going on.
+  expect(projectState({ ...quiet, busy: true, tasks: [task("needs_input")] })).toBe("needs_you");
+  expect(projectState({ ...quiet, tasks: [task("needs_input", "octo-friend")] })).toBe("idle");
+  expect(projectState({ ...quiet, awake: false, workers: [engineer("working", true)] })).toBe("needs_you");
+  expect(projectState({ ...quiet, workers: [engineer("working", true, "octo-friend")] })).toBe("working");
 });

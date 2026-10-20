@@ -141,13 +141,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     if (!row) throw new Error("task worker event insert returned no row");
     return toChatEvent(row);
   };
-  const transcript = (workerId: string): ChatEvent[] =>
+  // The worker's events after the one numbered `after` (all of them by default), oldest first.
+  const transcript = (workerId: string, after = 0): ChatEvent[] =>
     db
-      .query<ChatEventRow, [string]>(
+      .query<ChatEventRow, [string, number]>(
         `SELECT seq, turn_id, event FROM task_worker_events JOIN task_workers ON task_workers.id = worker_id
-         WHERE worker_id = ?1 ORDER BY seq`,
+         WHERE worker_id = ?1 AND seq > ?2 ORDER BY seq`,
       )
-      .all(workerId)
+      .all(workerId, after)
       .map(toChatEvent);
 
   // Ends the worker's turn from control's side, if it has not ended yet.

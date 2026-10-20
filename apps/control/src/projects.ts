@@ -1,9 +1,11 @@
 import {
   AnswerApprovalRequest,
+  ContextPath,
   CoordinatorToControl,
   CoordinatorToolCall,
   CreateProjectRequest,
   ProjectSettingsRequest,
+  projectState,
   SecretName,
   SendMessageRequest,
   SetProjectSecretRequest,
@@ -12,12 +14,14 @@ import {
   type ChatEvent,
   type ClientEvent,
   type ContextFile,
+  type ContextFileText,
   type ControlToCoordinator,
   type CopilotPayer,
   type Project,
   type ProjectId,
   type ProjectMember,
   type ProjectSecret,
+  type ProjectState,
   type SendMessageResponse,
   type Task,
   type User,
@@ -73,6 +77,11 @@ export type ProjectHostOptions = {
   connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
   // The project's task ledger changed.
   onLedgerChange: (projectId: ProjectId) => void;
+  // The project's state may have changed for its members (contracts projectState):
+  // its agent woke, slept or got a message to answer.
+  onStateChange: (projectId: ProjectId) => void;
+  // The project was deleted: these were its members.
+  onDeleted: (memberIds: UserId[]) => void;
   // The coordinator did something: its idle time starts again (idle.ts).
   onActivity: (projectId: ProjectId) => void;
 };
@@ -115,6 +124,8 @@ const failure = (error: unknown) => {
 //   DELETE /projects/:id/secrets/:name  → 204: its value goes
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
+//   GET    /projects/:id/context     → ContextFile[]: the shared context's files
+//   GET    /projects/:id/context/file  ?path=<ContextPath> → ContextFileText (400 invalid_path; 404 not_found)
 //   POST   /projects/:id/approvals/:approvalId  body AnswerApprovalRequest → 204: the member answers
 //                                    what control asked in their running turn (409 not_pending when it
 //                                    is answered, unknown, another member's or its turn ended)
@@ -146,6 +157,8 @@ export function projectHost({
   upgrade,
   connectorsFor,
   onLedgerChange,
+  onStateChange,
+  onDeleted,
   onActivity,
 }: ProjectHostOptions) {
   const { projects } = store;
@@ -197,6 +210,7 @@ export function projectHost({
   // workspace, for a shared one) whoever pays: org billing changes only
   // Copilot's identity. If they cannot be read, the turn runs without connectors.
   const schedule = (projectId: ProjectId) => {
+    onStateChange(projectId);
     if (stopping.has(projectId)) return;
     if (!greeted.has(projectId)) return wake(projectId);
     const next = projects.claimNextTurn(projectId);
@@ -355,12 +369,14 @@ export function projectHost({
       GET: member((_user, { project }) => Response.json(project satisfies Project)),
       DELETE: member(async (_user, { project, owner }: { project: Project; owner: boolean }, _req: Bun.BunRequest<"/projects/:id">) => {
         if (!owner) return apiError(403, "owner_only");
+        const members = projects.memberIds(project.id);
         await workers.removeProject(project.id);
         await computers.destroy(project.id, { deleteData: true });
         coordinators.get(project.id)?.close();
         await context.remove(project.id);
         return inOrder(project.id, async () => {
           await forget(projects.delete(project.id));
+          onDeleted(members);
           return new Response(null, { status: 204 });
         });
       }),
@@ -421,6 +437,20 @@ export function projectHost({
       GET: member((_user, { project }, _req: Bun.BunRequest<"/projects/:id/tasks">) =>
         Response.json(projects.tasks(project.id) satisfies Task[]),
       ),
+    },
+    "/projects/:id/context": {
+      GET: member(async (_user, { project }, _req: Bun.BunRequest<"/projects/:id/context">) =>
+        Response.json((await context.list(project.id)) satisfies ContextFile[]),
+      ),
+    },
+    "/projects/:id/context/file": {
+      GET: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/context/file">) => {
+        const path = ContextPath.safeParse(new URL(req.url).searchParams.get("path"));
+        if (!path.success) return apiError(400, "invalid_path");
+        const content = await context.read(project.id, path.data);
+        if (content === null) return apiError(404, "not_found");
+        return Response.json({ path: path.data, content } satisfies ContextFileText);
+      }),
     },
     // The answer is stored first, then wakes the call control holds.
     "/projects/:id/approvals/:approvalId": {
@@ -502,6 +532,16 @@ export function projectHost({
     // Whether the project's coordinator has a turn running or waiting.
     busy: (projectId: ProjectId) => projects.hasUnfinishedTurn(projectId),
 
+    // The project's state dot for the member `login` (contracts projectState).
+    stateOf: (projectId: ProjectId, login: string): ProjectState =>
+      projectState({
+        login,
+        awake: greeted.has(projectId),
+        busy: projects.hasUnfinishedTurn(projectId),
+        tasks: projects.tasks(projectId),
+        workers: store.taskWorkers.workersOf(projectId),
+      }),
+
     // Stops the idle project's computer. Its coordinator is forgotten once the
     // computer is stopped, and a turn queued meanwhile starts it again.
     async sleep(projectId: ProjectId) {
@@ -511,6 +551,7 @@ export function projectHost({
         coordinators.get(projectId)?.close();
         coordinators.delete(projectId);
         greeted.delete(projectId);
+        onStateChange(projectId);
       } finally {
         stopping.delete(projectId);
       }
@@ -582,6 +623,7 @@ export function projectHost({
       if (coordinators.get(data.projectId) !== ws) return;
       coordinators.delete(data.projectId);
       greeted.delete(data.projectId);
+      onStateChange(data.projectId);
     },
 
     message(data: ProjectSocketData, raw: string | Buffer) {
