@@ -800,6 +800,12 @@ export function taskWorkerHost({
     // (a connector call), as its pushes are asked.
     ask: (turn: TaskWorkerTurn, kind: ApprovalKind, detail: string, signal: AbortSignal) => agentOf(turn).ask(kind, detail, signal),
 
+    // A push through the git proxy moved branches of `repo` (repos.ts): each
+    // verdict on one of them, at another commit, is stale.
+    pushed(repo: string, moved: Array<{ branch: string; sha: string }>) {
+      for (const projectId of projects.staleOnPush(repo, moved)) publishTasks(projectId);
+    },
+
     // For the git proxy: the worker's turn as a repo agent; a verifier's only fetches its project's repo.
     repoAgentOf(turn: TaskWorkerTurn): RepoAgent | RepoReader | null {
       if (workers.worker(turn.workerId)?.kind !== "verifier") return agentOf(turn);

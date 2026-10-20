@@ -42,6 +42,8 @@ export type RepoAccessOptions = {
   ownerLogin: (userId: UserId) => Promise<string | null>;
   // The agent whose running turn a key is (a bot's, task worker's or coordinator's), if any.
   agentFor: (key: string) => RepoAgent | RepoReader | null;
+  // GitHub took an approved push to the repo: each branch it moves, and the commit it moves it to.
+  onPushed: (fullName: string, moved: Array<{ branch: string; sha: string }>) => void;
 };
 
 type Refusal = { error: ApiErrorCode; status: number; message: string };
@@ -60,7 +62,7 @@ const unapproved = {
   },
 };
 
-export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor }: RepoAccessOptions) {
+export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor, onPushed }: RepoAccessOptions) {
   // A token that may `access` the repo: the app's installation token for it,
   // once it shows the bot owner may do it themselves. For a read where the app
   // is not installed the token is null: GitHub is asked without one, which works
@@ -116,6 +118,7 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
       const body = req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined;
 
       let token = access.token;
+      let pushed: PushRequest | null = null;
       // Every push that may update a ref waits for the owner, however long that
       // takes, and control forwards exactly the bytes they approved. Only git's
       // probe before a large push (a bare flush packet) updates nothing and passes.
@@ -130,6 +133,7 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
         const fresh = await grant(bot.userId, fullName, "write");
         if ("error" in fresh) return rejectPush(request, fresh.message);
         token = fresh.token;
+        pushed = request;
       }
 
       const headers = new Headers();
@@ -142,6 +146,12 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
       const res = await fetch(`${githubUrl}/${fullName}.git${rest}${url.search}`, { method: req.method, headers, body, timeout: false });
       // Without an installation token GitHub sees an anonymous request, which only a public repo answers.
       if (!token && (res.status === 401 || res.status === 404)) return text(403, notInstalled(fullName).message);
+      // GitHub may still refuse a ref (a push that is not a fast-forward): what
+      // hears of it checks GitHub again before it counts on it (taskWorkers.ts's done check).
+      if (pushed && res.ok) {
+        const moved = pushed.refs.flatMap(({ ref, sha }) => (ref.startsWith("refs/heads/") ? [{ branch: ref.slice("refs/heads/".length), sha }] : []));
+        onPushed(fullName, moved);
+      }
       // Only what git reads: GitHub's auth challenge must not reach git, and the body is already decoded.
       const forwarded = new Headers();
       for (const name of ["content-type", "cache-control"]) {
@@ -206,9 +216,10 @@ const isProbe = (body: Uint8Array) => body.length === 4 && new TextDecoder().dec
 
 // A receive-pack request's commands, read from its pkt-lines ("<old> <new> <ref>",
 // the first with the client's capabilities after a NUL) up to the flush packet
-// (https://git-scm.com/docs/pack-protocol#_reference_update_request_and_packfile_transfer).
+// (https://git-scm.com/docs/pack-protocol#_reference_update_request_and_packfile_transfer):
+// each ref with its new commit (`sha`, all zeros when it is deleted).
 // Null for a content encoding control cannot read.
-type PushRequest = { refs: Array<{ ref: string; deleted: boolean }>; capabilities: string[] };
+type PushRequest = { refs: Array<{ ref: string; sha: string; deleted: boolean }>; capabilities: string[] };
 function pushRequest(raw: Uint8Array<ArrayBuffer>, encoding: string | null): PushRequest | null {
   if (encoding !== null && encoding !== "gzip") return null;
   const body = encoding === "gzip" ? Bun.gunzipSync(raw) : raw;
@@ -221,7 +232,7 @@ function pushRequest(raw: Uint8Array<ArrayBuffer>, encoding: string | null): Pus
     const [command = "", capabilities] = latin1.decode(body.subarray(at + 4, at + length)).split("\0");
     if (capabilities !== undefined) request.capabilities = capabilities.trim().split(" ");
     const [, newId = "", ref = ""] = command.trim().split(" ");
-    if (ref) request.refs.push({ ref, deleted: /^0+$/.test(newId) });
+    if (ref) request.refs.push({ ref, sha: newId, deleted: /^0+$/.test(newId) });
     at += length;
   }
   return request;

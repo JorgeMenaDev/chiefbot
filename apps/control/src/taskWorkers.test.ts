@@ -1285,3 +1285,39 @@ test("a verifier whose computer runs an image that cannot verify is blocked at o
   expect(received.join("\n")).not.toContain("run-task");
   expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification).toMatchObject({ result: "blocked", summary: rebuild });
 });
+
+test("a push through Chiefbot that moves the pull request's branch makes its verdict stale, and one to another branch does not", async () => {
+  const control = await gitProject();
+  const { owner, project, copilot } = control;
+  const pushes: number[] = [];
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
+    else if (isWorker(prompt)) {
+      const clone = copilot.workingDirectories.at(-1) ?? "";
+      pushes.push((await runtime.shell(`cd ${clone} && git checkout -q -b other && git commit -q --allow-empty -m other && git push -q origin other`)).exitCode);
+      pushes.push((await runtime.shell(`cd ${clone} && git checkout -q fix-typo && git commit -q --allow-empty -m more && git push -q origin fix-typo`)).exitCode);
+    }
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  await pullRequestOnTask(control, tool);
+  const verificationOf = async () => Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification;
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+  await workerWhen(owner, project, verifier.id, ({ state }) => state === "finished");
+  expect(await verificationOf()).toMatchObject({ result: "pass", stale: false });
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  const approve = async (branch: string) => {
+    const detail = `git push to octo-org/shop: ${branch}`;
+    const [push] = (await workerWhen(owner, project, engineer.id, ({ pendingApprovals }) => pendingApprovals[0]?.detail === detail)).pendingApprovals;
+    await owner.api("POST", `/projects/${project.id}/workers/${engineer.id}/approvals/${push?.approvalId}`, { approved: true });
+  };
+
+  await approve("other");
+  await eventually(() => pushes.length === 1);
+  expect(await verificationOf()).toMatchObject({ stale: false });
+  await approve("fix-typo");
+  await workerWhen(owner, project, engineer.id, ({ state }) => state === "finished");
+
+  expect(pushes).toEqual([0, 0]);
+  expect(await verificationOf()).toMatchObject({ result: "pass", stale: true });
+});

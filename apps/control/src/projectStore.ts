@@ -414,6 +414,31 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return task(projectId, number);
     },
 
+    // A push moved branches of `repo` (each to its `sha`): marks stale each
+    // verification of the repo's tasks on one of them at another commit. The
+    // projects whose tasks changed.
+    staleOnPush: db.transaction((repo: string, moved: Array<{ branch: string; sha: string }>): ProjectId[] => {
+      const verified = db
+        .query<TaskRow, [string]>(
+          `SELECT project_tasks.* FROM project_tasks JOIN projects ON projects.id = project_tasks.project_id
+           WHERE projects.repo = ?1 AND project_tasks.verification IS NOT NULL`,
+        )
+        .all(repo)
+        .map(toTask);
+      const changed = new Set<ProjectId>();
+      for (const { projectId, number, verification } of verified) {
+        if (!verification || verification.stale || !moved.some(({ branch, sha }) => branch === verification.branch && sha !== verification.sha)) continue;
+        db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+          projectId,
+          number,
+          JSON.stringify({ ...verification, stale: true } satisfies Verification),
+          Date.now(),
+        );
+        changed.add(projectId);
+      }
+      return [...changed];
+    }),
+
     // Queues a member's message for the coordinator. Null, storing nothing, while
     // their previous message is still queued or running, unless `whileBusy`: a
     // handoff from the member's chief of staff queues behind it instead.
