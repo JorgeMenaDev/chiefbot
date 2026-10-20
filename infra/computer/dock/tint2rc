@@ -1,0 +1,66 @@
+# The bot computer's dock: tint2 as a launcher-only panel, centred at the
+# bottom of the 1280x800 screen (start.sh). With no compositor, tint2 draws its
+# translucent background over the wallpaper itself. Its strut keeps maximised
+# windows above it, so the dock is always there to click.
+
+# Background 1: the dock.
+rounded = 16
+border_width = 1
+border_sides = TBLR
+background_color = #ffffff 55
+border_color = #ffffff 80
+
+# Background 2: a launcher icon, lit while the pointer is on it.
+rounded = 10
+border_width = 0
+background_color = #000000 0
+border_color = #000000 0
+background_color_hover = #ffffff 60
+border_color_hover = #000000 0
+background_color_pressed = #000000 12
+border_color_pressed = #000000 0
+
+# Background 3: a tooltip.
+rounded = 6
+border_width = 1
+border_sides = TBLR
+background_color = #ffffff 100
+border_color = #000000 15
+
+# Fixed width: 3 icons of 44, 2 gaps of 6, padding of 10 each side, border of 1
+# each side. tint2's panel_shrink sizes it too, but draws the wallpaper behind
+# it misaligned.
+panel_items = L
+panel_size = 166 68
+panel_margin = 0 10
+panel_padding = 10 0 6
+panel_background_id = 1
+panel_position = bottom center horizontal
+panel_layer = top
+strut_policy = follow_size
+panel_window_name = dock
+wm_menu = 0
+panel_dock = 0
+autohide = 0
+mouse_effects = 1
+mouse_hover_icon_asb = 100 0 0
+mouse_pressed_icon_asb = 100 0 0
+
+# Chromium, Files and Terminal, left to right (dock/*.desktop).
+launcher_padding = 0 0 6
+launcher_background_id = 0
+launcher_icon_background_id = 2
+launcher_icon_size = 44
+launcher_icon_theme = Adwaita
+launcher_icon_theme_override = 1
+startup_notifications = 0
+launcher_tooltip = 1
+launcher_item_app = /opt/chiefbot/dock/chromium.desktop
+launcher_item_app = /opt/chiefbot/dock/files.desktop
+launcher_item_app = /opt/chiefbot/dock/terminal.desktop
+
+tooltip_show_timeout = 0.3
+tooltip_hide_timeout = 0.1
+tooltip_padding = 8 5
+tooltip_background_id = 3
+tooltip_font_color = #222222 100

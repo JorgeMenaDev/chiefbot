@@ -1,0 +1,5 @@
+# Copied to /etc/chromium.d/, which Debian's chromium script reads, so Chromium
+# gets these flags however it is opened: from the dock, a terminal or Files.
+# The container is its sandbox: with no capabilities and no-new-privileges,
+# Chromium's own sandbox cannot start.
+export CHROMIUM_FLAGS="$CHROMIUM_FLAGS --no-sandbox --disable-dev-shm-usage --no-first-run --hide-crash-restore-bubble --start-maximized"
