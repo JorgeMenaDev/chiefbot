@@ -420,9 +420,10 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         : null;
     }),
 
-    // Says in the turn's chat who pays for it. Outside the coordinator's numbering.
-    addPayer(turnId: TurnId, payer: CopilotPayer): MemberEvent {
-      return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer }) };
+    // Says in the turn's chat who pays for it, and the project's model when that
+    // payer's plan does not offer it (the turn runs on Auto). Outside the coordinator's numbering.
+    addPayer(turnId: TurnId, payer: CopilotPayer, unavailableModel: string | null): MemberEvent {
+      return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer, unavailableModel }) };
     },
 
     // Whether a turn waits for the project's coordinator.

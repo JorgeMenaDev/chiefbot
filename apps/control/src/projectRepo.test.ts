@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { ApiError, ModelOption, Project, User, Workspace, WorkspaceInvite, type ChatEvent, type ModelReport } from "@chiefbot/contracts";
 import { defaultFakeUser, type FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, fakeRequest, sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
@@ -133,15 +133,20 @@ test("a fetch that fails is shown in the chat, and the repo tools say why instea
 });
 
 // Control's project, with octo-friend as a second member who may read the repo.
-async function withGuest(control: Awaited<ReturnType<typeof projectOf>>) {
-  const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan: "individual", sku: "monthly_subscriber" } };
+async function withGuest(control: Awaited<ReturnType<typeof projectOf>>, sku = "monthly_subscriber") {
+  const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan: "individual", sku } };
   await control.owner.api("POST", `/workspaces/${control.workspace.id}/invites`, { login: friend.login });
   const guest = await control.signIn(friend);
   const [invite] = WorkspaceInvite.array().parse(await (await guest.api("GET", "/invites")).json());
   await guest.api("POST", `/invites/${invite?.id}/accept`);
   control.github.setAccess("octo-org/shop", friend.login, "read");
   const id = User.parse(await (await guest.api("GET", "/me")).json()).id;
-  return { guest, remove: () => control.owner.api("DELETE", `/workspaces/${control.workspace.id}/members/${id}`) };
+  const ask = async (text: string, turns = 1) => {
+    const chat = guest.watchProjectChat(control.project.id);
+    await guest.api("POST", `/projects/${control.project.id}/messages`, { text });
+    return chat.until(doneCount(turns));
+  };
+  return { guest, ask, remove: () => control.owner.api("DELETE", `/workspaces/${control.workspace.id}/members/${id}`) };
 }
 
 test("a member removed while their turn fetches: that turn goes no further, and the next member's turn reads a copy of its own", async () => {
@@ -223,6 +228,40 @@ test("when the copy cannot be fetched, the coordinator is told why, and gets no 
 
   expect(copilot.instructions.at(-1)).toMatch(/You cannot read the repo this turn: its copy could not be fetched \(.*octo-org\/shop was not found, or your GitHub account cannot see it/);
   expect(copilot.skillDirectories.at(-1)).toEqual([]);
+});
+
+test("configured instructions and skills the commit does not have are named in the fetch row and told to the coordinator", async () => {
+  const copilot = fakeCopilot();
+  const control = await projectOf({ ...shop, "chiefbot.project.yaml": "instructions: [docs/alias/team.md]\nskills: [.agents/skills]\n" }, { copilot });
+  const at = control.github.git("octo-org/shop", "rev-parse", "main").slice(0, 7);
+
+  const events = await ask(control, "How do you ship here?");
+
+  const skipped = [
+    `instructions path docs/alias/team.md not found in the repo at ${at}; use the real path, not a symlink`,
+    `skills path .agents/skills not found in the repo at ${at}; use the real path, not a symlink`,
+  ];
+  const fetches = events.flatMap(({ event }) => (event.type === "tool-call" && event.toolCallId === "repo-copy" && event.status !== "running" ? [event] : []));
+  expect(fetches.map(({ name, status }) => [name, status])).toEqual([[["Fetch octo-org/shop", ...skipped].join(" · "), "succeeded"]]);
+  expect(copilot.instructions.at(-1)).toContain(["These configured paths were skipped:", ...skipped.map((line) => `- ${line}`)].join("\n"));
+});
+
+test("when removing a failed copy fails too, the next turn still refreshes it", async () => {
+  const copilot = fakeCopilot({ script: answering(["repo_read", { path: "README.md" }]) });
+  const control = await projectOf(shop, { copilot });
+  await ask(control, "What does the readme say?");
+  const folder = dirname(control.computers.computers.get(control.project.id)?.repoRoot ?? "");
+  atCleanUp(() => chmodSync(folder, 0o755));
+  control.github.setAccess("octo-org/shop", "octo-user", null);
+  // The copy's folder cannot be removed from its parent.
+  chmodSync(folder, 0o555);
+  await ask(control, "And now?", 2);
+  chmodSync(folder, 0o755);
+  control.github.setAccess("octo-org/shop", "octo-user", "write");
+
+  const events = await ask(control, "And now?", 3);
+
+  expect(replies(events)).toEqual(["1: # Shop", "1: # Shop"]);
 });
 
 test("the coordinator still cannot run a command or write a file, and the runtime may read only inside the copy", async () => {
@@ -307,4 +346,54 @@ test("control keeps the models a coordinator reports only from a running turn, a
   await chat.until((events) => events.some(({ event }) => event.type === "text-delta"));
 
   expect(await offered()).toEqual(["auto", "claude-sonnet-4.6"]);
+});
+
+const sonnet = { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", capabilities: { supports: { reasoningEffort: true } }, supportedReasoningEfforts: ["low", "medium", "high"] };
+const paid: FakeGitHubUser = { ...defaultFakeUser, copilot: { plan: "individual", sku: "monthly_subscriber" } };
+const payerLines = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "payer" ? [[event.payer.kind, event.unavailableModel]] : []));
+
+test("a member whose plan does not offer the project's model has their turn run on Auto, and their chat says so", async () => {
+  const copilot = fakeCopilot({ models: { list: [sonnet], modelPriceCategories: [] } });
+  const control = await projectOf(shop, { copilot, user: paid });
+  const { ask: guestAsks } = await withGuest(control, "free_limited_copilot");
+  await ask(control, "Plan the cart");
+  await eventually(async () => (await control.owner.api("PUT", `/projects/${control.project.id}/model`, { model: "claude-sonnet-4.6", effort: "high" })).ok);
+
+  await guestAsks("Plan the checkout");
+  const chat = await guestAsks("And the receipt?", 2);
+
+  expect(copilot.sends.map(({ prompt, model, effort }) => [prompt, model, effort])).toEqual([
+    ["Plan the cart", "auto", null],
+    ["Plan the checkout", "auto", null],
+    ["And the receipt?", "auto", null],
+  ]);
+  // Before the member's first turn their plan's models are unknown; after it, Free offers Sonnet locked.
+  expect(payerLines(chat)).toEqual([
+    ["seat", "claude-sonnet-4.6"],
+    ["seat", "Claude Sonnet 4.6"],
+  ]);
+});
+
+test("an organization-paid turn runs on the project's model once the organization's plan has listed it, and on Auto until then", async () => {
+  const copilot = fakeCopilot({ models: { list: [sonnet], modelPriceCategories: [] } });
+  const mint = async (repo: string) => ({ token: "ghs_org_1", expiresAt: Date.now() + 3_600_000, account: repo.split("/")[0] ?? repo });
+  const control = await projectOf(shop, { copilot, user: paid, copilotTokens: mint });
+  const { owner, workspace, project } = control;
+  await ask(control, "Plan the cart");
+  await eventually(async () => (await owner.api("PUT", `/projects/${project.id}/model`, { model: "claude-sonnet-4.6", effort: "high" })).ok);
+  await owner.api("PUT", `/workspaces/${workspace.id}/copilot-mode`, { mode: "org" });
+
+  await ask(control, "Plan the checkout", 2);
+  const chat = await ask(control, "And the receipt?", 3);
+
+  expect(copilot.sends.map(({ prompt, model, effort }) => [prompt, model, effort])).toEqual([
+    ["Plan the cart", "auto", null],
+    ["Plan the checkout", "auto", null],
+    ["And the receipt?", "claude-sonnet-4.6", "high"],
+  ]);
+  expect(payerLines(chat)).toEqual([
+    ["seat", null],
+    ["org", "claude-sonnet-4.6"],
+    ["org", null],
+  ]);
 });

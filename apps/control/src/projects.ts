@@ -1,4 +1,5 @@
 import {
+  AUTO_MODEL,
   AnswerApprovalRequest,
   CoordinatorToControl,
   CoordinatorToolCall,
@@ -8,6 +9,7 @@ import {
   SendMessageRequest,
   SetBotModelRequest,
   SetProjectSecretRequest,
+  supportedEffort,
   type AgentConnector,
   type ApprovalKind,
   type ChatEvent,
@@ -15,7 +17,6 @@ import {
   type ContextFile,
   type ControlToCoordinator,
   type CopilotPayer,
-  type ModelOption,
   type Project,
   type ProjectId,
   type ProjectMember,
@@ -30,7 +31,7 @@ import type { ApprovalOutcome, controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
-import { currentEffort, pickModel } from "./models.ts";
+import { modelOptions, pickModel } from "./models.ts";
 import { parseProjectFile, readProjectFile } from "./projectFile.ts";
 import { queue } from "./queue.ts";
 import type { repoAccess } from "./repos.ts";
@@ -64,8 +65,6 @@ export type ProjectHostOptions = {
   githubApiUrl: string;
   // A token to read a repo for a user, or why not (repos.ts readToken).
   repoReadToken: ReturnType<typeof repoAccess>["readToken"];
-  // The model picker's rows for the user's Copilot plan (models.ts).
-  modelOptions: (user: User) => ModelOption[];
   // Control's URL as a computer reaches it.
   controlUrlForComputers: () => string;
   // Publishes to a WebSocket topic.
@@ -148,7 +147,6 @@ export function projectHost({
   approvals,
   githubApiUrl,
   repoReadToken,
-  modelOptions,
   controlUrlForComputers,
   publish,
   publishToUser,
@@ -213,13 +211,26 @@ export function projectHost({
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
     const project = projects.project(projectId);
     if (!next || !run || !project) return;
-    const model = { model: project.model, effort: currentEffort(store.modelReport(next.member.userId), project.model, project.effort) };
+    const { unavailable, ...model } = turnModel(project, run.payer, next.member.userId);
     const turnKey = store.turnKeys.issue({ agent: "coordinator", projectId, userId: next.member.userId, turnId: next.turnId });
-    publishChat(projectId, projects.addPayer(next.turnId, run.payer));
+    publishChat(projectId, projects.addPayer(next.turnId, run.payer, unavailable));
     void connectorsFor(projectId, next.member.userId)
       .catch(() => [])
       .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, ...model, turnKey, payer: run.payer, connectors }));
   };
+
+  // The model and effort a turn of the project runs on: the project's, as far as
+  // the plan of who pays offers them (the member's on their seat, the
+  // organization's on its billing, as their turns last listed them), else Auto.
+  // `unavailable` then names the project's model, for the turn's payer line.
+  const turnModel = (project: Project, payer: CopilotPayer, userId: UserId) => {
+    const options = payer.kind === "seat" ? modelOptionsOf(store.user(userId)) : modelOptions(store.orgModelReport(payer.account), null);
+    const offered = options.find(({ id, lockedReason }) => id === project.model && lockedReason === null);
+    if (offered) return { model: project.model, effort: supportedEffort(offered.efforts, project.effort), unavailable: null };
+    return { model: AUTO_MODEL, effort: null, unavailable: options.find(({ id }) => id === project.model)?.name ?? project.model };
+  };
+  // The model picker's rows for the user's Copilot plan (models.ts).
+  const modelOptionsOf = (user: User) => modelOptions(store.modelReport(user.id), user.copilotPlan);
 
   // Starts the project's computer when a turn waits and no coordinator is
   // connected: it was stopped for idleness. A no-op for a computer still running.
@@ -395,7 +406,7 @@ export function projectHost({
       PUT: member(async (user, { project }, req: Bun.BunRequest<"/projects/:id/model">) => {
         const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "model_unavailable");
-        const picked = pickModel(modelOptions(user), body.data, project.effort);
+        const picked = pickModel(modelOptionsOf(user), body.data, project.effort);
         if ("error" in picked) return apiError(400, picked.error);
         const saved = projects.setModel(project.id, picked.model, picked.effort);
         return saved ? Response.json(saved satisfies Project) : apiError(404, "not_found");
@@ -610,12 +621,15 @@ export function projectHost({
         }
         return;
       }
-      // The plan's models, as a turn's session listed them: the turn's member's,
-      // while the turn runs on their own seat. The project's model picker offers them.
+      // The plan's models, as a turn's session listed them, while the turn runs:
+      // its member's on their own seat (the project's model picker offers them),
+      // the organization's on its billing. Turns pick their model by them (turnModel).
       if (message.type === "models") {
         const userId = projects.runningTurnMember(projectId, message.turnId);
         const run = userId && payerOf({ kind: "project", projectId, askerId: userId });
-        if (userId && run && run.payer.kind === "seat" && run.payer.userId === userId) store.setModelReport(userId, message.report);
+        if (!userId || !run) return;
+        if (run.payer.kind === "org") store.setOrgModelReport(run.payer.account, message.report);
+        else if (run.payer.userId === userId) store.setModelReport(userId, message.report);
         return;
       }
       // The coordinator lost the running turn unless it says it still runs it.

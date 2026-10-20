@@ -347,7 +347,8 @@ export type ControlToCoordinator = z.infer<typeof ControlToCoordinator>;
 
 // Coordinator → control on the same WebSocket: turn-event and hello, as a bot's worker sends them (chat.ts),
 // and models: the plan's models as the session of `turnId` lists them. Control keeps
-// them as the turn's member's only while that turn runs on the member's own seat.
+// them only while that turn runs: as its member's on their own seat, as the
+// organization's on its billing.
 export const CoordinatorToControl = z.discriminatedUnion("type", [
   TurnEventMessage,
   TurnHello,

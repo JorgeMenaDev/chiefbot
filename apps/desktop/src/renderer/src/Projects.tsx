@@ -244,7 +244,12 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
     case "error":
       return <ErrorMessage message={item.message} />;
     case "payer":
-      return <p className="text-muted-foreground text-xs">{payerText(item.payer)}</p>;
+      return (
+        <p className="text-muted-foreground text-xs">
+          {payerText(item.payer)}
+          {item.unavailableModel && <span className="block">{fellBack(item.payer, item.unavailableModel)}</span>}
+        </p>
+      );
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
     case "handoff":
@@ -318,6 +323,11 @@ function TaskLedger({ project, login }: { project: Project; login: string }) {
 // Who pays for a run, in a line.
 function payerText(payer: CopilotPayer) {
   return payer.kind === "seat" ? `On ${payer.login}'s Copilot seat` : `Billed to ${payer.account}'s Copilot (organization)`;
+}
+
+// Why a turn ran on Auto: the plan of who paid does not offer the project's `model`.
+function fellBack(payer: CopilotPayer, model: string) {
+  return `${model} isn't on ${payer.kind === "seat" ? payer.login : payer.account}'s plan; this turn ran on Auto.`;
 }
 
 // One worker of a task: its state, who pays for it, its pull request and what it waits on. Only

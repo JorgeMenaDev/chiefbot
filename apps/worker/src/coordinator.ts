@@ -13,7 +13,7 @@ import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
 import { modelReport } from "./models.ts";
-import { readable, refreshCopy, repoInstructions, repoTools, skillRoots, type RepoCopy } from "./repoCopy.ts";
+import { readable, refreshCopy, repoSetup, repoTools, type RepoCopy } from "./repoCopy.ts";
 
 export type CoordinatorOptions = {
   // Control's base URL as seen from the computer.
@@ -67,7 +67,8 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     const refreshed = refreshing.then((): Promise<RepoCopy> | RepoCopy =>
       turn.ended.aborted ? { error: "The turn ended." } : refreshCopy(repoRoot, url, turn.key, turn.ended),
     );
-    refreshing = refreshed;
+    // A refresh that fails outright (its cleanup failed) still lets the next one run.
+    refreshing = refreshed.catch(() => {});
     return refreshed;
   };
 
@@ -93,11 +94,10 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   }
 
   // The member's session for `turn`, in place of the one of their previous turn,
-  // or null when control ended the turn first. Its repo tools, the repo's
-  // instructions and its skills come from `copy`, the repo as this turn fetched it.
-  async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[], turn: Turn, copy: RepoCopy) {
+  // or null when control ended the turn first. Its repo tools come from `copy`,
+  // the repo as this turn fetched it, and the repo's instructions and skills from its `setup`.
+  async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[], turn: Turn, copy: RepoCopy, setup: Awaited<ReturnType<typeof repoSetup>>) {
     if (!project) throw new Error("A turn came before control said which project this is");
-    const [repoTold, skillDirectories] = await Promise.all([repoInstructions(copy, project.config.instructions), skillRoots(copy, project.config.skills)]);
     if (!link.running(turn)) return null;
     // From here the session is in `sessions` at once, for stopMember to find.
     const previous = sessions.get(member.userId);
@@ -113,8 +113,8 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       sessionId: `${projectId}-${member.userId}`,
       onPermissionRequest: permissionFor(new Set(tools.map(({ name }) => name)), connectors, copy),
       tools,
-      instructions: [instructions(project, member), repoTold].join("\n\n"),
-      skillDirectories,
+      instructions: [instructions(project, member), setup.instructions].join("\n\n"),
+      skillDirectories: setup.skillDirectories,
       mcpServers: connectorServers(connectors, (name) => link.connector(turn, name)),
       onMcpCall: link.reportCalls(connectors, bearer),
     };
@@ -133,32 +133,33 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   }
 
   // Each turn first refreshes the copy of the repo, with the turn's key. The
-  // chat shows the fetch as a tool call, so a member sees when it fails. The turn
+  // chat shows the fetch as a tool call, so a member sees when it fails, and
+  // which configured instructions or skills paths it skipped, and why. The turn
   // runs on the project's `model` at `effort`, set on the session first (the SDK
   // switches an open session's model, keeping its conversation; a null effort
-  // clears the last one). A session on the member's own seat lists their plan's
-  // models for control: the project's model picker offers them.
+  // clears the last one). The session lists its plan's models for control
+  // (the member's, or the organization's when it pays), which picks the model of
+  // the turns after it by them.
   async function runTurn({ turnId, turnKey, member, text, model, effort, payer, connectors }: Extract<ControlToCoordinator, { type: "run-turn" }>) {
     const turn = link.begin(turnId, turnKey);
     turns.set(member.userId, turn);
     try {
       if (!project) throw new Error("A turn came before control said which project this is");
       const { repo } = project;
-      const fetchRow = (status: "running" | "succeeded" | "failed") => {
-        if (link.running(turn)) link.emit(turnId, { type: "tool-call", toolCallId: "repo-copy", name: `Fetch ${repo}`, status });
+      const fetchRow = (status: "running" | "succeeded" | "failed", skipped: string[] = []) => {
+        if (link.running(turn)) link.emit(turnId, { type: "tool-call", toolCallId: "repo-copy", name: [`Fetch ${repo}`, ...skipped].join(" · "), status });
       };
       fetchRow("running");
       const copy = await refresh(turn, `${controlUrl}/git/${repo}.git`);
-      fetchRow("error" in copy ? "failed" : "succeeded");
-      const session = await sessionFor(member, payer, connectors, turn, copy);
+      const setup = await repoSetup(copy, project.config);
+      fetchRow("error" in copy ? "failed" : "succeeded", setup.skipped);
+      const session = await sessionFor(member, payer, connectors, turn, copy, setup);
       // Control ended the turn before it had a session (its member left): nothing more of it runs.
       if (!session) return;
-      if (payer.kind === "seat") {
-        void session.rpc.model.list().then(
-          (list) => link.send({ type: "models", turnId, report: modelReport(list) }),
-          () => {},
-        );
-      }
+      void session.rpc.model.list().then(
+        (list) => link.send({ type: "models", turnId, report: modelReport(list) }),
+        () => {},
+      );
       await session.setModel(model, effort);
       await session.send(text);
     } catch (error) {

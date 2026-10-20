@@ -96,7 +96,9 @@ export type QuestionAnswer = z.infer<typeof QuestionAnswer>;
 
 // Who pays for the turn's Copilot requests. Control adds it when a project's
 // coordinator starts the turn, outside the runtime's numbering.
-export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer });
+// `unavailableModel` names the project's model when the payer's plan does not
+// offer it, so the turn runs on Auto (null: it runs on the project's model).
+export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer, unavailableModel: z.string().nullable().default(null) });
 
 // Body of POST /bots/:id/approvals/:approvalId (204; 409 when it is not pending).
 export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
@@ -192,7 +194,7 @@ export const ChatItem = z.discriminatedUnion("kind", [
   // Control's note about a handoff, from before cards (HandoffUpdate).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
   // Who pays for the turn that follows.
-  z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer }),
+  z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer, unavailableModel: z.string().nullable().default(null) }),
   // expired: the turn ended before anyone answered (its worker restarted).
   // withdrawn: the agent stopped waiting on it (approval-withdrawn); the turn goes on.
   z.object({

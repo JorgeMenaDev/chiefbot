@@ -30,31 +30,48 @@ const isolatedGit = {
   GIT_LITERAL_PATHSPECS: "1",
 };
 
+// Settings no config of the copy's own .git can change: no hooks, no fsmonitor
+// command, and no gc or maintenance left running in the background.
+const fixedConfig = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false"];
+
 // Runs git in `cwd` and resolves with its stdout, cut at `limit` bytes (git is
 // stopped there, so a huge output never sits in memory); throws with its stderr
-// when it fails. `signal` stops it too.
+// when it fails. `signal` stops it too. Git runs in a process group of its own,
+// so stopping it stops what it started (fetch's HTTP helper), and it resolves
+// only once all of them exited: nothing then holds its stderr open.
 async function git(cwd: string, args: string[], { env = { ...isolatedGit, HOME: cwd }, limit = Number.POSITIVE_INFINITY, signal }: { env?: Record<string, string>; limit?: number; signal?: AbortSignal | undefined } = {}) {
-  const proc = Bun.spawn(["git", ...args], { cwd, env, stdout: "pipe", stderr: "pipe", ...(signal && { signal }) });
-  const stderr = new Response(proc.stderr).text();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  let cut = false;
-  for await (const chunk of proc.stdout) {
-    if (size + chunk.length > limit) {
-      chunks.push(chunk.subarray(0, limit - size));
-      cut = true;
-      proc.kill();
-      break;
+  const proc = Bun.spawn(["git", ...fixedConfig, ...args], { cwd, env, stdout: "pipe", stderr: "pipe", detached: true });
+  const stop = () => {
+    try {
+      process.kill(-proc.pid, "SIGKILL");
+    } catch {
+      // The whole group has exited.
     }
-    chunks.push(chunk);
-    size += chunk.length;
+  };
+  signal?.addEventListener("abort", stop);
+  try {
+    if (signal?.aborted) stop();
+    const stderr = new Response(proc.stderr).text();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    let cut = false;
+    for await (const chunk of proc.stdout) {
+      if (size + chunk.length > limit) {
+        chunks.push(chunk.subarray(0, limit - size));
+        cut = true;
+        stop();
+        break;
+      }
+      chunks.push(chunk);
+      size += chunk.length;
+    }
+    const [exitCode, errors] = await Promise.all([proc.exited, stderr]);
+    if (signal?.aborted) throw new Error(`git ${args[0]} stopped`);
+    if (exitCode !== 0 && !cut) throw Object.assign(new Error(errors.trim() || `git ${args[0]} failed`), { exitCode });
+    return { out: Buffer.concat(chunks), cut };
+  } finally {
+    signal?.removeEventListener("abort", stop);
   }
-  const exitCode = await proc.exited;
-  // Stopped by `signal`: no wait for its stderr, which a child of git's (fetch's
-  // HTTP helper) may hold open until the server answers.
-  if (signal?.aborted) throw new Error(`git ${args[0]} stopped`);
-  if (exitCode !== 0 && !cut) throw Object.assign(new Error((await stderr).trim() || `git ${args[0]} failed`), { exitCode });
-  return { out: Buffer.concat(chunks), cut };
 }
 
 // Fetches the default branch (the remote's HEAD) of the repo at `url` into the
@@ -219,36 +236,48 @@ const standardInstructions = ["AGENTS.md", ".github/copilot-instructions.md"];
 // How much of one instruction file the coordinator is told; it reads on with repo_read.
 const INSTRUCTION_BYTES = 20_000;
 
-// What the coordinator is told of the repo in this turn: that it can read it,
-// and the repo's instructions (the standard files, then the project's
-// `configured` ones, those the commit has); or why it cannot read it.
-export async function repoInstructions(copy: RepoCopy, configured: string[]): Promise<string> {
-  if ("error" in copy) return `You cannot read the repo this turn: its copy could not be fetched (${copy.error}). Say so when the member asks about the code.`;
-  const files = await Promise.all(
-    [...new Set([...standardInstructions, ...configured])].map(async (path) => {
-      const found = await find(copy, path);
-      if ("refused" in found || found.entry.kind !== "file") return [];
+// What a turn takes from the repo besides its tools: what the coordinator is
+// told of it (that it can read it, the repo's instructions: the standard files,
+// then the project's `instructions`), the `skills` folders the runtime loads
+// skills from, and the configured paths skipped, each with why. A path is
+// looked up in the commit, where a folder that is a symlink holds nothing, so a
+// path through one is not found. Or, with no copy, why it cannot read the repo.
+export async function repoSetup(copy: RepoCopy, config: { instructions: string[]; skills: string[] }) {
+  if ("error" in copy) {
+    const instructions = `You cannot read the repo this turn: its copy could not be fetched (${copy.error}). Say so when the member asks about the code.`;
+    return { instructions, skillDirectories: [], skipped: [] };
+  }
+  const at = copy.commit.slice(0, 7);
+  const skip = (what: "instructions" | "skills", path: string, found: Awaited<ReturnType<typeof find>>) =>
+    "refused" in found
+      ? `${what} path ${path} not found in the repo at ${at}; use the real path, not a symlink`
+      : `${what} path ${path} is a ${found.entry.kind} in the repo at ${at}, not a ${what === "skills" ? "folder" : "file"}`;
+  const files: string[] = [];
+  const skipped: string[] = [];
+  for (const path of new Set([...standardInstructions, ...config.instructions])) {
+    const found = await find(copy, path);
+    if ("at" in found && found.entry.kind === "file") {
       const { out, cut } = await git(copy.root, ["cat-file", "blob", found.entry.object], { limit: INSTRUCTION_BYTES });
       const text = out.toString("utf8").trimEnd();
-      return [`## ${path}\n${cut ? `${text}\n(cut at ${INSTRUCTION_BYTES} bytes: read on with repo_read)` : text}`];
-    }),
-  );
-  return [
+      files.push(`## ${path}\n${cut ? `${text}\n(cut at ${INSTRUCTION_BYTES} bytes: read on with repo_read)` : text}`);
+    } else if (config.instructions.includes(path)) {
+      skipped.push(skip("instructions", path, found));
+    }
+  }
+  const skillDirectories: string[] = [];
+  for (const path of config.skills) {
+    const found = await find(copy, path);
+    if ("at" in found && found.entry.kind === "folder") skillDirectories.push(join(copy.root, found.at));
+    else skipped.push(skip("skills", path, found));
+  }
+  const instructions = [
     `You can read the repo: a copy of its default branch at commit ${copy.commit}, fetched at the start of this turn. ` +
       "repo_read reads a file or lists a folder, and repo_search searches the text of its files. Answer questions about the code from it, " +
       "naming the files you found, rather than dispatching an engineer. You cannot change files or run commands: that is the job of the engineers you dispatch.",
-    ...(files.flat().length > 0
-      ? ["The repo's instructions follow. They are written for the agents that change its code: use them to plan the work and to brief engineers.", ...files.flat()]
-      : []),
+    ...(files.length > 0 ? ["The repo's instructions follow. They are written for the agents that change its code: use them to plan the work and to brief engineers.", ...files] : []),
+    ...(skipped.length > 0 ? [["These configured paths were skipped:", ...skipped.map((line) => `- ${line}`)].join("\n")] : []),
   ].join("\n\n");
-}
-
-// The project's skill folders that are in this turn's commit, as folders of the
-// copy, for the runtime to load skills from.
-export async function skillRoots(copy: RepoCopy, configured: string[]): Promise<string[]> {
-  if ("error" in copy) return [];
-  const found = await Promise.all(configured.map((path) => find(copy, path)));
-  return found.flatMap((folder) => ("at" in folder && folder.entry.kind === "folder" ? [join(copy.root, folder.at)] : []));
+  return { instructions, skillDirectories, skipped };
 }
 
 // The coordinator's repo tools over this turn's copy. With no copy they still

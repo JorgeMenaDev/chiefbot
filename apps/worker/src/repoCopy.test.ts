@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from "bun:test";
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { refreshCopy, repoInstructions, repoTools, type RepoCopy } from "./repoCopy.ts";
+import { refreshCopy, repoSetup, repoTools } from "./repoCopy.ts";
 
 const folders: string[] = [];
 afterEach(() => {
@@ -117,7 +117,7 @@ test("a read, a search and the instructions return at most their budget, however
   const first = await run(read, { path: "big.txt" });
   const beyond = await run(read, { path: "big.txt", startLine: 59_000 });
   const found = await run(search, { pattern: "^match" });
-  const told = await repoInstructions(copy as RepoCopy, []);
+  const { instructions: told } = await repoSetup(copy, { instructions: [], skills: [] });
 
   expect(first.split("\n").slice(0, 2)).toEqual(["1: a line of the big file, long enough to fill it 1", "2: a line of the big file, long enough to fill it 2"]);
   expect(first.split("\n").at(-1)).toMatch(/^\(lines 1 to 500 of the first \d+, which is as far as a read goes: read on with startLine 501\)$/);
@@ -126,4 +126,57 @@ test("a read, a search and the instructions return at most their budget, however
   expect(found.split("\n").at(-1)).toBe("(the first 200 matches: narrow the search)");
   expect(told).toContain(`## AGENTS.md\n${"x".repeat(20_000)}\n(cut at 20000 bytes: read on with repo_read)`);
   expect(told).not.toContain("x".repeat(20_001));
+});
+
+test("configured instructions and skill folders the commit lacks, or reaches only through a symlinked folder, are skipped with the reason", async () => {
+  const repo = repoWith(
+    { "real/team.md": "Ask Ada.\n", "real/skills/release/SKILL.md": "Tag it.\n" },
+    { alias: "real" },
+  );
+  const { copy } = await fetched(repo);
+  const at = copy.commit.slice(0, 7);
+
+  const setup = await repoSetup(copy, { instructions: ["alias/team.md", "real/team.md", "real"], skills: ["alias/skills", "real/skills", "real/team.md"] });
+
+  expect(setup.skipped).toEqual([
+    `instructions path alias/team.md not found in the repo at ${at}; use the real path, not a symlink`,
+    `instructions path real is a folder in the repo at ${at}, not a file`,
+    `skills path alias/skills not found in the repo at ${at}; use the real path, not a symlink`,
+    `skills path real/team.md is a file in the repo at ${at}, not a folder`,
+  ]);
+  expect(setup.skillDirectories).toEqual([join(copy.root, "real/skills")]);
+  expect(setup.instructions).toContain("## real/team.md\nAsk Ada.");
+  expect(setup.instructions).toContain(["These configured paths were skipped:", ...setup.skipped.map((line) => `- ${line}`)].join("\n"));
+});
+
+test("a refresh stopped mid-fetch leaves no git process behind, though the server never answers", async () => {
+  let asked = 0;
+  // A git server that holds every request open.
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => (asked++, new Promise<Response>(() => {})) });
+  const url = `${server.url.origin}/octo-org/stalled.git`;
+  const stop = new AbortController();
+  const refreshing = refreshCopy(join(newFolder(), "repo"), url, "turn-key", stop.signal);
+  while (asked === 0) await Bun.sleep(10);
+
+  stop.abort();
+  const copy = await refreshing;
+  const left = Bun.spawnSync(["pgrep", "-f", url]).stdout.toString().trim();
+  server.stop(true);
+
+  expect("error" in copy).toBe(true);
+  expect(left).toBe("");
+});
+
+test("git runs no hook of the copy's own config, even one planted there", async () => {
+  const repo = repoWith({ "README.md": "# Shop\n" });
+  const { computer, copy } = await fetched(repo);
+  const hooks = join(computer, "hooks");
+  mkdirSync(hooks);
+  writeFileSync(join(hooks, "post-checkout"), `#!/bin/sh\ntouch ${join(computer, "hook-ran")}\n`);
+  chmodSync(join(hooks, "post-checkout"), 0o755);
+  Bun.spawnSync(["git", "config", "core.hooksPath", hooks], { cwd: copy.root });
+
+  await refreshCopy(copy.root, repo, "turn-key");
+
+  expect(existsSync(join(computer, "hook-ran"))).toBe(false);
 });
