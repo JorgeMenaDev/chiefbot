@@ -95,6 +95,7 @@ const bots = createBots({
   onUser: (user) => auth.userChanged(user),
   onTasks: (projectId, tasks) => window?.webContents.send("projects:tasks", { projectId, tasks }),
   onWorkers: (projectId, workers) => window?.webContents.send("projects:workers", { projectId, workers }),
+  onProjectState: (projectId, state) => window?.webContents.send("projects:state", { projectId, state }),
 });
 
 const chats = createChats({
@@ -222,6 +223,7 @@ ipcMain.handle("projects:set-secret", (_event, id: unknown, name: unknown, value
 ipcMain.handle("projects:clear-secret", (_event, id: unknown, name: unknown) => projects.clearSecret(ProjectId.parse(id), SecretName.parse(name)));
 ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
 ipcMain.handle("projects:workers", (_event, id: unknown) => projects.workers(ProjectId.parse(id)));
+ipcMain.handle("projects:states", () => bots.projectStates());
 ipcMain.handle("projects:answer-chat", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   projects.answerChat(ProjectId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
 );

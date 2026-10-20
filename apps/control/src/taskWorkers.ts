@@ -61,6 +61,8 @@ export type TaskWorkerHostOptions = {
   publishToUser: (userId: UserId, event: ClientEvent) => void;
   // The project's task ledger changed (a worker linked its pull request).
   onLedgerChange: (projectId: ProjectId) => void;
+  // One of the project's workers changed, so its state may have (contracts projectState).
+  onStateChange: (projectId: ProjectId) => void;
   // Upgrades the request to the worker's WebSocket; undefined once upgraded.
   upgrade: (req: Request, data: TaskWorkerSocketData) => Response | undefined;
 };
@@ -108,6 +110,7 @@ export function taskWorkerHost({
   controlUrlForComputers,
   publishToUser,
   onLedgerChange,
+  onStateChange,
   upgrade,
 }: TaskWorkerHostOptions) {
   const { projects, taskWorkers: workers } = store;
@@ -120,6 +123,7 @@ export function taskWorkerHost({
   const publish = (projectId: ProjectId) => {
     const event = { type: "workers", projectId, workers: workers.workersOf(projectId) } satisfies ClientEvent;
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, event);
+    onStateChange(projectId);
   };
   const publishTasks = (projectId: ProjectId) => {
     const event = { type: "tasks", projectId, tasks: projects.tasks(projectId) } satisfies ClientEvent;

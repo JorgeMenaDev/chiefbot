@@ -114,6 +114,9 @@ const api = {
       ipcRenderer.invoke("projects:answer", id, workerId, approvalId, approved),
     // { projectId, workers } whenever one of a project's workers changes.
     onWorkers: (listener: (workers: unknown) => void) => subscribe("projects:workers", listener),
+    // Each project's state dot for the user, by project id; then { projectId, state } on every change.
+    states: (): Promise<unknown> => ipcRenderer.invoke("projects:states"),
+    onState: (listener: (change: unknown) => void) => subscribe("projects:state", listener),
   },
   // The Theme setting: main sets Electron's native theme to match.
   theme: {

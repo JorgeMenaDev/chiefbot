@@ -3,6 +3,7 @@ import { ChatItem, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts
 import { AgentConnector, ConnectorName } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
 import { RepoFullName } from "./repos.ts";
+import type { TaskWorker } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // A file or folder inside the repo, relative to its root: no leading slash and no "." or ".." part.
@@ -223,6 +224,24 @@ export type Task = z.infer<typeof Task>;
 // ClientEvent), and what Electron main hands the renderer.
 export const ProjectTasks = z.object({ projectId: ProjectId, tasks: z.array(Task) });
 export type ProjectTasks = z.infer<typeof ProjectTasks>;
+
+// The dot beside a project in the Projects tab, for one member:
+//   needs_you  a task they asked for waits on their answer, or an engineer they asked for waits on their approval
+//   working    the project agent has a message to answer, or an engineer runs
+//   sleeping   the project's computer is stopped while idle; the next message wakes it
+//   idle       none of these
+export const ProjectState = z.enum(["idle", "working", "needs_you", "sleeping"]);
+export type ProjectState = z.infer<typeof ProjectState>;
+
+// The member `login`'s state of a project: `awake` while its computer runs the
+// project agent, `busy` while the agent has a message of any member to answer.
+export function projectState({ login, awake, busy, tasks, workers }: { login: string; awake: boolean; busy: boolean; tasks: Task[]; workers: TaskWorker[] }): ProjectState {
+  const asked = tasks.some(({ status, requestedBy }) => status === "needs_input" && requestedBy === login);
+  const approve = workers.some(({ pendingApprovals, requestedBy }) => pendingApprovals.length > 0 && requestedBy === login);
+  if (asked || approve) return "needs_you";
+  if (busy || workers.some(({ state }) => state === "launching" || state === "working")) return "working";
+  return awake ? "idle" : "sleeping";
+}
 
 // The coordinator's tools, by name. Each argument schema is also what the model sees.
 export const CreateTaskArgs = z.object({

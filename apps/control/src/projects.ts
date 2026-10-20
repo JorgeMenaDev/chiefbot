@@ -4,6 +4,7 @@ import {
   CoordinatorToolCall,
   CreateProjectRequest,
   ProjectSettingsRequest,
+  projectState,
   SecretName,
   SendMessageRequest,
   SetProjectSecretRequest,
@@ -18,6 +19,7 @@ import {
   type ProjectId,
   type ProjectMember,
   type ProjectSecret,
+  type ProjectState,
   type SendMessageResponse,
   type Task,
   type User,
@@ -73,6 +75,9 @@ export type ProjectHostOptions = {
   connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
   // The project's task ledger changed.
   onLedgerChange: (projectId: ProjectId) => void;
+  // The project's state may have changed for its members (contracts projectState):
+  // its agent woke, slept or got a message to answer.
+  onStateChange: (projectId: ProjectId) => void;
   // The coordinator did something: its idle time starts again (idle.ts).
   onActivity: (projectId: ProjectId) => void;
 };
@@ -146,6 +151,7 @@ export function projectHost({
   upgrade,
   connectorsFor,
   onLedgerChange,
+  onStateChange,
   onActivity,
 }: ProjectHostOptions) {
   const { projects } = store;
@@ -197,6 +203,7 @@ export function projectHost({
   // workspace, for a shared one) whoever pays: org billing changes only
   // Copilot's identity. If they cannot be read, the turn runs without connectors.
   const schedule = (projectId: ProjectId) => {
+    onStateChange(projectId);
     if (stopping.has(projectId)) return;
     if (!greeted.has(projectId)) return wake(projectId);
     const next = projects.claimNextTurn(projectId);
@@ -490,6 +497,16 @@ export function projectHost({
     // Whether the project's coordinator has a turn running or waiting.
     busy: (projectId: ProjectId) => projects.hasUnfinishedTurn(projectId),
 
+    // The project's state dot for the member `login` (contracts projectState).
+    stateOf: (projectId: ProjectId, login: string): ProjectState =>
+      projectState({
+        login,
+        awake: greeted.has(projectId),
+        busy: projects.hasUnfinishedTurn(projectId),
+        tasks: projects.tasks(projectId),
+        workers: store.taskWorkers.workersOf(projectId),
+      }),
+
     // Stops the idle project's computer. Its coordinator is forgotten once the
     // computer is stopped, and a turn queued meanwhile starts it again.
     async sleep(projectId: ProjectId) {
@@ -499,6 +516,7 @@ export function projectHost({
         coordinators.get(projectId)?.close();
         coordinators.delete(projectId);
         greeted.delete(projectId);
+        onStateChange(projectId);
       } finally {
         stopping.delete(projectId);
       }
@@ -570,6 +588,7 @@ export function projectHost({
       if (coordinators.get(data.projectId) !== ws) return;
       coordinators.delete(data.projectId);
       greeted.delete(data.projectId);
+      onStateChange(data.projectId);
     },
 
     message(data: ProjectSocketData, raw: string | Buffer) {

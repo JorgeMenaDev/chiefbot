@@ -5,8 +5,9 @@ import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, QuestionId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
-import { ProjectTasks } from "./projects.ts";
+import { ProjectState, ProjectTasks } from "./projects.ts";
 import { QuestionResult } from "./questions.ts";
+import { ScreenControl } from "./screens.ts";
 import { ProjectWorkers } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
@@ -21,12 +22,6 @@ export type BotToken = z.infer<typeof BotToken>;
 // stopped:  the computer is stopped; its disk is kept.
 export const BotStatus = z.enum(["starting", "online", "stopping", "stopped"]);
 export type BotStatus = z.infer<typeof BotStatus>;
-
-// Who drives the bot's screen. agent: the bot; a viewer only watches.
-// human: the user took over (mouse and keyboard); the agent waits until
-// hand-back: control refuses new chat turns, and a running turn's tool calls wait.
-export const ScreenControl = z.enum(["agent", "human"]);
-export type ScreenControl = z.infer<typeof ScreenControl>;
 
 // A bot's face: one of a fixed set of shapes, all with the same two eyes, in one
 // of a fixed set of colours. The desktop draws them (renderer Avatar.tsx).
@@ -78,11 +73,14 @@ export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 //   user   the user changed: their GitHub sign-in was lost or restored
 //   tasks    the whole task ledger of one of the user's projects; sent on every change
 //   workers  every worker of one of the user's projects; sent on every change
+//   project-state  one of the user's projects' state dot for them (projects.ts projectState); each
+//           project's on connect, then on every change
 export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bots"), bots: z.array(Bot) }),
   z.object({ type: z.literal("user"), user: User }),
   ProjectTasks.extend({ type: z.literal("tasks") }),
   ProjectWorkers.extend({ type: z.literal("workers") }),
+  z.object({ type: z.literal("project-state"), projectId: ProjectId, state: ProjectState }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 

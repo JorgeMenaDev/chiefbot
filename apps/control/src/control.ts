@@ -28,6 +28,7 @@ import {
   type ModelOption,
   type OpenedPullRequest,
   type ProjectId,
+  type ProjectState,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
@@ -346,6 +347,7 @@ export function startControl({
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     onLedgerChange: watchHandoffs,
+    onStateChange: (projectId) => projectStateChanged(projectId),
     upgrade: (req, data) => upgrade(server, req, data),
   });
 
@@ -365,9 +367,29 @@ export function startControl({
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     upgrade: (req, data) => upgrade(server, req, data),
     connectorsFor: connectors.agentConnectors,
-    onLedgerChange: watchHandoffs,
+    onLedgerChange: (projectId) => {
+      watchHandoffs(projectId);
+      projectStateChanged(projectId);
+    },
+    onStateChange: (projectId) => projectStateChanged(projectId),
     onActivity: (projectId) => coordinatorIdle.touch(projectId),
   });
+
+  // The state dot each member last got of each project, so only a change goes
+  // out. Each member gets their own: a project needs only the member it asks.
+  const sentStates = new Map<string, ProjectState>();
+  const memberState = (projectId: ProjectId, userId: UserId) => {
+    const state = projects.stateOf(projectId, store.user(userId).login);
+    const changed = sentStates.get(`${projectId}:${userId}`) !== state;
+    sentStates.set(`${projectId}:${userId}`, state);
+    return { changed, event: JSON.stringify({ type: "project-state", projectId, state } satisfies ClientEvent) };
+  };
+  function projectStateChanged(projectId: ProjectId) {
+    for (const userId of store.projects.memberIds(projectId)) {
+      const { changed, event } = memberState(projectId, userId);
+      if (changed) server.publish(topic(userId), event);
+    }
+  }
   // Chiefs of staff handing work to projects (handoffs.ts).
   const chiefs = chiefHost({ store, projects });
   // What projects listen to: polled CI runs and issue queries, and schedules (subscriptions.ts).
@@ -789,8 +811,12 @@ export function startControl({
           return;
         }
         if (ws.data.kind === "client") {
-          ws.subscribe(topic(ws.data.userId));
-          ws.send(botsEvent(ws.data.userId));
+          const { userId } = ws.data;
+          ws.subscribe(topic(userId));
+          ws.send(botsEvent(userId));
+          for (const workspace of store.workspaces.workspacesFor(userId)) {
+            for (const project of store.projects.projectsIn(workspace.id)) ws.send(memberState(project.id, userId).event);
+          }
           return;
         }
         if (ws.data.kind === "chat") {
