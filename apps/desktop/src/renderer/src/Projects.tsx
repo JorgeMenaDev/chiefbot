@@ -222,7 +222,9 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
       return <p className="text-muted-foreground text-xs">{payerText(item.payer)}</p>;
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
+    // Only bots ask their user questions for now.
     case "notice":
+    case "question":
       return null;
   }
 }

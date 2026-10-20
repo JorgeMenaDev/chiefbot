@@ -1,6 +1,15 @@
-import { CopilotClient, type CopilotClientOptions, type MCPServerConfig, type ResumeSessionConfig, type SessionHooks } from "@github/copilot-sdk";
+import {
+  CopilotClient,
+  type CopilotClientOptions,
+  type ElicitationHandler,
+  type ElicitationResult,
+  type MCPServerConfig,
+  type ResumeSessionConfig,
+  type SessionEvent,
+  type SessionHooks,
+} from "@github/copilot-sdk";
 import { connectionsRoot } from "./connections.ts";
-import type { BotSession, Copilot } from "./copilot.ts";
+import type { BotSession, Copilot, QuestionRequest } from "./copilot.ts";
 
 // The real Copilot SDK in copilot-cli mode: the bundled runtime runs in the bot
 // computer with its full tool set (shell, files, git), working in `workingDirectory`.
@@ -92,11 +101,29 @@ function connectorConfig(mcpServers: Record<string, MCPServerConfig> = {}, onMcp
   };
 }
 
+// A session's ask_user tool as structured forms (askUserVariant "elicitation"),
+// each answered by `onQuestion`. The SDK calls onElicitationRequest without the
+// request's id, but always synchronously while it dispatches the raw
+// elicitation.requested event, before any subscriber sees it (dist/session.js
+// _dispatchEvent). So each call waits in line until `onEvent`, subscribed to the
+// session, hands it that event's requestId: two identical forms still get their own.
+export function askUser(onQuestion: (request: QuestionRequest) => Promise<ElicitationResult>) {
+  const unmatched: Array<(requestId: string) => void> = [];
+  const onElicitationRequest: ElicitationHandler = (context) =>
+    new Promise((resolve, reject) => void unmatched.push((requestId) => void onQuestion({ ...context, requestId }).then(resolve, reject)));
+  return {
+    config: { askUserVariant: "elicitation" as const, onElicitationRequest },
+    onEvent(event: SessionEvent) {
+      if (event.type === "elicitation.requested") unmatched.shift()?.(event.data.requestId);
+    },
+  };
+}
+
 // A Copilot on the SDK with `clientOptions`. Seat sessions share one runtime
 // and get their tokens from gitHubTokenProvider. An installation session gets a
 // runtime of its own, started with its token in COPILOT_GITHUB_TOKEN, which
 // stops when the session disconnects. Either resumes the session's history
-// when it exists on disk.
+// when it exists on disk. A session opened with onQuestion gets the ask_user tool (askUser).
 function sdkCopilot(
   clientOptions: CopilotClientOptions & { env: Record<string, string | undefined> },
   sessionConfig: (options: Parameters<Copilot["openSession"]>[0]) => ResumeSessionConfig,
@@ -104,14 +131,19 @@ function sdkCopilot(
   const shared = new CopilotClient(clientOptions);
   return {
     async openSession(options) {
-      const config = sessionConfig(options);
+      const asks = options.onQuestion && askUser(options.onQuestion);
+      const config = { ...sessionConfig(options), ...asks?.config };
+      const opened = (session: Awaited<ReturnType<typeof openOn>>) => {
+        if (asks) session.on(asks.onEvent);
+        return bound(session);
+      };
       if (options.auth.kind === "seat") {
         const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
-        return { ...bound(session), disconnect: () => session.disconnect() };
+        return { ...opened(session), disconnect: () => session.disconnect() };
       }
       const own = new CopilotClient({ ...clientOptions, env: { ...clientOptions.env, COPILOT_GITHUB_TOKEN: options.auth.token } });
       const session = await openOn(own, options.sessionId, config);
-      return { ...bound(session), disconnect: async () => void (await own.stop()) };
+      return { ...opened(session), disconnect: async () => void (await own.stop()) };
     },
   };
 }

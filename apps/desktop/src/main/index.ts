@@ -2,6 +2,8 @@
 import {
   AnswerApprovalRequest,
   ApprovalId,
+  QuestionId,
+  QuestionResult,
   AttachmentId,
   BotId,
   ConnectionName,
@@ -167,6 +169,9 @@ ipcMain.handle("chat:send", (_event, id: unknown, text: unknown, attachments: un
 ipcMain.handle("chat:attachment", (_event, id: unknown, attachmentId: unknown) => chats.attachment(BotId.parse(id), AttachmentId.parse(attachmentId)));
 ipcMain.handle("chat:answer", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   chats.answer(BotId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
+);
+ipcMain.handle("chat:answer-question", (_event, id: unknown, questionId: unknown, result: unknown) =>
+  chats.answerQuestion(BotId.parse(id), QuestionId.parse(questionId), QuestionResult.parse(result)),
 );
 ipcMain.handle("routines:list", (_event, botId: unknown) => routines.list(BotId.parse(botId)));
 ipcMain.handle("routines:create", (_event, botId: unknown, input: unknown) =>

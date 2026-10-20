@@ -4,6 +4,7 @@ import type {
   BotAvatar,
   ConnectorInput,
   EnvironmentInput,
+  QuestionResult,
   RoutineInput,
   ServiceInput,
   SetBotModelRequest,
@@ -53,6 +54,9 @@ const api = {
     attachment: (botId: string, attachmentId: string): Promise<unknown> => ipcRenderer.invoke("chat:attachment", botId, attachmentId),
     answer: (botId: string, approvalId: string, approved: boolean): Promise<void> =>
       ipcRenderer.invoke("chat:answer", botId, approvalId, approved),
+    // The user's answer to one of the bot's questions: every question answered, or declined.
+    answerQuestion: (botId: string, questionId: string, result: QuestionResult): Promise<void> =>
+      ipcRenderer.invoke("chat:answer-question", botId, questionId, result),
     onChange: (listener: (view: unknown) => void) => subscribe("chat:state", listener),
   },
   routines: {

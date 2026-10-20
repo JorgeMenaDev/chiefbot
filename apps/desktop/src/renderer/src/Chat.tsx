@@ -8,6 +8,7 @@ import { chatRows, type LaneItem, type ToolItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { chipFor, isImage, uploads, type DraftAttachment } from "./composerAttachments.ts";
 import { Markdown } from "./Markdown.tsx";
+import { QuestionCard } from "./QuestionCard.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
@@ -133,6 +134,8 @@ function Message({
       );
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.chat.answer(botId, item.approvalId, approved)} />;
+    case "question":
+      return <QuestionCard item={item} onAnswer={(result) => window.chiefbot.chat.answerQuestion(botId, item.questionId, result)} />;
     // A chief's chat has none: it always runs on its owner's seat, as its header says.
     case "payer":
       return null;
