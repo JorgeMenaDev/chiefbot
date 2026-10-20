@@ -9,7 +9,7 @@ The `gcloud` command is signed in as the user for this turn, with a Google acces
 
 Commands run in the user's default project (`gcloud config list` shows it). For another one, add `--project <id>` at the end. Put every flag after the command (`gcloud run services list --region europe-west2`, not `gcloud --project x run …`): a read with a flag in front waits for approval. Add `--format json` when you need to read fields.
 
-A 403 that says an API "has not been used in project … or it is disabled" means the project does not use that product (no GKE clusters, say), not that it is down.
+A 403 that says an API "has not been used in project … or it is disabled", or any other permission error, means you could not look: report that product's health as unknown, name the API and project, and never read it as "nothing is down".
 
 ## Health recipes (these run without asking)
 
@@ -54,7 +54,7 @@ Use `resource.type="k8s_container"` with `resource.labels.cluster_name` for GKE.
 ```sh
 gcloud compute regions describe <region> --format "value(status)"
 gcloud compute zones list --filter "region:<region>"
-curl -s https://status.cloud.google.com/incidents.json | bun -e 'for (const i of await Bun.stdin.json()) if (!i.end && i.currently_affected_locations.some((l) => l.id === process.argv[1])) console.log(i.begin, i.service_name, i.severity, i.external_desc)' <region>
+bun -e 'for (const i of await (await fetch("https://status.cloud.google.com/incidents.json")).json()) if (!i.end && i.currently_affected_locations.some((l) => l.id === process.argv[1])) console.log(i.begin, i.service_name, i.severity, i.external_desc)' <region>
 ```
 
 ## Changes

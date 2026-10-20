@@ -32,11 +32,17 @@ const base64url = (value: object) => Buffer.from(JSON.stringify(value)).toString
 // A one-hour access token for the credentials JSON `keyText`, from `tokenUrl`: a
 // JWT bearer grant signed with a service account's private key, or a refresh
 // grant for authorized_user. Errors name Google's error code, never the key.
-export async function googleAccessToken(keyText: string, tokenUrl = googleTokenUrl): Promise<string> {
+// Google has `timeoutMs` to answer in full, so a slow endpoint never holds a turn.
+export async function googleAccessToken(keyText: string, tokenUrl = googleTokenUrl, timeoutMs = 10_000): Promise<string> {
   const key = parseGoogleKey(keyText);
   if (!key) throw new Error("the saved key is not a service account key or authorized_user credentials JSON");
-  const res = await fetch(tokenUrl, { method: "POST", body: new URLSearchParams(grant(key, tokenUrl)) });
+  const signal = AbortSignal.timeout(timeoutMs);
+  const timedOut = () => new Error(`Google's token endpoint did not answer within ${timeoutMs} ms`);
+  const res = await fetch(tokenUrl, { method: "POST", body: new URLSearchParams(grant(key, tokenUrl)), signal }).catch((error: unknown) => {
+    throw signal.aborted ? timedOut() : error;
+  });
   const body: unknown = await res.json().catch(() => null);
+  if (signal.aborted) throw timedOut();
   const token = z.object({ access_token: z.string().min(1) }).safeParse(body);
   if (res.ok && token.success) return token.data.access_token;
   const error = z.object({ error: z.string().max(100) }).safeParse(body);

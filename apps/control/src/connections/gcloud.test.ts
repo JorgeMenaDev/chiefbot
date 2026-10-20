@@ -5,8 +5,10 @@ import { createVerify, generateKeyPairSync } from "node:crypto";
 import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ComputerProvider } from "../computers/computer.ts";
 import type { SecretStore } from "../secrets/secretStore.ts";
 import { atCleanUp, cleanUp, doneCount, startTestControl } from "../testControl.ts";
+import { googleAccessToken } from "./googleToken.ts";
 
 afterEach(cleanUp);
 
@@ -20,8 +22,9 @@ const authorizedUser = { type: "authorized_user", client_id: "client.apps.exampl
 
 // A fake Google token endpoint: a JWT bearer grant whose assertion the service
 // account's key signed for an hour of cloud-platform, or the authorized user's
-// refresh grant, gets an access token; anything else is refused.
-function fakeGoogle() {
+// refresh grant, gets an access token; anything else is refused. It answers once
+// `hold` settles.
+function fakeGoogle(hold: Promise<unknown>) {
   const grants: string[] = [];
   const server = Bun.serve({
     port: 0,
@@ -29,6 +32,7 @@ function fakeGoogle() {
       const form = new URLSearchParams(await req.text());
       const grant = form.get("grant_type") ?? "";
       grants.push(grant);
+      await hold;
       if (grant === "urn:ietf:params:oauth:grant-type:jwt-bearer") {
         const [header = "", claims = "", signature = ""] = (form.get("assertion") ?? "").split(".");
         const signed = createVerify("RSA-SHA256").update(`${header}.${claims}`).verify(publicKey, signature, "base64url");
@@ -50,8 +54,8 @@ function fakeGoogle() {
 // Control minting tokens at a fake Google, whose bots stage connections under
 // `root`, with a fake `gcloud` on the shell's PATH (after the wrappers) that prints
 // the token it reads from its file and its project.
-async function setup() {
-  const google = fakeGoogle();
+async function setup({ hold = Promise.resolve(), provider }: { hold?: Promise<unknown>; provider?: (fake: ComputerProvider) => ComputerProvider } = {}) {
+  const google = fakeGoogle(hold);
   const secrets = new Map<string, string>();
   const store: SecretStore = {
     get: async (name) => secrets.get(name) ?? null,
@@ -63,7 +67,13 @@ async function setup() {
   writeFileSync(join(tools, "gcloud"), '#!/bin/sh\necho "gcloud $* token=$(cat "$CLOUDSDK_AUTH_ACCESS_TOKEN_FILE") project=$CLOUDSDK_CORE_PROJECT"\n');
   chmodSync(join(tools, "gcloud"), 0o755);
   const shell = { cwd: tmpdir(), env: { PATH: `${root}/bin:${tools}:${process.env.PATH ?? ""}` } };
-  const control = await startTestControl({ secrets: store, connectionsRoot: root, googleTokenUrl: google.url, copilot: fakeCopilot({ shell }) });
+  const control = await startTestControl({
+    secrets: store,
+    connectionsRoot: root,
+    googleTokenUrl: google.url,
+    copilot: fakeCopilot({ shell }),
+    ...(provider === undefined ? {} : { provider }),
+  });
   return { ...control, ...control.user, root, google };
 }
 
@@ -148,4 +158,49 @@ test("google-access-token needs a secret key field, and makes the field token th
   expect(issues({ key: { label: "Key", secret: true }, token: { label: "Token" } })).toEqual([["fields.token", "google-access-token makes the field token itself"]]);
   // Without the exchange, {token} names no field.
   expect(ConnectionDefinition.safeParse({ title: "G", description: "G.", cli: "gcloud", fields: { key: { label: "Key", secret: true } }, env: { T: "{token}" } }).success).toBe(false);
+});
+
+test("a turn stopped while its token is being minted never reaches the worker", async () => {
+  const google = Promise.withResolvers<void>();
+  const shutdown = Promise.withResolvers<void>();
+  atCleanUp(() => shutdown.resolve());
+  // The computer takes its time to stop, so its worker is still connected when the token comes.
+  const { api, computers, onlineBot, send, watchChat, google: endpoint } = await setup({
+    hold: google.promise,
+    provider: (fake) => ({ ...fake, stop: (botId) => shutdown.promise.then(() => fake.stop(botId)) }),
+  });
+  await api("PUT", "/connections/gcloud", { fields: { key: JSON.stringify(serviceAccount), project: "demo-project" } });
+  const bot = await onlineBot("Ada");
+  const ran: string[] = [];
+  computers.copilot.script = async function* (prompt) {
+    ran.push(prompt);
+    yield sdk.idle();
+  };
+  const chat = watchChat(bot.id);
+
+  await send(bot.id, "is the hello service up?");
+  while (endpoint.grants.length === 0) await Bun.sleep(10);
+  const stopped = api("POST", `/bots/${bot.id}/stop`);
+  await chat.until(doneCount(1));
+  google.resolve();
+  await Bun.sleep(200);
+  shutdown.resolve();
+
+  expect(ran).toEqual([]);
+  expect((await stopped).status).toBe(200);
+});
+
+test("a token endpoint that stalls, before answering or mid-answer, fails within the timeout", async () => {
+  const stalled = [
+    () => new Promise<Response>(() => {}),
+    () => new Response(new ReadableStream({ start: (body) => body.enqueue(new TextEncoder().encode('{"access_token":')) }), { headers: { "content-type": "application/json" } }),
+  ];
+  for (const fetch of stalled) {
+    const server = Bun.serve({ port: 0, fetch });
+    atCleanUp(() => server.stop(true));
+    const started = Date.now();
+
+    await expect(googleAccessToken(JSON.stringify(authorizedUser), server.url.href, 200)).rejects.toThrow("Google's token endpoint did not answer within 200 ms");
+    expect(Date.now() - started).toBeLessThan(2000);
+  }
 });

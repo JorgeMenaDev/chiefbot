@@ -62,8 +62,8 @@ export function chatTurns({
   // Starts a chat turn with `text` on the bot's worker. The turn is recorded at
   // once; it goes to the worker with the owner's connections once they are read.
   // A worker that reconnects meanwhile has ended the turn as lost, so it goes
-  // only to the connection it was started on. Unreadable connections leave the
-  // turn without them.
+  // only to the connection it was started on, and a turn that ended meanwhile
+  // (Stop) does not go at all. Unreadable connections leave the turn without them.
   const sendTurn = (userId: UserId, botId: BotId, text: string): { turnId: TurnId } | { error: TurnRefusal } => {
     const worker = workerOf(botId);
     if (!worker) return { error: "bot_offline" };
@@ -78,9 +78,10 @@ export function chatTurns({
     publishChat(botId, started);
     void connectionsFor(userId)
       .catch(() => [])
-      .then((connections) =>
-        worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, turnKey, text, model, connections } satisfies ControlToWorker)),
-      );
+      .then((connections) => {
+        if (workerOf(botId) !== worker || !store.unfinishedTurns(botId).includes(started.turnId)) return;
+        worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, turnKey, text, model, connections } satisfies ControlToWorker));
+      });
     return { turnId: started.turnId };
   };
 
