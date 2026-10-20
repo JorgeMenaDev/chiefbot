@@ -5,7 +5,6 @@ import {
   savedSecretKept,
   ServiceId,
   ServiceInput,
-  type Environment,
   type Service,
   type ServiceHealth,
   type ServiceResult,
@@ -17,14 +16,15 @@ import { apiError, bearer, jsonWithin, unauthorized } from "../http.ts";
 import type { SecretStore } from "../secrets/secretStore.ts";
 import type { openStore } from "../store.ts";
 import { checkEnvironment, SERVICE_TIMEOUT_MS, type Net } from "./serviceCheck.ts";
+import type { SavedEnvironment } from "./serviceStore.ts";
 
 // How many checks of one person's services run at once; the rest wait their turn.
 export const SERVICE_CONCURRENCY = 4;
 // The most a service's body may be: six environments with their secrets.
 const BODY_LIMIT = 128 * 1024;
 
-// The SecretStore name of an environment's secret.
-const secretName = (id: EnvironmentId) => `service-${id}`;
+// A new SecretStore name for a secret being written (SavedEnvironment's secretName).
+const newSecretName = () => `service-${crypto.randomUUID()}`;
 
 // A check whose secret could not be read. Why goes to control's log, never the screen.
 const unreadable: ServiceResult = {
@@ -40,8 +40,10 @@ const unreadable: ServiceResult = {
 // when asked: when the person opens Health (POST /health/services/check), on
 // Refresh (health.ts) and on Check now, never on a timer, at most
 // SERVICE_CONCURRENCY at a time per person. It keeps the results HEALTH_KEEP_MS
-// (health.ts prunes them). A secret goes to `secrets`, keyed by environment, and
-// is never sent back: the dialog leaves it out to keep it (savedSecretKept). A
+// (health.ts prunes them). A secret goes to `secrets` under a new name each
+// time it is written, and is never sent back: the dialog leaves it out to keep
+// it (savedSecretKept). A check or Test signs with the secret its snapshot of the
+// environment names, so a replaced secret never goes to the URL it replaced. A
 // check still running when its service is saved again or removed, or when
 // control stops, is aborted and its result dropped.
 //
@@ -58,42 +60,45 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
   const tests = new Set<AbortController>();
   const inTurn = slots(SERVICE_CONCURRENCY);
 
-  // The saved secret of environment `id`, or null when the store refuses, has
-  // none, or gives none within SERVICE_TIMEOUT_MS.
-  async function savedSecret(id: EnvironmentId, stop: AbortSignal): Promise<string | null> {
+  // The saved secret `name`, or null when the store refuses, has none (it was
+  // replaced or removed), or gives none within SERVICE_TIMEOUT_MS.
+  async function savedSecret(name: string, stop: AbortSignal): Promise<string | null> {
     const late = new AbortController();
     const cancel = clock.setTimeout(() => late.abort(), SERVICE_TIMEOUT_MS);
     const signal = AbortSignal.any([stop, late.signal]);
     const gaveUp = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(new Error("no answer in time")), { once: true }));
     try {
-      return await Promise.race([secrets.get(secretName(id)), gaveUp]);
+      return await Promise.race([secrets.get(name), gaveUp]);
     } catch (error) {
-      if (!stop.aborted) console.error(`service check of ${id} could not read its secret`, error);
+      if (!stop.aborted) console.error(`service check could not read its secret ${name}`, error);
       return null;
     } finally {
       cancel();
     }
   }
 
-  // What a check of `target` finds, signed with `secret()` when its authentication needs one.
-  async function outcome(target: Pick<Environment, "url" | "auth">, secret: () => Promise<string | null>, stop: AbortSignal): Promise<ServiceResult> {
-    if (target.auth.kind === "none") return checkEnvironment({ ...target, secret: null }, { net, clock, stop });
-    const value = await secret();
-    return value === null ? unreadable : checkEnvironment({ ...target, secret: value }, { net, clock, stop });
+  // What a check of `url` finds, signed as `auth` says with the secret given, or else the saved one named.
+  async function outcome(
+    { url, auth, secret, secretName }: Pick<SavedEnvironment, "url" | "auth" | "secretName"> & { secret?: string },
+    stop: AbortSignal,
+  ): Promise<ServiceResult> {
+    if (auth.kind === "none") return checkEnvironment({ url, auth, secret: null }, { net, clock, stop });
+    const value = secret ?? (secretName === null ? null : await savedSecret(secretName, stop));
+    return value === null ? unreadable : checkEnvironment({ url, auth, secret: value }, { net, clock, stop });
   }
 
   // Checks the person's environment as saved now and keeps the result, unless it
   // is being checked already: then it waits for that check. Never rejects.
-  function check(userId: UserId, environment: Environment): Promise<void> {
+  function check(userId: UserId, environment: SavedEnvironment): Promise<void> {
     const current = running.get(environment.id);
     if (current) return current.job;
     const abort = new AbortController();
     const job = inTurn(userId, async () => {
       if (abort.signal.aborted) return;
       const at = clock.now();
-      const result = await outcome(environment, () => savedSecret(environment.id, abort.signal), abort.signal);
-      // Saved again, removed or control stopped meanwhile: the result is stale.
-      if (!abort.signal.aborted && store.services.environment(userId, environment.id)) store.services.record(environment.id, { ...result, at });
+      const result = await outcome(environment, abort.signal);
+      // Control stopped meanwhile; the store drops it too when the environment changed or went.
+      if (!abort.signal.aborted) store.services.record(environment, { ...result, at });
     })
       .catch((error: unknown) => console.error(`service check of ${environment.id} failed: ${error instanceof Error ? error.name : "unknown error"}`))
       .finally(() => {
@@ -103,8 +108,11 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
     return job;
   }
 
-  const checkServices = (userId: UserId, services: Service[]) =>
-    Promise.all(services.flatMap(({ environments }) => environments.map((environment) => check(userId, environment))));
+  const checkSaved = (userId: UserId, environments: SavedEnvironment[]) => Promise.all(environments.map((environment) => check(userId, environment)));
+
+  // Deletes secrets no environment holds any more. One that fails stays behind, logged.
+  const forget = (names: Iterable<string>) =>
+    Promise.all([...names].map((name) => secrets.delete(name).catch((error: unknown) => console.error(`could not delete the service secret ${name}`, error))));
 
   // The service is saved again or removed: its checks still running are aborted and dropped.
   function changed({ environments }: Service) {
@@ -128,36 +136,53 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
 
   // Saves the person's service from the body: new when `existing` is null, else
   // replacing it. An environment's secret is needed when its authentication
-  // signs, unless the saved one is kept. Secrets go first, so a saved
-  // environment never lacks one; those no environment needs any more go last.
+  // signs, unless the saved one is kept. New secrets are written first, each
+  // under a new name; then the service and the names its environments use are
+  // saved at once; then the secrets no environment names any more go. When a
+  // step fails, what it wrote goes and the service stays as it was.
   async function save(userId: UserId, req: Request, existing: Service | null) {
     const input = ServiceInput.safeParse((await jsonWithin(req, BODY_LIMIT))?.json ?? null);
     if (!input.success) return apiError(400, "invalid_service", z.prettifyError(input.error));
     const { name, icon, environments } = input.data;
-    const saved = new Map(existing?.environments.map((environment) => [environment.id, environment]));
+    const before = new Map(existing ? store.services.saved(userId, existing.id).map((environment) => [environment.id, environment]) : []);
     for (const environment of environments) {
-      if (environment.id && !saved.has(environment.id)) return apiError(400, "invalid_service", `${environment.name} is not an environment of this service`);
-      const kept = savedSecretKept(environment.id && saved.get(environment.id), environment);
+      if (environment.id && !before.has(environment.id)) return apiError(400, "invalid_service", `${environment.name} is not an environment of this service`);
+      const kept = savedSecretKept(environment.id && before.get(environment.id), environment);
       if (environment.auth.kind !== "none" && environment.secret === undefined && !kept) {
         return apiError(400, "invalid_service", `${environment.name} needs its ${environment.auth.kind === "bearer" ? "token" : "header value"}`);
       }
     }
+    // Each environment as it will be saved, and the secret it brings, to write under a new name.
+    const next = environments.map(({ id, name, url, auth, secret }) => {
+      const write = auth.kind !== "none" && secret !== undefined ? { name: newSecretName(), secret } : null;
+      const secretName = auth.kind === "none" ? null : (write?.name ?? (id && before.get(id)?.secretName) ?? null);
+      const environment: SavedEnvironment = { id: id ?? EnvironmentId.parse(`env_${crypto.randomUUID()}`), name, url, auth, secretName };
+      return { environment, write };
+    });
+    const writes = next.flatMap(({ write }) => (write ? [write] : []));
+    const saving = next.map(({ environment }) => environment);
     const service: Service = {
       id: existing?.id ?? ServiceId.parse(`service_${crypto.randomUUID()}`),
       name,
       icon,
-      environments: environments.map(({ id, name, url, auth }) => ({ id: id ?? EnvironmentId.parse(`env_${crypto.randomUUID()}`), name, url, auth })),
+      environments: saving.map(({ id, name, url, auth }) => ({ id, name, url, auth })),
     };
-    await Promise.all(
-      service.environments.map(async ({ id, auth }, index) => {
-        const secret = environments[index]?.secret;
-        if (auth.kind !== "none" && secret !== undefined) await secrets.put(secretName(id), secret);
-      }),
-    );
+    const written = await Promise.allSettled(writes.map(({ name, secret }) => secrets.put(name, secret)));
+    const refused = written.find((outcome) => outcome.status === "rejected");
+    if (refused) {
+      console.error("could not save a service's secret", refused.reason);
+      await forget(writes.map(({ name }) => name));
+      return apiError(503, "secrets_unavailable", "Couldn't save the secrets, so nothing changed. Try again.");
+    }
     if (existing) changed(existing);
-    store.services.save(userId, service, clock.now());
-    const signing = new Set(service.environments.flatMap(({ id, auth }) => (auth.kind === "none" ? [] : [id])));
-    await Promise.all([...saved.keys()].filter((id) => !signing.has(id)).map((id) => secrets.delete(secretName(id))));
+    let dropped: string[];
+    try {
+      dropped = store.services.save(userId, service, saving, clock.now());
+    } catch (error) {
+      await forget(writes.map(({ name }) => name));
+      throw error;
+    }
+    await forget(dropped);
     return Response.json(service satisfies Service, { status: existing ? 200 : 201 });
   }
 
@@ -169,14 +194,15 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
     const { id, url, auth, secret } = input.data;
     const saved = id ? store.services.environment(userId, id) : null;
     if (id && !saved) return apiError(404, "not_found");
-    if (auth.kind !== "none" && secret === undefined && !savedSecretKept(saved?.environment, input.data)) {
+    if (auth.kind !== "none" && secret === undefined && !savedSecretKept(saved ?? undefined, input.data)) {
       return apiError(400, "invalid_service", `Enter the ${auth.kind === "bearer" ? "token" : "header value"} to test`);
     }
     const abort = new AbortController();
     tests.add(abort);
     try {
-      const signWith = () => (secret !== undefined ? Promise.resolve(secret) : id ? savedSecret(id, abort.signal) : Promise.resolve(null));
-      const result = await inTurn(userId, () => outcome({ url, auth }, signWith, abort.signal));
+      // The saved secret named now: if it is replaced before this Test's turn, the Test finds it gone.
+      const signWith = { url, auth, secretName: saved?.secretName ?? null, ...(secret === undefined ? {} : { secret }) };
+      const result = await inTurn(userId, () => outcome(signWith, abort.signal));
       return Response.json(result satisfies ServiceResult);
     } finally {
       tests.delete(abort);
@@ -203,7 +229,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
     },
     "/health/services/check": {
       POST: signedIn(async (userId) => {
-        await checkServices(userId, store.services.list(userId));
+        await checkSaved(userId, store.services.saved(userId));
         return Response.json(report(userId) satisfies ServiceHealth[]);
       }),
     },
@@ -214,8 +240,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
       PUT: ofService((userId, service, req) => save(userId, req, service)),
       DELETE: ofService(async (userId, service) => {
         changed(service);
-        store.services.remove(userId, service.id);
-        await Promise.all(service.environments.map(({ id }) => secrets.delete(secretName(id))));
+        await forget(store.services.remove(userId, service.id));
         return new Response(null, { status: 204 });
       }),
     },
@@ -223,7 +248,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
       POST: signedIn(async (userId, req: Bun.BunRequest<"/health/services/:id/check">) => {
         const service = store.services.get(userId, ServiceId.parse(req.params.id));
         if (!service) return apiError(404, "not_found");
-        await checkServices(userId, [service]);
+        await checkSaved(userId, store.services.saved(userId, service.id));
         return Response.json(report(userId) satisfies ServiceHealth[]);
       }),
     },
@@ -233,7 +258,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
     routes,
     report,
     // Checks every environment of the person's services (Refresh).
-    checkAll: async (userId: UserId) => void (await checkServices(userId, store.services.list(userId))),
+    checkAll: async (userId: UserId) => void (await checkSaved(userId, store.services.saved(userId))),
     stop() {
       for (const { abort } of running.values()) abort.abort();
       for (const abort of tests) abort.abort();

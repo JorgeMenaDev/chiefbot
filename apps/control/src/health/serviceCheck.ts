@@ -1,4 +1,4 @@
-import type { ServiceAuth, ServiceResult } from "@chiefbot/contracts";
+import { SERVICE_PROBLEM_MAX, type ServiceAuth, type ServiceResult } from "@chiefbot/contracts";
 import type { Clock } from "@chiefbot/worker/clock";
 import { lookup } from "node:dns/promises";
 import { BlockList, isIP } from "node:net";
@@ -41,7 +41,7 @@ const downStatuses = ["DOWN", "OUT_OF_SERVICE"];
 // request to the address it checked, so a second lookup cannot point it
 // elsewhere. Gives up after SERVICE_TIMEOUT_MS, or when `stop` aborts. Never
 // throws, and the result never holds the secret or the service's own words,
-// beyond a short top-level `status`.
+// beyond a short top-level `status`; its problem is cut to SERVICE_PROBLEM_MAX.
 export async function checkEnvironment(
   { url, auth, secret }: { url: string; auth: ServiceAuth; secret: string | null },
   { net, clock, stop }: { net: Net; clock: Clock; stop: AbortSignal },
@@ -52,15 +52,17 @@ export async function checkEnvironment(
   const target = new URL(url);
   // Text the service chose, which might echo the secret, is dropped when it does.
   const leaks = (text: string) => secret !== null && secret !== "" && text.includes(secret);
+  let result: ServiceResult;
   try {
     const started = clock.now();
-    const result = await ask(target, { auth, secret, net, signal, leaks, elapsed: () => clock.now() - started });
-    return { ...result, problem: result.problem && secret ? result.problem.replaceAll(secret, "…") : result.problem };
+    result = await ask(target, { auth, secret, net, signal, leaks, elapsed: () => clock.now() - started });
   } catch (error) {
-    return failed(signal.aborted ? `No answer within ${SERVICE_TIMEOUT_MS / 1000} s` : unreachable(error, target.hostname, leaks));
+    result = failed(signal.aborted ? `No answer within ${SERVICE_TIMEOUT_MS / 1000} s` : unreachable(error, target.hostname, leaks));
   } finally {
     cancel();
   }
+  const problem = result.problem && secret ? result.problem.replaceAll(secret, "…") : result.problem;
+  return { ...result, problem: problem && problem.length > SERVICE_PROBLEM_MAX ? `${problem.slice(0, SERVICE_PROBLEM_MAX - 1)}…` : problem };
 }
 
 type Ask = { auth: ServiceAuth; secret: string | null; net: Net; signal: AbortSignal; leaks: (text: string) => boolean; elapsed: () => number };

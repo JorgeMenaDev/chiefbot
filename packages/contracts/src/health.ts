@@ -72,15 +72,19 @@ export const RECENT_SERVICE_CHECKS = 20;
 export const ServiceIcon = z.enum(["web", "api", "auth", "data", "messaging", "other"]);
 export type ServiceIcon = z.infer<typeof ServiceIcon>;
 
-// A health URL: http or https, with no user name or password in it (a credential
-// goes under authentication, which never shows).
+// A host name DNS can hold: at most 253 characters, each label at most 63.
+const dnsSized = (hostname: string) => hostname.length <= 253 && hostname.split(".").every((label) => label.length <= 63);
+
+// A health URL: http or https, with a host name DNS can hold and no user name or
+// password in it (a credential goes under authentication, which never shows).
 export const ServiceUrl = z
   .string()
   .trim()
   .max(2000)
   .pipe(z.url({ protocol: /^https?$/, error: "expected an http or https URL" }))
   // Zod runs this even when the URL check failed, so it must not throw then.
-  .refine((text) => !URL.canParse(text) || (new URL(text).username === "" && new URL(text).password === ""), "put a credential under authentication, not in the URL");
+  .refine((text) => !URL.canParse(text) || (new URL(text).username === "" && new URL(text).password === ""), "put a credential under authentication, not in the URL")
+  .refine((text) => !URL.canParse(text) || dnsSized(new URL(text).hostname), "the host name is too long");
 
 // How control signs the check: no credential, `Authorization: Bearer <secret>`,
 // or the header `header` with the secret as its value (an API key, or Basic auth).
@@ -155,6 +159,9 @@ export function savedSecretKept(saved: Pick<Environment, "url" | "auth"> | undef
   }
 }
 
+// The longest problem a service check gives; serviceCheck.ts cuts a longer one.
+export const SERVICE_PROBLEM_MAX = 300;
+
 // What one check of an environment found: its status (ok: 2xx in time;
 // degraded: 2xx but slow; down: anything else; unknown: control could not
 // check), the HTTP code, the body's top-level `status` (Spring Boot Actuator,
@@ -165,7 +172,7 @@ export const ServiceResult = z.object({
   code: z.number().int().min(100).max(599).nullable(),
   bodyStatus: z.string().min(1).max(40).nullable(),
   latencyMs: z.number().int().min(0).nullable(),
-  problem: z.string().min(1).max(300).nullable(),
+  problem: z.string().min(1).max(SERVICE_PROBLEM_MAX).nullable(),
 });
 export type ServiceResult = z.infer<typeof ServiceResult>;
 

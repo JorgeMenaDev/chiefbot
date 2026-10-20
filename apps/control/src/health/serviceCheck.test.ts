@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { isIP } from "node:net";
+import { SERVICE_PROBLEM_MAX, ServiceResult } from "@chiefbot/contracts";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { checkEnvironment, SERVICE_TIMEOUT_MS, type Net } from "./serviceCheck.ts";
 
@@ -114,6 +115,16 @@ test("a redirect is not followed: it is down, naming only where it points", asyn
 
   expect(await check(net)).toEqual({ status: "down", code: 302, bodyStatus: null, latencyMs: 0, problem: "Redirects to login.example.org, which is not followed" });
   expect(calls).toHaveLength(1);
+});
+
+test("a problem naming a long host is cut to the length a result may have", async () => {
+  const far = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(63)}.${"e".repeat(63)}.example.org`;
+  const { net } = fakeNet(() => new Response(null, { status: 302, headers: { location: `https://${far}/` } }));
+
+  const { problem } = ServiceResult.parse(await check(net));
+  expect(problem).toHaveLength(SERVICE_PROBLEM_MAX);
+  expect(problem ?? "").toStartWith(`Redirects to ${"a".repeat(63)}.`);
+  expect(problem ?? "").toEndWith("…");
 });
 
 test("a cloud metadata address is never asked, by name or by what a name resolves to", async () => {

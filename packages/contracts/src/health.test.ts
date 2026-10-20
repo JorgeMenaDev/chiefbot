@@ -10,7 +10,7 @@ const meta = {
   ],
 };
 
-test("a service has 1 to 6 environments with names of their own, and http or https URLs without credentials", () => {
+test("a service has 1 to 6 environments with names of their own, and http or https URLs with a real host name and no credentials", () => {
   const refused = (change: Record<string, unknown>) => ServiceInput.safeParse({ ...meta, ...change }).success === false;
   const env = (change: Record<string, unknown>) => ({ environments: [{ ...meta.environments[1], ...change }] });
 
@@ -26,6 +26,10 @@ test("a service has 1 to 6 environments with names of their own, and http or htt
   expect(refused(env({ url: "" }))).toBe(true);
   expect(refused(env({ url: "meta.example" }))).toBe(true);
   expect(refused(env({ url: "https://user:pass@meta.example.com/health" }))).toBe(true);
+  // A host name DNS could not hold: over 253 characters, or a label over 63.
+  expect(refused(env({ url: `https://${"a".repeat(64)}.example.com/health` }))).toBe(true);
+  expect(refused(env({ url: `https://${Array.from({ length: 5 }, () => "a".repeat(60)).join(".")}.com/health` }))).toBe(true);
+  expect(refused(env({ url: `https://${"a".repeat(63)}.example.com/health` }))).toBe(false);
   expect(refused(env({ auth: { kind: "header", header: "Host" } }))).toBe(true);
   expect(refused(env({ auth: { kind: "header", header: "X Api Key" } }))).toBe(true);
   expect(refused(env({ auth: { kind: "bearer" }, secret: "line\nbreak" }))).toBe(true);

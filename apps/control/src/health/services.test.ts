@@ -32,16 +32,20 @@ function fakeNet(answer: (sent: Sent) => Response | Promise<Response>) {
   return { net, sent };
 }
 
-// A SecretStore in memory; `failing` makes it refuse services' secrets.
+// A SecretStore in memory; `failing` makes it refuse to read services' secrets,
+// and `refusing` to write that value.
 function memorySecrets() {
   const saved = new Map<string, string>();
-  const state = { failing: false };
+  const state: { failing: boolean; refusing: string | null } = { failing: false, refusing: null };
   const store: SecretStore = {
     get: async (name) => {
       if (state.failing && name.startsWith("service-")) throw new Error("PERMISSION_DENIED on the secret");
       return saved.get(name) ?? null;
     },
-    put: async (name, value) => void saved.set(name, value),
+    put: async (name, value) => {
+      if (value === state.refusing) throw new Error("PERMISSION_DENIED on the secret");
+      saved.set(name, value);
+    },
     delete: async (name) => void saved.delete(name),
   };
   const services = () => [...saved].filter(([name]) => name.startsWith("service-"));
@@ -108,17 +112,13 @@ test("services are checked when Health opens, on Refresh and on Check now, never
   ]);
 });
 
-test("secrets are write-only: kept in the secret store by environment, never sent back, kept on edit only for the same host", async () => {
+test("secrets are write-only: kept in the secret store per environment, never sent back, kept on edit only for the same host", async () => {
   const secrets = memorySecrets();
   const { user } = await setup(up, secrets.store);
   const service = await add(user);
-  const [prod, preprod, int] = service.environments;
-  if (!prod || !preprod || !int) throw new Error("expected three environments");
 
-  expect(secrets.services()).toEqual([
-    [`service-${prod.id}`, token],
-    [`service-${preprod.id}`, "preprod-key-0123"],
-  ]);
+  expect(secrets.services().map(([, value]) => value)).toEqual([token, "preprod-key-0123"]);
+  const names = secrets.services().map(([name]) => name);
   const everything = JSON.stringify([service, await checkAll(user), await report(user)]);
   expect(everything).not.toContain(token);
   expect(everything).not.toContain("preprod-key-0123");
@@ -126,7 +126,7 @@ test("secrets are write-only: kept in the secret store by environment, never sen
   const edit = (body: object) => user.api("PUT", `/health/services/${service.id}`, body);
   const saved = asSaved(service);
   expect((await edit(saved)).status).toBe(200);
-  expect(secrets.services()).toHaveLength(2);
+  expect(secrets.services().map(([name]) => name)).toEqual(names);
   expect((await checkAll(user))[0]?.environments[0]?.latest?.status).toBe("ok");
   // To another host, or signing another way, the secret must be typed again.
   const moved = await edit({ ...saved, environments: [{ ...saved.environments[0], url: "https://elsewhere.example.com/health" }, ...saved.environments.slice(1)] });
@@ -141,6 +141,59 @@ test("secrets are write-only: kept in the secret store by environment, never sen
   expect(secrets.services()).toHaveLength(2);
   await user.api("DELETE", `/health/services/${again.id}`);
   expect(secrets.services()).toEqual([]);
+});
+
+test("a save that cannot write every new secret changes nothing, and leaves none of them behind", async () => {
+  const secrets = memorySecrets();
+  const { user, sent } = await setup(up, secrets.store);
+  const service = await add(user);
+  const before = secrets.services();
+  const [prod, preprod, int] = asSaved(service).environments;
+  if (!prod || !preprod || !int) throw new Error("expected three environments");
+
+  secrets.state.refusing = "new-preprod-key";
+  const moved = await user.api("PUT", `/health/services/${service.id}`, {
+    ...asSaved(service),
+    environments: [
+      { ...prod, url: "https://meta.example.org/actuator/health", secret: "new-prod-token" },
+      { ...preprod, url: "https://meta-preprod.example.org/actuator/health", secret: "new-preprod-key" },
+      int,
+    ],
+  });
+
+  expect([moved.status, await moved.text()]).toEqual([503, JSON.stringify({ error: "secrets_unavailable", message: "Couldn't save the secrets, so nothing changed. Try again." })]);
+  expect(secrets.services()).toEqual(before);
+  await checkAll(user);
+  expect(sent.map(({ host, headers }) => [host, headers.authorization ?? headers["X-API-Key"] ?? null]).sort()).toEqual([
+    ["meta-int.example.com", null],
+    ["meta-preprod.example.com", "preprod-key-0123"],
+    ["meta.example.com", `Bearer ${token}`],
+  ]);
+});
+
+test("a Test waiting for its turn never signs with a secret saved after it was asked: that one is for another URL", async () => {
+  const waiting: Array<() => void> = [];
+  const { user, sent } = await setup(({ host }) => (host.endsWith(".wide.example.com") ? new Promise((resolve) => waiting.push(() => resolve(up()))) : up()));
+  const service = await add(user);
+  const prod = asSaved(service).environments[0];
+  if (!prod) throw new Error("expected prod");
+  const names = ["a", "b", "c", "d"];
+  await add(user, { name: "Wide", icon: "api", environments: names.map((name) => ({ name, url: `https://${name}.wide.example.com/health`, auth: { kind: "none" } })) });
+
+  // Every slot is taken, so the Test of prod's saved secret waits.
+  const busy = user.api("POST", "/health/services/check");
+  await eventually(async () => waiting.length === SERVICE_CONCURRENCY);
+  const queued = user.api("POST", "/health/services/test", prod);
+  await Bun.sleep(20);
+  const moved = { ...prod, url: "https://meta.example.org/actuator/health", secret: "new-prod-token" };
+  expect((await user.api("PUT", `/health/services/${service.id}`, { ...asSaved(service), environments: [moved, ...asSaved(service).environments.slice(1)] })).status).toBe(200);
+  for (const answer of waiting.splice(0)) answer();
+
+  const result = ServiceResult.parse(await (await queued).json());
+  expect(result.status).toBe("unknown");
+  expect(result.problem ?? "").toStartWith("Couldn't read this environment's secret");
+  await busy;
+  expect(sent.filter(({ headers }) => headers.authorization === "Bearer new-prod-token").map(({ host }) => host)).toEqual([]);
 });
 
 test("each person sees, edits, checks and tests only their own services", async () => {
