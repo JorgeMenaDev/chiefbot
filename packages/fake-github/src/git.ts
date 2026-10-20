@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -16,17 +16,43 @@ export function git(cwd: string, args: string[]) {
   return result.stdout.toString().trim();
 }
 
-// Makes <root>/<fullName>.git with one commit on main holding `files`.
+// Writes `files` into the work tree `work`, by path, making folders as needed.
+function writeFiles(work: string, files: Record<string, string>) {
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(work, path)), { recursive: true });
+    writeFileSync(join(work, path), content);
+  }
+}
+
+// Makes <root>/<fullName>.git with one commit on main holding `files`, by path (folders made as needed).
 export function createBareRepo(root: string, fullName: string, files: Record<string, string>) {
   const work = mkdtempSync(join(tmpdir(), "fake-github-seed-"));
   try {
     git(work, ["init", "-q", "-b", "main"]);
-    for (const [path, content] of Object.entries(files)) writeFileSync(join(work, path), content);
+    writeFiles(work, files);
     git(work, ["add", "."]);
     git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Initial commit"]);
     const bare = join(root, `${fullName}.git`);
     git(dirname(work), ["clone", "-q", "--bare", work, bare]);
     return bare;
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+// Adds a commit holding `files` (new or changed) to `branch` of the bare repo at
+// `bare` (main by default; a new branch starts from main), and returns its SHA.
+export function commitFiles(bare: string, files: Record<string, string>, branch = "main") {
+  const work = mkdtempSync(join(tmpdir(), "fake-github-commit-"));
+  try {
+    git(work, ["clone", "-q", bare, "."]);
+    const exists = git(work, ["branch", "-r", "--list", `origin/${branch}`]) !== "";
+    git(work, ["checkout", "-q", "-B", branch, exists ? `origin/${branch}` : "origin/main"]);
+    writeFiles(work, files);
+    git(work, ["add", "."]);
+    git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Change"]);
+    git(work, ["push", "-q", "origin", `HEAD:${branch}`]);
+    return git(work, ["rev-parse", "HEAD"]);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

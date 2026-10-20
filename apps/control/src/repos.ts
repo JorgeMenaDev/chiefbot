@@ -7,7 +7,7 @@ import {
   type UserId,
 } from "@chiefbot/contracts";
 import type { ApprovalOutcome } from "./approvals.ts";
-import { createPullRequest, installationToken, repoPermission, type GitHubAppKey } from "./github.ts";
+import { createPullRequest, installationToken, readPullRequest, repoPermission, type GitHubAppKey, type PullRequestHead } from "./github.ts";
 
 // Control's repo access, the boundary between bots and GitHub. Control holds the
 // only credential that may write (the deployer's repo app, through one-repo
@@ -18,7 +18,9 @@ import { createPullRequest, installationToken, repoPermission, type GitHubAppKey
 // are opened by control, also after approval. Each request first checks that the
 // owner is still signed in and, through the repo app, that they may do it themselves.
 // A project's task worker reaches repos the same way, with its turn's key: for
-// it, the "owner" is the member who asked for it.
+// it, the "owner" is the member who asked for it. A project's coordinator only
+// fetches its own project's repo, into the copy it reads, as the turn's member,
+// and so does a verifier, into its clone: neither ever pushes.
 
 // Who a turn key acts for: whose GitHub account bounds its repo access, and
 // how to ask that person to approve, in that turn of the bot or task worker.
@@ -27,6 +29,10 @@ export type RepoAgent = {
   ask: (kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
 };
 
+// A project's coordinator or verifier in its turn: it may fetch `repo`, its
+// project's, as the turn's member, and nothing else. `who` names it in a refusal.
+export type RepoReader = { userId: UserId; repo: string; who: string };
+
 export type RepoAccessOptions = {
   // github.com (git) and api.github.com; fakes in tests.
   githubUrl: string;
@@ -34,8 +40,14 @@ export type RepoAccessOptions = {
   app: GitHubAppKey;
   // The bot owner's GitHub login, or null when they must sign in again.
   ownerLogin: (userId: UserId) => Promise<string | null>;
-  // The agent whose running turn a key is (a bot's or task worker's), if any.
-  agentFor: (key: string) => RepoAgent | null;
+  // The agent whose running turn a key is (a bot's, task worker's or coordinator's), if any.
+  agentFor: (key: string) => RepoAgent | RepoReader | null;
+  // An approved push to the repo is about to reach GitHub, to move `branches`.
+  // What it returns is called once the push is over: with each branch GitHub
+  // took it for and the commit it moves it to, none when GitHub refused it, or
+  // null when its outcome is unknown (GitHub's answer was lost, or a server
+  // error), so the push may have landed or land yet.
+  onPush: (fullName: string, branches: string[]) => (moved: Array<{ branch: string; sha: string }> | null) => void;
 };
 
 type Refusal = { error: ApiErrorCode; status: number; message: string };
@@ -54,7 +66,7 @@ const unapproved = {
   },
 };
 
-export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor }: RepoAccessOptions) {
+export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor, onPush }: RepoAccessOptions) {
   // A token that may `access` the repo: the app's installation token for it,
   // once it shows the bot owner may do it themselves. For a read where the app
   // is not installed the token is null: GitHub is asked without one, which works
@@ -102,15 +114,21 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
         return text(403, "Chiefbot's git proxy speaks only git's smart HTTP protocol.");
       }
       const push = service === "git-receive-pack";
+      if ("repo" in bot && (push || bot.repo.toLowerCase() !== fullName.toLowerCase())) {
+        return text(403, `${bot.who} may only fetch ${bot.repo}.`);
+      }
       const access = await grant(bot.userId, fullName, push ? "write" : "read");
       if ("error" in access) return text(access.status, access.message);
       const body = req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined;
 
       let token = access.token;
+      let pushed: PushRequest | null = null;
       // Every push that may update a ref waits for the owner, however long that
       // takes, and control forwards exactly the bytes they approved. Only git's
       // probe before a large push (a bare flush packet) updates nothing and passes.
       if (push && body && !isProbe(body)) {
+        // Refused above already: nobody could approve a coordinator's or verifier's push.
+        if (!("ask" in bot)) return text(403, "Only a bot or an engineer may push.");
         const request = pushRequest(body, req.headers.get("content-encoding"));
         if (request === null) return text(415, "Chiefbot's git proxy reads only plain or gzip push requests.");
         server.timeout(req, 0);
@@ -119,6 +137,7 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
         const fresh = await grant(bot.userId, fullName, "write");
         if ("error" in fresh) return rejectPush(request, fresh.message);
         token = fresh.token;
+        pushed = request;
       }
 
       const headers = new Headers();
@@ -128,7 +147,23 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
       }
       if (token) headers.set("authorization", `Basic ${btoa(`x-access-token:${token}`)}`);
       const rest = url.pathname.slice(`/git/${owner}/${repo}`.length);
-      const res = await fetch(`${githubUrl}/${fullName}.git${rest}${url.search}`, { method: req.method, headers, body, timeout: false });
+      const moves = (pushed?.refs ?? []).flatMap(({ ref, sha }) => (ref.startsWith("refs/heads/") ? [{ branch: ref.slice("refs/heads/".length), sha }] : []));
+      const ended = pushed ? onPush(fullName, moves.map(({ branch }) => branch)) : null;
+      let res: Response;
+      let answer: ArrayBuffer | ReadableStream<Uint8Array> | null;
+      try {
+        res = await fetch(`${githubUrl}/${fullName}.git${rest}${url.search}`, { method: req.method, headers, body, timeout: false });
+        // A push is over once GitHub's whole answer, each ref's status, is in.
+        answer = pushed ? await res.arrayBuffer() : res.body;
+      } catch (error) {
+        if (!ended) throw error;
+        ended(null);
+        return text(502, "Chiefbot lost GitHub's answer to this push, so it may land yet. Fetch to see whether it did.");
+      }
+      // GitHub may still refuse a ref (a push that is not a fast-forward): what
+      // hears of it checks GitHub again before it counts on it (taskWorkers.ts's
+      // done check). A 4xx refused the push; a 5xx (a gateway timeout) may hide one that landed.
+      ended?.(res.ok ? moves : res.status >= 500 ? null : []);
       // Without an installation token GitHub sees an anonymous request, which only a public repo answers.
       if (!token && (res.status === 401 || res.status === 404)) return text(403, notInstalled(fullName).message);
       // Only what git reads: GitHub's auth challenge must not reach git, and the body is already decoded.
@@ -137,26 +172,38 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
         const value = res.headers.get(name);
         if (value !== null) forwarded.set(name, value);
       }
-      return new Response(res.body, { status: res.status, headers: forwarded });
+      return new Response(answer, { status: res.status, headers: forwarded });
+    },
+
+    // Pull request `number` of the repo as `userId` may read it: its head now,
+    // or why not (repo_not_found for one GitHub does not show them).
+    async pullRequestHead(userId: UserId, fullName: string, number: number): Promise<PullRequestHead | Refusal> {
+      const access = await grant(userId, fullName, "read");
+      if ("error" in access) return access;
+      const pr = await readPullRequest(githubApiUrl, access.token, fullName, number).catch((error: unknown) => error instanceof Error ? error : new Error(String(error)));
+      if (pr instanceof Error) return { error: "github_failed", status: 502, message: pr.message };
+      return pr ?? { error: "repo_not_found", status: 404, message: `${fullName} has no pull request #${number} your GitHub account can see.` };
     },
 
     // The create_pull_request tool (POST /worker/:botId/pull-requests, or a task worker's):
     // asks the owner, then opens the pull request with the app's installation token.
+    // An engineer's opens as a draft (`draft`).
     async pullRequest(
       bot: RepoAgent,
       args: PullRequestArgs,
       signal: AbortSignal,
+      { draft = false }: { draft?: boolean } = {},
     ): Promise<OpenedPullRequest | Refusal> {
       const access = await grant(bot.userId, args.repository, "write");
       if ("error" in access) return access;
-      const outcome = await bot.ask("pull-request", `${args.repository}: ${args.head} → ${args.base}\n${args.title}`, signal);
+      const outcome = await bot.ask("pull-request", `${args.repository}: ${args.head} → ${args.base}${draft ? " (draft)" : ""}\n${args.title}`, signal);
       if (outcome !== "approved") {
         return { error: outcome === "declined" ? "declined" : "no_turn", status: outcome === "declined" ? 403 : 409, message: unapproved["pull-request"][outcome] };
       }
       const fresh = await grant(bot.userId, args.repository, "write");
       if ("error" in fresh) return fresh;
       // grant only returns a null token for reads.
-      const opened = await createPullRequest(githubApiUrl, fresh.token ?? "", args);
+      const opened = await createPullRequest(githubApiUrl, fresh.token ?? "", args, draft);
       return "refused" in opened ? { error: "github_failed", status: 502, message: opened.refused } : opened;
     },
   };
@@ -183,9 +230,10 @@ const isProbe = (body: Uint8Array) => body.length === 4 && new TextDecoder().dec
 
 // A receive-pack request's commands, read from its pkt-lines ("<old> <new> <ref>",
 // the first with the client's capabilities after a NUL) up to the flush packet
-// (https://git-scm.com/docs/pack-protocol#_reference_update_request_and_packfile_transfer).
+// (https://git-scm.com/docs/pack-protocol#_reference_update_request_and_packfile_transfer):
+// each ref with its new commit (`sha`, all zeros when it is deleted).
 // Null for a content encoding control cannot read.
-type PushRequest = { refs: Array<{ ref: string; deleted: boolean }>; capabilities: string[] };
+type PushRequest = { refs: Array<{ ref: string; sha: string; deleted: boolean }>; capabilities: string[] };
 function pushRequest(raw: Uint8Array<ArrayBuffer>, encoding: string | null): PushRequest | null {
   if (encoding !== null && encoding !== "gzip") return null;
   const body = encoding === "gzip" ? Bun.gunzipSync(raw) : raw;
@@ -198,7 +246,7 @@ function pushRequest(raw: Uint8Array<ArrayBuffer>, encoding: string | null): Pus
     const [command = "", capabilities] = latin1.decode(body.subarray(at + 4, at + length)).split("\0");
     if (capabilities !== undefined) request.capabilities = capabilities.trim().split(" ");
     const [, newId = "", ref = ""] = command.trim().split(" ");
-    if (ref) request.refs.push({ ref, deleted: /^0+$/.test(newId) });
+    if (ref) request.refs.push({ ref, sha: newId, deleted: /^0+$/.test(newId) });
     at += length;
   }
   return request;

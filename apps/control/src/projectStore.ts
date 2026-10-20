@@ -1,32 +1,52 @@
 import type { Database } from "bun:sqlite";
 import {
+  AUTO_MODEL,
+  effectiveConfig,
+  latestPullRequest,
   Project,
+  ProjectFile,
+  ProjectFileState,
   ProjectId,
+  projectFileName,
   Task,
   TurnId,
   UserId,
   type ApprovalId,
   type ApprovalKind,
   type ChatEvent,
-  type CopilotPayer,
+  type AutoFallback,
+  CopilotPayer,
   type CreateTaskArgs,
-  ProjectFile,
+  type DoneOverride,
   type ProjectMember,
+  type ReasoningEffort,
   type TaskStatus,
   type TurnEvent,
   type UpdateTaskArgs,
+  type Verification,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { z } from "zod";
+import { addColumn } from "./addColumn.ts";
+import { issuesOf, parseProjectFile } from "./projectFile.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
+
+// A change to a task: UpdateTaskArgs but its status.
+type TaskChange = Omit<z.output<typeof UpdateTaskArgs>, "status">;
+
+// What the done rule saw before the project agent marks a task done
+// (taskWorkers.ts): its pull request's head on GitHub, and the revision of the
+// pushes through Chiefbot to its branch, read before GitHub was, none in flight then.
+export type VerifiedHead = { pullRequest: string; sha: string; revision: number };
 
 // Projects, their task ledgers and their members' chats with the coordinator,
 // in control's SQLite. openStore (store.ts) calls this once the users and
 // workspaces tables exist. Methods that take an id from a URL accept a plain
 // string: an unknown one reads as missing.
 export function projectStore(db: Database, hash: (token: string) => string) {
-  // A project binds one repo of a workspace. `file` is its chiefbot.project.yaml
-  // as JSON. The coordinator's credential is stored as a SHA-256.
+  // A project binds one repo of a workspace. `file` is what control found of its
+  // chiefbot.project.yaml (a ProjectFileState) as JSON, and `settings` the YAML
+  // members saved in the app. The coordinator's credential is stored as a SHA-256.
   db.run(`CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -37,6 +57,23 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     created_at INTEGER NOT NULL,
     UNIQUE (workspace_id, repo)
   )`);
+  addColumn(db, "projects", "settings", "TEXT NOT NULL DEFAULT ''");
+  // The coordinator's Copilot model id, and its reasoning effort (NULL: the
+  // model's default). Projects from before the model picker run on Auto.
+  addColumn(db, "projects", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
+  addColumn(db, "projects", "effort", "TEXT");
+  // The project's secrets that control holds a value for, each with the
+  // SecretStore name its value is under. Each value written gets a new one.
+  db.run(`CREATE TABLE IF NOT EXISTS project_secrets (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    secret_name TEXT NOT NULL,
+    PRIMARY KEY (project_id, name)
+  )`);
+  // SecretStore names that may hold a value no project secret uses: a value
+  // being written, one whose write failed, a replaced or cleared one, a deleted
+  // project's. Each stays until the SecretStore deleted it, even past its project.
+  db.run("CREATE TABLE IF NOT EXISTS project_secret_leftovers (secret_name TEXT PRIMARY KEY)");
   // The task ledger: the only record of task state. `links` is a JSON array of TaskLinks.
   db.run(`CREATE TABLE IF NOT EXISTS project_tasks (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -50,6 +87,24 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (project_id, number)
+  )`);
+  // What the task waits on while it needs input; NULL otherwise.
+  addColumn(db, "project_tasks", "question", "TEXT");
+  // Its latest verdict from a verifier, a Verification as JSON; NULL before any.
+  // `overrides`: a JSON array of DoneOverrides, each time a member marked it done in the app.
+  addColumn(db, "project_tasks", "verification", "TEXT");
+  addColumn(db, "project_tasks", "overrides", "TEXT NOT NULL DEFAULT '[]'");
+  // Pushes through Chiefbot's git proxy to each branch of a repo: `revision`
+  // counts those that started, `active` those still in flight. A check that
+  // reads both before the branch's head on GitHub, and after finds none active
+  // and the same revision, knows no push through Chiefbot moved the branch in
+  // between (the done rule, a verifier's pinned commit).
+  db.run(`CREATE TABLE IF NOT EXISTS branch_pushes (
+    repo TEXT NOT NULL COLLATE NOCASE,
+    branch TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    active INTEGER NOT NULL,
+    PRIMARY KEY (repo, branch)
   )`);
   // Each member's chat with the coordinator: turns and their events, as for a
   // bot's chat. A turn waits `queued` until the project's scheduler gives it
@@ -71,6 +126,10 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     event TEXT NOT NULL
   )`);
   db.run("CREATE INDEX IF NOT EXISTS coordinator_events_by_chat ON coordinator_events (project_id, user_id, seq)");
+  // Who pays for the turn (JSON CopilotPayer), from when the scheduler starts it. NULL before, and for turns started before the column.
+  addColumn(db, "coordinator_turns", "payer", "TEXT");
+  // The task a turn control queued itself continues (queueSystemTurn); NULL for a member's message.
+  addColumn(db, "coordinator_turns", "task_number", "INTEGER");
   // What control asked the member of a coordinator turn to approve (a connector
   // call, connectors.ts), and the answer (NULL while pending) (turnRecords.ts approvalRecords).
   db.run(`CREATE TABLE IF NOT EXISTS coordinator_approvals (
@@ -88,13 +147,42 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     liveTurns: "SELECT id FROM coordinator_turns WHERE state = 'running'",
   });
 
-  type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string };
-  // A stored project file. Projects created before `environments` left the
-  // project file (it was never used) still carry it: it is dropped.
-  const StoredProjectFile = ProjectFile.extend({ environments: z.unknown().optional() }).transform(({ environments: _, ...file }) => file);
-  const toProject = (row: ProjectRow): Project =>
-    Project.parse({ id: row.id, workspaceId: row.workspace_id, name: row.name, repo: row.repo, file: StoredProjectFile.parse(JSON.parse(row.file)) });
-  const projectColumns = "projects.id, projects.workspace_id, projects.name, projects.repo, projects.file";
+  // Records the SecretStore names `select` finds as leftovers, and returns them.
+  const retire = (select: string, ...params: string[]) => {
+    const names = db
+      .query<{ secret_name: string }, string[]>(select)
+      .all(...params)
+      .map(({ secret_name }) => secret_name);
+    for (const name of names) db.query("INSERT OR IGNORE INTO project_secret_leftovers (secret_name) VALUES (?1)").run(name);
+    return names;
+  };
+
+  type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string; settings: string; model: string; effort: string | null };
+  // What control stored of the project file. Projects made before a missing
+  // file was allowed store the file itself, and those made before `environments`
+  // left the project file (it was never used) still carry it: it is dropped.
+  const LegacyFile = ProjectFile.extend({ environments: z.unknown().optional() }).transform(({ environments: _, ...file }) => ({ status: "found" as const, file }));
+  // A file stored before the project file's rules changed may no longer fit
+  // them: it reads as invalid, so the project still opens and its settings take over.
+  const storedFile = (json: string): ProjectFileState => {
+    const stored: unknown = JSON.parse(json);
+    const file = (typeof stored === "object" && stored !== null && "status" in stored ? ProjectFileState : LegacyFile).safeParse(stored);
+    return file.success ? file.data : { status: "invalid", error: `${projectFileName}, as read when the project was made: ${issuesOf(file.error)}` };
+  };
+  // Settings are checked when saved (PUT /projects/:id/settings), so they parse here.
+  const storedSettings = (text: string) => {
+    const settings = parseProjectFile(text);
+    if ("error" in settings) throw new Error(`stored project settings no longer parse: ${settings.error}`);
+    return settings;
+  };
+  const toProject = (row: ProjectRow): Project => {
+    const file = storedFile(row.file);
+    const { config, sources } = effectiveConfig(file.status === "found" ? file.file : null, storedSettings(row.settings));
+    const { id, workspace_id: workspaceId, name, repo, settings, model, effort } = row;
+    return Project.parse({ id, workspaceId, name, repo, file, settings, config, sources, model, effort });
+  };
+  const projectColumns = "projects.id, projects.workspace_id, projects.name, projects.repo, projects.file, projects.settings, projects.model, projects.effort";
+  const returnedColumns = "RETURNING id, workspace_id, name, repo, file, settings, model, effort";
 
   type TaskRow = {
     project_id: string;
@@ -102,9 +190,12 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     title: string;
     detail: string;
     status: string;
+    question: string | null;
     owner: string | null;
     requested_by: string;
     links: string;
+    verification: string | null;
+    overrides: string;
     created_at: number;
     updated_at: number;
   };
@@ -115,15 +206,80 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       title: row.title,
       detail: row.detail,
       status: row.status,
+      question: row.question,
       owner: row.owner,
       requestedBy: row.requested_by,
       links: JSON.parse(row.links),
+      verification: row.verification === null ? null : JSON.parse(row.verification),
+      overrides: JSON.parse(row.overrides),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
   const task = (projectId: ProjectId, number: number) => {
     const row = db.query<TaskRow, [string, number]>("SELECT * FROM project_tasks WHERE project_id = ?1 AND number = ?2").get(projectId, number);
     return row ? toTask(row) : null;
+  };
+
+  // The pushes through Chiefbot to the repo's branch: how many started (`revision`) and how many are in flight (`active`).
+  const pushesTo = (repo: string, branch: string) =>
+    db.query<{ revision: number; active: number }, [string, string]>("SELECT revision, active FROM branch_pushes WHERE repo = ?1 AND branch = ?2").get(repo, branch) ?? {
+      revision: 0,
+      active: 0,
+    };
+  // Whether no push through Chiefbot to the repo's branch started after push
+  // `revision`, and none is in flight.
+  const noPushSince = (repo: string, branch: string, revision: number) => {
+    const pushes = pushesTo(repo, branch);
+    return pushes.active === 0 && pushes.revision === revision;
+  };
+  // Marks stale each verification of the repo's tasks a push may have made
+  // old (`touched`). The projects whose tasks changed.
+  const staleOn = (repo: string, touched: (verification: Verification) => boolean): ProjectId[] => {
+    const verified = db
+      .query<TaskRow, [string]>(
+        `SELECT project_tasks.* FROM project_tasks JOIN projects ON projects.id = project_tasks.project_id
+         WHERE projects.repo = ?1 COLLATE NOCASE AND project_tasks.verification IS NOT NULL`,
+      )
+      .all(repo)
+      .map(toTask);
+    const changed = new Set<ProjectId>();
+    for (const { projectId, number, verification } of verified) {
+      if (!verification || verification.stale || !touched(verification)) continue;
+      db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify({ ...verification, stale: true } satisfies Verification),
+        Date.now(),
+      );
+      changed.add(projectId);
+    }
+    return [...changed];
+  };
+  const repoOf = (projectId: ProjectId) => db.query<{ repo: string }, [string]>("SELECT repo FROM projects WHERE id = ?1").get(projectId)?.repo ?? "";
+
+  // Writes `change` to the task (the fields given, `links` added), at `status`:
+  // the one given, else as it was. A done task that gets a new latest pull
+  // request reopens (in progress): done then needs a PASS for it. The task as
+  // written, or null when the project has no such task.
+  const writeTask = (projectId: ProjectId, { number, links, ...change }: TaskChange & { status?: TaskStatus | undefined }) => {
+    const current = task(projectId, number);
+    if (!current) return null;
+    const allLinks = [...current.links, ...(links ?? [])];
+    const reopened = current.status === "done" && latestPullRequest(allLinks) !== latestPullRequest(current.links);
+    const status = change.status ?? (reopened ? "in_progress" : current.status);
+    const next = {
+      title: change.title ?? current.title,
+      detail: change.detail ?? current.detail,
+      status,
+      question: status === "needs_input" ? (change.question ?? current.question) : null,
+      owner: change.owner === undefined ? current.owner : change.owner,
+      links: allLinks,
+    };
+    db.query(
+      `UPDATE project_tasks SET title = ?3, detail = ?4, status = ?5, question = ?6, owner = ?7, links = ?8, updated_at = ?9
+       WHERE project_id = ?1 AND number = ?2`,
+    ).run(projectId, number, next.title, next.detail, next.status, next.question, next.owner, JSON.stringify(next.links), Date.now());
+    return task(projectId, number);
   };
 
   // Stores one event of a turn in its member's chat.
@@ -137,6 +293,15 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     if (!row) throw new Error("coordinator event insert returned no row");
     return toChatEvent(row);
   };
+  // A new queued turn of `text` in the member's chat with the coordinator, one
+  // that continues task `taskNumber` when control queues it: its id.
+  const insertTurn = (projectId: ProjectId, userId: UserId, text: string, taskNumber: number | null = null) => {
+    const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
+    db.query(
+      "INSERT INTO coordinator_turns (id, project_id, user_id, text, state, created_at, task_number) VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6)",
+    ).run(turnId, projectId, userId, text, Date.now(), taskNumber);
+    return turnId;
+  };
 
   // A stored chat event and the member whose chat it is in.
   type MemberEvent = { userId: UserId; event: ChatEvent };
@@ -147,14 +312,24 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     return UserId.parse(row.user_id);
   };
 
+  // A push in flight when control stopped ended without GitHub's answer: as
+  // for any push whose outcome is unknown (pushEnded), every verdict on its branch is stale.
+  db.transaction(() => {
+    const cut = db.query<{ repo: string; branch: string }, []>("SELECT repo, branch FROM branch_pushes WHERE active > 0").all();
+    for (const { repo, branch } of cut) {
+      db.query("UPDATE branch_pushes SET active = 0, revision = revision + 1 WHERE repo = ?1 AND branch = ?2").run(repo, branch);
+      staleOn(repo, (verification) => verification.branch === branch);
+    }
+  })();
+
   return {
     // A new project named after its repo, or "exists" when the workspace already
     // has one for the repo. `token` is the coordinator's credential.
-    create(workspaceId: WorkspaceId, repo: string, file: ProjectFile, token: string): Project | "exists" {
+    create(workspaceId: WorkspaceId, repo: string, file: ProjectFileState, token: string): Project | "exists" {
       const row = db
         .query<ProjectRow, [string, string, string, string, string, string, number]>(
           `INSERT INTO projects (id, workspace_id, name, repo, file, token_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-           ON CONFLICT (workspace_id, repo) DO NOTHING RETURNING id, workspace_id, name, repo, file`,
+           ON CONFLICT (workspace_id, repo) DO NOTHING ${returnedColumns}`,
         )
         .get(`project_${crypto.randomUUID()}`, workspaceId, repo.split("/")[1] ?? repo, repo, JSON.stringify(file), hash(token), Date.now());
       return row ? toProject(row) : "exists";
@@ -190,8 +365,83 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return row ? ProjectId.parse(row.id) : null;
     },
 
-    delete(projectId: ProjectId) {
-      db.query("DELETE FROM projects WHERE id = ?1").run(projectId);
+    // Deletes the project; returns the SecretStore names of its secrets' values, now leftovers.
+    delete(projectId: ProjectId): string[] {
+      return db.transaction(() => {
+        const held = retire("SELECT secret_name FROM project_secrets WHERE project_id = ?1", projectId);
+        db.query("DELETE FROM projects WHERE id = ?1").run(projectId);
+        return held;
+      })();
+    },
+
+    // The names of the project's secrets control holds a value for, oldest first.
+    secretNames(projectId: ProjectId): string[] {
+      return db
+        .query<{ name: string }, [string]>("SELECT name FROM project_secrets WHERE project_id = ?1 ORDER BY rowid")
+        .all(projectId)
+        .map(({ name }) => name);
+    },
+
+    // The project's secrets that control holds a value for, each with the SecretStore name of its value.
+    secretRefs(projectId: ProjectId): Array<{ name: string; secretName: string }> {
+      return db
+        .query<{ name: string; secret_name: string }, [string]>("SELECT name, secret_name FROM project_secrets WHERE project_id = ?1 ORDER BY rowid")
+        .all(projectId)
+        .map(({ name, secret_name }) => ({ name, secretName: secret_name }));
+    },
+
+    // A value is about to be written under `secretName`: a leftover until it is published.
+    stageSecret(secretName: string) {
+      db.query("INSERT OR IGNORE INTO project_secret_leftovers (secret_name) VALUES (?1)").run(secretName);
+    },
+
+    // The project's secret `name` now has the value written under
+    // `secretName`; returns the SecretStore name of the value it replaced, now a leftover.
+    publishSecret(projectId: ProjectId, name: string, secretName: string): string[] {
+      return db.transaction(() => {
+        const replaced = retire("SELECT secret_name FROM project_secrets WHERE project_id = ?1 AND name = ?2", projectId, name);
+        db.query(
+          `INSERT INTO project_secrets (project_id, name, secret_name) VALUES (?1, ?2, ?3)
+           ON CONFLICT (project_id, name) DO UPDATE SET secret_name = excluded.secret_name`,
+        ).run(projectId, name, secretName);
+        db.query("DELETE FROM project_secret_leftovers WHERE secret_name = ?1").run(secretName);
+        return replaced;
+      })();
+    },
+
+    // The project's secret `name` has no value any more; returns the SecretStore name of the one it had, now a leftover.
+    clearSecret(projectId: ProjectId, name: string): string[] {
+      return db.transaction(() => {
+        const cleared = retire("SELECT secret_name FROM project_secrets WHERE project_id = ?1 AND name = ?2", projectId, name);
+        db.query("DELETE FROM project_secrets WHERE project_id = ?1 AND name = ?2").run(projectId, name);
+        return cleared;
+      })();
+    },
+
+    // Every leftover SecretStore name, and the end of one the SecretStore deleted.
+    secretLeftovers: () =>
+      db
+        .query<{ secret_name: string }, []>("SELECT secret_name FROM project_secret_leftovers")
+        .all()
+        .map(({ secret_name }) => secret_name),
+    secretDeleted(secretName: string) {
+      db.query("DELETE FROM project_secret_leftovers WHERE secret_name = ?1").run(secretName);
+    },
+
+    // Saves the project's settings, YAML its caller has checked (parseProjectFile).
+    setSettings(projectId: ProjectId, text: string): Project | null {
+      const row = db
+        .query<ProjectRow, [string, string]>(`UPDATE projects SET settings = ?2 WHERE id = ?1 ${returnedColumns}`)
+        .get(projectId, text);
+      return row ? toProject(row) : null;
+    },
+
+    // The coordinator's turns run on `model` at `effort` from the next one on.
+    setModel(projectId: ProjectId, model: string, effort: ReasoningEffort | null): Project | null {
+      const row = db
+        .query<ProjectRow, [string, string, string | null]>(`UPDATE projects SET model = ?2, effort = ?3 WHERE id = ?1 ${returnedColumns}`)
+        .get(projectId, model, effort);
+      return row ? toProject(row) : null;
     },
 
     // The project's workspace members: who sees its ledger.
@@ -241,38 +491,148 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return toTask(row);
     }),
 
-    // Changes the fields given and adds `links`. Null when the project has no such task.
-    updateTask: db.transaction((projectId: ProjectId, { number, links, ...change }: z.output<typeof UpdateTaskArgs>): Task | null => {
+    // Changes the fields given and adds `links`; a pull request added to a done
+    // task reopens it (writeTask). A question stays while the task needs input,
+    // and goes once it does not. Only completeTask marks a task done. Null when
+    // the project has no such task.
+    updateTask: db.transaction((projectId: ProjectId, change: TaskChange & { status?: Exclude<TaskStatus, "done"> | undefined }): Task | null => writeTask(projectId, change)),
+
+    // Marks the task done with `change`, as the project agent does, under the
+    // done rule. A task whose latest pull request is new to it, or that is not
+    // done yet, needs `verified`: what the done rule saw (taskWorkers.ts), found
+    // the same now, in this transaction. The pull request, its PASS for that head,
+    // not stale, and no push through Chiefbot to its branch since (its push
+    // revision) or in flight. "moved", writing nothing, when any of it changed meanwhile.
+    completeTask: db.transaction((projectId: ProjectId, change: TaskChange, verified: VerifiedHead | undefined): Task | "moved" | null => {
+      const current = task(projectId, change.number);
+      if (!current) return null;
+      const pullRequest = latestPullRequest([...current.links, ...(change.links ?? [])]);
+      const staysDone = current.status === "done" && pullRequest === latestPullRequest(current.links);
+      if (pullRequest !== undefined && !staysDone) {
+        const verification = current.verification;
+        const unchanged =
+          verified?.pullRequest === pullRequest &&
+          verification?.pullRequest === pullRequest &&
+          verification.result === "pass" &&
+          !verification.stale &&
+          verification.sha === verified.sha &&
+          noPushSince(repoOf(projectId), verification.branch, verified.revision);
+        if (!unchanged) return "moved";
+      }
+      return writeTask(projectId, { ...change, status: "done" });
+    }),
+
+    // A member (`by`, a login) marks the task done in the app: recorded on it
+    // with its verification then. "closed" when it is done or abandoned; null
+    // when the project has no such task.
+    markDone: db.transaction((projectId: ProjectId, number: number, by: string): Task | "closed" | null => {
       const current = task(projectId, number);
       if (!current) return null;
-      const next = {
-        title: change.title ?? current.title,
-        detail: change.detail ?? current.detail,
-        status: change.status ?? current.status,
-        owner: change.owner === undefined ? current.owner : change.owner,
-        links: [...current.links, ...(links ?? [])],
-      };
-      db.query(
-        `UPDATE project_tasks SET title = ?3, detail = ?4, status = ?5, owner = ?6, links = ?7, updated_at = ?8
-         WHERE project_id = ?1 AND number = ?2`,
-      ).run(projectId, number, next.title, next.detail, next.status, next.owner, JSON.stringify(next.links), Date.now());
+      if (current.status === "done" || current.status === "abandoned") return "closed";
+      const now = Date.now();
+      const overrides = [...current.overrides, { by, at: now, verification: current.verification } satisfies DoneOverride];
+      db.query("UPDATE project_tasks SET status = 'done', question = NULL, overrides = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify(overrides),
+        now,
+      );
       return task(projectId, number);
+    }),
+
+    // Sets the verdict a verifier gave on the task. It is current only if no
+    // push through Chiefbot to its branch was in flight when control pinned its
+    // commit (at push `revision`; null when one was), none started since, and
+    // none is in flight now. Stale otherwise. Null when the project has no such task.
+    setVerdict: db.transaction((projectId: ProjectId, number: number, verification: Omit<Verification, "stale">, revision: number | null): Task | null => {
+      const stale = revision === null || !noPushSince(repoOf(projectId), verification.branch, revision);
+      db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify({ ...verification, stale } satisfies Verification),
+        Date.now(),
+      );
+      return task(projectId, number);
+    }),
+
+    // Marks the task's verification by verifier `worker` stale: its pull
+    // request's head on GitHub has moved. Only a new verdict makes a task's
+    // verification current again. Whether it changed the task.
+    markStale: db.transaction((projectId: ProjectId, number: number, worker: string): boolean => {
+      const verification = task(projectId, number)?.verification;
+      if (verification?.worker !== worker || verification.stale) return false;
+      db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify({ ...verification, stale: true } satisfies Verification),
+        Date.now(),
+      );
+      return true;
+    }),
+
+    // The pushes through Chiefbot to the repo's branch: `revision` counts those that started, `active` those in flight.
+    pushesTo,
+
+    // Chiefbot's git proxy is about to forward a push to `branches` of `repo`.
+    pushStarted: db.transaction((repo: string, branches: string[]) => {
+      for (const branch of branches) {
+        db.query(
+          `INSERT INTO branch_pushes (repo, branch, revision, active) VALUES (?1, ?2, 1, 1)
+           ON CONFLICT (repo, branch) DO UPDATE SET revision = revision + 1, active = active + 1`,
+        ).run(repo, branch);
+      }
+    }),
+
+    // That push is over. `moved` holds the branches GitHub took it for, each
+    // with the commit it moved to (none when GitHub refused it): each
+    // verification on one of them at another commit is stale. Null when its
+    // outcome is unknown (GitHub's answer was lost, or a server error): it may have landed,
+    // so its branches count a new revision and every verification on them is
+    // stale, until a new verifier's. The projects whose tasks changed.
+    pushEnded: db.transaction((repo: string, branches: string[], moved: Array<{ branch: string; sha: string }> | null): ProjectId[] => {
+      for (const branch of branches) {
+        db.query("UPDATE branch_pushes SET active = active - 1, revision = revision + ?3 WHERE repo = ?1 AND branch = ?2").run(repo, branch, moved === null ? 1 : 0);
+      }
+      return staleOn(repo, (verification) =>
+        moved === null ? branches.includes(verification.branch) : moved.some(({ branch, sha }) => branch === verification.branch && sha !== verification.sha),
+      );
     }),
 
     // Queues a member's message for the coordinator. Null, storing nothing, while
     // their previous message is still queued or running, unless `whileBusy`: a
-    // handoff from the member's chief of staff queues behind it instead.
+    // handoff from the member's chief of staff queues behind it instead. A turn
+    // control queued itself (queueSystemTurn) is not theirs: the message queues behind it.
     queueTurn: db.transaction((projectId: ProjectId, userId: UserId, text: string, whileBusy = false): ChatEvent | null => {
       const unfinished = db
-        .query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND user_id = ?2 AND state != 'done'")
+        .query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND user_id = ?2 AND state != 'done' AND task_number IS NULL")
         .get(projectId, userId);
       if (unfinished && !whileBusy) return null;
-      const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
-      db.query(
-        "INSERT INTO coordinator_turns (id, project_id, user_id, text, state, created_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
-      ).run(turnId, projectId, userId, text, Date.now());
-      return append(turnId, { type: "user-message", text });
+      return append(insertTurn(projectId, userId, text), { type: "user-message", text });
     }),
+
+    // Queues a turn control starts itself in the member's chat to continue task
+    // `taskNumber` (taskWorkers.ts), behind any turn of theirs: the chat shows it
+    // as a system line, not as the member's message.
+    queueSystemTurn: db.transaction(
+      (projectId: ProjectId, userId: UserId, text: string, taskNumber: number): ChatEvent =>
+        append(insertTurn(projectId, userId, text, taskNumber), { type: "system-message", text }),
+    ),
+
+    // Ends the project's queued turns that continue a task now done or abandoned
+    // (or gone), so the coordinator never gets them and cannot reopen the task.
+    // The events that end them, to publish.
+    endClosedContinuations: db.transaction((projectId: ProjectId): MemberEvent[] =>
+      db
+        .query<{ id: string; user_id: string }, [string]>(
+          `UPDATE coordinator_turns SET state = 'done'
+           WHERE project_id = ?1 AND state = 'queued' AND task_number IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM project_tasks WHERE project_tasks.project_id = coordinator_turns.project_id
+             AND project_tasks.number = coordinator_turns.task_number AND project_tasks.status NOT IN ('done', 'abandoned'))
+           RETURNING id, user_id`,
+        )
+        .all(projectId)
+        .map(({ id, user_id }) => ({ userId: UserId.parse(user_id), event: append(TurnId.parse(id), { type: "done" }) })),
+    ),
 
     // The scheduler's one claim: the project's oldest queued turn becomes its
     // running turn. Null while a turn is running or none waits, so the
@@ -292,10 +652,12 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         : null;
     }),
 
-    // Says in the turn's chat who pays for it. Outside the coordinator's numbering.
-    addPayer(turnId: TurnId, payer: CopilotPayer): MemberEvent {
-      return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer }) };
-    },
+    // Records who pays for the turn, and says so in its chat, with why it runs
+    // on Auto when it does. Outside the coordinator's numbering.
+    addPayer: db.transaction((turnId: TurnId, payer: CopilotPayer, fallback: AutoFallback | null): MemberEvent => {
+      db.query("UPDATE coordinator_turns SET payer = ?2 WHERE id = ?1").run(turnId, JSON.stringify(payer));
+      return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer, fallback }) };
+    }),
 
     // Whether a turn waits for the project's coordinator.
     hasQueuedTurn(projectId: ProjectId): boolean {
@@ -305,6 +667,14 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     // Whether a turn of the project runs or waits for its coordinator.
     hasUnfinishedTurn(projectId: ProjectId): boolean {
       return db.query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND state != 'done'").get(projectId) !== null;
+    },
+
+    // Who pays for the project's turn, as recorded when it started, while it runs; null otherwise.
+    runningTurnPayer(projectId: ProjectId, turnId: TurnId): CopilotPayer | null {
+      const row = db
+        .query<{ payer: string | null }, [string, string]>("SELECT payer FROM coordinator_turns WHERE id = ?1 AND project_id = ?2 AND state = 'running'")
+        .get(turnId, projectId);
+      return row?.payer ? CopilotPayer.parse(JSON.parse(row.payer)) : null;
     },
 
     // The member the project's turn runs for, while it runs; null otherwise.
@@ -377,6 +747,25 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         { userId, event: append(turnId, { type: "done" }) },
       ];
     }),
+
+    // The coordinator's last message in the latest of `turnIds` that has one and
+    // is done; null when none has.
+    lastReply(turnIds: readonly TurnId[]): string | null {
+      const events = db
+        .query<ChatEventRow, [string]>(
+          `SELECT seq, turn_id, event FROM coordinator_events
+           WHERE turn_id IN (SELECT id FROM coordinator_turns WHERE state = 'done' AND id IN (SELECT value FROM json_each(?1)))
+           ORDER BY seq`,
+        )
+        .all(JSON.stringify(turnIds))
+        .map(toChatEvent);
+      const last = events.findLast(({ event }) => event.type === "text-delta");
+      if (last?.event.type !== "text-delta") return null;
+      const { turnId, event: { messageId } } = last;
+      return events
+        .flatMap(({ turnId: id, event }) => (id === turnId && event.type === "text-delta" && event.messageId === messageId ? [event.text] : []))
+        .join("");
+    },
 
     // The member's chat with the project's coordinator after `seq` (0 for all of it), oldest first.
     chatAfter(projectId: ProjectId, userId: UserId, seq: number): ChatEvent[] {

@@ -7,8 +7,10 @@ import {
   type BotId,
   type ChatItem,
   type ChatView,
+  type HandoffId,
   type QuestionId,
   type QuestionResult,
+  type ReplyToHandoffRequest,
 } from "@chiefbot/contracts";
 import { controlCaller } from "./controlApi.ts";
 
@@ -118,6 +120,12 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
       await call("POST", `/bots/${botId}/questions/${questionId}`, result);
     },
 
+    // The owner's answer to a handoff's question, from its card in the bot's chat.
+    // Throws with control's refusal, e.g. 409 question_changed.
+    async replyToHandoff(botId: BotId, handoffId: HandoffId, reply: ReplyToHandoffRequest) {
+      await call("POST", `/bots/${botId}/handoffs/${handoffId}/messages`, reply);
+    },
+
     // Call on sign-out.
     disconnect() {
       const open = [...chats.values()];
@@ -150,8 +158,11 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
   switch (event.type) {
     case "user-message":
       return { ...view, working: "", items: [...view.items, { kind: "user", id: turnId, text: event.text, attachments: event.attachments }] };
+    // A turn control queued itself: the member's composer stays free while it waits.
+    case "system-message":
+      return { ...view, items: [...view.items, { kind: "notice", id: turnId, text: event.text }] };
     case "payer":
-      return { ...view, items: [...view.items, { kind: "payer", id: `${turnId}:payer`, payer: event.payer }] };
+      return { ...view, items: [...view.items, { kind: "payer", id: `${turnId}:payer`, payer: event.payer, fallback: event.fallback }] };
     case "text-delta": {
       const id = `${turnId}:${event.messageId}`;
       const items = upsert(id, (existing) => ({
@@ -174,7 +185,12 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       const card: ChatItem = { kind: "approval", id: `${turnId}:${approvalId}`, approvalId, request: kind, detail, state: "pending" };
       return { ...view, working: waitingForApproval, items: [...view.items, card] };
     }
-    // Control's note about a handoff: it leaves any running turn as it is.
+    // Control's notes about a handoff leave any running turn as it is. A card
+    // stays where the handoff's first appeared, showing its latest.
+    case "handoff-card": {
+      const id = `handoff:${event.card.handoffId}`;
+      return { ...view, items: upsert(id, () => ({ kind: "handoff", id, ...event.card })) };
+    }
     case "handoff-update":
       return { ...view, items: [...view.items, { kind: "notice", id: `${turnId}:notice`, text: event.text }] };
     case "approval-answer": {
@@ -205,6 +221,14 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       );
       return { ...view, working: stillWaiting(items), items };
     }
+    // An engineer's or verifier's setup, step by step, before its agent's first
+    // message: the rows its task shows too (EngineerDetails). Its end adds none.
+    case "setup-step": {
+      const id = `${turnId}:setup:${event.step.step}`;
+      return { ...view, items: [...view.items, { kind: "setup", id, step: event.step }] };
+    }
+    case "setup-done":
+      return view;
     // Approvals and questions left pending when a turn ends can no longer be answered.
     case "done": {
       const items = view.items.map(

@@ -47,7 +47,8 @@ export const ModelReport = z.object({
 });
 export type ModelReport = z.infer<typeof ModelReport>;
 
-// Body of PUT /bots/:id/model. `effort` null runs the model on its default effort.
-// Without `effort` the bot keeps its effort if the model supports it, or goes to the default.
+// Body of PUT /bots/:id/model, and of PUT /projects/:id/model for a project's
+// coordinator. `effort` null runs the model on its default effort. Without
+// `effort` the bot (or project) keeps its effort if the model supports it, or goes to the default.
 export const SetBotModelRequest = z.object({ model: z.string().min(1), effort: ReasoningEffort.nullable().optional() });
 export type SetBotModelRequest = z.infer<typeof SetBotModelRequest>;

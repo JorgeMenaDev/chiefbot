@@ -1,8 +1,15 @@
-import type { ReactNode } from "react";
+import { PanelRightIcon } from "lucide-react";
+import { createContext, type ReactNode } from "react";
+import { Button } from "./components/ui/button.tsx";
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "./components/ui/card.tsx";
 
 // The pieces every main-column screen shares, after T3 Code's chat header and
 // settings panels: a slim top bar, panels that open under it, list rows, cards.
+
+// Whether the pane around is on screen. App keeps a hidden tab's pane mounted,
+// so its drafts stay; what must not stay open while hidden (a full-screen view,
+// a modal that would block the window) closes when this turns false.
+export const PaneShown = createContext(true);
 
 // The top bar: the screen's name (and a quiet note), its actions on the right.
 // It is the window's drag handle, as macOS hides the title bar. While the sidebar
@@ -47,6 +54,16 @@ export function SidePanel({ bar, hidden, children }: { bar: ReactNode; hidden?: 
       <div className="drag-region flex h-(--topbar-height) shrink-0 items-center gap-2 border-b px-3">{bar}</div>
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">{children}</div>
     </aside>
+  );
+}
+
+// Shows or hides a side panel (`label` names it). It sits at the window's top-right corner
+// either way: at the end of the chat header while the panel is closed, in the panel's bar while open.
+export function PanelToggle({ open, label, className, onClick }: { open: boolean; label: string; className?: string; onClick: () => void }) {
+  return (
+    <Button size="icon-xs" variant="ghost" pressed={open} className={className} aria-label={label} title={open ? "Hide panel" : "Show panel"} onClick={onClick}>
+      <PanelRightIcon />
+    </Button>
   );
 }
 

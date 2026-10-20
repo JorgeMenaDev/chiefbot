@@ -12,15 +12,21 @@ import {
   ConnectorInput,
   ConnectorName,
   ConnectorTokenRequest,
+  ContextImagePath,
+  ContextPath,
   CreateBotRequest,
   CreateProjectRequest,
   CreateWorkspaceRequest,
   EnvironmentInput,
+  HandoffId,
   InviteId,
   InviteRequest,
   ProjectId,
+  ProjectSettingsRequest,
+  ReplyToHandoffRequest,
   RoutineId,
   RoutineInput,
+  SecretName,
   SendBotMessageRequest,
   SendMessageRequest,
   ServiceId,
@@ -28,8 +34,10 @@ import {
   SetCopilotModeRequest,
   SetBotAccessRequest,
   SetBotModelRequest,
+  SetProjectSecretRequest,
   SubscriptionId,
   SubscriptionInput,
+  Task,
   TaskWorkerId,
   Theme,
   UserId,
@@ -90,6 +98,7 @@ const bots = createBots({
   onUser: (user) => auth.userChanged(user),
   onTasks: (projectId, tasks) => window?.webContents.send("projects:tasks", { projectId, tasks }),
   onWorkers: (projectId, workers) => window?.webContents.send("projects:workers", { projectId, workers }),
+  onProjectStates: (states) => window?.webContents.send("projects:states", states),
 });
 
 const chats = createChats({
@@ -110,6 +119,7 @@ const projects = createProjects({
   controlUrl,
   session: sessionStore.load,
   onChat: (view) => window?.webContents.send("projects:chat", view),
+  onWorkerChat: (view) => window?.webContents.send("projects:worker-chat", view),
 });
 
 const auth = createAuth({
@@ -173,6 +183,9 @@ ipcMain.handle("chat:answer", (_event, id: unknown, approvalId: unknown, approve
 ipcMain.handle("chat:answer-question", (_event, id: unknown, questionId: unknown, result: unknown) =>
   chats.answerQuestion(BotId.parse(id), QuestionId.parse(questionId), QuestionResult.parse(result)),
 );
+ipcMain.handle("chat:reply-to-handoff", (_event, id: unknown, handoffId: unknown, reply: unknown) =>
+  chats.replyToHandoff(BotId.parse(id), HandoffId.parse(handoffId), ReplyToHandoffRequest.parse(reply)),
+);
 ipcMain.handle("routines:list", (_event, botId: unknown) => routines.list(BotId.parse(botId)));
 ipcMain.handle("routines:create", (_event, botId: unknown, input: unknown) =>
   routines.create(BotId.parse(botId), RoutineInput.parse(input)),
@@ -204,8 +217,35 @@ ipcMain.handle("projects:list", (_event, workspaceId: unknown) => projects.list(
 ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) =>
   projects.create(WorkspaceId.parse(workspaceId), CreateProjectRequest.parse({ repo }).repo),
 );
+ipcMain.handle("projects:save-settings", (_event, id: unknown, text: unknown) =>
+  projects.saveSettings(ProjectId.parse(id), ProjectSettingsRequest.parse({ text }).text),
+);
+ipcMain.handle("projects:set-model", (_event, id: unknown, request: unknown) => projects.setModel(ProjectId.parse(id), SetBotModelRequest.parse(request)));
+ipcMain.handle("projects:secrets", (_event, id: unknown) => projects.secrets(ProjectId.parse(id)));
+ipcMain.handle("projects:set-secret", (_event, id: unknown, name: unknown, value: unknown) =>
+  projects.setSecret(ProjectId.parse(id), SecretName.parse(name), SetProjectSecretRequest.parse({ value }).value),
+);
+ipcMain.handle("projects:clear-secret", (_event, id: unknown, name: unknown) => projects.clearSecret(ProjectId.parse(id), SecretName.parse(name)));
 ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
 ipcMain.handle("projects:workers", (_event, id: unknown) => projects.workers(ProjectId.parse(id)));
+ipcMain.handle("projects:states", () => bots.projectStates());
+// Opening a worker's transcript answers with what main has so far; the rest follows on projects:worker-chat.
+ipcMain.handle("projects:open-worker-chat", (_event, id: unknown, workerId: unknown) => {
+  const worker = TaskWorkerId.parse(workerId);
+  projects.openWorkerChat(ProjectId.parse(id), worker);
+  return projects.workerChatView(worker);
+});
+ipcMain.handle("projects:close-worker-chat", (_event, workerId: unknown) => projects.closeWorkerChat(TaskWorkerId.parse(workerId)));
+ipcMain.handle("projects:take-over", (_event, id: unknown, workerId: unknown) => projects.takeOver(ProjectId.parse(id), TaskWorkerId.parse(workerId)));
+ipcMain.handle("projects:hand-back", (_event, id: unknown, workerId: unknown) => projects.handBack(ProjectId.parse(id), TaskWorkerId.parse(workerId)));
+ipcMain.handle(
+  "projects:worker-screen-url",
+  (_event, id: unknown, workerId: unknown) => `${controlSockets}/projects/${ProjectId.parse(id)}/workers/${TaskWorkerId.parse(workerId)}/screen`,
+);
+ipcMain.handle("projects:context", (_event, id: unknown) => projects.context(ProjectId.parse(id)));
+ipcMain.handle("projects:context-file", (_event, id: unknown, path: unknown) => projects.contextFile(ProjectId.parse(id), ContextPath.parse(path)));
+ipcMain.handle("projects:context-image", (_event, id: unknown, path: unknown) => projects.contextImage(ProjectId.parse(id), ContextImagePath.parse(path)));
+ipcMain.handle("projects:mark-done", (_event, id: unknown, number: unknown) => projects.markDone(ProjectId.parse(id), Task.shape.number.parse(number)));
 ipcMain.handle("projects:answer-chat", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   projects.answerChat(ProjectId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
 );
@@ -218,7 +258,7 @@ ipcMain.handle("projects:delete", async (_event, id: unknown, name: unknown) => 
   const { response } = await dialog.showMessageBox(window, {
     type: "warning",
     message: `Delete the project ${String(name)}?`,
-    detail: "Its coordinator's and workers' computers, task ledger, chats and shared context are deleted. The repo is not touched.",
+    detail: "The computers of its project agent, engineers and verifiers, its task ledger, chats, shared context, settings and secrets are deleted. The repo is not touched.",
     buttons: ["Delete", "Cancel"],
     defaultId: 1,
     cancelId: 1,
@@ -329,10 +369,11 @@ ipcMain.handle("bots:delete", async (_event, id: unknown) => {
 });
 
 app.whenReady().then(async () => {
-  // Adds the control session to the screen WebSocket's handshake, so the
-  // renderer never holds it. Control checks that the session owns the bot.
+  // Adds the control session to the screen WebSockets' handshake, so the
+  // renderer never holds it. Control checks that the session owns the bot, or
+  // is a member of the engineer's project.
   session.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: [`${controlSockets}/bots/*/screen`] },
+    { urls: [`${controlSockets}/bots/*/screen`, `${controlSockets}/projects/*/workers/*/screen`] },
     ({ requestHeaders }, callback) => {
       const token = sessionStore.load();
       callback({ requestHeaders: token ? { ...requestHeaders, Authorization: `Bearer ${token}` } : requestHeaders });

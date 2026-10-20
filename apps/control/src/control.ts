@@ -28,6 +28,8 @@ import {
   type ModelOption,
   type OpenedPullRequest,
   type ProjectId,
+  type ProjectState,
+  type ProjectStates,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
@@ -58,7 +60,7 @@ import { serviceHost } from "./health/services.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
 import { subscriptionHost } from "./subscriptions.ts";
-import { taskWorkerHost, type TaskWorkerSocketData } from "./taskWorkers.ts";
+import { taskWorkerHost, type TaskWorkerSocketData, type WorkerWatchSocketData } from "./taskWorkers.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
@@ -140,7 +142,8 @@ type SocketData =
   | { kind: "viewer"; botId: BotId; streamId: string }
   | { kind: "screen"; streamId: string }
   | ProjectSocketData
-  | TaskWorkerSocketData;
+  | TaskWorkerSocketData
+  | WorkerWatchSocketData;
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -216,6 +219,9 @@ type SocketData =
 //   …      /health/services  people's own services on Health, checked on demand (health/services.ts)
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
 //                             turn's key: handing work to projects and watching it (handoffs.ts)
+//   POST   /bots/:id/handoffs/:handoffId/messages  bearer session: the owner's answer from a
+//                             handoff's card in the bot's chat (handoffs.ts); 409 when the project
+//                             asks another question now, or the handoff's task is done or abandoned
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //
@@ -261,7 +267,7 @@ export function startControl({
   // or screen viewer: it would die with the computer.
   const stopping = new Set<BotId>();
   // Who drives each screen and the viewers' streams (screens.ts).
-  const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
+  const screens = screenTunnel<BotId>({ onStreamEnd: (botId) => idle.touch(botId) });
   // People's connections, which their bots' turns carry (connections/connections.ts).
   // Saving or turning one off drops a health check of it still running.
   const connections = connectionHost({
@@ -310,8 +316,13 @@ export function startControl({
     agentFor: (key) => {
       const turn = store.turnKeys.holder(key);
       if (turn?.agent === "bot") return botAgent(turn);
-      return turn?.agent === "task-worker" ? taskWorkers.agentOf(turn) : null;
+      if (turn?.agent === "coordinator") {
+        const repo = store.projects.project(turn.projectId)?.repo;
+        return repo ? { userId: turn.userId, repo, who: "A project's coordinator" } : null;
+      }
+      return turn?.agent === "task-worker" ? taskWorkers.repoAgentOf(turn) : null;
     },
+    onPush: (fullName, branches) => taskWorkers.pushing(fullName, branches),
   });
 
   // Who pays for each agent run's Copilot (copilotIdentity.ts).
@@ -335,14 +346,19 @@ export function startControl({
     store,
     payerOf,
     connectorsFor: connectors.agentConnectors,
+    secretsFor: (projectId) => projects.secretValues(projectId),
     computers,
     approvals,
     approvalWaitMinutes,
     clock,
+    context,
     pullRequest: repos.pullRequest,
+    pullRequestHead: repos.pullRequestHead,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     onLedgerChange: watchHandoffs,
+    onStateChange: (projectId) => projectStateChanged(projectId),
+    onTurnQueued: (projectId, userId, event) => projects.queued(projectId, userId, event),
     upgrade: (req, data) => upgrade(server, req, data),
   });
 
@@ -352,6 +368,7 @@ export function startControl({
     payerOf,
     computers,
     context,
+    secrets,
     workers: taskWorkers,
     approvals,
     githubApiUrl,
@@ -361,9 +378,47 @@ export function startControl({
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     upgrade: (req, data) => upgrade(server, req, data),
     connectorsFor: connectors.agentConnectors,
-    onLedgerChange: watchHandoffs,
+    onLedgerChange: (projectId) => {
+      watchHandoffs(projectId);
+      projectStateChanged(projectId);
+    },
+    onStateChange: (projectId) => projectStateChanged(projectId),
+    onDeleted: (memberIds) => projectsGone(memberIds),
     onActivity: (projectId) => coordinatorIdle.touch(projectId),
   });
+
+  // The state dot each member last got of each project, so only a change goes
+  // out. Each member gets their own: a project needs only the member it asks.
+  const sentStates = new Map<UserId, Map<ProjectId, ProjectState>>();
+  // The member's state of the project now, and whether it differs from what they last got.
+  const memberState = (projectId: ProjectId, userId: UserId) => {
+    const sent = sentStates.get(userId) ?? new Map<ProjectId, ProjectState>();
+    sentStates.set(userId, sent);
+    const state = projects.stateOf(projectId, store.user(userId).login);
+    const changed = sent.get(projectId) !== state;
+    sent.set(projectId, state);
+    return { state, changed };
+  };
+  function projectStateChanged(projectId: ProjectId) {
+    for (const userId of store.projects.memberIds(projectId)) {
+      const { state, changed } = memberState(projectId, userId);
+      if (changed) server.publish(topic(userId), JSON.stringify({ type: "project-state", projectId, state } satisfies ClientEvent));
+    }
+  }
+  // Every project of the member's workspaces with its state, as one snapshot
+  // that replaces what they had: on /events open, and once a project of theirs
+  // goes (deleted, or they left its workspace).
+  const statesEvent = (userId: UserId) => {
+    sentStates.delete(userId);
+    const states: ProjectStates = {};
+    for (const workspace of store.workspaces.workspacesFor(userId)) {
+      for (const { id } of store.projects.projectsIn(workspace.id)) states[id] = memberState(id, userId).state;
+    }
+    return JSON.stringify({ type: "project-states", states } satisfies ClientEvent);
+  };
+  const projectsGone = (userIds: UserId[]) => {
+    for (const userId of userIds) server.publish(topic(userId), statesEvent(userId));
+  };
   // Chiefs of staff handing work to projects (handoffs.ts).
   const chiefs = chiefHost({ store, projects });
   // What projects listen to: polled CI runs and issue queries, and schedules (subscriptions.ts).
@@ -487,6 +542,7 @@ export function startControl({
       ...workspaceRoutes(store, async (workspaceId, userId) => {
         projects.memberRemoved(workspaceId, userId);
         taskWorkers.memberRemoved(workspaceId, userId);
+        projectsGone([userId]);
       }),
       ...projects.routes,
       ...taskWorkers.routes,
@@ -773,6 +829,7 @@ export function startControl({
       open(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.open(ws, ws.data);
         if (ws.data.kind === "task-worker") return taskWorkers.open(ws, ws.data);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen" || ws.data.kind === "worker-transcript") return taskWorkers.watchOpen(ws, ws.data);
         if (ws.data.kind === "viewer") {
           const worker = workers.get(ws.data.botId);
           if (!worker) return ws.close();
@@ -785,8 +842,10 @@ export function startControl({
           return;
         }
         if (ws.data.kind === "client") {
-          ws.subscribe(topic(ws.data.userId));
-          ws.send(botsEvent(ws.data.userId));
+          const { userId } = ws.data;
+          ws.subscribe(topic(userId));
+          ws.send(botsEvent(userId));
+          ws.send(statesEvent(userId));
           return;
         }
         if (ws.data.kind === "chat") {
@@ -807,6 +866,7 @@ export function startControl({
       close(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.close(ws, ws.data);
         if (ws.data.kind === "task-worker") return taskWorkers.close(ws, ws.data);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen" || ws.data.kind === "worker-transcript") return taskWorkers.watchClose(ws, ws.data);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.end(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
@@ -816,6 +876,7 @@ export function startControl({
       message(ws, raw) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.message(ws.data, raw);
         if (ws.data.kind === "task-worker") return taskWorkers.message(ws.data, raw);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen" || ws.data.kind === "worker-transcript") return taskWorkers.watchMessage(ws.data, raw);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.relay(ws.data.streamId, ws.data.kind, raw);
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));

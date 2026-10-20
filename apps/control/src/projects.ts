@@ -1,19 +1,32 @@
 import {
+  AUTO_MODEL,
   AnswerApprovalRequest,
+  ContextImagePath,
+  ContextPath,
   CoordinatorToControl,
   CoordinatorToolCall,
   CreateProjectRequest,
+  ProjectSettingsRequest,
+  projectState,
+  SecretName,
   SendMessageRequest,
+  SetBotModelRequest,
+  SetProjectSecretRequest,
+  supportedEffort,
   type AgentConnector,
   type ApprovalKind,
   type ChatEvent,
   type ClientEvent,
   type ContextFile,
+  type ContextFileText,
   type ControlToCoordinator,
+  type AutoFallback,
   type CopilotPayer,
   type Project,
   type ProjectId,
   type ProjectMember,
+  type ProjectSecret,
+  type ProjectState,
   type SendMessageResponse,
   type Task,
   type User,
@@ -24,11 +37,14 @@ import type { ApprovalOutcome, controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
-import { readProjectFile } from "./projectFile.ts";
+import { modelOptions, pickModel } from "./models.ts";
+import { parseProjectFile, readProjectFile } from "./projectFile.ts";
+import { queue } from "./queue.ts";
 import type { repoAccess } from "./repos.ts";
+import { secretFailure, type SecretStore } from "./secrets/secretStore.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
-import type { taskWorkerHost } from "./taskWorkers.ts";
+import { movedWhileChecking, type taskWorkerHost } from "./taskWorkers.ts";
 import { coordinatorTurn, heldTurn, type CoordinatorTurn } from "./turnKeys.ts";
 
 // What a project WebSocket is bound to: a project's coordinator, or one
@@ -46,6 +62,8 @@ export type ProjectHostOptions = {
   payerOf: ReturnType<typeof copilotIdentity>;
   computers: ComputerProvider;
   context: ContextStore;
+  // Where the values of the projects' secrets live.
+  secrets: SecretStore;
   // The projects' task workers (taskWorkers.ts): the coordinator's worker tools.
   workers: ReturnType<typeof taskWorkerHost>;
   // Approvals control asks for in a coordinator turn (a connector call).
@@ -65,9 +83,18 @@ export type ProjectHostOptions = {
   connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
   // The project's task ledger changed.
   onLedgerChange: (projectId: ProjectId) => void;
+  // The project's state may have changed for its members (contracts projectState):
+  // its agent woke, slept or got a message to answer.
+  onStateChange: (projectId: ProjectId) => void;
+  // The project was deleted: these were its members.
+  onDeleted: (memberIds: UserId[]) => void;
   // The coordinator did something: its idle time starts again (idle.ts).
   onActivity: (projectId: ProjectId) => void;
 };
+
+// A new SecretStore name for a project secret's value being written: each value
+// gets its own, so two writes never touch the same one.
+const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.randomUUID()}`;
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
 // (from the ComputerProvider), a task ledger and shared context in control,
@@ -79,14 +106,31 @@ export type ProjectHostOptions = {
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET    /workspaces/:id/projects  → Project[]
 //   POST   /workspaces/:id/projects  body CreateProjectRequest → 201 Project. Control reads the repo's
-//                                    chiefbot.project.yaml through the repo app, if the user may read it (400
-//                                    invalid_project_file says what is wrong; 409 project_exists;
-//                                    403 reauth_needed), then starts the coordinator's computer.
+//                                    chiefbot.project.yaml through the repo app, if the user may read it
+//                                    (404 repo_not_found; 403 reauth_needed; 409 project_exists), then starts
+//                                    the coordinator's computer. No file, or an invalid one, still makes the
+//                                    project: Project.file says so, and the settings alone make its config.
 //   GET    /projects/:id             → Project
 //   DELETE /projects/:id             → 204 (workspace owner only): its computer, its workers' computers,
-//                                    ledger, chats and context go
+//                                    ledger, chats, context, settings and secrets go, once the secret
+//                                    writes already asked for are done
+//   PUT    /projects/:id/settings    body ProjectSettingsRequest → Project with the new config (400
+//                                    invalid_settings says what is wrong)
+//   PUT    /projects/:id/model       body SetBotModelRequest → Project: the coordinator's next turn runs on
+//                                    it (400 model_unavailable when the member's plan does not offer it or it is
+//                                    locked, effort_unavailable when the model does not support the effort)
+//   GET    /projects/:id/secrets     → ProjectSecret[]: names, never a value
+//   PUT    /projects/:id/secrets/:name  body SetProjectSecretRequest → 204, for a name the config declares
+//                                    (400 invalid_secret; 503 secrets_unavailable)
+//   DELETE /projects/:id/secrets/:name  → 204: its value goes
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
+//   POST   /projects/:id/tasks/:number/done  → Task: the member marks it done, over the done rule
+//                                    (taskWorkers.ts doneCheck), recorded in its `overrides`
+//                                    (404 not_found; 409 task_closed when it is done or abandoned)
+//   GET    /projects/:id/context     → ContextFile[]: the shared context's files
+//   GET    /projects/:id/context/file  ?path=<ContextPath> → ContextFileText (400 invalid_path; 404 not_found)
+//   GET    /projects/:id/context/image ?path=<ContextImagePath> → the PNG's bytes (400 invalid_path; 404 not_found)
 //   POST   /projects/:id/approvals/:approvalId  body AnswerApprovalRequest → 204: the member answers
 //                                    what control asked in their running turn (409 not_pending when it
 //                                    is answered, unknown, another member's or its turn ended)
@@ -107,6 +151,7 @@ export function projectHost({
   payerOf,
   computers,
   context,
+  secrets,
   workers,
   approvals,
   githubApiUrl,
@@ -117,6 +162,8 @@ export function projectHost({
   upgrade,
   connectorsFor,
   onLedgerChange,
+  onStateChange,
+  onDeleted,
   onActivity,
 }: ProjectHostOptions) {
   const { projects } = store;
@@ -128,6 +175,27 @@ export function projectHost({
   // Projects whose computer control is stopping (no turn may land on it), and those it is starting.
   const stopping = new Set<ProjectId>();
   const waking = new Set<ProjectId>();
+  // A project's secret writes and clears, and its deletion, run one at a time, in order.
+  const inOrder = queue<ProjectId>();
+
+  // Deletes leftover secret values (projectStore) from the SecretStore. One it
+  // refuses stays a leftover, logged, and goes when control next starts.
+  const forget = (secretNames: string[]) =>
+    Promise.all(
+      secretNames.map(async (secretName) => {
+        try {
+          await secrets.delete(secretName);
+          // Secret Manager answers a delete of a secret it does not find as done
+          // (secretManager.ts), and it is eventually consistent: a value written
+          // just before may still be there after its record goes (docs/deploy.md).
+          projects.secretDeleted(secretName);
+        } catch (error) {
+          console.error(`could not delete the project secret value ${secretName}: ${secretFailure(error)}`);
+        }
+      }),
+    );
+  // What writes and deletes left before control stopped, or failed to delete.
+  void forget(projects.secretLeftovers());
 
   const chatTopic = (projectId: ProjectId, userId: UserId) => `project-chat:${projectId}:${userId}`;
   const publishChat = (projectId: ProjectId, { userId, event }: { userId: UserId; event: ChatEvent }) =>
@@ -137,27 +205,58 @@ export function projectHost({
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, { type: "tasks", projectId, tasks });
     onLedgerChange(projectId);
   };
+  // Ends the project's queued continuations of tasks done or abandoned (a
+  // member's Mark done, the coordinator's done), so none reopens its task.
+  const endClosedContinuations = (projectId: ProjectId) => {
+    for (const ended of projects.endClosedContinuations(projectId)) publishChat(projectId, ended);
+  };
+  // The task is done or abandoned: its workers stop, and its queued continuations end.
+  const taskClosed = (projectId: ProjectId, taskNumber: number) => {
+    workers.taskClosed(projectId, taskNumber);
+    endClosedContinuations(projectId);
+  };
   const toCoordinator = (projectId: ProjectId, message: ControlToCoordinator) =>
     coordinators.get(projectId)?.send(JSON.stringify(message));
 
   // The project's scheduler: once its coordinator is ready, hands it the oldest
   // queued turn, unless a turn is running (the store's claim refuses then), with
-  // who pays for its Copilot and the connectors ready for that turn's member.
+  // the project's model (at its effort while the member's plan still offers it
+  // for the model), who pays for its Copilot and the connectors ready for that turn's member.
   // The turn's chat says who pays. Connectors act as the member (or the
   // workspace, for a shared one) whoever pays: org billing changes only
   // Copilot's identity. If they cannot be read, the turn runs without connectors.
+  // A queued continuation of a task closed meanwhile ends unclaimed.
   const schedule = (projectId: ProjectId) => {
+    onStateChange(projectId);
     if (stopping.has(projectId)) return;
+    endClosedContinuations(projectId);
     if (!greeted.has(projectId)) return wake(projectId);
     const next = projects.claimNextTurn(projectId);
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
-    if (!next || !run) return;
+    const project = projects.project(projectId);
+    if (!next || !run || !project) return;
+    const { fallback, ...model } = turnModel(project, run.payer, next.member.userId);
     const turnKey = store.turnKeys.issue({ agent: "coordinator", projectId, userId: next.member.userId, turnId: next.turnId });
-    publishChat(projectId, projects.addPayer(next.turnId, run.payer));
+    publishChat(projectId, projects.addPayer(next.turnId, run.payer, fallback));
     void connectorsFor(projectId, next.member.userId)
       .catch(() => [])
-      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, turnKey, payer: run.payer, connectors }));
+      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, ...model, turnKey, payer: run.payer, connectors }));
   };
+
+  // The model and effort a turn of the project runs on: the project's, as far as
+  // the plan of who pays offers them (the member's on their seat, the
+  // organization's on its billing, as their turns last listed them), else Auto.
+  // `fallback` then says why, for the turn's payer line.
+  const turnModel = (project: Project, payer: CopilotPayer, userId: UserId) => {
+    const report = payer.kind === "seat" ? store.modelReport(userId) : store.orgModelReport(payer.account);
+    const options = modelOptions(report, payer.kind === "seat" ? store.user(userId).copilotPlan : null);
+    const offered = options.find(({ id, lockedReason }) => id === project.model && lockedReason === null);
+    if (offered) return { model: project.model, effort: supportedEffort(offered.efforts, project.effort), fallback: null };
+    const model = options.find(({ id }) => id === project.model)?.name ?? project.model;
+    return { model: AUTO_MODEL, effort: null, fallback: { model, reason: report ? "not_on_plan" : "plan_unknown" } satisfies AutoFallback };
+  };
+  // The model picker's rows for the user's Copilot plan (models.ts).
+  const modelOptionsOf = (user: User) => modelOptions(store.modelReport(user.id), user.copilotPlan);
 
   // Starts the project's computer when a turn waits and no coordinator is
   // connected: it was stopped for idleness. A no-op for a computer still running.
@@ -235,10 +334,16 @@ export function projectHost({
       case "update_task": {
         const owner = ownerLogin(call.owner);
         if (!owner) return notMember(String(call.owner));
-        const task = projects.updateTask(projectId, { ...call, owner: owner.login });
+        const { status, ...change } = { ...call, owner: owner.login };
+        // Done goes through the done rule: checked against GitHub, then written
+        // only if what it checked is unchanged (projectStore.ts completeTask).
+        const check = status === "done" ? await workers.doneCheck(project, asker, call.number, call.links) : null;
+        if (check && "refused" in check) return apiError(400, "invalid_tool_call", check.refused);
+        const task = status === "done" ? projects.completeTask(projectId, change, check?.verified) : projects.updateTask(projectId, { ...change, status });
+        if (task === "moved") return apiError(400, "invalid_tool_call", movedWhileChecking(call.number));
         if (!task) return apiError(404, "not_found", `No task #${call.number} in this project`);
         publishTasks(projectId);
-        if (task.status === "done" || task.status === "abandoned") workers.taskClosed(projectId, task.number);
+        if (task.status === "done" || task.status === "abandoned") taskClosed(projectId, task.number);
         return Response.json(task satisfies Task);
       }
       case "list_tasks":
@@ -252,12 +357,22 @@ export function projectHost({
       case "write_context":
         return Response.json((await context.write(projectId, call.path, call.content)) satisfies ContextFile);
       case "dispatch_worker":
+      case "dispatch_verifier":
       case "worker_status":
       case "worker_transcript":
       case "stop_worker":
         return workers.tool(project, asker, call);
     }
   }
+
+  // The project's secrets as members see them: the names its config declares,
+  // then any value left whose name it no longer declares. Never a value.
+  const secretsOf = (project: Project): ProjectSecret[] => {
+    const held = new Set(projects.secretNames(project.id));
+    const declared = project.config.secrets.map((name) => ({ name, declared: true, set: held.has(name) }));
+    const left = [...held].filter((name) => !project.config.secrets.includes(name)).map((name) => ({ name, declared: false, set: true }));
+    return [...declared, ...left];
+  };
 
   const routes = {
     "/workspaces/:id/projects": {
@@ -276,11 +391,9 @@ export function projectHost({
         const body = CreateProjectRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "invalid_project");
         const access = await repoReadToken(user.id, body.data.repo);
-        if ("error" in access) {
-          return access.error === "reauth_needed" ? apiError(403, "reauth_needed") : apiError(400, "invalid_project_file", access.message);
-        }
+        if ("error" in access) return apiError(access.status, access.error, access.message);
         const file = await readProjectFile(githubApiUrl, access.token, body.data.repo);
-        if ("error" in file) return apiError(400, "invalid_project_file", file.error);
+        if ("refusal" in file) return apiError(file.refusal.status, file.refusal.error, file.refusal.message);
         const projectToken = crypto.randomUUID() + crypto.randomUUID();
         const project = projects.create(workspace.id, body.data.repo, file, projectToken);
         if (project === "exists") return apiError(409, "project_exists");
@@ -298,18 +411,119 @@ export function projectHost({
       GET: member((_user, { project }) => Response.json(project satisfies Project)),
       DELETE: member(async (_user, { project, owner }: { project: Project; owner: boolean }, _req: Bun.BunRequest<"/projects/:id">) => {
         if (!owner) return apiError(403, "owner_only");
+        const members = projects.memberIds(project.id);
         await workers.removeProject(project.id);
         await computers.destroy(project.id, { deleteData: true });
         coordinators.get(project.id)?.close();
         await context.remove(project.id);
-        projects.delete(project.id);
-        return new Response(null, { status: 204 });
+        return inOrder(project.id, async () => {
+          await forget(projects.delete(project.id));
+          onDeleted(members);
+          return new Response(null, { status: 204 });
+        });
+      }),
+    },
+    // Any member saves the settings; the coordinator gets the new config at once.
+    "/projects/:id/settings": {
+      PUT: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/settings">) => {
+        const body = ProjectSettingsRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_settings", "expected { text }");
+        const settings = parseProjectFile(body.data.text);
+        if ("error" in settings) return apiError(400, "invalid_settings", `Settings: ${settings.error}`);
+        const saved = projects.setSettings(project.id, body.data.text);
+        if (!saved) return apiError(404, "not_found");
+        toCoordinator(project.id, { type: "bound", project: saved });
+        return Response.json(saved satisfies Project);
+      }),
+    },
+    // Any member picks the coordinator's model, among those their own plan offers.
+    "/projects/:id/model": {
+      PUT: member(async (user, { project }, req: Bun.BunRequest<"/projects/:id/model">) => {
+        const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "model_unavailable");
+        const picked = pickModel(modelOptionsOf(user), body.data, project.effort);
+        if ("error" in picked) return apiError(400, picked.error);
+        const saved = projects.setModel(project.id, picked.model, picked.effort);
+        return saved ? Response.json(saved satisfies Project) : apiError(404, "not_found");
+      }),
+    },
+    "/projects/:id/secrets": {
+      GET: member((_user, { project }, _req: Bun.BunRequest<"/projects/:id/secrets">) => Response.json(secretsOf(project) satisfies ProjectSecret[])),
+    },
+    // The value goes to the SecretStore only, and never comes back. It is
+    // written under a new name, recorded as a leftover first; then the secret
+    // points at it, and the value it replaced goes. A failed write leaves the
+    // secret as it was, and its leftover goes.
+    "/projects/:id/secrets/:name": {
+      PUT: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/secrets/:name">) => {
+        const { name } = req.params;
+        const body = SetProjectSecretRequest.safeParse(await req.json().catch(() => null));
+        return inOrder(project.id, async () => {
+          // The project as it is now: it may have gone, or its config changed, meanwhile.
+          const current = projects.project(project.id);
+          if (!current) return apiError(404, "not_found");
+          if (!current.config.secrets.includes(name)) return apiError(400, "invalid_secret", `${current.name}'s config declares no secret ${name}.`);
+          if (!body.success) return apiError(400, "invalid_secret", "expected { value } of 1 to 16384 characters");
+          const secretName = newSecretName(current.id);
+          projects.stageSecret(secretName);
+          try {
+            await secrets.put(secretName, body.data.value);
+          } catch (error) {
+            console.error(`could not save the secret ${name} of ${current.id}: ${secretFailure(error)}`);
+            await forget([secretName]);
+            return apiError(503, "secrets_unavailable", "Couldn't save the secret, so it keeps its last value. Try again.");
+          }
+          await forget(projects.publishSecret(current.id, name, secretName));
+          return new Response(null, { status: 204 });
+        });
+      }),
+      DELETE: member((_user, { project }, req: Bun.BunRequest<"/projects/:id/secrets/:name">) => {
+        const name = SecretName.safeParse(req.params.name);
+        if (!name.success) return apiError(404, "not_found");
+        return inOrder(project.id, async () => {
+          await forget(projects.clearSecret(project.id, name.data));
+          return new Response(null, { status: 204 });
+        });
       }),
     },
     "/projects/:id/tasks": {
       GET: member((_user, { project }, _req: Bun.BunRequest<"/projects/:id/tasks">) =>
         Response.json(projects.tasks(project.id) satisfies Task[]),
       ),
+    },
+    "/projects/:id/tasks/:number/done": {
+      POST: member((user, { project }, req: Bun.BunRequest<"/projects/:id/tasks/:number/done">) => {
+        const number = Number(req.params.number);
+        const task = Number.isInteger(number) ? projects.markDone(project.id, number, user.login) : null;
+        if (task === null) return apiError(404, "not_found");
+        if (task === "closed") return apiError(409, "task_closed", `Task #${number} is already done or abandoned.`);
+        publishTasks(project.id);
+        taskClosed(project.id, number);
+        return Response.json(task satisfies Task);
+      }),
+    },
+    "/projects/:id/context": {
+      GET: member(async (_user, { project }, _req: Bun.BunRequest<"/projects/:id/context">) =>
+        Response.json((await context.list(project.id)) satisfies ContextFile[]),
+      ),
+    },
+    "/projects/:id/context/file": {
+      GET: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/context/file">) => {
+        const path = ContextPath.safeParse(new URL(req.url).searchParams.get("path"));
+        if (!path.success) return apiError(400, "invalid_path");
+        const content = await context.read(project.id, path.data);
+        if (content === null) return apiError(404, "not_found");
+        return Response.json({ path: path.data, content } satisfies ContextFileText);
+      }),
+    },
+    "/projects/:id/context/image": {
+      GET: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/context/image">) => {
+        const path = ContextImagePath.safeParse(new URL(req.url).searchParams.get("path"));
+        if (!path.success) return apiError(400, "invalid_path");
+        const bytes = await context.readImage(project.id, path.data);
+        if (bytes === null) return apiError(404, "not_found");
+        return new Response(bytes, { headers: { "content-type": "image/png" } });
+      }),
     },
     // The answer is stored first, then wakes the call control holds.
     "/projects/:id/approvals/:approvalId": {
@@ -376,8 +590,30 @@ export function projectHost({
     // Projects whose coordinator is connected: their computers run.
     awake: () => [...coordinators.keys()].map((id) => ({ id })),
 
+    // The values of the project's secrets that its config declares and that are
+    // set, by name, for one of its engineers (taskWorkers.ts). Read in turn with
+    // the secrets' writes, so a value being replaced is read whole. Throws when
+    // the SecretStore fails.
+    secretValues: (projectId: ProjectId) =>
+      inOrder(projectId, async () => {
+        const declared = projects.project(projectId)?.config.secrets ?? [];
+        const refs = projects.secretRefs(projectId).filter(({ name }) => declared.includes(name));
+        const values = await Promise.all(refs.map(async ({ name, secretName }) => ({ name, value: await secrets.get(secretName) })));
+        return Object.fromEntries(values.flatMap(({ name, value }) => (value === null ? [] : [[name, value]])));
+      }),
+
     // Whether the project's coordinator has a turn running or waiting.
     busy: (projectId: ProjectId) => projects.hasUnfinishedTurn(projectId),
+
+    // The project's state dot for the member `login` (contracts projectState).
+    stateOf: (projectId: ProjectId, login: string): ProjectState =>
+      projectState({
+        login,
+        awake: greeted.has(projectId),
+        busy: projects.hasUnfinishedTurn(projectId),
+        tasks: projects.tasks(projectId),
+        workers: store.taskWorkers.workersOf(projectId),
+      }),
 
     // Stops the idle project's computer. Its coordinator is forgotten once the
     // computer is stopped, and a turn queued meanwhile starts it again.
@@ -388,6 +624,7 @@ export function projectHost({
         coordinators.get(projectId)?.close();
         coordinators.delete(projectId);
         greeted.delete(projectId);
+        onStateChange(projectId);
       } finally {
         stopping.delete(projectId);
       }
@@ -424,16 +661,8 @@ export function projectHost({
     // members see it, and the handoffs linked to its tasks are checked.
     ledgerChanged: publishTasks,
 
-    // Queues `text` in the member's chat with the coordinator, behind their own
-    // unanswered message if there is one (a handoff from their chief of staff).
-    deliver(projectId: ProjectId, userId: UserId, text: string) {
-      const queued = projects.queueTurn(projectId, userId, text, true);
-      if (queued) publishChat(projectId, { userId, event: queued });
-      schedule(projectId);
-    },
-
-    // Call after queueing a turn in the store directly (a subscription's event):
-    // the member's chat shows it, and the scheduler picks it up.
+    // Call after queueing a turn in the store directly (a subscription's event,
+    // a chief's handoff): the member's chat shows it, and the scheduler picks it up.
     queued(projectId: ProjectId, userId: UserId, event: ChatEvent) {
       publishChat(projectId, { userId, event });
       schedule(projectId);
@@ -467,6 +696,7 @@ export function projectHost({
       if (coordinators.get(data.projectId) !== ws) return;
       coordinators.delete(data.projectId);
       greeted.delete(data.projectId);
+      onStateChange(data.projectId);
     },
 
     message(data: ProjectSocketData, raw: string | Buffer) {
@@ -482,6 +712,17 @@ export function projectHost({
           approvals.turnEnded(message.turnId);
           schedule(projectId);
         }
+        return;
+      }
+      // The plan's models, as a turn's session listed them, while the turn runs:
+      // the plan of who pays for that turn, as recorded when it started (not as the
+      // workspace bills now). The member's on their own seat (the project's model
+      // picker offers them), the organization's on its billing. Turns pick their
+      // model by them (turnModel). A turn with no recorded payer reports nothing.
+      if (message.type === "models") {
+        const payer = projects.runningTurnPayer(projectId, message.turnId);
+        if (payer?.kind === "org") store.setOrgModelReport(payer.account, message.report);
+        else if (payer) store.setModelReport(payer.userId, message.report);
         return;
       }
       // The coordinator lost the running turn unless it says it still runs it.

@@ -1,6 +1,6 @@
 # Connectors and the access checklist
 
-A **connector** is an MCP server a workspace defines once. A project asks for the connectors its agents need by name, in its `chiefbot.project.yaml`:
+A **connector** is an MCP server a workspace defines once. A project asks for the connectors its agents need by name, in its config: its `chiefbot.project.yaml` or its settings in the app (README, Projects):
 
 ```yaml
 connectors: [github, github-actions, jira]
@@ -14,7 +14,7 @@ A **connection** (`docs/connections.md`) is different: a command-line tool, like
 
 | Field | Meaning |
 | --- | --- |
-| `name` | How project files name it, and the MCP server name agents see. Lower-case letters, digits and hyphens. |
+| `name` | How a project's config names it, and the MCP server name agents see. Lower-case letters, digits and hyphens. |
 | `title` | What the desktop shows. |
 | `server` | `remote`: a Streamable HTTP MCP server at `url`. `command`: a stdio MCP server the agent's computer starts (`command`, `args`, `env`). |
 | `auth` | `none`, `workspace-secret` (one service credential the workspace owner sets) or `personal-oauth` (each member's own account). A `command` connector takes only `none`: control refuses any other with `400 invalid_connector`. |
@@ -25,7 +25,7 @@ The workspace owner adds, deletes and sets the secrets of connectors. Members co
 
 ## Identity per call
 
-- **Remote connectors** are reached only through control: each agent session gets `<control>/coordinator/<project>/mcp/<name>` (a project's worker: `<control>/task-worker/<worker>/mcp/<name>`, running as the member who asked for it) as the server's URL, through a forwarder on the agent's own computer: the session presents its turn's private forwarder secret (32 random bytes, forgotten when the turn ends; anything else gets `401`), and the forwarder adds the turn's key to each request as it goes out (so a new key after a control restart applies at once), which control issues when the turn starts and revokes when it ends. For each request control picks the identity (no credential, the workspace secret, or the member's own token), adds it as `Authorization: Bearer …` and forwards the request. Tokens never reach a computer. The member is always the one the key's turn runs for (the coordinator's scheduled turn, or the worker's task), never one a request names, and a request without a live key is refused (`403 invalid_turn_key`).
+- **Remote connectors** are reached only through control: each agent session gets `<control>/coordinator/<project>/mcp/<name>` (an engineer or verifier: `<control>/task-worker/<worker>/mcp/<name>`, running as the member who asked for it) as the server's URL, through a forwarder on the agent's own computer: the session presents its turn's private forwarder secret (32 random bytes, forgotten when the turn ends; anything else gets `401`), and the forwarder adds the turn's key to each request as it goes out (so a new key after a control restart applies at once), which control issues when the turn starts and revokes when it ends. For each request control picks the identity (no credential, the workspace secret, or the member's own token), adds it as `Authorization: Bearer …` and forwards the request. Tokens never reach a computer. The member is always the one the key's turn runs for (the coordinator's scheduled turn, or the engineer's or verifier's task), never one a request names, and a request without a live key is refused (`403 invalid_turn_key`).
 - **Command connectors** run on the agent's computer with no credential. A credential on a computer could be read by the agent and used without control seeing it, so a connector with one must be remote. Their `env` is plain configuration that members and agents can read: put no secret in it.
 - A member's OAuth sign-in is refreshed by control shortly before it expires.
 
@@ -33,7 +33,7 @@ The workspace owner adds, deletes and sets the secrets of connectors. Members co
 
 Before control's proxy forwards a call to a remote connector's tool, it checks the server's own `tools/list`: a tool is read-only only when its `annotations.readOnlyHint` is `true`. Any other call waits, held in control, until the member whose turn makes it approves it. So does every other request, whatever the server's annotations say (`resources/read`, `prompts/get`, an answer to the server, a `DELETE` that ends the session…): only the server's event stream (`GET`) and the messages `initialize`, `notifications/initialized`, `notifications/cancelled`, `ping` and `tools/list` pass without asking. A POST body that is not JSON-RPC is refused (`400 invalid_connector`). Every request, an open event stream included, is cut when its turn ends or its member leaves the workspace. The card shows in that member's chat with the coordinator (**Connector approval**, with the connector's title and the tool), or under the task for a worker, like a push. Declined, the agent gets `403 declined`; if the turn ends first, `409 no_turn`. An approval belongs to the turn that asked: it can be answered only while that turn runs, and only that turn's request uses it. A connector the owner marked `writesWithoutApproval` skips this. Control keeps each server's list of read-only tools for ten minutes.
 
-A command connector runs on the agent's computer, so control cannot hold its calls: a worker asks the member itself before a tool that may write, and a coordinator has no shell or files for such a tool to touch.
+A command connector runs on the agent's computer, so control cannot hold its calls: an engineer's or verifier's worker asks the member itself before a tool that may write, and a coordinator has no shell, and no files for such a tool to touch but its copy of the repo, which each turn fetches again.
 
 ## The call log
 

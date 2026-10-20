@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { createBareRepo, git, gitHttpBackend } from "./git.ts";
+import { commitFiles, createBareRepo, git, gitHttpBackend } from "./git.ts";
 
 // A fake github.com + api.github.com for tests: the OAuth device flow, the
 // refresh grant, the two API reads control makes at sign-in, private git repos
@@ -45,7 +45,7 @@ export const defaultFakeUser: FakeGitHubUser = {
   copilot: { plan: "individual", sku: "free_limited_copilot" },
 };
 
-const PullRequestBody = z.object({ head: z.string(), base: z.string(), title: z.string(), body: z.string().default("") });
+const PullRequestBody = z.object({ head: z.string(), base: z.string(), title: z.string(), body: z.string().default(""), draft: z.boolean().default(false) });
 
 // The part of a GitHub App manifest the fake reads.
 const AppManifest = z.object({
@@ -65,6 +65,7 @@ export type FakePullRequest = {
   base: string;
   title: string;
   body: string;
+  draft: boolean;
   by: string;
 };
 
@@ -117,9 +118,23 @@ export function startFakeGitHub({
   let deviceClientId = "";
   // Bare repos live here as <owner>/<name>.git.
   const repoRoot = mkdtempSync(join(tmpdir(), "fake-github-repos-"));
+  // The git http-backend runs answering requests now: stop removes the repos once they are over.
+  const backends = new Set<Promise<Response>>();
   const pullRequests: FakePullRequest[] = [];
   // Every push GitHub accepted, and who sent it.
   const pushes: Array<{ repository: string; by: string }> = [];
+  // While set (holdGit), git's requests wait for it; `held` counts those that waited.
+  let gitGate: Promise<void> | null = null;
+  let held = 0;
+  // While set (holdPullRequests), a pull request's read waits for it once it has
+  // read the head; `pullsHeld` counts those that waited.
+  let pullGate: Promise<void> | null = null;
+  let pullsHeld = 0;
+  // While set (holdPushes), each push waits before GitHub applies it, then is
+  // applied; cut: dropped, its answer failing as a broken connection's would;
+  // or applied with a 502 answer, as a gateway that timed out gives.
+  let pushGate: Promise<"apply" | "cut" | "502"> | null = null;
+  let pushesHeld = 0;
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
   // Each repo: its id (as GitHub numbers repos), whether the app is installed on it, and who may do what.
   const repos = new Map<string, { id: number; installed: boolean; access: Record<string, FakeRepoAccess> }>();
@@ -251,6 +266,14 @@ export function startFakeGitHub({
           }
         },
       },
+      // The repo itself. Like GitHub, 404 for a repo the token cannot read.
+      "/repos/:owner/:repo": {
+        GET: (req) => {
+          const repository = `${req.params.owner}/${req.params.repo}`;
+          if (!reader(bearerToken(req), repository)) return Response.json({ message: "Not Found" }, { status: 404 });
+          return Response.json({ id: repos.get(repository)?.id, full_name: repository, private: true, default_branch: "main" });
+        },
+      },
       // A user's permission on the repo, read with an installation token for it.
       "/repos/:owner/:repo/collaborators/:username/permission": {
         GET: (req) => {
@@ -306,12 +329,28 @@ export function startFakeGitHub({
           const repository = `${req.params.owner}/${req.params.repo}`;
           const by = writer(bearerToken(req), repository);
           if (!by) return Response.json({ message: "Not Found" }, { status: 404 });
-          const { head, base, title, body } = PullRequestBody.parse(await req.json());
+          const { head, base, title, body, draft } = PullRequestBody.parse(await req.json());
           const branches = git(bareRepo(repository), ["branch", "--format=%(refname:short)"]).split("\n");
           if (!branches.includes(head)) return Response.json({ message: "Validation Failed" }, { status: 422 });
-          const pr = { repository, number: pullRequests.length + 1, head, base, title, body, by };
+          const pr = { repository, number: pullRequests.length + 1, head, base, title, body, draft, by };
           pullRequests.push(pr);
-          return Response.json({ number: pr.number, html_url: `${new URL(req.url).origin}/${repository}/pull/${pr.number}` }, { status: 201 });
+          return Response.json({ number: pr.number, html_url: pullRequestUrl(pr) }, { status: 201 });
+        },
+      },
+      // One pull request, its head as its branch is now. Like GitHub, 404 for a
+      // repo the token cannot read.
+      "/repos/:owner/:repo/pulls/:number": {
+        GET: async (req) => {
+          const repository = `${req.params.owner}/${req.params.repo}`;
+          const pr = pullRequests.find((candidate) => candidate.repository === repository && candidate.number === Number(req.params.number));
+          if (!pr || !reader(bearerToken(req), repository)) return Response.json({ message: "Not Found" }, { status: 404 });
+          const { number, title, body, head, base } = pr;
+          const sha = git(bareRepo(repository), ["rev-parse", `refs/heads/${head}`]);
+          if (pullGate) {
+            pullsHeld++;
+            await pullGate;
+          }
+          return Response.json({ number, html_url: pullRequestUrl(pr), state: "open", title, body, head: { ref: head, sha }, base: { ref: base } });
         },
       },
     },
@@ -322,6 +361,10 @@ export function startFakeGitHub({
       const url = new URL(req.url);
       const repository = url.pathname.match(/^\/([^/]+\/[^/]+)\.git\//)?.[1];
       if (!repository) return new Response("Not Found", { status: 404 });
+      if (gitGate) {
+        held++;
+        await gitGate;
+      }
       const basic = req.headers.get("authorization")?.match(/^Basic (.+)$/)?.[1];
       const password = basic ? atob(basic).split(":").slice(1).join(":") : "";
       if (!validAccessTokens.has(password) && !installationTokens.has(password)) {
@@ -330,11 +373,20 @@ export function startFakeGitHub({
       const push = url.pathname.endsWith("/git-receive-pack") || url.searchParams.get("service") === "git-receive-pack";
       const by = push ? writer(password, repository) : reader(password, repository);
       if (!by) return new Response("Repository not found.", { status: push ? 403 : 404 });
-      const res = await gitHttpBackend(req, repoRoot);
+      const how = pushGate && req.method === "POST" && push ? (pushesHeld++, await pushGate) : "apply";
+      if (how === "cut") return new Response(new ReadableStream({ start: (answer) => answer.error(new Error("connection lost")) }));
+      const backend = gitHttpBackend(req, repoRoot);
+      backends.add(backend);
+      const res = await backend.finally(() => backends.delete(backend));
       if (push && req.method === "POST" && res.ok) pushes.push({ repository, by });
-      return res;
+      return how === "502" ? new Response("Bad Gateway", { status: 502 }) : res;
     },
   });
+
+  // A pull request's page, as GitHub's html_url.
+  function pullRequestUrl({ repository, number }: FakePullRequest): string {
+    return `${server.url.origin}/${repository}/pull/${number}`;
+  }
 
   // Whether an installation token may read (or write) the repo's contents.
   function installationMay(token: string, repository: string, level: "read" | "write") {
@@ -434,11 +486,69 @@ export function startFakeGitHub({
       createBareRepo(repoRoot, fullName, files);
       repos.set(fullName, { id: 9000 + repos.size, installed, access });
     },
+    // A new commit holding `files` on the repo's `branch` (main by default; a new
+    // one starts from main), as if someone pushed it: its SHA.
+    commit: (fullName: string, files: Record<string, string>, branch = "main") => commitFiles(bareRepo(fullName), files, branch),
+    // A pull request someone opened on github.com from `head`, by `login`: its URL.
+    openPullRequest(fullName: string, { head, base = "main", title, body = "" }: { head: string; base?: string; title: string; body?: string }, login = user.login) {
+      const pr = { repository: fullName, number: pullRequests.length + 1, head, base, title, body, draft: false, by: login };
+      pullRequests.push(pr);
+      return pullRequestUrl(pr);
+    },
+    // Holds git's requests until `release` runs, as a slow GitHub would. `held` counts the requests that waited.
+    holdGit() {
+      let release = () => {};
+      gitGate = new Promise((resolve) => (release = resolve));
+      held = 0;
+      return {
+        held: () => held,
+        release: () => {
+          gitGate = null;
+          release();
+        },
+      };
+    },
+    // Holds each pull request's answer, the head it read, until `release` runs:
+    // its branch may move meanwhile, as on a slow GitHub. `held` counts the reads that waited.
+    holdPullRequests() {
+      let release = () => {};
+      pullGate = new Promise((resolve) => (release = resolve));
+      pullsHeld = 0;
+      return {
+        held: () => pullsHeld,
+        release: () => {
+          pullGate = null;
+          release();
+        },
+      };
+    },
+    // Holds each push before it is applied: `release` applies them, `cut` drops
+    // them and fails their answers, `timeOut` applies them and answers 502.
+    // `held` counts the pushes that waited.
+    holdPushes() {
+      let settle = (_: "apply" | "cut" | "502") => {};
+      pushGate = new Promise((resolve) => (settle = resolve));
+      pushesHeld = 0;
+      const end = (how: "apply" | "cut" | "502") => {
+        pushGate = null;
+        settle(how);
+      };
+      return { held: () => pushesHeld, release: () => end("apply"), cut: () => end("cut"), timeOut: () => end("502") };
+    },
+    // Gives `login` `access` to the repo, or takes theirs away (null).
+    setAccess(fullName: string, login: string, access: FakeRepoAccess | null) {
+      const repo = repos.get(fullName);
+      if (!repo) throw new Error(`no repo ${fullName}`);
+      if (access === null) delete repo.access[login];
+      else repo.access[login] = access;
+    },
     // Runs git in the repo's bare copy, e.g. to read what a push left there.
     git: (fullName: string, ...args: string[]) => git(bareRepo(fullName), args),
+    // Stops the server. The repos go once every git http-backend still running
+    // is over: one whose repo went first fails with "fatal: '.' does not appear to be a git repository".
     stop: () => {
       server.stop(true);
-      rmSync(repoRoot, { recursive: true, force: true });
+      void Promise.allSettled(backends).then(() => rmSync(repoRoot, { recursive: true, force: true }));
     },
   };
 }

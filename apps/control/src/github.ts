@@ -187,18 +187,37 @@ function appJwt({ id, privateKey }: GitHubAppKey) {
   return `${unsigned}.${createSign("RSA-SHA256").update(unsigned).sign(privateKey, "base64url")}`;
 }
 
-// Opens a pull request; GitHub's refusal (e.g. 422, no such branch) comes back as `refused`.
+// Opens a pull request, as a draft when `draft`; GitHub's refusal (e.g. 422, no such branch) comes back as `refused`.
 export async function createPullRequest(
   apiUrl: string,
   token: string,
   { repository, head, base, title, body }: PullRequestArgs,
+  draft: boolean,
 ): Promise<OpenedPullRequest | { refused: string }> {
   const res = await fetch(`${apiUrl}/repos/${repository}/pulls`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-    body: JSON.stringify({ head, base, title, body }),
+    body: JSON.stringify({ head, base, title, body, draft }),
   });
   if (!res.ok) return { refused: `GitHub refused the pull request (${res.status}): ${await res.text()}` };
   const pr = z.object({ number: z.number().int(), html_url: z.string() }).parse(await res.json());
   return { number: pr.number, url: pr.html_url };
+}
+
+// A pull request as a verifier needs it: its head commit and branch now, its title and description.
+export type PullRequestHead = { sha: string; branch: string; title: string; body: string };
+
+// Reads pull request `number` of the repo with a token that may read it (null:
+// without one, which works for a public repo). Null when GitHub has no such pull
+// request the token can see; throws on any other failure.
+export async function readPullRequest(apiUrl: string, token: string | null, fullName: string, number: number): Promise<PullRequestHead | null> {
+  const res = await fetch(`${apiUrl}/repos/${fullName}/pulls/${number}`, {
+    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), accept: "application/vnd.github+json" },
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GitHub /repos/${fullName}/pulls/${number} failed: ${res.status}`);
+  const pr = z
+    .object({ title: z.string(), body: z.string().nullable(), head: z.object({ sha: z.string(), ref: z.string() }) })
+    .parse(await res.json());
+  return { sha: pr.head.sha, branch: pr.head.ref, title: pr.title, body: pr.body ?? "" };
 }

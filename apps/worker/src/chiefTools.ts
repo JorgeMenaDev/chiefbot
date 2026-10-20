@@ -1,6 +1,5 @@
-import type { Tool } from "@github/copilot-sdk";
-import { ApiError, ChiefToolCall, HandoffStatusArgs, ListProjectsArgs, SendToProjectArgs } from "@chiefbot/contracts";
-import type { z } from "zod";
+import { ApiError, ChiefToolCall, HandoffStatusArgs, ListProjectsArgs, MessageProjectArgs, SendToProjectArgs } from "@chiefbot/contracts";
+import { controlTool } from "./controlTool.ts";
 
 // A bot's tools as its owner's chief of staff: it hands work to a project of
 // one of its owner's workspaces and follows it. Control keeps the handoffs and
@@ -18,22 +17,32 @@ export function chiefTools({ controlUrl, botId, turnKey }: { controlUrl: string;
     throw new Error(refusal.success ? (refusal.data.message ?? refusal.data.error) : `Control answered ${res.status}`);
   }
 
-  const tool = <Args extends z.ZodObject>(name: ChiefToolCall["tool"], description: string, parameters: Args) =>
-    ({
-      name,
-      description,
-      parameters,
-      handler: (args: unknown) => call(ChiefToolCall.parse({ tool: name, ...parameters.parse(args) })),
-    }) satisfies Tool<unknown>;
+  const tool = controlTool(ChiefToolCall, call);
 
   return [
     tool("list_projects", "List the team projects you can hand work to: those of every workspace your owner belongs to.", ListProjectsArgs),
     tool(
       "send_to_project",
-      "Hand a piece of work to a team project. Its coordinator gets it as a task and plans it with the team; you do not manage its workers. " +
-        "You will be told in this chat when the project needs your owner's input and when it is done.",
+      "Hand a new piece of work to a team project. Its coordinator gets it as a task and plans it with the team; you do not manage its workers. " +
+        "Your owner sees a card in this chat that follows it. For more about work you already handed over, use message_project instead.",
       SendToProjectArgs,
     ),
-    tool("handoff_status", "Where the work you handed to projects stands: each handoff's task status and links (pull requests, pages).", HandoffStatusArgs),
+    tool(
+      "message_project",
+      "Send a follow-up about work you already handed to a project, or your owner's answer to its question. " +
+        "It reaches the same task and the same chat with the project's coordinator, never a new task. " +
+        "While the project asks a question (handoff_status shows it), name that question in `question`: a message naming " +
+        "another question, or none, is refused with what the project asks now, so check that with your owner first. " +
+        "Once the task is done or abandoned it is refused: hand over new work with send_to_project.",
+      MessageProjectArgs,
+      // The tool call's own id: control delivers one message per call, however often it arrives.
+      ({ sessionId, toolCallId }) => ({ deliveryId: `${sessionId}/${toolCallId}` }),
+    ),
+    tool(
+      "handoff_status",
+      "Where the work you handed to projects stands: each handoff's task status, the project's open question, its workers, " +
+        "links (pull requests, pages) and the coordinator's last reply about it.",
+      HandoffStatusArgs,
+    ),
   ];
 }

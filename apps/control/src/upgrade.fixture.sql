@@ -230,3 +230,4 @@ INSERT INTO project_tasks (project_id, number, title, detail, status, owner, req
 INSERT INTO task_workers (id, project_id, task_number, creation_id, user_id, turn_id, prompt, token_hash, state, computer, created_at, updated_at)
   VALUES ('worker_1', 'project_1', 1, 'creation_1', 'user_1', 'turn_1', 'Fix the typo', 'worker-hash', 'working', 'wanted', 1, 1);
 INSERT INTO task_worker_approvals (id, worker_id, kind, detail) VALUES ('approval_1', 'worker_1', 'tool', 'git push');
+INSERT INTO task_worker_events (worker_id, event) VALUES ('worker_1', '{"type":"user-message","text":"Fix the typo","attachments":[]}');

@@ -7,6 +7,7 @@ import { BotComposerControls, useModels } from "./BotComposerControls.tsx";
 import { chatRows, type LaneItem, type ToolItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { chipFor, isImage, uploads, type DraftAttachment } from "./composerAttachments.ts";
+import { HandoffCard, type HandoffItem } from "./HandoffCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { QuestionCard } from "./QuestionCard.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
@@ -33,8 +34,17 @@ function useChat(botId: BotId) {
 // replies as markdown, tool calls as one-line rows), the bot's status, and the
 // composer at the bottom. Enter sends, Shift+Enter adds a line. Files go with a
 // message; one with only files says their chips. `initialDraft` starts the
-// composer with a message to send (Health's Ask my bot).
-export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: string | undefined }) {
+// composer with a message to send (Health's Ask my bot). `onOpenProject` opens
+// the project of a handoff's card.
+export function Chat({
+  bot,
+  initialDraft = "",
+  onOpenProject,
+}: {
+  bot: Bot;
+  initialDraft?: string | undefined;
+  onOpenProject: (handoff: HandoffItem) => void;
+}) {
   const view = useChat(bot.id);
   const models = useModels();
   const [draft, setDraft] = useState(initialDraft);
@@ -84,7 +94,14 @@ export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: stri
         status={working ? view.working || "Working" : null}
         empty={`Send ${bot.name} a message to start.`}
         renderItem={(item, streaming) => (
-          <Message botId={bot.id} item={item} streaming={streaming} shortcuts={item.id === newestQuestion} readImage={readImage} />
+          <Message
+            botId={bot.id}
+            item={item}
+            streaming={streaming}
+            shortcuts={item.id === newestQuestion}
+            readImage={readImage}
+            onOpenProject={onOpenProject}
+          />
         )}
       />
       <Composer
@@ -116,6 +133,7 @@ function Message({
   streaming,
   shortcuts,
   readImage,
+  onOpenProject,
 }: {
   botId: BotId;
   item: LaneItem;
@@ -123,6 +141,7 @@ function Message({
   // Whether a question card takes keys 1–9 while no card has focus.
   shortcuts: boolean;
   readImage: (id: AttachmentId) => Promise<unknown>;
+  onOpenProject: (handoff: HandoffItem) => void;
 }) {
   switch (item.kind) {
     case "user":
@@ -131,8 +150,16 @@ function Message({
       return <AssistantMessage text={item.text} streaming={streaming} />;
     case "error":
       return <ErrorMessage message={item.message} />;
+    case "handoff":
+      return (
+        <HandoffCard
+          item={item}
+          onReply={(reply) => window.chiefbot.chat.replyToHandoff(botId, item.handoffId, reply)}
+          onOpen={() => onOpenProject(item)}
+        />
+      );
     case "notice":
-      // Control's note about a handoff to a project: needs input, or done.
+      // Control's note about a handoff to a project, from before cards: needs input, or done.
       return (
         <Alert variant="info">
           <InfoIcon />
@@ -150,7 +177,9 @@ function Message({
         />
       );
     // A chief's chat has none: it always runs on its owner's seat, as its header says.
+    // Only engineers and verifiers set up.
     case "payer":
+    case "setup":
       return null;
   }
 }
@@ -261,12 +290,15 @@ const toolIcon: Record<ToolItem["status"], ReactNode> = {
   failed: <XIcon className="size-3 text-destructive" aria-label="failed" />,
 };
 
-// A tool call in a line of fixed height, with how it went.
+// A tool call in a line of fixed height, with how it went. A name too long
+// for the line shows whole on hover.
 function ToolRow({ name, status }: Pick<ToolItem, "name" | "status">) {
   return (
     <div className="flex h-6 items-center gap-2 font-mono text-muted-foreground text-xs">
       {toolIcon[status]}
-      <span className="truncate">{name}</span>
+      <span className="truncate" title={name}>
+        {name}
+      </span>
     </div>
   );
 }

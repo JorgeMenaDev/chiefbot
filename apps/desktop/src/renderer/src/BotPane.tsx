@@ -1,13 +1,15 @@
 import type { Bot, BotStatus } from "@chiefbot/contracts";
-import { PanelRightIcon, PowerIcon, PowerOffIcon, Trash2Icon } from "lucide-react";
-import { useId, useState, type KeyboardEvent } from "react";
+import { PowerIcon, PowerOffIcon, Trash2Icon } from "lucide-react";
+import { useState } from "react";
 import { Avatar } from "./Avatar.tsx";
 import { Chat } from "./Chat.tsx";
+import type { HandoffItem } from "./HandoffCard.tsx";
 import { ConnectionCalls } from "./ConnectApps.tsx";
 import { ScreenPane } from "./LiveScreen.tsx";
-import { Column, ErrorText, PaneHeader, PanelSection, SidePanel } from "./Pane.tsx";
+import { Column, ErrorText, PaneHeader, PanelSection, PanelToggle, SidePanel } from "./Pane.tsx";
 import { Routines } from "./Routines.tsx";
 import { Button } from "./components/ui/button.tsx";
+import { TabPanel, Tabs, useTabIds } from "./components/ui/tabs.tsx";
 import { cn } from "./lib/utils.ts";
 
 // Whether the bot details panel is open survives a restart and applies to every bot.
@@ -15,7 +17,19 @@ const detailsKey = "chiefbot.botDetails";
 
 // The selected bot: its chat in the middle, its details panel on the right.
 // `draft` starts the composer with a message (Health's Ask my bot).
-export function BotPane({ bot, draft }: { bot: Bot; draft?: string | undefined }) {
+// `onOpenProject` opens the project of a handoff's card. `away` while the
+// Projects tab hides it: its screen closes, so the bot can idle-stop.
+export function BotPane({
+  bot,
+  draft,
+  away = false,
+  onOpenProject,
+}: {
+  bot: Bot;
+  draft?: string | undefined;
+  away?: boolean;
+  onOpenProject: (handoff: HandoffItem) => void;
+}) {
   const [details, setDetails] = useState(() => localStorage.getItem(detailsKey) !== "closed");
   const showDetails = (open: boolean) => {
     setDetails(open);
@@ -25,23 +39,13 @@ export function BotPane({ bot, draft }: { bot: Bot; draft?: string | undefined }
     <>
       <Column>
         <PaneHeader icon={<BotFace bot={bot} className="size-6" dotClassName="-end-1 -bottom-1 bg-background" />} title={bot.name} note={`${statusText[bot.status]} · runs on your Copilot seat`}>
-          {!details && <DetailsToggle open={false} onClick={() => showDetails(true)} />}
+          {!details && <PanelToggle open={false} label="Bot details" onClick={() => showDetails(true)} />}
         </PaneHeader>
-        <Chat bot={bot} initialDraft={draft} />
+        <Chat bot={bot} initialDraft={draft} onOpenProject={onOpenProject} />
       </Column>
       {/* Closed, the panel stays mounted but hidden, so the bot's screen stays open. */}
-      <BotDetails bot={bot} hidden={!details} onClose={() => showDetails(false)} />
+      <BotDetails bot={bot} hidden={!details} away={away} onClose={() => showDetails(false)} />
     </>
-  );
-}
-
-// Shows or hides the details panel. It sits at the window's top-right corner either
-// way: at the end of the chat header while the panel is closed, in the panel's bar while open.
-function DetailsToggle({ open, className, onClick }: { open: boolean; className?: string; onClick: () => void }) {
-  return (
-    <Button size="icon-xs" variant="ghost" pressed={open} className={className} aria-label="Bot details" title={open ? "Hide details" : "Show details"} onClick={onClick}>
-      <PanelRightIcon />
-    </Button>
   );
 }
 
@@ -58,18 +62,18 @@ export function BotFace({ bot, className, dotClassName }: { bot: Bot; className:
   );
 }
 
+type Tab = "details" | "computer";
 const tabs = [
-  ["details", "Details"],
-  ["computer", "Computer"],
+  { key: "details", label: "Details" },
+  { key: "computer", label: "Computer" },
 ] as const;
-
-type Tab = (typeof tabs)[number][0];
 
 // The bot's avatar and name over two tabs: Details (status, routines, delete)
 // and Computer (its live screen). Both tabs stay mounted, the other one hidden
 // (the routines list aside): an open screen counts as activity, so the selected
 // bot does not idle-stop while the user is on Details or has closed the panel.
-function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClose: () => void }) {
+// Away in the Projects tab, the screen closes.
+function BotDetails({ bot, hidden, away, onClose }: { bot: Bot; hidden: boolean; away: boolean; onClose: () => void }) {
   const { start, stop, remove } = window.chiefbot.bots;
   const [tab, setTab] = useState<Tab>("details");
   const [error, setError] = useState<string | null>(null);
@@ -79,55 +83,23 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
     setError(null);
     change().catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)));
   };
-  const id = useId();
-  const tabId = (key: Tab) => `${id}-tab-${key}`;
-  const panelId = (key: Tab) => `${id}-panel-${key}`;
-  // Arrow keys, Home and End move between the tabs (the WAI-ARIA tabs pattern).
-  const onTabKey = (event: KeyboardEvent) => {
-    const index = tabs.findIndex(([key]) => key === tab);
-    const moves: Partial<Record<string, number>> = { ArrowRight: index + 1, ArrowLeft: index - 1 + tabs.length, Home: 0, End: tabs.length - 1 };
-    const next = moves[event.key];
-    const target = next === undefined ? undefined : tabs[next % tabs.length];
-    if (!target) return;
-    event.preventDefault();
-    setTab(target[0]);
-    document.getElementById(tabId(target[0]))?.focus();
-  };
+  const ids = useTabIds<Tab>();
   return (
     <SidePanel
       hidden={hidden}
       bar={
-        <DetailsToggle open className="ms-auto" onClick={onClose} />
+        <PanelToggle open label="Bot details" className="ms-auto" onClick={onClose} />
       }
     >
       <div className="flex flex-col items-center gap-3 px-5 pt-6 pb-5 text-center">
         <Avatar avatar={bot.avatar} className="size-20" />
         <h2 className="max-w-full truncate font-semibold text-lg">{bot.name}</h2>
-        <div role="tablist" aria-label="Bot" className="flex w-full rounded-lg bg-muted p-0.5" onKeyDown={onTabKey}>
-          {tabs.map(([key, label]) => (
-            <button
-              key={key}
-              id={tabId(key)}
-              type="button"
-              role="tab"
-              aria-selected={tab === key}
-              aria-controls={panelId(key)}
-              tabIndex={tab === key ? 0 : -1}
-              className={cn(
-                "flex-1 cursor-pointer rounded-md py-1 font-medium text-sm transition-colors",
-                tab === key ? "bg-background text-foreground shadow-xs dark:bg-input/64" : "text-muted-foreground hover:text-foreground",
-              )}
-              onClick={() => setTab(key)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <Tabs label="Bot" tabs={tabs} value={tab} ids={ids} onChange={setTab} className="w-full" />
       </div>
-      <div role="tabpanel" id={panelId("computer")} aria-labelledby={tabId("computer")} hidden={tab !== "computer"}>
-        <ScreenPane bot={bot} />
-      </div>
-      <div role="tabpanel" id={panelId("details")} aria-labelledby={tabId("details")} hidden={tab !== "details"}>
+      <TabPanel ids={ids} tab="computer" value={tab}>
+        {!away && <ScreenPane bot={bot} />}
+      </TabPanel>
+      <TabPanel ids={ids} tab="details" value={tab}>
         <PanelSection title="Status">
           <div className="flex items-center gap-3">
             <StatusDot status={bot.status} />
@@ -155,7 +127,7 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
             Delete {bot.name}
           </Button>
         </PanelSection>
-      </div>
+      </TabPanel>
     </SidePanel>
   );
 }

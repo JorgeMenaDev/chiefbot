@@ -1,6 +1,7 @@
 import { z } from "zod";
-import { ApprovalId, AttachmentId, BotId, HandoffId, QuestionId, TurnId, TurnKey } from "./ids.ts";
+import { ApprovalId, AttachmentId, BotId, HandoffId, ProjectId, QuestionId, TurnId, TurnKey, WorkspaceId } from "./ids.ts";
 import { QuestionForm, QuestionResult } from "./questions.ts";
+import { VerdictLine } from "./verification.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
@@ -14,6 +15,22 @@ import { CopilotPayer } from "./workspaces.ts";
 //   file-change   a file the agent writes, when the bot's access mode is supervised
 export const ApprovalKind = z.enum(["push", "pull-request", "tool", "connector", "command", "file-change"]);
 export type ApprovalKind = z.infer<typeof ApprovalKind>;
+
+// The most of a setup step's output an engineer keeps: the end of it.
+export const SETUP_LOG_MAX = 16_384;
+
+// One step of an engineer's setup (a project's task worker), before its agent
+// starts: the command it ran, how it ended and the end of its output.
+//   clone     clones the project's repo from its default branch, through control's git proxy
+//   checkout  a verifier's: fetches the commit it checks and checks it out
+//   setup     the project's commands.setup, in the clone, with the project's secrets in its environment
+export const SetupStep = z.object({
+  step: z.enum(["clone", "checkout", "setup"]),
+  command: z.string(),
+  exitCode: z.int(),
+  log: z.string().max(SETUP_LOG_MAX),
+});
+export type SetupStep = z.infer<typeof SetupStep>;
 
 // What happens during one turn, as the worker reports it. The worker turns
 // Copilot SDK session events into these; a turn always ends with `done`.
@@ -32,6 +49,10 @@ export type ApprovalKind = z.infer<typeof ApprovalKind>;
 //   question-withdrawn  the agent no longer waits on that question, which can no
 //               longer be answered: the SDK ended it, its turn ended, or the bot was stopped
 //               (control adds that one).
+//   setup-step  an engineer ran one step of its setup (SetupStep), before its agent starts.
+//               A step that fails ends the turn: the engineer is blocked.
+//   setup-done  the engineer's setup is over and its agent starts, with the repo's
+//               instruction files and skill folders it found
 export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text-delta"), messageId: z.string(), text: z.string() }),
   z.object({
@@ -46,6 +67,8 @@ export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("approval-withdrawn"), approvalId: ApprovalId }),
   z.object({ type: z.literal("question-request"), questionId: QuestionId, form: QuestionForm }),
   z.object({ type: z.literal("question-withdrawn"), questionId: QuestionId }),
+  z.object({ type: z.literal("setup-step"), step: SetupStep }),
+  z.object({ type: z.literal("setup-done"), instructions: z.array(z.string()), skills: z.array(z.string()) }),
   z.object({ type: z.literal("done") }),
 ]);
 export type TurnEvent = z.infer<typeof TurnEvent>;
@@ -86,6 +109,12 @@ export type SentAttachment = z.infer<typeof SentAttachment>;
 export const UserMessage = z.object({ type: z.literal("user-message"), text: z.string(), attachments: z.array(SentAttachment).optional() });
 export type UserMessage = z.infer<typeof UserMessage>;
 
+// The message that starts a turn control queued for a project's coordinator
+// itself, in a member's chat: one of their task's engineers or verifiers ended,
+// so the coordinator continues the task. The chat shows it as a system line.
+export const SystemMessage = z.object({ type: z.literal("system-message"), text: z.string() });
+export type SystemMessage = z.infer<typeof SystemMessage>;
+
 // The user's answer to an approval-request of the same turn. Control adds it.
 export const ApprovalAnswer = z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() });
 export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>;
@@ -94,31 +123,70 @@ export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>;
 export const QuestionAnswer = z.object({ type: z.literal("question-answer"), questionId: QuestionId, result: QuestionResult });
 export type QuestionAnswer = z.infer<typeof QuestionAnswer>;
 
+// Why a turn runs on Auto rather than the project's `model`: the payer's plan
+// does not offer it (not_on_plan), or no turn on that plan has listed its models yet (plan_unknown).
+export const AutoFallback = z.object({ model: z.string(), reason: z.enum(["not_on_plan", "plan_unknown"]) });
+export type AutoFallback = z.infer<typeof AutoFallback>;
+
 // Who pays for the turn's Copilot requests. Control adds it when a project's
-// coordinator starts the turn, outside the runtime's numbering.
-export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer });
+// coordinator starts the turn, outside the runtime's numbering. `fallback` is
+// null when the turn runs on the project's model.
+export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) });
 
 // Body of POST /bots/:id/approvals/:approvalId (204; 409 when it is not pending).
 export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
 export type AnswerApprovalRequest = z.infer<typeof AnswerApprovalRequest>;
 
-// Control's note in a chief of staff's chat: a project's task for one of its
-// handoffs (handoffs.ts) now needs the owner's input, or is done. Posted once
-// each time the task's status becomes one of these, in a turn of its own.
+// Where a handoff (handoffs.ts) stands, as its card in the chief's chat says it,
+// from its task in the ledger:
+//   accepted     the task is open: the project has it
+//   working      the task is in progress
+//   needs_input  the task waits on the owner's answer to `question`
+//   pr_opened    the task, in progress or open, links a pull request
+//   verified     and a verifier passed that pull request's head
+//   done, abandoned  the task is closed
+export const HandoffStage = z.enum(["accepted", "working", "needs_input", "pr_opened", "verified", "done", "abandoned"]);
+export type HandoffStage = z.infer<typeof HandoffStage>;
+
+// What a handoff's card in its chief's chat shows. `project` is the project's
+// name; `question` is set only at needs_input; `pullRequests` are the task's;
+// `verification` is its verdict on the latest of them, or null for none.
+export const HandoffCard = z.object({
+  handoffId: HandoffId,
+  workspaceId: WorkspaceId,
+  projectId: ProjectId,
+  project: z.string(),
+  title: z.string(),
+  taskNumber: z.number().int().min(1),
+  stage: HandoffStage,
+  question: z.string().nullable(),
+  pullRequests: z.array(z.url()),
+  verification: VerdictLine.nullable().default(null),
+});
+export type HandoffCard = z.infer<typeof HandoffCard>;
+
+// Control's note in a chief of staff's chat: its handoff's card, whole. Posted
+// when the chief hands the work over and again whenever what the card shows
+// changes, each in a turn of its own. The desktop shows one card per handoff,
+// where it first appeared, with the latest of these.
+export const HandoffCardEvent = z.object({ type: z.literal("handoff-card"), card: HandoffCard });
+export type HandoffCardEvent = z.infer<typeof HandoffCardEvent>;
+
+// Control's note in chats from before handoff cards: the handoff's task needed
+// the owner's input, or was done. Control posts no more of them.
 export const HandoffUpdate = z.object({
   type: z.literal("handoff-update"),
   handoffId: HandoffId,
   status: z.enum(["needs_input", "done"]),
   text: z.string(),
 });
-export type HandoffUpdate = z.infer<typeof HandoffUpdate>;
 
 // One entry of a bot's chat history as control stores it. `seq` grows across all
 // of control's chat history, so a client resumes with "everything after seq N".
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, QuestionAnswer, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, SystemMessage, ApprovalAnswer, QuestionAnswer, HandoffCardEvent, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
@@ -157,10 +225,15 @@ export const ChatItem = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("assistant"), id: z.string(), text: z.string() }),
   z.object({ kind: z.literal("tool"), id: z.string(), name: z.string(), status: z.enum(["running", "succeeded", "failed"]) }),
   z.object({ kind: z.literal("error"), id: z.string(), message: z.string() }),
-  // Control's note about a handoff (HandoffUpdate).
+  // A handoff's card (HandoffCardEvent), as its latest event says.
+  HandoffCard.extend({ kind: z.literal("handoff"), id: z.string() }),
+  // Control's note: about a handoff, from before cards (HandoffUpdate), or the
+  // start of a turn control queued in a project chat (SystemMessage).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
+  // One step of an engineer's or verifier's setup, before its agent starts.
+  z.object({ kind: z.literal("setup"), id: z.string(), step: SetupStep }),
   // Who pays for the turn that follows.
-  z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer }),
+  z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) }),
   // expired: the turn ended before anyone answered (its worker restarted).
   // withdrawn: the agent stopped waiting on it (approval-withdrawn); the turn goes on.
   z.object({
@@ -199,7 +272,8 @@ export type ChatView = z.infer<typeof ChatView>;
 //               after it has resent every event of its latest turn. Control stores
 //               each index once, so resends are harmless, then ends every other
 //               unfinished turn: the runtime lost it. `capabilities` name what the
-//               runtime does beyond the first protocol (ACCESS_MODES, ATTACHMENTS); an older one sends none.
+//               runtime does beyond the first protocol (ACCESS_MODES, ATTACHMENTS,
+//               ENGINEER_SETUP, VERIFIER); an older one sends none.
 export const TurnEventMessage = z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent });
 export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable(), capabilities: z.array(z.string()).default([]) });
 
@@ -209,6 +283,14 @@ export const ACCESS_MODES = "access-modes";
 // A bot's worker that gives a turn's files to its session. One without it drops
 // them, so control sends it only turns without files.
 export const ATTACHMENTS = "attachments";
+// A task worker that sets up before its agent starts (an engineer: EngineerSetup).
+// One without it would ignore the setup and start its agent bare, so control
+// gives it no task: it ends blocked, asking for a rebuilt computer image.
+export const ENGINEER_SETUP = "engineer-setup";
+// A task worker that can be a verifier: it checks out the commit its setup names,
+// has report_verdict and no create_pull_request. Control gives one without it no
+// verifier's task: it ends blocked, asking for a rebuilt computer image.
+export const VERIFIER = "verifier";
 
 // Control → an agent's runtime, after a hello naming a turn that still runs whose
 // key control no longer has (control restarted, which revokes every key): the

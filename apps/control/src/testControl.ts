@@ -8,6 +8,7 @@ import {
   type BotAvatar,
   type BotId,
   type CoordinatorToControl,
+  type ModelReport,
   type ProjectId,
   type TurnEvent,
   type TurnId,
@@ -18,6 +19,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Clock } from "@chiefbot/worker/clock";
+import type { SetupShell } from "@chiefbot/worker/engineer-setup";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { Probes } from "./health/probe.ts";
@@ -55,6 +57,8 @@ export type TestControlOptions = {
   gitSocket?: string;
   // Where the bots' workers stage connections for a turn (fakeComputers).
   connectionsRoot?: string;
+  // Runs engineers' setup commands (fakeComputers). Default: none runs, each answers exit 0.
+  setupShell?: SetupShell;
   // Wraps the fake provider, e.g. to make start fail.
   provider?: (fake: ComputerProvider) => ComputerProvider;
   // The bot a new user gets at their first sign-in. Default: none.
@@ -84,6 +88,7 @@ export async function startTestControl({
   copilot = fakeCopilot(),
   gitSocket,
   connectionsRoot,
+  setupShell,
   provider,
   firstBot,
   clock,
@@ -102,6 +107,7 @@ export async function startTestControl({
     ...(gitSocket === undefined ? {} : { gitSocket }),
     ...(connectionsRoot === undefined ? {} : { connectionsRoot }),
     ...(clock === undefined ? {} : { clock }),
+    ...(setupShell === undefined ? {} : { setupShell }),
   });
   const options = {
     port: 0,
@@ -190,6 +196,9 @@ function userApi(url: string, sessionToken: string) {
     watchChat: (botId: BotId, after = 0) => watchChat(url, auth, `/bots/${botId}/chat?after=${after}`),
     // The user's own chat with a project's coordinator.
     watchProjectChat: (projectId: ProjectId, after = 0) => watchChat(url, auth, `/projects/${projectId}/chat?after=${after}`),
+    // What one of a project's workers did, as a member follows it.
+    watchWorkerTranscript: (projectId: ProjectId, workerId: string, after = 0) =>
+      watchChat(url, auth, `/projects/${projectId}/workers/${workerId}/transcript?after=${after}`),
     // A new bot, once its worker is connected.
     async onlineBot(name: string) {
       const bot = await createBot(name);
@@ -251,6 +260,8 @@ export async function fakeCoordinator({ url, computers }: TestControl, projectId
     token,
     nth,
     hello: (activeTurnId: TurnId | null) => send({ type: "hello", activeTurnId, capabilities: [] }),
+    // The plan's models, as the session of `turnId` lists them.
+    models: (turnId: TurnId, report: ModelReport) => send({ type: "models", turnId, report }),
     // The turn's next event; the first one of a turn is number 0.
     event: (turnId: TurnId, event: TurnEvent, from?: number) => send({ type: "turn-event", turnId, index: from ?? index++, event }),
     newTurn: () => void (index = 0),

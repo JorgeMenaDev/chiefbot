@@ -261,7 +261,7 @@ test("control opens the bot's pull request only after the user approves it", asy
   await chat.until(done);
 
   expect(github.pullRequests).toEqual([
-    { repository: "octo/demo", number: 1, head: "fix-typo", base: "main", title: "Fix a typo", body: "Teh → The", by: "app" },
+    { repository: "octo/demo", number: 1, head: "fix-typo", base: "main", title: "Fix a typo", body: "Teh → The", draft: false, by: "app" },
   ]);
   expect(pr).toEqual({ approved: true, result: `Opened pull request #1: ${github.url}/octo/demo/pull/1` });
 });

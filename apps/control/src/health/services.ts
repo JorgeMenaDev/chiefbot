@@ -13,7 +13,8 @@ import {
 import type { Clock } from "@chiefbot/worker/clock";
 import { z } from "zod";
 import { apiError, bearer, jsonWithin, unauthorized } from "../http.ts";
-import type { SecretStore } from "../secrets/secretStore.ts";
+import { queue } from "../queue.ts";
+import { secretFailure, type SecretStore } from "../secrets/secretStore.ts";
 import type { openStore } from "../store.ts";
 import { checkEnvironment, SERVICE_TIMEOUT_MS, type Net } from "./serviceCheck.ts";
 import type { SavedEnvironment } from "./serviceStore.ts";
@@ -60,7 +61,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
   const tests = new Set<AbortController>();
   const inTurn = slots(SERVICE_CONCURRENCY);
   // A person's saves and removes run one at a time, each on what the last one left.
-  const inOrder = queue();
+  const inOrder = queue<UserId>();
 
   // The saved secret `name`, or null when the store refuses, has none (it was
   // replaced or removed), or gives none within SERVICE_TIMEOUT_MS.
@@ -72,7 +73,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
     try {
       return await Promise.race([secrets.get(name), gaveUp]);
     } catch (error) {
-      if (!stop.aborted) console.error(`service check could not read its secret ${name}`, error);
+      if (!stop.aborted) console.error(`service check could not read its secret ${name}: ${secretFailure(error)}`);
       return null;
     } finally {
       cancel();
@@ -102,7 +103,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
       // Control stopped meanwhile; the store drops it too when the environment changed or went.
       if (!abort.signal.aborted) store.services.record(environment, { ...result, at });
     })
-      .catch((error: unknown) => console.error(`service check of ${environment.id} failed: ${error instanceof Error ? error.name : "unknown error"}`))
+      .catch((error: unknown) => console.error(`service check of ${environment.id} failed: ${secretFailure(error)}`))
       .finally(() => {
         if (running.get(environment.id)?.job === job) running.delete(environment.id);
       });
@@ -114,7 +115,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
 
   // Deletes secrets no environment holds any more. One that fails stays behind, logged.
   const forget = (names: Iterable<string>) =>
-    Promise.all([...names].map((name) => secrets.delete(name).catch((error: unknown) => console.error(`could not delete the service secret ${name}`, error))));
+    Promise.all([...names].map((name) => secrets.delete(name).catch((error: unknown) => console.error(`could not delete the service secret ${name}: ${secretFailure(error)}`))));
 
   // The service is saved again or removed: its checks still running are aborted and dropped.
   function changed({ environments }: Service) {
@@ -180,7 +181,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
     const written = await Promise.allSettled(writes.map(({ name, secret }) => secrets.put(name, secret)));
     const refused = written.find((outcome) => outcome.status === "rejected");
     if (refused) {
-      console.error("could not save a service's secret", refused.reason);
+      console.error(`could not save a service's secret: ${secretFailure(refused.reason)}`);
       await forget(writes.map(({ name }) => name));
       return apiError(503, "secrets_unavailable", "Couldn't save the secrets, so nothing changed. Try again.");
     }
@@ -290,23 +291,5 @@ function slots(max: number) {
       if (next) next();
       else if (--person.active === 0) people.delete(userId);
     }
-  };
-}
-
-// Runs each person's jobs one after another, in the order they came; another
-// person's do not wait. A job that fails does not stop the next.
-function queue() {
-  const last = new Map<UserId, Promise<void>>();
-  return <T>(userId: UserId, job: () => Promise<T>): Promise<T> => {
-    const run = (last.get(userId) ?? Promise.resolve()).then(job);
-    const settled = run.then(
-      () => {},
-      () => {},
-    );
-    last.set(userId, settled);
-    void settled.then(() => {
-      if (last.get(userId) === settled) last.delete(userId);
-    });
-    return run;
   };
 }

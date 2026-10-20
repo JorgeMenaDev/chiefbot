@@ -5,9 +5,10 @@ import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, QuestionId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
-import { ProjectTasks } from "./projects.ts";
+import { ProjectStateChange, ProjectStates, ProjectTasks } from "./projects.ts";
 import { QuestionResult } from "./questions.ts";
-import { ProjectWorkers } from "./taskWorkers.ts";
+import { ScreenControl } from "./screens.ts";
+import { EngineerSetup, ProjectWorkers, TaskWorkerKind } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
@@ -21,12 +22,6 @@ export type BotToken = z.infer<typeof BotToken>;
 // stopped:  the computer is stopped; its disk is kept.
 export const BotStatus = z.enum(["starting", "online", "stopping", "stopped"]);
 export type BotStatus = z.infer<typeof BotStatus>;
-
-// Who drives the bot's screen. agent: the bot; a viewer only watches.
-// human: the user took over (mouse and keyboard); the agent waits until
-// hand-back: control refuses new chat turns, and a running turn's tool calls wait.
-export const ScreenControl = z.enum(["agent", "human"]);
-export type ScreenControl = z.infer<typeof ScreenControl>;
 
 // A bot's face: one of a fixed set of shapes, all with the same two eyes, in one
 // of a fixed set of colours. The desktop draws them (renderer Avatar.tsx).
@@ -78,11 +73,16 @@ export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 //   user   the user changed: their GitHub sign-in was lost or restored
 //   tasks    the whole task ledger of one of the user's projects; sent on every change
 //   workers  every worker of one of the user's projects; sent on every change
+//   project-states  every project of the user's workspaces with its state dot for them (projects.ts
+//           projectState), replacing what they had: on connect, and once a project of theirs goes
+//   project-state  one of those projects' new state dot for them, on every change
 export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bots"), bots: z.array(Bot) }),
   z.object({ type: z.literal("user"), user: User }),
   ProjectTasks.extend({ type: z.literal("tasks") }),
   ProjectWorkers.extend({ type: z.literal("workers") }),
+  z.object({ type: z.literal("project-states"), states: ProjectStates }),
+  ProjectStateChange.extend({ type: z.literal("project-state") }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 
@@ -95,8 +95,10 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //                   `connections` are the owner's connections that are on (connections.ts), for this turn only.
 //                   `attachments` are the files sent with the message: the worker reads each from control with the turn's key.
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
-//                   (control's proxy runs them as the member who asked), and its `turnKey`. Sent once,
-//                   after its first hello.
+//                   (control's proxy runs them as the member who asked), and its `turnKey`. It sets
+//                   up as `setup` says before its agent starts (taskWorkers.ts EngineerSetup). A
+//                   `verifier` (its `kind`) gets report_verdict and no create_pull_request. Sent
+//                   once, after its first hello.
 //   turn-key        the running turn's new key (chat.ts TurnKeyMessage)
 //   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
 //   screen-open     a viewer is waiting: dial /worker/:botId/screen/:streamId and pipe the screen's VNC bytes through it
@@ -120,11 +122,13 @@ export const ControlToWorker = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("run-task"),
+    kind: TaskWorkerKind.default("engineer"),
     turnId: TurnId,
     turnKey: TurnKey,
     text: z.string(),
     payer: CopilotPayer,
     connectors: z.array(AgentConnector),
+    setup: EngineerSetup,
   }),
   z.object({ type: z.literal("screen-control"), control: ScreenControl }),
   z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),

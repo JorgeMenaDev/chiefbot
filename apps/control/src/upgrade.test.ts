@@ -9,7 +9,7 @@ import { atCleanUp, cleanUp } from "./testControl.ts";
 
 afterEach(cleanUp);
 
-test("a database the first v0.2 build made opens and keeps working: new columns are added, stale project file keys dropped, its users get no first bot, its bots get the default face", async () => {
+test("a database the first v0.2 build made opens and keeps working: new columns are added, stale project file keys dropped, an old project file reads as found, its users get no first bot, its bots get the default face, its workers survive the new worker states", async () => {
   const dir = mkdtempSync(join(tmpdir(), "chiefbot-upgrade-"));
   atCleanUp(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "control.sqlite");
@@ -23,13 +23,24 @@ test("a database the first v0.2 build made opens and keeps working: new columns 
   const workspaceId = WorkspaceId.parse("workspace_1");
   const workerId = TaskWorkerId.parse("worker_1");
 
-  expect(store.projects.project(projectId)?.file).toEqual({ connectors: ["tracker"], commands: {} });
+  // Its project file, stored before a missing file was allowed, still reads, and it has no settings yet.
+  expect(store.projects.project(projectId)).toMatchObject({
+    file: { status: "found", file: { connectors: ["tracker"], commands: {} } },
+    settings: "",
+    config: { connectors: ["tracker"] },
+  });
+  expect(store.projects.secretNames(projectId)).toEqual([]);
   expect(store.connectors.get(workspaceId, "tracker")?.writesWithoutApproval).toBe(false);
   store.connectors.setWritesWithoutApproval(workspaceId, "tracker", true);
   expect(store.connectors.get(workspaceId, "tracker")?.writesWithoutApproval).toBe(true);
   // The pending approval from before the upgrade still belongs to the worker's turn, and a new one is kept beside it.
   store.taskWorkers.requestApproval(workerId, TurnId.parse("turn_1"), { approvalId: ApprovalId.parse("approval_2"), kind: "tool", detail: "gh pr create" }, 5);
   expect(store.taskWorkers.workerIn(projectId, workerId)?.pendingApprovals.map(({ detail }) => detail)).toEqual(["git push", "gh pr create"]);
+  // Its workers' table, rebuilt for the states engineers added, keeps the worker and its transcript, and takes a new state.
+  expect(store.taskWorkers.workerIn(projectId, workerId)).toMatchObject({ state: "working", setup: [] });
+  store.taskWorkers.end(workerId, "blocked", "Its setup failed.");
+  expect(store.taskWorkers.transcript(workerId).map(({ event }) => event.type)).toEqual(["user-message", "approval-request", "error", "done"]);
+  expect(store.taskWorkers.workerIn(projectId, workerId)?.state).toBe("blocked");
   // A bot from before faces wears the default one.
   expect(store.botFor(UserId.parse("user_1"), "bot_1")?.avatar).toEqual(DEFAULT_AVATAR);
   // A user from before first bots never gets one.

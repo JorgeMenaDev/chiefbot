@@ -5,11 +5,14 @@ import {
   BotId,
   ClientEvent,
   HandoffId,
+  ProjectId,
   QuestionId,
   SignInResponse,
   TurnId,
+  WorkspaceId,
   type ChatEvent,
   type ChatView,
+  type HandoffCard,
   type QuestionForm,
 } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
@@ -185,6 +188,43 @@ test("an approval nobody answered before its turn ended shows as expired", () =>
   expect(view.items.find((item) => item.kind === "approval")).toMatchObject({ state: "expired" });
 });
 
+test("a handoff's cards fold into one card, where it first appeared, that shows the latest", () => {
+  const ask = TurnId.parse("turn-1");
+  const later = TurnId.parse("turn-3");
+  const card: HandoffCard = {
+    handoffId: HandoffId.parse("handoff-1"),
+    workspaceId: WorkspaceId.parse("workspace-1"),
+    projectId: ProjectId.parse("project-1"),
+    project: "shop",
+    title: "Checkout",
+    taskNumber: 1,
+    stage: "accepted",
+    question: null,
+    pullRequests: [],
+    verification: null,
+  };
+  const pullRequest = "https://github.com/octo-org/shop/pull/7";
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+  const events: ChatEvent[] = [
+    { seq: 1, turnId: ask, event: { type: "user-message", text: "hand the checkout over" } },
+    { seq: 2, turnId: ask, event: { type: "tool-call", toolCallId: "t1", name: "send_to_project", status: "running" } },
+    { seq: 3, turnId: TurnId.parse("turn-2"), event: { type: "handoff-card", card } },
+    { seq: 4, turnId: ask, event: { type: "tool-call", toolCallId: "t1", name: "send_to_project", status: "succeeded" } },
+    { seq: 5, turnId: ask, event: { type: "text-delta", messageId: "m1", text: "Sent." } },
+    { seq: 6, turnId: ask, event: { type: "done" } },
+    { seq: 7, turnId: later, event: { type: "user-message", text: "thanks" } },
+    { seq: 8, turnId: later, event: { type: "done" } },
+    { seq: 9, turnId: TurnId.parse("turn-4"), event: { type: "handoff-card", card: { ...card, stage: "needs_input", question: "Stripe or Adyen?" } } },
+    { seq: 10, turnId: TurnId.parse("turn-5"), event: { type: "handoff-card", card: { ...card, stage: "pr_opened", pullRequests: [pullRequest] } } },
+  ];
+
+  const view = events.reduce<ChatView>(foldChat, empty);
+
+  expect(view.items.map(({ kind }) => kind)).toEqual(["user", "tool", "handoff", "assistant", "user"]);
+  expect(view.items[2]).toEqual({ kind: "handoff", id: "handoff:handoff-1", ...card, stage: "pr_opened", pullRequests: [pullRequest] });
+  expect(view.working).toBeNull();
+});
+
 test("a bot's question shows as a card, still pending after a relaunch, and answering it lets the bot go on", async () => {
   const { control, computers, sessionToken, botId } = await setup();
   const answers: unknown[] = [];
@@ -278,7 +318,7 @@ test("the bot waits for your answer while any of its questions is still pending,
   ]);
 });
 
-test("control's handoff notice shows in the chief's chat as a notice, even in the middle of a reply", () => {
+test("a handoff notice from before cards shows in the chief's chat as a notice, even in the middle of a reply", () => {
   const reply = TurnId.parse("turn-1");
   const notice = TurnId.parse("turn-2");
   const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
@@ -301,4 +341,37 @@ test("control's handoff notice shows in the chief's chat as a notice, even in th
     ["notice", 'shop finished "Checkout" (task #1).'],
   ]);
   expect(view.working).toBe("");
+});
+
+test("a turn control queued in a project chat shows as a notice, not as the member's message, and leaves the composer free", () => {
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+  const text = "Engineer for task #1 ended: opened a pull request.";
+
+  const view = foldChat(empty, { seq: 1, turnId: TurnId.parse("turn-1"), event: { type: "system-message", text } });
+
+  expect(view.items).toEqual([{ kind: "notice", id: "turn-1", text }]);
+  expect(view.working).toBeNull();
+});
+
+test("an engineer's or verifier's transcript shows each setup step, with the row its task shows, before its agent's first message", () => {
+  const turnId = TurnId.parse("turn-1");
+  const clone = { step: "clone" as const, command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "" };
+  const checkout = { step: "checkout" as const, command: "git fetch -q origin abc && git checkout -q --detach abc", exitCode: 0, log: "" };
+  const events: ChatEvent["event"][] = [
+    { type: "user-message", text: "You are the verifier of the project shop." },
+    { type: "setup-step", step: clone },
+    { type: "setup-step", step: checkout },
+    { type: "setup-done", instructions: ["AGENTS.md"], skills: [] },
+    { type: "text-delta", messageId: "m1", text: "Checking the pull request." },
+  ];
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+
+  const view = events.reduce<ChatView>((view, event, seq) => foldChat(view, { seq, turnId, event }), empty);
+
+  expect(view.items.map((item) => (item.kind === "setup" ? [item.kind, item.step] : [item.kind]))).toEqual([
+    ["user"],
+    ["setup", clone],
+    ["setup", checkout],
+    ["assistant"],
+  ]);
 });
