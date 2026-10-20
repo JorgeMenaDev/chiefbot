@@ -38,6 +38,8 @@ Each check is ok, degraded, down or unknown. Unknown means the check could not r
 
 A probe is code, not YAML: a function in `apps/control/src/health/`, listed in `defaultProbes`. A connection without one is not on the screen.
 
+The same page checks your own services' health URLs, per environment, when you open it and on **Refresh** rather than every 5 minutes: README, "Services".
+
 ## Security position
 
 Approvals here are a guardrail against mistakes, not a boundary.
