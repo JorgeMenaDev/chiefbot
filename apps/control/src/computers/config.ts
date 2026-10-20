@@ -44,36 +44,18 @@ export function proxyEnv({ proxy }: CompanyNetwork, controlUrl: string): Record<
   };
 }
 
-// The proxy's values no log or transcript may show (the stack runner's and the
-// engineer's redactors hide them): each proxy URL that has credentials, its
-// user:password as written in the URL and decoded (a Proxy-Authorization
-// header's base64 is of the decoded pair), and its password.
-export function proxySecrets({ proxy }: CompanyNetwork): string[] {
-  const decoded = (part: string) => {
-    try {
-      return decodeURIComponent(part);
-    } catch {
-      return part;
-    }
-  };
-  return [
-    ...new Set(
-      [proxy.http, proxy.https].flatMap((value) => {
-        const url = value === null ? null : URL.parse(value.includes("://") ? value : `http://${value}`);
-        if (value === null || url === null || url.username === "") return [];
-        const written = url.password === "" ? url.username : `${url.username}:${url.password}`;
-        const pair = url.password === "" ? decoded(url.username) : `${decoded(url.username)}:${decoded(url.password)}`;
-        return [value, written, pair, ...(url.password === "" ? [] : [decoded(url.password)])];
-      }),
-    ),
-  ];
-}
-
 // An env setting: unset and empty are the same.
 const setting = z
   .string()
   .optional()
   .transform((value) => value || null);
+
+// A proxy setting, refused with a user or a password: an engineer's computer gets
+// it, where an agent could print it. A proxy URL has an @ only after them.
+const proxySetting = (name: string) =>
+  setting.refine((value) => !value?.includes("@"), {
+    message: `${name} has a user or password. Chiefbot does not pass proxy credentials to engineers' computers, where an agent could print them. For a proxy that needs a sign-in, run a local forwarder that adds it (such as cntlm or px) and point ${name} at it.`,
+  });
 
 const Env = z.discriminatedUnion("CHIEFBOT_COMPUTERS", [
   z
@@ -83,10 +65,10 @@ const Env = z.discriminatedUnion("CHIEFBOT_COMPUTERS", [
       CHIEFBOT_DOCKER_SOCKET: z.string().optional(),
       DOCKER_HOST: z.string().optional(),
       CHIEFBOT_IMAGE_PREFIX: setting,
-      HTTP_PROXY: setting,
-      http_proxy: setting,
-      HTTPS_PROXY: setting,
-      https_proxy: setting,
+      HTTP_PROXY: proxySetting("HTTP_PROXY"),
+      http_proxy: proxySetting("http_proxy"),
+      HTTPS_PROXY: proxySetting("HTTPS_PROXY"),
+      https_proxy: proxySetting("https_proxy"),
       NO_PROXY: setting,
       no_proxy: setting,
       CHIEFBOT_CA_FILE: setting,

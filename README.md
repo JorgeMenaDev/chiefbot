@@ -187,7 +187,7 @@ The desktop dev script unsets `ELECTRON_RUN_AS_NODE`. Shells started by T3 Code 
 | `CHIEFBOT_APPROVAL_WAIT_MINUTES` | control | `60`: a project's engineer waiting this long on one approval fails and its computer stops, keeping its disk. The limit survives a control restart |
 | `CHIEFBOT_CONNECTIONS_DIR` | control | The repo's `connections` (`/opt/chiefbot/connections` in the control image): the connections **Connect apps** offers, read at startup |
 | `CHIEFBOT_TEMPLATES_DIR` | control | The repo's `templates` (`/opt/chiefbot/templates` in the control image): the template catalog, read at startup |
-| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | control (docker) | None: a company proxy, passed on to engineers' computers and their template stacks (`docs/deploy.md`, **Behind a company proxy**) |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | control (docker) | None: a company proxy, with no user or password in its URL, passed on to engineers' computers and their template stacks (`docs/deploy.md`, **Behind a company proxy**) |
 | `CHIEFBOT_CA_FILE` | control (docker) | None: a PEM file of the company proxy's CA certificate, which engineers' computers and their template stacks trust. Control refuses to start when it cannot read it |
 | `CHIEFBOT_IMAGE_PREFIX` | control (docker) | None: a registry that mirrors Docker Hub, for template stacks' base images, such as `registry.example.com/hub` |
 | `CHIEFBOT_PUBLIC_URL` | control | `http://127.0.0.1:<port>`: control as members' browsers reach it. Connector OAuth sign-ins return to `<it>/connectors/oauth/callback` |

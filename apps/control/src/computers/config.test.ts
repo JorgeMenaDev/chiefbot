@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { computersConfig, proxyEnv, proxySecrets } from "./config.ts";
+import { computersConfig, proxyEnv } from "./config.ts";
 
 const home = "/Users/ada";
 const noNetwork = { imagePrefix: null, proxy: { http: null, https: null, noProxy: null }, ca: null };
@@ -111,11 +111,19 @@ test("the proxy's env leaves the deployer's NO_PROXY, localhost and control's ow
   expect(proxyEnv({ ...noNetwork, proxy: { ...proxy, https: null } }, "http://host.docker.internal:7410")).toEqual({});
 });
 
-test("a proxy's credentials are what no log may show: each proxy URL that has them, its user:password as written and decoded, and its password; a proxy without them has none", () => {
-  const proxy = { http: "http://acme:p%40ss-word1@proxy.example.com:3128", https: "proxy.example.com:3128", noProxy: null };
+test("a proxy URL with a user or a password stops control, naming its variable and the way round it, never the URL or its credentials", () => {
+  const refusal = (name: string) =>
+    `${name} has a user or password. Chiefbot does not pass proxy credentials to engineers' computers, where an agent could print them. For a proxy that needs a sign-in, run a local forwarder that adds it (such as cntlm or px) and point ${name} at it.`;
+  const proxies = {
+    HTTPS_PROXY: "http://acme:hunter2-proxy@proxy.example.com:3128",
+    https_proxy: "http://:only-a-password@proxy.example.com:3128",
+    HTTP_PROXY: "tok-0123456789@proxy.example.com:3128",
+    http_proxy: "http://acme:p%40ss@proxy.example.com:3128",
+  };
 
-  expect(proxySecrets({ ...noNetwork, proxy })).toEqual(["http://acme:p%40ss-word1@proxy.example.com:3128", "acme:p%40ss-word1", "acme:p@ss-word1", "p@ss-word1"]);
-  // A proxy that takes a token as its user name, written without a scheme.
-  expect(proxySecrets({ ...noNetwork, proxy: { ...proxy, http: null, https: "tok-0123456789@proxy.example.com:3128" } })).toEqual(["tok-0123456789@proxy.example.com:3128", "tok-0123456789"]);
-  expect(proxySecrets(noNetwork)).toEqual([]);
+  for (const [name, value] of Object.entries(proxies)) {
+    const config = () => networkOf({ [name]: value });
+    expect(config).toThrow(refusal(name));
+    expect(config).not.toThrow(/hunter2|only-a-password|tok-0123456789|acme|p%40ss|proxy\.example\.com/);
+  }
 });

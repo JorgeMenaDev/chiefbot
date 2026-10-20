@@ -18,8 +18,7 @@ import { dockerEngine } from "../computers/docker.ts";
 //   own       the project's own service: it runs in the computer, from the engineer's clone, never as a container
 //   repos     the services that run from a repo, by name: its repo and ref (a branch or tag) and a
 //             token that may read it (null: a public repo). Every other service runs its stand-in.
-//   secrets   values no log of the stack may show: the project's secrets and the proxy's credentials.
-//             The repos' tokens are hidden too.
+//   secrets   values no log of the stack may show: the project's secrets. The repos' tokens are hidden too.
 //   network   behind a company network (docs/deploy.md): the prefix of base images, the proxy's
 //             env (proxyEnv; empty with none) and the CA certificate's PEM text. Null when unset.
 export type StackPlan = {
