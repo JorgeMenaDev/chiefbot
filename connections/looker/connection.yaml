@@ -2,8 +2,11 @@
 # folder ships one: looker.ts, a small client that signs in with the API client ID
 # and secret (POST /api/4.0/login) and makes one request per run. It reads them
 # from the variables the Looker SDKs use and writes nothing to disk.
-# GETs, inline queries (POST /queries/run/json, which only read) and connection
-# tests have their own commands, so the globs below can tell them from writes.
+# The reads the globs below let run have their own commands, and looker.ts checks
+# each can do no more: get takes only a list of paths that never run a query (a
+# query run can build derived tables in the database), activity only System
+# Activity queries, test-connection only that test. `looker request` (any method,
+# path and body) always asks.
 title: Looker
 description: Looker queries, schedules and database connections through its API, as you.
 cli: looker
@@ -18,5 +21,5 @@ env:
 readOnly:
   - "looker --help"
   - "looker get *"
-  - "looker query *"
+  - "looker activity *"
   - "looker test-connection *"
