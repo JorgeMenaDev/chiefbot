@@ -1,0 +1,86 @@
+# The acme stack, run the way Kubernetes runs a pod: every service joins the
+# network namespace of `pod`. Inside one copy everything is on localhost with fixed
+# ports, as on a developer's laptop, and two copies never see each other's ports.
+# Nothing is published to this machine. README.md has the commands.
+name: acme
+
+x-jwt-secret: &jwt-secret ${ACME_JWT_SECRET:-stand-in-secret-for-local-copies-only}
+x-health: &health
+  start_period: 180s
+  start_interval: 1s
+  interval: 30s
+  retries: 3
+
+services:
+  # Owns the namespace and does nothing else, like a Kubernetes pause container,
+  # so any app service can restart without taking the namespace with it.
+  pod:
+    image: registry.k8s.io/pause:3.10
+
+  postgres:
+    image: postgres:17
+    network_mode: service:pod
+    environment:
+      POSTGRES_DB: acme
+      POSTGRES_USER: acme
+      POSTGRES_PASSWORD: acme
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      <<: *health
+      test: ["CMD", "pg_isready", "--host=localhost", "--username=acme", "--dbname=acme"]
+
+  meta:
+    build: ./meta
+    image: acme-meta:local
+    network_mode: service:pod
+    environment:
+      ACME_JWT_SECRET: *jwt-secret
+    depends_on:
+      postgres: { condition: service_healthy }
+    healthcheck:
+      <<: *health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8082/actuator/health"]
+
+  auth:
+    build: ./auth
+    image: acme-auth:local
+    network_mode: service:pod
+    environment:
+      ACME_JWT_SECRET: *jwt-secret
+    depends_on:
+      meta: { condition: service_healthy }
+    healthcheck:
+      <<: *health
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/actuator/health"]
+
+  seed:
+    build: ./seed
+    image: acme-seed:local
+    network_mode: service:pod
+    environment:
+      ACME_SEED_BASIC_AUTH: alice:alice-password
+    depends_on:
+      auth: { condition: service_healthy }
+
+  ui:
+    build: ./ui
+    image: acme-ui:local
+    network_mode: service:pod
+    environment:
+      ACME_DEV_BASIC_AUTH: alice:alice-password
+    depends_on:
+      seed: { condition: service_completed_successfully }
+    healthcheck:
+      <<: *health
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/acme-ui/health"]
+
+  # The browser for check.sh. Never started by `up`.
+  probe:
+    build: ./probe
+    image: acme-probe:local
+    network_mode: service:pod
+    profiles: [probe]
+
+volumes:
+  pgdata:
