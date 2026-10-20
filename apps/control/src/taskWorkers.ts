@@ -1,4 +1,5 @@
 import {
+  ENGINEER_SETUP,
   AnswerApprovalRequest,
   type ApprovalId,
   PullRequestArgs,
@@ -569,10 +570,14 @@ export function taskWorkerHost({
       // The models report is for a bot's model picker, and connection calls for a
       // bot's turn: a task worker sends neither.
       if (message.type === "models" || message.type === "connection-calls") return;
-      // Hello. The first one starts the task; after that, the worker lost the
-      // task unless it says it still runs it, and may have missed answers.
+      // Hello. The first one starts the task, if the worker can set up; after
+      // that, the worker lost the task unless it says it still runs it, and may
+      // have missed answers.
       const started = worker.state === "setting_up" || worker.state === "working";
-      if (worker.state === "launching") {
+      if (worker.state === "launching" && !message.capabilities.includes(ENGINEER_SETUP)) {
+        if (workers.end(workerId, "blocked", outdatedImage).length > 0) turnOver(workerId, turnId);
+        publish(worker.projectId);
+      } else if (worker.state === "launching") {
         void startTask(workerId, worker.projectId, userId);
       } else if (started && message.activeTurnId !== turnId) {
         workers.end(workerId, "failed", "The worker's computer restarted before it finished the task.");
@@ -588,6 +593,10 @@ export function taskWorkerHost({
     },
   };
 }
+
+// Why an engineer whose worker cannot set up (no ENGINEER_SETUP in its hello) is blocked.
+const outdatedImage =
+  "Its computer runs an older Chiefbot image, which cannot set up an engineer. Rebuild the computer image (`bun run computer:build`), then dispatch the task again.";
 
 // How long control waits to try again to stop an ended worker's computer.
 const stopRetryMs = 30_000;

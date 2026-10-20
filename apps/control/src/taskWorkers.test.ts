@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, ConnectorCall, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ACCESS_MODES, ATTACHMENTS, ApiError, ConnectorCall, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -131,6 +131,19 @@ const connectorOf = (copilot: FakeCopilot, name: string) => {
   const server = copilot.mcpServers.at(-1)?.[name];
   return server?.type === "http" ? { url: server.url, headers: server.headers ?? {} } : { url: "", headers: {} };
 };
+
+// Connects to control as the worker `workerId` (with its credential `token`) and
+// says hello, as a worker that can do `capabilities`. Every message control sends
+// it is kept in `received`.
+async function connectAsWorker(url: string, workerId: string, token: string, capabilities: string[]) {
+  const received: string[] = [];
+  const socket = new WebSocket(`${url.replace(/^http/, "ws")}/task-worker/${workerId}`, { headers: { authorization: `Bearer ${token}` } });
+  socket.onmessage = (message) => received.push(String(message.data));
+  await new Promise((resolve) => (socket.onopen = resolve));
+  atCleanUp(() => socket.close());
+  socket.send(JSON.stringify({ type: "hello", activeTurnId: null, capabilities }));
+  return { received };
+}
 
 // How a fake setup command ends: its exit code and its output, in the chunks it comes in.
 type SetupAnswer = { exitCode: number; output: string | string[] };
@@ -359,18 +372,39 @@ test("an engineer whose turn ends while control reads its secrets never gets the
   await eventually(() => reads > 0);
 
   // The worker reconnects, saying it runs no turn: control ends it. Its new connection stays open.
-  const received: string[] = [];
-  const socket = new WebSocket(`${url.replace(/^http/, "ws")}/task-worker/${id}`, { headers: { authorization: `Bearer ${tokens.get(id)}` } });
-  socket.onmessage = (message) => received.push(String(message.data));
-  await new Promise((resolve) => (socket.onopen = resolve));
-  atCleanUp(() => socket.close());
-  socket.send(JSON.stringify({ type: "hello", activeTurnId: null, capabilities: [] }));
+  const { received } = await connectAsWorker(url, id, tokens.get(id) ?? "", []);
   await workerWhen(owner, project, id, ({ state }) => state === "failed");
   release();
   await Bun.sleep(100);
 
   expect(received.join("\n")).not.toContain("run-task");
   expect(setup.runs).toEqual([]);
+});
+
+test("an engineer whose computer runs an image without setup is blocked at once, told to rebuild the image, and gets no task", async () => {
+  const tokens = new Map<string, string>();
+  const control = await teamProject({
+    provider: (fake) => ({
+      ...fake,
+      async create(spec) {
+        tokens.set(spec.id, spec.env.CHIEFBOT_TASK_WORKER_TOKEN ?? "");
+        await fake.create(spec);
+      },
+      // An engineer's computer starts no worker of ours: the test speaks for an older one.
+      async start(id) {
+        if (!id.startsWith("worker_")) await fake.start(id);
+      },
+    }),
+  });
+  const { owner, project, url } = control;
+  const { tool } = await heldTurn(control);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const { received } = await connectAsWorker(url, id, tokens.get(id) ?? "", [ACCESS_MODES, ATTACHMENTS]);
+
+  const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  expect(blocked.result).toBe("Its computer runs an older Chiefbot image, which cannot set up an engineer. Rebuild the computer image (`bun run computer:build`), then dispatch the task again.");
+  expect(received.join("\n")).not.toContain("run-task");
 });
 
 test("a resent dispatch with the same creation id starts one worker, even while the first is still getting its computer", async () => {
