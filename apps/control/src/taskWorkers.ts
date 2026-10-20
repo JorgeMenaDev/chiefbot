@@ -45,6 +45,7 @@ import { apiError, bearer, unauthorized } from "./http.ts";
 import type { PullRequestHead } from "./github.ts";
 import type { repoAccess, RepoAgent, RepoReader } from "./repos.ts";
 import { viewerBytes } from "./rfbViewer.ts";
+import { secretRedactor } from "@chiefbot/worker/secret-redactor";
 import { screenTunnel } from "./screens.ts";
 import { secretFailure } from "./secrets/secretStore.ts";
 import { templateProblem } from "./templates/projectTemplate.ts";
@@ -656,7 +657,11 @@ export function taskWorkerHost({
       await stacks.stop(workerId).catch((error: unknown) => console.error(`could not remove the stack of ${workerId}:`, error));
       return null;
     }
-    if (outcome instanceof Error) return `Its stack did not start: ${outcome.message}`;
+    // The runner's own failure, not a stage's: its message may hold what the runner was given.
+    if (outcome instanceof Error) {
+      const tokens = Object.values(repos).flatMap(({ token }) => (token === null ? [] : [token]));
+      return `Its stack did not start: ${secretRedactor([...Object.values(secrets), ...tokens]).redact(outcome.message)}`;
+    }
     return outcome === "ready" ? null : `Its stack did not start: its ${last} stage failed.`;
   }
 

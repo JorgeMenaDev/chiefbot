@@ -4,7 +4,7 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadTemplates, repoTemplates } from "./catalog.ts";
-import { dockerStacks, type StackReport } from "./stacks.ts";
+import { dockerStacks, stackModel, type StackReport } from "./stacks.ts";
 
 test("a stage's log keeps the end of what its steps print, every secret hidden before the cut: one the cut lands inside too", async () => {
   const token = "ghs_0123456789abcdefghijklmnopqrstuvwxyz";
@@ -37,4 +37,34 @@ test("a stage's log keeps the end of what its steps print, every secret hidden b
   } finally {
     rmSync(bin, { recursive: true, force: true });
   }
+});
+
+test("the stack's compose model leaves out the project's own service, and every wait on it or on the seed, in services nothing starts too and in either form of depends_on", () => {
+  const healthy = { condition: "service_healthy" };
+  const model = stackModel(
+    {
+      name: "acme",
+      networks: { default: {} },
+      services: {
+        ui: { build: { context: "/t/ui" }, network_mode: "service:pod", depends_on: { seed: { condition: "service_completed_successfully" } } },
+        seed: { image: "acme-seed:local", depends_on: { auth: healthy } },
+        auth: { image: "acme-auth:local", expose: ["8081"] },
+        // In no stage: nothing starts it, and it needs the project's own service.
+        diagnostic: { image: "acme-diagnostic:local", depends_on: { ui: { condition: "service_started" }, auth: healthy } },
+        probe: { image: "acme-probe:local", depends_on: ["ui", "seed", "auth"] },
+      },
+    },
+    { computer: "chiefbot-worker_a", own: "ui", seed: "seed", images: {} },
+  );
+
+  const joined = { network_mode: "container:chiefbot-worker_a" };
+  expect(model.services).toEqual({
+    seed: { image: "acme-seed:local", ...joined, depends_on: { auth: healthy } },
+    auth: { image: "acme-auth:local", ...joined },
+    diagnostic: { image: "acme-diagnostic:local", ...joined, depends_on: { auth: healthy } },
+    probe: { image: "acme-probe:local", ...joined, depends_on: ["auth"] },
+  });
+  // The project's other keys stay, but its networks: every service is in the computer's.
+  expect(model).toHaveProperty("name", "acme");
+  expect(model).not.toHaveProperty("networks");
 });

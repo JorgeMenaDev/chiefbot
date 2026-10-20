@@ -13,11 +13,16 @@ export function fakeStacks() {
   // The stage that fails next, with its log.
   let failure: { label: string; log: string } | null = null;
   let stopsFail = false;
+  // What the next start throws, made from its plan.
+  let thrown: ((plan: StackPlan) => Error) | null = null;
 
   const runner: StackRunner = {
     async start(id, plan, onStage) {
       started.push({ id, plan });
       running.add(id);
+      const error = thrown?.(plan);
+      thrown = null;
+      if (error) throw error;
       for (const label of [BUILD_STAGE, ...stackStages(plan.template, plan.own).map(({ label }) => label)]) {
         onStage({ label, state: "running", log: "" });
         if (failure?.label === label) {
@@ -44,6 +49,8 @@ export function fakeStacks() {
     running,
     // The next stack's stage `label` fails with `log`.
     failAt: (label: string, log: string) => void (failure = { label, log }),
+    // The next start throws the error `make` makes from its plan, as a runner's own failure would.
+    throwAtStart: (make: (plan: StackPlan) => Error) => void (thrown = make),
     // While `failing`, every stop fails, as when Docker does not answer.
     failStops: (failing: boolean) => void (stopsFail = failing),
   };

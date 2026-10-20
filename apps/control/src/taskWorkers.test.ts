@@ -1975,6 +1975,18 @@ test("a stage of the stack that fails blocks the engineer with that stage's log,
   ]);
 });
 
+test("a stack runner's own failure blocks the engineer with its message, the project's secrets and the repo tokens hidden", async () => {
+  const control = await templateProject({}, "secrets: [DB_PASSWORD]\n");
+  const { owner, project, stacks } = control;
+  expect((await owner.api("PUT", `/projects/${project.id}/secrets/DB_PASSWORD`, { value: "hunter2-dev" })).status).toBe(204);
+  const { tool } = await heldTurn(control);
+  stacks.throwAtStart((plan) => new Error(`could not clean up /tmp/chiefbot-stack-x after ${plan.repos.meta?.token} and hunter2-dev`));
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  expect((await workerWhen(owner, project, id, ({ state }) => state === "blocked")).result).toBe("Its stack did not start: could not clean up /tmp/chiefbot-stack-x after *** and ***");
+});
+
 test("every engineer and verifier gets a stack of its own: two engineers at once get two, and a verifier a fresh one, whose failed stage is its BLOCKED report", async () => {
   const control = await templateProject();
   const { owner, project, stacks } = control;

@@ -65,8 +65,8 @@ export type DockerStacksOptions = {
 // StackRunner on the local Docker Engine, with the docker CLI and its compose
 // plugin. A worker's stack is the compose project <prefix><id>-stack, made from
 // the template's compose file as `docker compose config` reads it:
-// - the project's own service is left out (nothing else needs it:
-//   templateProblem), and so is any wait on the seed (it runs once, in its stage);
+// - the project's own service is left out, and so is any wait on it (nothing the
+//   stack starts needs it: templateProblem) or on the seed (it runs once, in its stage);
 // - every service joins the computer's network namespace (network_mode
 //   container:<computer>), so it keeps its fixed port on the computer's
 //   localhost. Docker refuses the keys that set a container's own network in
@@ -215,7 +215,8 @@ const ComposeModel = z.looseObject({
     z.string(),
     z.looseObject({
       build: z.looseObject({ context: z.string() }).optional(),
-      depends_on: z.record(z.string(), z.unknown()).optional(),
+      // A map once `docker compose config` has read it; a list in a file as written.
+      depends_on: z.union([z.array(z.string()), z.record(z.string(), z.unknown())]).optional(),
     }),
   ),
 });
@@ -226,15 +227,17 @@ const namespaceKeys = ["ports", "expose", "networks", "links", "hostname", "doma
 
 // The stack's compose model (dockerStacks says what changes). `images` names the
 // image of each service that has a build, and the folder it builds from when it
-// must be built; one without a folder is reused, so it keeps no build.
-function stackModel(
+// must be built; one without a folder is reused, so it keeps no build. Exported for its test.
+export function stackModel(
   { networks: _networks, services, ...model }: ComposeModel,
   { computer, own, seed, images }: { computer: string; own: string; seed: string; images: Record<string, { image: string; context?: string }> },
 ) {
   const stack = Object.entries(services).flatMap(([name, { build, depends_on, ...service }]) => {
     if (name === own) return [];
     const kept = Object.fromEntries(Object.entries(service).filter(([key]) => !namespaceKeys.includes(key)));
-    const waits = depends_on && Object.fromEntries(Object.entries(depends_on).filter(([on]) => on !== seed));
+    // A service no stage starts may still wait on the own service: compose refuses a wait on a service it lacks.
+    const stays = (on: string) => on !== own && on !== seed;
+    const waits = depends_on && (Array.isArray(depends_on) ? depends_on.filter(stays) : Object.fromEntries(Object.entries(depends_on).filter(([on]) => stays(on))));
     const image = images[name];
     return [
       [
