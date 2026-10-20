@@ -1,14 +1,18 @@
 import { ChatView, type Bot, type BotId, type ChatItem, type SentAttachment } from "@chiefbot/contracts";
-import { CheckIcon, CircleAlertIcon, InfoIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { CheckIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, WrenchIcon, XIcon } from "lucide-react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
 import { ChipText, SentAttachments } from "./Attachments.tsx";
 import { BotComposerControls, useModels } from "./BotComposerControls.tsx";
+import { chatRows, type LaneItem, type ToolItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { chipFor, isImage, type DraftAttachment } from "./composerAttachments.ts";
+import { Markdown } from "./Markdown.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
+import { bottomFollower } from "./lib/followBottom.ts";
+import { cn } from "./lib/utils.ts";
 
 // The bot's chat as Electron main folds it, kept live over chat:state.
 function useChat(botId: BotId) {
@@ -25,7 +29,7 @@ function useChat(botId: BotId) {
 }
 
 // T3 Code's chat shape: a centred lane of messages (user on the right, the bot's
-// replies as plain text, tool calls as one-line rows), the bot's status, and the
+// replies as markdown, tool calls as one-line rows), the bot's status, and the
 // composer at the bottom. Enter sends, Shift+Enter adds a line. Files go with a
 // message; one with only files says their chips.
 export function Chat({ bot }: { bot: Bot }) {
@@ -60,13 +64,13 @@ export function Chat({ bot }: { bot: Bot }) {
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <Timeline follow={view}>
-        {view.items.length === 0 && <ChatEmpty>Send {bot.name} a message to start.</ChatEmpty>}
-        {view.items.map((item) => (
-          <Message key={item.id} botId={bot.id} item={item} />
-        ))}
-        {working && <Working>{view.working || "Working"}</Working>}
-      </Timeline>
+      <ChatTimeline
+        chatKey={bot.id}
+        items={view.items}
+        status={working ? view.working || "Working" : null}
+        empty={`Send ${bot.name} a message to start.`}
+        renderItem={(item, streaming) => <Message botId={bot.id} item={item} streaming={streaming} />}
+      />
       <Composer
         placeholder={
           bot.status !== "online"
@@ -89,14 +93,12 @@ export function Chat({ bot }: { bot: Bot }) {
   );
 }
 
-function Message({ botId, item }: { botId: BotId; item: ChatItem }) {
+function Message({ botId, item, streaming }: { botId: BotId; item: LaneItem; streaming: boolean }) {
   switch (item.kind) {
     case "user":
       return <UserMessage text={item.text} attachments={item.attachments} read={(id) => window.chiefbot.chat.attachment(botId, id)} />;
     case "assistant":
-      return <AssistantMessage text={item.text} />;
-    case "tool":
-      return <ToolRow name={item.name} status={item.status} />;
+      return <AssistantMessage text={item.text} streaming={streaming} />;
     case "error":
       return <ErrorMessage message={item.message} />;
     case "notice":
@@ -117,25 +119,75 @@ function Message({ botId, item }: { botId: BotId; item: ChatItem }) {
 
 // The pieces below are shared with a project's coordinator chat (Projects.tsx).
 
-// The scrolling message lane. It follows the newest message whenever `follow` changes.
-export function Timeline({ follow, children }: { follow: unknown; children: ReactNode }) {
-  const end = useRef<HTMLDivElement>(null);
-  // A block body on purpose: Chromium's scrollIntoView returns a promise, and an
-  // effect must return nothing or a cleanup function.
-  useEffect(() => {
-    void end.current?.scrollIntoView({ block: "end" });
-  }, [follow]);
+// A chat's message lane. Rows come from chatRows (a turn's tool calls grouped,
+// keys that hold while a turn runs); `renderItem` draws every other item, with
+// `streaming` true for the reply still arriving. `status` (null when idle) shows
+// in a line under the last row that keeps its space while idle, so a turn
+// starting or ending moves nothing. `chatKey` names the chat.
+export function ChatTimeline({
+  chatKey,
+  items,
+  status,
+  empty,
+  renderItem,
+}: {
+  chatKey: string;
+  items: readonly ChatItem[];
+  status: string | null;
+  empty: ReactNode;
+  renderItem: (item: LaneItem, streaming: boolean) => ReactNode;
+}) {
+  const last = items.at(-1);
+  const streamingId = status !== null && last?.kind === "assistant" ? last.id : null;
+  const lastSent = items.findLast((item) => item.kind === "user")?.id;
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4 px-5 py-6">
+    <Timeline bottomKey={`${chatKey}:${lastSent}`}>
+      {items.length === 0 && <ChatEmpty>{empty}</ChatEmpty>}
+      {chatRows(items).map((row) =>
+        row.kind === "tools" ? (
+          <ToolGroup key={row.key} tools={row.tools} folded={row.folded} />
+        ) : (
+          <Fragment key={row.key}>{renderItem(row.item, row.item.id === streamingId)}</Fragment>
+        ),
+      )}
+      <Working status={status} />
+    </Timeline>
+  );
+}
+
+// The scrolling lane. While the user is at the bottom it stays there
+// (lib/followBottom.ts): a ResizeObserver pins it as rows arrive and text
+// streams, before the frame paints, so nothing jumps. Scrolled up to read, it
+// leaves the view alone. A new `bottomKey` (another chat, or the user's new
+// message) goes back to the bottom.
+function Timeline({ bottomKey, children }: { bottomKey: string; children: ReactNode }) {
+  const scroller = useRef<HTMLDivElement>(null);
+  const lane = useRef<HTMLDivElement>(null);
+  const [follow] = useState(bottomFollower);
+
+  useLayoutEffect(() => {
+    if (scroller.current) follow.pin(scroller.current);
+  }, [follow, bottomKey]);
+
+  useEffect(() => {
+    const element = scroller.current;
+    if (!element || !lane.current) return;
+    const observer = new ResizeObserver(() => follow.grew(element));
+    observer.observe(lane.current);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [follow]);
+
+  return (
+    <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto" onScroll={(event) => follow.scrolled(event.currentTarget)}>
+      <div ref={lane} className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4 px-5 py-6">
         {children}
-        <div ref={end} />
       </div>
     </div>
   );
 }
 
-export function ChatEmpty({ children }: { children: ReactNode }) {
+function ChatEmpty({ children }: { children: ReactNode }) {
   return (
     <Empty>
       <EmptyDescription>{children}</EmptyDescription>
@@ -161,11 +213,9 @@ export function UserMessage({
   );
 }
 
-export function AssistantMessage({ text }: { text: string }) {
-  return <div className="whitespace-pre-wrap text-foreground text-sm leading-relaxed">{text}</div>;
+export function AssistantMessage({ text, streaming }: { text: string; streaming: boolean }) {
+  return <Markdown text={text} streaming={streaming} />;
 }
-
-type ToolItem = Extract<ChatItem, { kind: "tool" }>;
 
 const toolIcon: Record<ToolItem["status"], ReactNode> = {
   running: <Spinner className="size-3" />,
@@ -173,12 +223,51 @@ const toolIcon: Record<ToolItem["status"], ReactNode> = {
   failed: <XIcon className="size-3 text-destructive" aria-label="failed" />,
 };
 
-// A tool call in a line, with how it went.
-export function ToolRow({ name, status }: Pick<ToolItem, "name" | "status">) {
+// A tool call in a line of fixed height, with how it went.
+function ToolRow({ name, status }: Pick<ToolItem, "name" | "status">) {
   return (
-    <div className="flex items-center gap-2 font-mono text-muted-foreground text-xs">
+    <div className="flex h-6 items-center gap-2 font-mono text-muted-foreground text-xs">
       {toolIcon[status]}
       <span className="truncate">{name}</span>
+    </div>
+  );
+}
+
+// A row of tool calls (chatRows.ts). Unfolded: a line per call, so a new call
+// only adds a line at the end. Folded: one line that opens the list, naming the
+// call running now, or how many ran and failed (after T3 Code's work-group toggle).
+function ToolGroup({ tools, folded }: { tools: ToolItem[]; folded: boolean }) {
+  const [open, setOpen] = useState(false);
+  const list = (
+    <div className="flex flex-col">
+      {tools.map((tool) => (
+        <ToolRow key={tool.id} name={tool.name} status={tool.status} />
+      ))}
+    </div>
+  );
+  if (!folded) return list;
+  const running = tools.findLast((tool) => tool.status === "running");
+  const failed = tools.filter((tool) => tool.status === "failed").length;
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={open}
+        className="flex h-6 max-w-full cursor-pointer items-center gap-2 text-muted-foreground text-xs transition-colors hover:text-foreground"
+        onClick={() => setOpen(!open)}
+      >
+        {running ? toolIcon.running : <WrenchIcon className="size-3 shrink-0" />}
+        {running ? (
+          <span className="truncate font-mono">{running.name}</span>
+        ) : (
+          <span className="truncate">
+            Ran {tools.length} {tools.length === 1 ? "tool" : "tools"}
+            {failed > 0 && <span className="text-destructive-foreground">, {failed} failed</span>}
+          </span>
+        )}
+        <ChevronRightIcon className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+      </button>
+      {open && <div className="ps-5">{list}</div>}
     </div>
   );
 }
@@ -192,12 +281,16 @@ export function ErrorMessage({ message }: { message: string }) {
   );
 }
 
-// What the agent is doing now, pulsing.
-export function Working({ children }: { children: ReactNode }) {
+// What the agent is doing now, pulsing, in one line. Idle (null), the line stays empty.
+function Working({ status }: { status: string | null }) {
   return (
-    <p className="flex items-center gap-2 text-muted-foreground text-xs">
-      <Spinner className="size-3.5" />
-      <span className="animate-working">{children}…</span>
+    <p className="flex h-5 shrink-0 items-center gap-2 text-muted-foreground text-xs">
+      {status !== null && (
+        <>
+          <Spinner className="size-3.5" />
+          <span className="animate-working truncate">{status}…</span>
+        </>
+      )}
     </p>
   );
 }
