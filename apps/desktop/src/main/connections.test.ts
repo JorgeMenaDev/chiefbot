@@ -41,6 +41,7 @@ test("the user turns Jira on with their fields and off again, and reads a bot's 
   const bot = await createBots({ controlUrl: control.url, session, onChange: () => {} }).create({ name: "Ada", avatar: DEFAULT_AVATAR });
 
   expect(before.map(({ name, on }) => [name, on])).toEqual([
+    ["dynatrace", false],
     ["gcloud", false],
     ["harness", false],
     ["jira", false],
@@ -48,6 +49,6 @@ test("the user turns Jira on with their fields and off again, and reads a bot's 
   ]);
   expect(jira.on).toBe(true);
   expect(refused).toContain("invalid_connection: email is missing");
-  expect((await connections.list()).map(({ on }) => on)).toEqual([false, false, false, false]);
+  expect((await connections.list()).map(({ on }) => on)).toEqual([false, false, false, false, false]);
   expect(await connections.calls(bot.id)).toEqual([]);
 });
