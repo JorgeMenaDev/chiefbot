@@ -6,6 +6,8 @@ import {
   CoordinatorToControl,
   CoordinatorToolCall,
   CreateProjectRequest,
+  effectiveConfig,
+  projectFileName,
   ProjectSettingsRequest,
   projectState,
   SecretName,
@@ -25,10 +27,12 @@ import {
   type Project,
   type ProjectId,
   type ProjectMember,
+  type ProjectFile,
   type ProjectSecret,
   type ProjectState,
   type SendMessageResponse,
   type Task,
+  type Template,
   type User,
   type UserId,
   type WorkspaceId,
@@ -44,6 +48,7 @@ import type { repoAccess } from "./repos.ts";
 import { secretFailure, type SecretStore } from "./secrets/secretStore.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
+import { templateProblem } from "./templates/projectTemplate.ts";
 import { movedWhileChecking, type taskWorkerHost } from "./taskWorkers.ts";
 import { coordinatorTurn, heldTurn, type CoordinatorTurn } from "./turnKeys.ts";
 
@@ -71,6 +76,8 @@ export type ProjectHostOptions = {
   githubApiUrl: string;
   // A token to read a repo for a user, or why not (repos.ts readToken).
   repoReadToken: ReturnType<typeof repoAccess>["readToken"];
+  // The template catalog (templates/catalog.ts loadTemplates) a project's template keys must name.
+  templates: Template[];
   // Control's URL as a computer reaches it.
   controlUrlForComputers: () => string;
   // Publishes to a WebSocket topic.
@@ -110,12 +117,16 @@ const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.r
 //                                    (404 repo_not_found; 403 reauth_needed; 409 project_exists), then starts
 //                                    the coordinator's computer. No file, or an invalid one, still makes the
 //                                    project: Project.file says so, and the settings alone make its config.
+//                                    A file whose template keys fail templateProblem, or map a service to a
+//                                    repo the user cannot read, is invalid.
 //   GET    /projects/:id             → Project
 //   DELETE /projects/:id             → 204 (workspace owner only): its computer, its workers' computers,
 //                                    ledger, chats, context, settings and secrets go, once the secret
 //                                    writes already asked for are done
 //   PUT    /projects/:id/settings    body ProjectSettingsRequest → Project with the new config (400
-//                                    invalid_settings says what is wrong)
+//                                    invalid_settings says what is wrong: also when the config's template
+//                                    keys fail templateProblem, or the settings map a service to a repo
+//                                    the member cannot read)
 //   PUT    /projects/:id/model       body SetBotModelRequest → Project: the coordinator's next turn runs on
 //                                    it (400 model_unavailable when the member's plan does not offer it or it is
 //                                    locked, effort_unavailable when the model does not support the effort)
@@ -156,6 +167,7 @@ export function projectHost({
   approvals,
   githubApiUrl,
   repoReadToken,
+  templates,
   controlUrlForComputers,
   publish,
   publishToUser,
@@ -374,6 +386,21 @@ export function projectHost({
     return [...declared, ...left];
   };
 
+  // Why the user cannot read a repo `services` maps a service to, with its key, or
+  // null. Control's repo access decides (repos.ts readToken), and a repo the repo
+  // app is not installed on must be one GitHub shows without a token: a public one.
+  const unreadable = async (userId: UserId, services: NonNullable<ProjectFile["services"]>) => {
+    for (const [name, source] of Object.entries(services)) {
+      if (source === "stand-in") continue;
+      const access = await repoReadToken(userId, source.repo);
+      if ("error" in access) return `services.${name}: ${access.message}`;
+      if (access.token === null && !(await fetch(`${githubApiUrl}/repos/${source.repo}`, { headers: { accept: "application/vnd.github+json" } })).ok) {
+        return `services.${name}: ${source.repo} was not found, or your GitHub account cannot see it.`;
+      }
+    }
+    return null;
+  };
+
   const routes = {
     "/workspaces/:id/projects": {
       GET: (req: Bun.BunRequest<"/workspaces/:id/projects">) => {
@@ -392,8 +419,10 @@ export function projectHost({
         if (!body.success) return apiError(400, "invalid_project");
         const access = await repoReadToken(user.id, body.data.repo);
         if ("error" in access) return apiError(access.status, access.error, access.message);
-        const file = await readProjectFile(githubApiUrl, access.token, body.data.repo);
-        if ("refusal" in file) return apiError(file.refusal.status, file.refusal.error, file.refusal.message);
+        const read = await readProjectFile(githubApiUrl, access.token, body.data.repo);
+        if ("refusal" in read) return apiError(read.refusal.status, read.refusal.error, read.refusal.message);
+        const problem = read.status === "found" ? (templateProblem(read.file, body.data.repo, templates) ?? (await unreadable(user.id, read.file.services ?? {}))) : null;
+        const file = problem === null ? read : { status: "invalid" as const, error: `${projectFileName}: ${problem}` };
         const projectToken = crypto.randomUUID() + crypto.randomUUID();
         const project = projects.create(workspace.id, body.data.repo, file, projectToken);
         if (project === "exists") return apiError(409, "project_exists");
@@ -425,11 +454,16 @@ export function projectHost({
     },
     // Any member saves the settings; the coordinator gets the new config at once.
     "/projects/:id/settings": {
-      PUT: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/settings">) => {
+      PUT: member(async (user, { project }, req: Bun.BunRequest<"/projects/:id/settings">) => {
         const body = ProjectSettingsRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "invalid_settings", "expected { text }");
         const settings = parseProjectFile(body.data.text);
         if ("error" in settings) return apiError(400, "invalid_settings", `Settings: ${settings.error}`);
+        // The template keys as the config takes them, from the settings or the file;
+        // only the repos the settings map are checked, as the member who saves them.
+        const { config } = effectiveConfig(project.file.status === "found" ? project.file.file : null, settings);
+        const problem = templateProblem(config, project.repo, templates) ?? (await unreadable(user.id, settings.services ?? {}));
+        if (problem) return apiError(400, "invalid_settings", `Settings: ${problem}`);
         const saved = projects.setSettings(project.id, body.data.text);
         if (!saved) return apiError(404, "not_found");
         toCoordinator(project.id, { type: "bound", project: saved });
