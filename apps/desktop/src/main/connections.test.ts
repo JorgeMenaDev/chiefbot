@@ -51,4 +51,6 @@ test("the user turns Jira on with their fields and off again, and reads a bot's 
   expect(refused).toContain("invalid_connection: email is missing");
   expect((await connections.list()).map(({ on }) => on)).toEqual([false, false, false, false, false]);
   expect(await connections.calls(bot.id)).toEqual([]);
+  // Jira has no health probe: Health lists what it can check, and nothing of the user's yet.
+  expect(await connections.health()).toEqual({ checkable: ["Dynatrace", "Google Cloud", "Looker"], connections: [] });
 });

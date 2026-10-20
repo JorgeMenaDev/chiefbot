@@ -24,6 +24,8 @@ test("gcloud's health reads run without asking; anything that may change a proje
     "gcloud compute regions describe europe-west2",
     "gcloud compute zones describe europe-west2-a",
     "gcloud config list",
+    "gcloud projects list --format json",
+    "gcloud projects describe demo-project",
   ];
   const writes = [
     "gcloud run deploy hello --image gcr.io/demo/hello",

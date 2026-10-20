@@ -7,6 +7,7 @@ import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input } from "./components/ui/input.tsx";
 import { useAction } from "./Workspaces.tsx";
+import { listOf } from "./lib/utils.ts";
 
 const ConnectionList = z.array(Connection);
 const CallList = z.array(ConnectionCall);
@@ -172,6 +173,11 @@ function SetupText({ text }: { text: string }) {
 // connection's CLI it ran, and when. Reloaded each time one of its turns ends.
 export function ConnectionCalls({ bot }: { bot: Bot }) {
   const [calls, setCalls] = useState<ConnectionCall[]>([]);
+  // The titles of the user's connections that are on; null until they arrive.
+  const [on, setOn] = useState<string[] | null>(null);
+  useEffect(() => {
+    void window.chiefbot.connections.list().then((next) => setOn(ConnectionList.parse(next).flatMap(({ on, title }) => (on ? [title] : []))));
+  }, [bot.id]);
   useEffect(() => {
     const reload = () => void window.chiefbot.connections.calls(bot.id).then((next) => setCalls(CallList.parse(next)));
     let working = false;
@@ -185,10 +191,16 @@ export function ConnectionCalls({ bot }: { bot: Bot }) {
   }, [bot.id]);
   return (
     <PanelSection title="Connection calls">
-      {calls.length === 0 && <Muted>No connection calls yet. Turn an app on under Connect apps in the gear menu.</Muted>}
+      {calls.length === 0 && on !== null && <Muted>{noCallsText(on)}</Muted>}
       {[...calls].reverse().map((call, index) => (
         <Row key={index} title={<span className="font-mono text-xs">{call.command}</span>} meta={`${call.connection} · ${new Date(call.at).toLocaleString()}`} />
       ))}
     </PanelSection>
   );
+}
+
+// What an empty call log says, by the titles of the connections that are on.
+export function noCallsText(on: string[]) {
+  if (on.length === 0) return "No connection calls yet. Turn an app on under Connect apps in the gear menu.";
+  return `No connection calls yet. ${listOf(on)} ${on.length === 1 ? "is" : "are"} on. Commands your bot runs with ${on.length === 1 ? "it" : "them"} show here when each turn ends.`;
 }

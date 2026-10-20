@@ -22,7 +22,8 @@ const SecretFields = z.record(z.string(), z.string());
 // Connections: the CLIs of `catalog` (catalog.ts) a person turns on with their own
 // fields, which their own bots then use as them (docs/connections.md). Coordinators
 // and task workers never get them. `googleTokenUrl` is where the google-access-token
-// exchange mints tokens (googleToken.ts; a fake in tests).
+// exchange mints tokens (googleToken.ts; a fake in tests). `onChange` hears each
+// save and turn-off (health drops its checks of the old fields).
 //
 // Person routes (a session):
 //   GET    /connections                 → Connection[]: the catalog, with `on` for the person
@@ -36,11 +37,13 @@ export function connectionHost({
   secrets,
   catalog,
   googleTokenUrl,
+  onChange = () => {},
 }: {
   store: ReturnType<typeof openStore>;
   secrets: SecretStore;
   catalog: CatalogConnection[];
   googleTokenUrl?: string;
+  onChange?: (userId: UserId, name: string) => void;
 }) {
   const found = (name: string) => catalog.find((connection) => connection.name === name);
 
@@ -57,6 +60,15 @@ export function connectionHost({
       on: on.has(name),
     }));
   };
+
+  // Every saved field of the person's connection `name`, secret ones too, or
+  // null when it is off. Only control reads the secret ones.
+  async function savedFields(userId: UserId, name: string): Promise<Record<string, string> | null> {
+    const plain = store.connections.on(userId).get(name);
+    if (!plain) return null;
+    const secret = SecretFields.safeParse(JSON.parse((await secrets.get(secretName(userId, name))) ?? "null"));
+    return secret.success ? { ...plain, ...secret.data } : null;
+  }
 
   // Runs a person route for the signed-in user; 401 otherwise.
   const signedIn =
@@ -84,6 +96,7 @@ export function connectionHost({
     const entries = Object.entries(fields);
     await secrets.put(secretName(userId, connection.name), JSON.stringify(Object.fromEntries(entries.filter(isSecret))));
     store.connections.save(userId, connection.name, Object.fromEntries(entries.filter((entry) => !isSecret(entry))));
+    onChange(userId, connection.name);
     return Response.json(rows(userId).find(({ name }) => name === connection.name) satisfies Connection | undefined);
   }
 
@@ -100,6 +113,7 @@ export function connectionHost({
         const connection = found(req.params.name);
         if (!connection) return apiError(404, "not_found");
         store.connections.remove(userId, connection.name);
+        onChange(userId, connection.name);
         await secrets.delete(secretName(userId, connection.name));
         return new Response(null, { status: 204 });
       }),
@@ -114,6 +128,7 @@ export function connectionHost({
 
   return {
     routes,
+    savedFields,
 
     // A bot's worker's calls of its turn `turnId`, sent just before the turn's
     // done: logged only while that turn is one of the bot's unfinished ones, and
@@ -130,14 +145,10 @@ export function connectionHost({
     // saved secret (google-access-token: a one-hour `token` for the `key`, which
     // stays here); one whose exchange fails is left out of the turn.
     async forTurn(userId: UserId): Promise<AgentConnection[]> {
-      const on = store.connections.on(userId);
       const connections = await Promise.all(
         catalog.map(async ({ name, title, cli, skill, env, readOnly, exchange }): Promise<AgentConnection | null> => {
-          const plain = on.get(name);
-          if (!plain) return null;
-          const secret = SecretFields.safeParse(JSON.parse((await secrets.get(secretName(userId, name))) ?? "null"));
-          if (!secret.success) return null;
-          const saved = { ...plain, ...secret.data };
+          const saved = await savedFields(userId, name);
+          if (!saved) return null;
           try {
             if (exchange !== "google-access-token") return { name, title, cli, skill, env, readOnly, fields: saved };
             const { key = "", ...rest } = saved;
