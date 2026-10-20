@@ -358,6 +358,7 @@ export function startControl({
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     onLedgerChange: watchHandoffs,
     onStateChange: (projectId) => projectStateChanged(projectId),
+    onTurnQueued: (projectId, userId, event) => projects.queued(projectId, userId, event),
     upgrade: (req, data) => upgrade(server, req, data),
   });
 

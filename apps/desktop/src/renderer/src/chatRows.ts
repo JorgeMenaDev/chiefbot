@@ -15,12 +15,13 @@ type ToolsRow = { kind: "tools"; key: string; tools: ToolItem[]; folded: boolean
 //          turn as one line, after T3 Code's "Worked for…" fold, and the others go.
 export type ChatRow = { kind: "item"; key: string; item: LaneItem } | ToolsRow;
 
-// The lane's rows, turn by turn. A turn runs from one user message to the next.
+// The lane's rows, turn by turn. A turn runs from one user message, or one
+// notice (control's note, or a turn control started), to the next.
 export function chatRows(items: readonly ChatItem[]): ChatRow[] {
   const rows: ChatRow[] = [];
   let start = 0;
   for (let end = 1; end <= items.length; end++) {
-    if (end < items.length && items[end]?.kind !== "user") continue;
+    if (end < items.length && items[end]?.kind !== "user" && items[end]?.kind !== "notice") continue;
     rows.push(...turnRows(items.slice(start, end)));
     start = end;
   }

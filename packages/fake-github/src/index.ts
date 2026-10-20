@@ -118,6 +118,8 @@ export function startFakeGitHub({
   let deviceClientId = "";
   // Bare repos live here as <owner>/<name>.git.
   const repoRoot = mkdtempSync(join(tmpdir(), "fake-github-repos-"));
+  // The git http-backend runs answering requests now: stop removes the repos once they are over.
+  const backends = new Set<Promise<Response>>();
   const pullRequests: FakePullRequest[] = [];
   // Every push GitHub accepted, and who sent it.
   const pushes: Array<{ repository: string; by: string }> = [];
@@ -373,7 +375,9 @@ export function startFakeGitHub({
       if (!by) return new Response("Repository not found.", { status: push ? 403 : 404 });
       const how = pushGate && req.method === "POST" && push ? (pushesHeld++, await pushGate) : "apply";
       if (how === "cut") return new Response(new ReadableStream({ start: (answer) => answer.error(new Error("connection lost")) }));
-      const res = await gitHttpBackend(req, repoRoot);
+      const backend = gitHttpBackend(req, repoRoot);
+      backends.add(backend);
+      const res = await backend.finally(() => backends.delete(backend));
       if (push && req.method === "POST" && res.ok) pushes.push({ repository, by });
       return how === "502" ? new Response("Bad Gateway", { status: 502 }) : res;
     },
@@ -540,9 +544,11 @@ export function startFakeGitHub({
     },
     // Runs git in the repo's bare copy, e.g. to read what a push left there.
     git: (fullName: string, ...args: string[]) => git(bareRepo(fullName), args),
+    // Stops the server. The repos go once every git http-backend still running
+    // is over: one whose repo went first fails with "fatal: '.' does not appear to be a git repository".
     stop: () => {
       server.stop(true);
-      rmSync(repoRoot, { recursive: true, force: true });
+      void Promise.allSettled(backends).then(() => rmSync(repoRoot, { recursive: true, force: true }));
     },
   };
 }

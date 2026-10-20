@@ -213,6 +213,16 @@ export function projectHost({
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, { type: "tasks", projectId, tasks });
     onLedgerChange(projectId);
   };
+  // Ends the project's queued continuations of tasks done or abandoned (a
+  // member's Mark done, the coordinator's done), so none reopens its task.
+  const endClosedContinuations = (projectId: ProjectId) => {
+    for (const ended of projects.endClosedContinuations(projectId)) publishChat(projectId, ended);
+  };
+  // The task is done or abandoned: its workers stop, and its queued continuations end.
+  const taskClosed = (projectId: ProjectId, taskNumber: number) => {
+    workers.taskClosed(projectId, taskNumber);
+    endClosedContinuations(projectId);
+  };
   const toCoordinator = (projectId: ProjectId, message: ControlToCoordinator) =>
     coordinators.get(projectId)?.send(JSON.stringify(message));
 
@@ -223,9 +233,11 @@ export function projectHost({
   // The turn's chat says who pays. Connectors act as the member (or the
   // workspace, for a shared one) whoever pays: org billing changes only
   // Copilot's identity. If they cannot be read, the turn runs without connectors.
+  // A queued continuation of a task closed meanwhile ends unclaimed.
   const schedule = (projectId: ProjectId) => {
     onStateChange(projectId);
     if (stopping.has(projectId)) return;
+    endClosedContinuations(projectId);
     if (!greeted.has(projectId)) return wake(projectId);
     const next = projects.claimNextTurn(projectId);
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
@@ -339,7 +351,7 @@ export function projectHost({
         if (task === "moved") return apiError(400, "invalid_tool_call", movedWhileChecking(call.number));
         if (!task) return apiError(404, "not_found", `No task #${call.number} in this project`);
         publishTasks(projectId);
-        if (task.status === "done" || task.status === "abandoned") workers.taskClosed(projectId, task.number);
+        if (task.status === "done" || task.status === "abandoned") taskClosed(projectId, task.number);
         return Response.json(task satisfies Task);
       }
       case "list_tasks":
@@ -494,7 +506,7 @@ export function projectHost({
         if (task === null) return apiError(404, "not_found");
         if (task === "closed") return apiError(409, "task_closed", `Task #${number} is already done or abandoned.`);
         publishTasks(project.id);
-        workers.taskClosed(project.id, number);
+        taskClosed(project.id, number);
         return Response.json(task satisfies Task);
       }),
     },

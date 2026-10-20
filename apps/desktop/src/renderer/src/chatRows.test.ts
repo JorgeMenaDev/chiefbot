@@ -37,3 +37,10 @@ test("a turn's calls never fold into an earlier turn", () => {
 
   expect(shape(chatRows(items))).toEqual(["t1", "t1:c1 [t1:c1] folded", "t1:m1", "t2", "t2:c1 [t2:c1]"]);
 });
+
+test("a turn control started, shown as a notice, keeps its calls out of the turn before it", () => {
+  const notice = (id: string): ChatItem => ({ kind: "notice", id, text: "Engineer for task #1 ended: opened a pull request." });
+  const items = [user("t1"), tool("t1:c1"), reply("t1:m1"), notice("t2"), tool("t2:c1"), reply("t2:m1")];
+
+  expect(shape(chatRows(items))).toEqual(["t1", "t1:c1 [t1:c1] folded", "t1:m1", "t2", "t2:c1 [t2:c1] folded", "t2:m1"]);
+});

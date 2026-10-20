@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, TurnId, User, WorkerTranscript, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -110,7 +110,7 @@ const forever: FakeScript = async function* () {
 // A fake coordinator takes the project's (fakeCoordinator) and holds the owner's
 // turn open, after making task #1, so the test calls the coordinator's tools
 // straight on control with that turn's key, as the coordinator does. `release`
-// ends the turn. Workers run `worker` on the fake Copilot.
+// ends the turn, and `coordinator` sees what control sends next. Workers run `worker` on the fake Copilot.
 async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>, worker: FakeScript = forever) {
   const { url, project, copilot, owner } = control;
   copilot.script = worker;
@@ -124,7 +124,7 @@ async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>, worker
     return { status: answer.status, body: (await answer.json()) as unknown };
   };
   await tool({ tool: "create_task", title: "Fix the typo" });
-  return { tool, release: () => coordinator.event(turnId, { type: "done" }) };
+  return { tool, coordinator, release: () => coordinator.event(turnId, { type: "done" }) };
 }
 
 // How the latest session reaches its connector `name`: its computer's forwarder to control, with the turn's forwarder secret.
@@ -1530,10 +1530,15 @@ test("a push through Chiefbot that GitHub answers with a server error may have l
 test("on restart a push through Chiefbot that was in flight is over: every verdict on its branch is stale, and a new verifier's is current", async () => {
   const control = await teamProject({ persistent: true });
   const { owner, project, copilot } = control;
-  const { tool, release } = await heldTurn(control, verifyOrPush(copilot));
+  const { tool, coordinator, release } = await heldTurn(control, verifyOrPush(copilot));
   const { head } = await pullRequestOnTask(control, tool);
   await verifyTask(control, tool, "v-1");
   release();
+  // The verifier's ending wakes the coordinator, whose turn ends at once.
+  const { turnId } = await coordinator.nth("run-turn", 2);
+  coordinator.newTurn();
+  coordinator.event(turnId, { type: "done" });
+  await owner.watchProjectChat(project.id).until(doneCount(2));
   control.stopControl();
   // Control stopped while it forwarded a push to the pull request's branch.
   const db = new Database(control.dbPath);
@@ -1647,4 +1652,150 @@ test("a verifier takes one of the project's workers.max places, as an engineer d
   expect(computers.computers.has(verifier.id)).toBe(false);
   finish();
   expect(await workerWhen(owner, project, verifier.id, ({ verdict }) => verdict !== null)).toMatchObject({ state: "finished", verdict: "pass", sha: head });
+});
+
+// The system lines of a member's chat with the coordinator: turns control started, not the member.
+const systemLines = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "system-message" ? [event.text] : []));
+const continueTheTask = "Continue the task: dispatch the verifier on its PR, send fixes for ISSUES, or mark it done after a current PASS.";
+
+test("an engineer that ends wakes the project agent: a turn in the chat of the member who asked for the task, paid as their own turns are (their seat here), shown as a system line", async () => {
+  const control = await teamProject();
+  const { owner, guest, project } = control;
+  const { tool, coordinator, release } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "The README already reads The shop.");
+    yield sdk.idle();
+  });
+  const chat = owner.watchProjectChat(project.id);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await chat.until((events) => systemLines(events).length === 1);
+  release();
+  const next = await coordinator.nth("run-turn", 2);
+
+  const told = `Engineer for task #1 ended: finished without opening a pull request (worker_status has its report). ${continueTheTask}`;
+  expect(systemLines(chat.events)).toEqual([told]);
+  expect(chat.events.filter(({ event }) => event.type === "user-message").map(({ event }) => event.type === "user-message" && event.text)).toEqual(["Fix the typo"]);
+  expect(next).toMatchObject({ text: told, member: { login: "octo-user" }, payer: { kind: "seat", login: "octo-user" } });
+  expect((await workersOf(owner, project)).find((worker) => worker.id === id)?.state).toBe("finished");
+  expect(systemLines(await guest.watchProjectChat(project.id).settled())).toEqual([]);
+  coordinator.newTurn();
+  coordinator.event(next.turnId, { type: "done" });
+  await chat.until(doneCount(2));
+});
+
+test("one ending wakes the project agent once, across a restart; a worker that ended as control stopped wakes it when control starts", async () => {
+  const control = await teamProject({ persistent: true });
+  const { owner, project } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.idle();
+  });
+  await tool({ tool: "create_task", title: "Tidy the footer" });
+  for (const task of [1, 2]) await tool({ tool: "dispatch_worker", task, creationId: `c-${task}` });
+  await owner.watchProjectChat(project.id).until((events) => systemLines(events).length === 2);
+  control.stopControl();
+  // As if control had stopped before task #2's engineer woke the coordinator.
+  const db = new Database(control.dbPath);
+  const woke = "SELECT task_continuations.turn_id FROM task_continuations JOIN task_workers ON task_workers.id = worker_id WHERE task_number = 2";
+  db.run(`DELETE FROM coordinator_events WHERE turn_id IN (${woke})`);
+  db.run(`DELETE FROM coordinator_turns WHERE id IN (${woke})`);
+  db.run("DELETE FROM task_continuations WHERE worker_id IN (SELECT id FROM task_workers WHERE task_number = 2)");
+  db.close();
+
+  control.startControl();
+
+  await owner.watchProjectChat(project.id).until((events) => systemLines(events).length === 2);
+  const told = (task: number) => `Engineer for task #${task} ended: finished without opening a pull request (worker_status has its report). ${continueTheTask}`;
+  expect(systemLines(await owner.watchProjectChat(project.id).settled()).toSorted()).toEqual([told(1), told(2)]);
+  // The held turn, cut by the restart, and both continuations end.
+  await owner.watchProjectChat(project.id).until(doneCount(3));
+});
+
+test("a task's ended engineers and verifiers wake the project agent at most six times; then the task needs the member who asked for it", async () => {
+  const control = await teamProject();
+  const { owner, project } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.idle();
+  });
+  const chat = owner.watchProjectChat(project.id);
+  for (const n of [1, 2, 3, 4, 5, 6, 7]) {
+    const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: `c-${n}` })).body);
+    await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  }
+
+  const tasks = async () => Task.array().parse((await tool({ tool: "list_tasks" })).body);
+  await eventually(async () => (await tasks())[0]?.status === "needs_input");
+  expect((await tasks())[0]?.question).toBe("Automatic steps used up: tell the project how to go on.");
+  expect(systemLines(chat.events)).toHaveLength(6);
+});
+
+test("when the organization pays, a task's continuation runs on its Copilot, as the requester's own turns do", async () => {
+  const control = await teamProject({
+    copilotTokens: async (repo) => ({ token: "ghs_org_1", expiresAt: Date.now() + 3600_000, account: repo.split("/")[0] ?? repo }),
+  });
+  const { owner, workspace, project } = control;
+  await owner.api("PUT", `/workspaces/${workspace.id}/copilot-mode`, { mode: "org" });
+  const { tool, coordinator, release } = await heldTurn(control, async function* () {
+    yield sdk.idle();
+  });
+  const chat = owner.watchProjectChat(project.id);
+  await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" });
+  await chat.until((events) => systemLines(events).length === 1);
+
+  release();
+  const next = await coordinator.nth("run-turn", 2);
+
+  expect(next).toMatchObject({ member: { login: "octo-user" }, payer: { kind: "org", account: "octo-org" } });
+  coordinator.newTurn();
+  coordinator.event(next.turnId, { type: "done" });
+  await chat.until(doneCount(2));
+});
+
+test("a member's Mark done ends the task's queued continuation: the project agent never gets it, so it cannot reopen the task", async () => {
+  const control = await teamProject();
+  const { owner, project } = control;
+  const { tool, coordinator, release } = await heldTurn(control, async function* () {
+    yield sdk.idle();
+  });
+  const chat = owner.watchProjectChat(project.id);
+  await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" });
+  await chat.until((events) => systemLines(events).length === 1);
+
+  expect((await owner.api("POST", `/projects/${project.id}/tasks/1/done`)).status).toBe(200);
+  release();
+  await chat.until(doneCount(2));
+  expect((await owner.api("POST", `/projects/${project.id}/messages`, { text: "What next?" })).status).toBe(202);
+
+  // The next turn the coordinator gets is the member's message, not the continuation.
+  expect(await coordinator.nth("run-turn", 2)).toMatchObject({ text: "What next?" });
+  const [task] = Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json());
+  expect(task?.status).toBe("done");
+});
+
+test("a member's message queues behind their task's continuation instead of being refused", async () => {
+  const control = await teamProject();
+  const { owner, guest, project } = control;
+  const { tool, coordinator, release } = await heldTurn(control, async function* () {
+    yield sdk.idle();
+  });
+  const chat = owner.watchProjectChat(project.id);
+  // octo-friend's message waits behind the held turn, so it runs before the continuation.
+  expect((await guest.api("POST", `/projects/${project.id}/messages`, { text: "Hello" })).status).toBe(202);
+  await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" });
+  await chat.until((events) => systemLines(events).length === 1);
+  release();
+  const friends = await coordinator.nth("run-turn", 2);
+  expect(friends.text).toBe("Hello");
+
+  // The owner's only unfinished turn is the queued continuation.
+  expect((await owner.api("POST", `/projects/${project.id}/messages`, { text: "Use the footer too" })).status).toBe(202);
+
+  const ends = async (turnId: TurnId) => {
+    coordinator.newTurn();
+    coordinator.event(turnId, { type: "done" });
+  };
+  await ends(friends.turnId);
+  const continued = await coordinator.nth("run-turn", 3);
+  expect(continued.text).toStartWith("Engineer for task #1 ended:");
+  await ends(continued.turnId);
+  expect(await coordinator.nth("run-turn", 4)).toMatchObject({ text: "Use the footer too" });
 });

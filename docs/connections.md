@@ -46,7 +46,7 @@ Approvals here are a guardrail against mistakes, not a boundary.
 
 The credential is yours and the computer is your bot's, which acts only for you (`docs/isolation.md`). During a turn the agent can read the token file, run the CLI from a script, or call the vendor's API with the token directly, and the worker sees none of that as a command of the CLI. So a bot can do anything your token allows, as you could in your own terminal. That is why the screen asks for a token that expires, with only the access it needs: a Harness token or service account with viewer roles, a Dynatrace token with read scopes, a Google service account with viewer roles. acli signs in only with an Atlassian API token without scopes, which can do whatever its account can, so for Jira the account itself is the limit. The token is on the computer only while your turn runs. Google Cloud's is a one-hour access token: the key it comes from stays in control.
 
-Connections reach only your own bots. A project's coordinator has no shell, and task workers do not get connections.
+Connections reach only your own bots. A project's coordinator has no shell, and engineers and verifiers do not get connections.
 
 ## Add one
 

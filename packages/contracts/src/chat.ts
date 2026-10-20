@@ -109,6 +109,12 @@ export type SentAttachment = z.infer<typeof SentAttachment>;
 export const UserMessage = z.object({ type: z.literal("user-message"), text: z.string(), attachments: z.array(SentAttachment).optional() });
 export type UserMessage = z.infer<typeof UserMessage>;
 
+// The message that starts a turn control queued for a project's coordinator
+// itself, in a member's chat: one of their task's engineers or verifiers ended,
+// so the coordinator continues the task. The chat shows it as a system line.
+export const SystemMessage = z.object({ type: z.literal("system-message"), text: z.string() });
+export type SystemMessage = z.infer<typeof SystemMessage>;
+
 // The user's answer to an approval-request of the same turn. Control adds it.
 export const ApprovalAnswer = z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() });
 export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>;
@@ -180,7 +186,7 @@ export const HandoffUpdate = z.object({
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, QuestionAnswer, HandoffCardEvent, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, SystemMessage, ApprovalAnswer, QuestionAnswer, HandoffCardEvent, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
@@ -221,7 +227,8 @@ export const ChatItem = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("error"), id: z.string(), message: z.string() }),
   // A handoff's card (HandoffCardEvent), as its latest event says.
   HandoffCard.extend({ kind: z.literal("handoff"), id: z.string() }),
-  // Control's note about a handoff, from before cards (HandoffUpdate).
+  // Control's note: about a handoff, from before cards (HandoffUpdate), or the
+  // start of a turn control queued in a project chat (SystemMessage).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
   // Who pays for the turn that follows.
   z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) }),

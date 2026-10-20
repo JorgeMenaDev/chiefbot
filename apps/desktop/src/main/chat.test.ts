@@ -342,3 +342,13 @@ test("a handoff notice from before cards shows in the chief's chat as a notice, 
   ]);
   expect(view.working).toBe("");
 });
+
+test("a turn control queued in a project chat shows as a notice, not as the member's message, and leaves the composer free", () => {
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+  const text = "Engineer for task #1 ended: opened a pull request.";
+
+  const view = foldChat(empty, { seq: 1, turnId: TurnId.parse("turn-1"), event: { type: "system-message", text } });
+
+  expect(view.items).toEqual([{ kind: "notice", id: "turn-1", text }]);
+  expect(view.working).toBeNull();
+});

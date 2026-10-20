@@ -128,6 +128,8 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   db.run("CREATE INDEX IF NOT EXISTS coordinator_events_by_chat ON coordinator_events (project_id, user_id, seq)");
   // Who pays for the turn (JSON CopilotPayer), from when the scheduler starts it. NULL before, and for turns started before the column.
   addColumn(db, "coordinator_turns", "payer", "TEXT");
+  // The task a turn control queued itself continues (queueSystemTurn); NULL for a member's message.
+  addColumn(db, "coordinator_turns", "task_number", "INTEGER");
   // What control asked the member of a coordinator turn to approve (a connector
   // call, connectors.ts), and the answer (NULL while pending) (turnRecords.ts approvalRecords).
   db.run(`CREATE TABLE IF NOT EXISTS coordinator_approvals (
@@ -290,6 +292,15 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       .get(turnId, JSON.stringify(event));
     if (!row) throw new Error("coordinator event insert returned no row");
     return toChatEvent(row);
+  };
+  // A new queued turn of `text` in the member's chat with the coordinator, one
+  // that continues task `taskNumber` when control queues it: its id.
+  const insertTurn = (projectId: ProjectId, userId: UserId, text: string, taskNumber: number | null = null) => {
+    const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
+    db.query(
+      "INSERT INTO coordinator_turns (id, project_id, user_id, text, state, created_at, task_number) VALUES (?1, ?2, ?3, ?4, 'queued', ?5, ?6)",
+    ).run(turnId, projectId, userId, text, Date.now(), taskNumber);
+    return turnId;
   };
 
   // A stored chat event and the member whose chat it is in.
@@ -589,18 +600,39 @@ export function projectStore(db: Database, hash: (token: string) => string) {
 
     // Queues a member's message for the coordinator. Null, storing nothing, while
     // their previous message is still queued or running, unless `whileBusy`: a
-    // handoff from the member's chief of staff queues behind it instead.
+    // handoff from the member's chief of staff queues behind it instead. A turn
+    // control queued itself (queueSystemTurn) is not theirs: the message queues behind it.
     queueTurn: db.transaction((projectId: ProjectId, userId: UserId, text: string, whileBusy = false): ChatEvent | null => {
       const unfinished = db
-        .query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND user_id = ?2 AND state != 'done'")
+        .query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND user_id = ?2 AND state != 'done' AND task_number IS NULL")
         .get(projectId, userId);
       if (unfinished && !whileBusy) return null;
-      const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
-      db.query(
-        "INSERT INTO coordinator_turns (id, project_id, user_id, text, state, created_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
-      ).run(turnId, projectId, userId, text, Date.now());
-      return append(turnId, { type: "user-message", text });
+      return append(insertTurn(projectId, userId, text), { type: "user-message", text });
     }),
+
+    // Queues a turn control starts itself in the member's chat to continue task
+    // `taskNumber` (taskWorkers.ts), behind any turn of theirs: the chat shows it
+    // as a system line, not as the member's message.
+    queueSystemTurn: db.transaction(
+      (projectId: ProjectId, userId: UserId, text: string, taskNumber: number): ChatEvent =>
+        append(insertTurn(projectId, userId, text, taskNumber), { type: "system-message", text }),
+    ),
+
+    // Ends the project's queued turns that continue a task now done or abandoned
+    // (or gone), so the coordinator never gets them and cannot reopen the task.
+    // The events that end them, to publish.
+    endClosedContinuations: db.transaction((projectId: ProjectId): MemberEvent[] =>
+      db
+        .query<{ id: string; user_id: string }, [string]>(
+          `UPDATE coordinator_turns SET state = 'done'
+           WHERE project_id = ?1 AND state = 'queued' AND task_number IS NOT NULL AND NOT EXISTS (
+             SELECT 1 FROM project_tasks WHERE project_tasks.project_id = coordinator_turns.project_id
+             AND project_tasks.number = coordinator_turns.task_number AND project_tasks.status NOT IN ('done', 'abandoned'))
+           RETURNING id, user_id`,
+        )
+        .all(projectId)
+        .map(({ id, user_id }) => ({ userId: UserId.parse(user_id), event: append(TurnId.parse(id), { type: "done" }) })),
+    ),
 
     // The scheduler's one claim: the project's oldest queued turn becomes its
     // running turn. Null while a turn is running or none waits, so the

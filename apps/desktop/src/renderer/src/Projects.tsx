@@ -1,5 +1,5 @@
 import { type AutoFallback, type CopilotPayer, Project, ProjectChatView, type ProjectId, type Workspace } from "@chiefbot/contracts";
-import { FolderGit2Icon, PlugIcon, RadioIcon, SettingsIcon, Trash2Icon } from "lucide-react";
+import { FolderGit2Icon, InfoIcon, PlugIcon, RadioIcon, SettingsIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
@@ -193,9 +193,10 @@ function CoordinatorChat({ project, hidden, onChanged }: { project: Project; hid
   );
 }
 
-// The coordinator gets no handoff cards or notices, so those never show. Its approvals
-// are control's, for connector calls that may write. Each turn starts with who
-// pays for its Copilot.
+// The coordinator gets no handoff cards, so those never show. A notice starts a
+// turn control queued itself: one of the member's tasks' engineers or verifiers
+// ended. Its approvals are control's, for connector calls that may write. Each
+// turn starts with who pays for its Copilot.
 function ChatRow({ project, item, streaming }: { project: Project; item: LaneItem; streaming: boolean }) {
   switch (item.kind) {
     case "user":
@@ -213,8 +214,14 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
       );
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
-    case "handoff":
     case "notice":
+      return (
+        <p className="flex gap-1.5 text-muted-foreground text-xs">
+          <InfoIcon className="size-3.5 shrink-0" />
+          {item.text}
+        </p>
+      );
+    case "handoff":
     // Only bots ask their user questions for now.
     case "question":
       return null;
