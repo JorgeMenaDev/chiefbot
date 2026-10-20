@@ -288,12 +288,15 @@ const toolIcon: Record<ToolItem["status"], ReactNode> = {
   failed: <XIcon className="size-3 text-destructive" aria-label="failed" />,
 };
 
-// A tool call in a line of fixed height, with how it went.
+// A tool call in a line of fixed height, with how it went. A name too long
+// for the line shows whole on hover.
 function ToolRow({ name, status }: Pick<ToolItem, "name" | "status">) {
   return (
     <div className="flex h-6 items-center gap-2 font-mono text-muted-foreground text-xs">
       {toolIcon[status]}
-      <span className="truncate">{name}</span>
+      <span className="truncate" title={name}>
+        {name}
+      </span>
     </div>
   );
 }

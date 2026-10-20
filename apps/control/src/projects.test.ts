@@ -315,7 +315,7 @@ test("a coordinator that restarts mid-turn ends that turn with an error, then ru
   await computers.provider.stop(project.id);
   await computers.provider.start(project.id);
 
-  expect((await ownerChat.until(doneCount(1))).map(({ event }) => event.type)).toEqual(["user-message", "payer", "text-delta", "error", "done"]);
+  expect((await ownerChat.until(doneCount(1))).map(({ event }) => event.type)).toEqual(["user-message", "payer", "tool-call", "tool-call", "text-delta", "error", "done"]);
   expect(replies(await guest.watchProjectChat(project.id).until(doneCount(1)))).toEqual(["You said: my turn"]);
 });
 

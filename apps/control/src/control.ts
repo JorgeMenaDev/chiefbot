@@ -316,6 +316,10 @@ export function startControl({
     agentFor: (key) => {
       const turn = store.turnKeys.holder(key);
       if (turn?.agent === "bot") return botAgent(turn);
+      if (turn?.agent === "coordinator") {
+        const repo = store.projects.project(turn.projectId)?.repo;
+        return repo ? { userId: turn.userId, repo } : null;
+      }
       return turn?.agent === "task-worker" ? taskWorkers.agentOf(turn) : null;
     },
   });

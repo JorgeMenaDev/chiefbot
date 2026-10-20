@@ -8,6 +8,7 @@ import {
   type BotAvatar,
   type BotId,
   type CoordinatorToControl,
+  type ModelReport,
   type ProjectId,
   type TurnEvent,
   type TurnId,
@@ -254,6 +255,8 @@ export async function fakeCoordinator({ url, computers }: TestControl, projectId
     token,
     nth,
     hello: (activeTurnId: TurnId | null) => send({ type: "hello", activeTurnId, capabilities: [] }),
+    // The plan's models, as the session of `turnId` lists them.
+    models: (turnId: TurnId, report: ModelReport) => send({ type: "models", turnId, report }),
     // The turn's next event; the first one of a turn is number 0.
     event: (turnId: TurnId, event: TurnEvent, from?: number) => send({ type: "turn-event", turnId, index: from ?? index++, event }),
     newTurn: () => void (index = 0),

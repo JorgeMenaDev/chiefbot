@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ChatItem, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
 import { AgentConnector, ConnectorName } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
+import { ModelReport, ReasoningEffort } from "./models.ts";
 import { RepoFullName } from "./repos.ts";
 import type { TaskWorker } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
@@ -139,7 +140,9 @@ export function effectiveConfig(file: ProjectFile | null, settings: ProjectFile)
 
 // A project as a member of its workspace sees it. `name` is the repo's name.
 // `settings` is the YAML members saved in the app (ProjectFile's keys); `config`
-// and `sources` are effectiveConfig of the file and the settings.
+// and `sources` are effectiveConfig of the file and the settings. `model` is the
+// Copilot model the coordinator's turns run on (AUTO_MODEL until a member picks
+// one, with PUT /projects/:id/model), `effort` its reasoning effort (null: the model's default).
 export const Project = z.object({
   id: ProjectId,
   workspaceId: WorkspaceId,
@@ -149,6 +152,8 @@ export const Project = z.object({
   settings: z.string(),
   config: ProjectConfig,
   sources: ConfigSources,
+  model: z.string(),
+  effort: ReasoningEffort.nullable(),
 });
 export type Project = z.infer<typeof Project>;
 
@@ -303,6 +308,18 @@ export const WorkerTranscriptArgs = z.object({
 });
 export const StopWorkerArgs = z.object({ worker: TaskWorkerId.describe("The worker's id") });
 
+// The coordinator's repo tools. They run on the project's computer, over its
+// copy of the repo's default branch (worker repoCopy.ts), never in control.
+export const RepoReadArgs = z.object({
+  path: z.string().max(500).default("").describe("A file or folder, relative to the repo's root; left out, the root folder"),
+  startLine: z.number().int().min(1).default(1).describe("For a file: the first line to read"),
+});
+export const RepoSearchArgs = z.object({
+  pattern: z.string().min(1).max(500).describe("A regular expression (POSIX extended) to find in the text of the repo's files"),
+  path: z.string().max(500).default("").describe("Only in this file or folder; left out, the whole repo"),
+  ignoreCase: z.boolean().default(false),
+});
+
 // Body of POST /coordinator/:projectId/tools: one tool call of the running coordinator turn.
 // Its answer, as JSON: create_task and update_task → Task; list_tasks → Task[];
 // read_context → ContextFile[] without a path, { path, content } with one; write_context → ContextFile;
@@ -329,7 +346,8 @@ export type ProjectMember = z.infer<typeof ProjectMember>;
 
 // Control → coordinator on the /coordinator/:projectId WebSocket.
 //   bound     the project this connection belongs to; sent right after control accepts the credential
-//   run-turn  run one turn in `member`'s chat, on `payer`'s Copilot: the member's
+//   run-turn  run one turn in `member`'s chat, on `model` at `effort` (null: the model's
+//             default; the project's, as far as the member's plan offers it), on `payer`'s Copilot: the member's
 //             seat (GET …/github-token) or the organization's
 //             (GET …/installation-token). `turnKey` is the turn's key (ids.ts
 //             TurnKey): the bearer of every call to control in the turn, which
@@ -351,6 +369,8 @@ export const ControlToCoordinator = z.discriminatedUnion("type", [
     turnKey: TurnKey,
     member: ProjectMember,
     text: z.string(),
+    model: z.string(),
+    effort: ReasoningEffort.nullable().default(null),
     payer: CopilotPayer,
     connectors: z.array(AgentConnector).default([]),
   }),
@@ -359,8 +379,15 @@ export const ControlToCoordinator = z.discriminatedUnion("type", [
 ]);
 export type ControlToCoordinator = z.infer<typeof ControlToCoordinator>;
 
-// Coordinator → control on the same WebSocket: turn-event and hello, as a bot's worker sends them (chat.ts).
-export const CoordinatorToControl = z.discriminatedUnion("type", [TurnEventMessage, TurnHello]);
+// Coordinator → control on the same WebSocket: turn-event and hello, as a bot's worker sends them (chat.ts),
+// and models: the plan's models as the session of `turnId` lists them. Control keeps
+// them only while that turn runs: as its member's on their own seat, as the
+// organization's on its billing.
+export const CoordinatorToControl = z.discriminatedUnion("type", [
+  TurnEventMessage,
+  TurnHello,
+  z.object({ type: z.literal("models"), turnId: TurnId, report: ModelReport }),
+]);
 export type CoordinatorToControl = z.infer<typeof CoordinatorToControl>;
 
 // A member's chat with the project's coordinator as the desktop window shows it.

@@ -46,6 +46,19 @@ test("a coordinator session may use only its task, context and worker tools: no 
   expect(config.systemMessage).toEqual({ mode: "append", content: "Coordinate." });
 });
 
+test("a coordinator session with the repo's skill folders loads skills from them: the runtime's skill tool is the only one of its own it gets", () => {
+  const config = coordinatorSessionConfig({
+    sessionId: "project_1-user_1",
+    auth: { kind: "seat", gitHubTokenProvider: async () => ({ kind: "token", accessToken: "gho_a", expiresIn: 3600 }) },
+    onPermissionRequest: async () => ({ kind: "reject" }),
+    tools: coordinatorTools(async () => "[]"),
+    skillDirectories: ["/home/bot/repo/.agents/skills"],
+  });
+
+  expect(config.availableTools.filter((tool) => !tool.startsWith("custom:"))).toEqual(["builtin:skill"]);
+  expect([config.enableSkills, config.skillDirectories]).toEqual([true, ["/home/bot/repo/.agents/skills"]]);
+});
+
 test("a coordinator session with connectors also gets their MCP servers' tools, and reports each call", async () => {
   const reported: string[] = [];
   const config = coordinatorSessionConfig({

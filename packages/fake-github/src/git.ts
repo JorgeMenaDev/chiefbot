@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -21,12 +21,32 @@ export function createBareRepo(root: string, fullName: string, files: Record<str
   const work = mkdtempSync(join(tmpdir(), "fake-github-seed-"));
   try {
     git(work, ["init", "-q", "-b", "main"]);
-    for (const [path, content] of Object.entries(files)) writeFileSync(join(work, path), content);
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(work, path)), { recursive: true });
+      writeFileSync(join(work, path), content);
+    }
     git(work, ["add", "."]);
     git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Initial commit"]);
     const bare = join(root, `${fullName}.git`);
     git(dirname(work), ["clone", "-q", "--bare", work, bare]);
     return bare;
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+// Adds a commit holding `files` (new or changed) to main of the bare repo at `bare`.
+export function commitFiles(bare: string, files: Record<string, string>) {
+  const work = mkdtempSync(join(tmpdir(), "fake-github-commit-"));
+  try {
+    git(work, ["clone", "-q", bare, "."]);
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(work, path)), { recursive: true });
+      writeFileSync(join(work, path), content);
+    }
+    git(work, ["add", "."]);
+    git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Change"]);
+    git(work, ["push", "-q", "origin", "HEAD:main"]);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

@@ -1,10 +1,10 @@
-import { AUTO_MODEL, type Bot, type ModelOption } from "@chiefbot/contracts";
+import { AUTO_MODEL, type ModelOption } from "@chiefbot/contracts";
 import { CheckIcon, LockIcon } from "lucide-react";
 import { useId, useRef, useState } from "react";
 import { ComposerControl, ComposerControlChevron } from "./ComposerControl.tsx";
 import { cn } from "./lib/utils.ts";
 
-// The bot's model, after T3 Code's ProviderModelPicker and ModelListRow (via
+// The `model` a bot or a project runs on, after T3 Code's ProviderModelPicker and ModelListRow (via
 // Chartpilot's port): a composer control with the Copilot mark and the model's
 // name, opening a searchable list of the plan's `models` above the composer. Locked
 // rows show why in place of the provider line and cannot be picked. The list sits in
@@ -12,12 +12,12 @@ import { cn } from "./lib/utils.ts";
 // it. `onOpen` runs each time it opens (to read the plan's models again), `onPick`
 // with the model picked.
 export function ModelPicker({
-  bot,
+  model: current,
   models,
   onOpen,
   onPick,
 }: {
-  bot: Bot;
+  model: string;
   models: ModelOption[];
   onOpen: () => void;
   onPick: (model: ModelOption) => void;
@@ -27,7 +27,7 @@ export function ModelPicker({
   const search = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const name = models.find((model) => model.id === bot.model)?.name ?? (bot.model === AUTO_MODEL ? "Auto" : bot.model);
+  const name = models.find((model) => model.id === current)?.name ?? (current === AUTO_MODEL ? "Auto" : current);
   const q = query.trim().toLowerCase();
   const visible = q ? models.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(q)) : models;
 
@@ -68,7 +68,7 @@ export function ModelPicker({
         />
         <div role="listbox" className="flex min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5">
           {visible.map((model) => (
-            <ModelRow key={model.id} model={model} selected={model.id === bot.model} onSelect={() => choose(model)} />
+            <ModelRow key={model.id} model={model} selected={model.id === current} onSelect={() => choose(model)} />
           ))}
           {visible.length === 0 && <p className="px-2 py-3 text-center text-muted-foreground text-xs">No models found</p>}
         </div>

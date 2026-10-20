@@ -159,7 +159,7 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
     case "user-message":
       return { ...view, working: "", items: [...view.items, { kind: "user", id: turnId, text: event.text, attachments: event.attachments }] };
     case "payer":
-      return { ...view, items: [...view.items, { kind: "payer", id: `${turnId}:payer`, payer: event.payer }] };
+      return { ...view, items: [...view.items, { kind: "payer", id: `${turnId}:payer`, payer: event.payer, fallback: event.fallback }] };
     case "text-delta": {
       const id = `${turnId}:${event.messageId}`;
       const items = upsert(id, (existing) => ({

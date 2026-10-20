@@ -31,6 +31,8 @@ if (controlUrl && projectId && projectToken) {
     projectToken,
     // Session history on the computer's own disk.
     copilot: coordinatorSdk({ baseDirectory: "/home/bot/.copilot" }),
+    // The copy of the project's repo the coordinator reads, on the computer's own disk.
+    repoRoot: "/home/bot/repo",
     onBound: (project) => console.log(`coordinator connected to ${controlUrl} for ${project.repo}`),
   });
 } else {
