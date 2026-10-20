@@ -14,14 +14,18 @@ copies=("check-$run-a" "check-$run-b")
 started=()
 
 finish() {
-  local status=$? copy project
+  local status=$? copy project filter left
   for copy in ${started[@]+"${started[@]}"}; do
     project="acme-$copy"
     ((status == 0)) || docker compose -p "$project" logs --tail 30 || true
     ./stack.sh down "$copy" || status=1
-    if [[ -n $(docker ps -aq --filter "label=com.docker.compose.project=$project") ||
-      -n $(docker volume ls -q --filter "label=com.docker.compose.project=$project") ]]; then
-      echo "teardown left containers or volumes of $project behind" >&2
+    filter="label=com.docker.compose.project=$project"
+    if ! left=$(docker ps -aq --filter "$filter" && docker volume ls -q --filter "$filter" &&
+      docker network ls -q --filter "$filter"); then
+      echo "could not list what $project left behind" >&2
+      status=1
+    elif [[ -n $left ]]; then
+      echo "teardown left containers, volumes or networks of $project behind" >&2
       status=1
     fi
   done
