@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, ConnectorCall, Project, Task, TaskWorker, User, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ApiError, ConnectorCall, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -196,7 +196,7 @@ test("a setup command that fails blocks the engineer: its agent never starts, it
   expect(blocked.setup.at(-1)).toEqual({ step: "setup", command: "bun install --frozen-lockfile", exitCode: 1, log: lockfile });
   expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
   await eventually(async () => (await computers.provider.status(id)) === "stopped");
-  expect(((await tool({ tool: "worker_transcript", worker: id })).body as { lines: string[] }).lines.slice(1)).toEqual([
+  expect(WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body).lines.slice(1)).toEqual([
     `setup: bun install --frozen-lockfile (exit 1)\n${lockfile}`,
     "error: Its setup failed: `bun install --frozen-lockfile` exited with 1.",
   ]);
@@ -237,7 +237,7 @@ test("an engineer's setup clones the repo through control's git proxy, and its a
   expect(told).toContain('<file path="docs/agents.md">\nPrices are in cents.\n\n</file>');
   // A skill folder the repo lacks is left out.
   expect(copilot.skillDirectories[at]).toEqual([join(clone, ".agents/skills")]);
-  expect(((await tool({ tool: "worker_transcript", worker: id })).body as { lines: string[] }).lines[2]).toBe(
+  expect(WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body).lines[2]).toBe(
     "setup done; instructions AGENTS.md, docs/agents.md; skills .agents/skills",
   );
 });
