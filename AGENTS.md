@@ -27,6 +27,7 @@ infra/        Computer and control Docker images (built from the repo root), Cad
 - Keep it simple (YAGNI). No abstraction until a second caller exists. `ComputerProvider` is the one planned seam.
 - Build each ticket test-first (`tdd`). Tests are focused, with no smoke-test sprawl. Tests use fakes for Copilot, Docker and GCP, so `bun test` needs no network, Docker or tokens.
 - **No GCP spend.** Never run `terraform apply` or create any cloud resource. GCP code is tested with fakes only.
+- **Docker cleanup:** remove only the objects you created, by ID. Remove images with `docker rmi --no-prune <id>`. Never run `docker system/image/builder prune`: it deletes the owner's build cache.
 - **Copilot Free has 200 chats/month.** Live Copilot calls happen only in explicitly named manual checks, at most a handful per ticket.
 - Never print or commit tokens. `.env*` is git-ignored. The repo app's secrets live in `~/.chiefbot/` (owner-only), never in the repo.
 - Generic code only: no personal or company names, client IDs or private links. `scripts/check-public.sh` (in `bun run check`) fails on them; test fixtures use logins like `octo-user`.
