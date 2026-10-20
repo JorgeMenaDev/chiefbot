@@ -24,6 +24,10 @@ export type TurnKey = z.infer<typeof TurnKey>;
 export const ApprovalId = z.string().min(1).brand<"ApprovalId">();
 export type ApprovalId = z.infer<typeof ApprovalId>;
 
+// One form of questions a bot asked the user (Copilot's ask_user tool).
+export const QuestionId = z.string().min(1).brand<"QuestionId">();
+export type QuestionId = z.infer<typeof QuestionId>;
+
 // A prompt a bot runs on a schedule.
 export const RoutineId = z.string().min(1).brand<"RoutineId">();
 export type RoutineId = z.infer<typeof RoutineId>;

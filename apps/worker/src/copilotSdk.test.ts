@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
-import { agentEnv, coordinatorSessionConfig, workerSessionConfig } from "./copilotSdk.ts";
+import type { QuestionRequest } from "./copilot.ts";
+import { agentEnv, askUser, coordinatorSessionConfig, workerSessionConfig } from "./copilotSdk.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
+import { sdk } from "./fakeCopilot.ts";
 
 test("the agent's shell gets no GitHub token and no bot or task worker credential, so gh and the broker are out of reach", () => {
   const env = agentEnv({
@@ -105,4 +107,48 @@ test("a worker session gets its instructions after the SDK's own system message"
   });
 
   expect(config.systemMessage).toEqual({ mode: "append", content: "You have your own computer." });
+});
+
+test("ask_user forms: each SDK call gets the request id of the elicitation.requested event it was dispatched with, and close cancels the rest", async () => {
+  const asked: QuestionRequest[] = [];
+  const asks = askUser({
+    async ask(request) {
+      asked.push(request);
+      return { action: "decline" };
+    },
+    ended: () => {},
+  });
+  const { onElicitationRequest, onEvent } = asks.config;
+  const call = () => onElicitationRequest({ sessionId: "bot_1", message: "Same form", mode: "form" });
+  // As the SDK dispatches each event: its own handler first, then the subscribers
+  // (onEvent among them, subscribed before the session opened).
+  const dispatch = (requestId: string) => {
+    const answer = call();
+    onEvent(sdk.elicitationRequested(requestId, "Same form"));
+    return answer;
+  };
+
+  const answers = await Promise.all([dispatch("request-1"), dispatch("request-2")]);
+  onEvent(sdk.elicitationRequested("request-3", "Nobody's handler asked this"));
+  const unmatched = call();
+  asks.close();
+
+  expect(asks.config.askUserVariant).toBe("elicitation");
+  expect(answers).toEqual([{ action: "decline" }, { action: "decline" }]);
+  expect(await unmatched).toEqual({ action: "cancel" });
+  expect(asked).toEqual([
+    { sessionId: "bot_1", message: "Same form", mode: "form", requestId: "request-1" },
+    { sessionId: "bot_1", message: "Same form", mode: "form", requestId: "request-2" },
+  ]);
+});
+
+test("ask_user forms: the config's onEvent, which the SDK subscribes before the session opens, reports each resolved request", () => {
+  const ended: string[] = [];
+  const { onEvent } = askUser({ ask: async () => ({ action: "cancel" }), ended: (requestId) => ended.push(requestId) }).config;
+
+  onEvent(sdk.elicitationCompleted("request-1"));
+  onEvent(sdk.idle());
+  onEvent(sdk.elicitationCompleted("request-2", "accept"));
+
+  expect(ended).toEqual(["request-1", "request-2"]);
 });

@@ -9,6 +9,7 @@ import { Composer } from "./Composer.tsx";
 import { chipFor, isImage, uploads, type DraftAttachment } from "./composerAttachments.ts";
 import { HandoffCard, type HandoffItem } from "./HandoffCard.tsx";
 import { Markdown } from "./Markdown.tsx";
+import { QuestionCard } from "./QuestionCard.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
@@ -54,6 +55,8 @@ export function Chat({
   // The chat's sent images, read as they come into view; the last few kept.
   const [readImage] = useState(() => recentReads((id: AttachmentId) => window.chiefbot.chat.attachment(bot.id, id), 8));
   const working = view.working !== null;
+  // The newest pending question takes keys 1–9 while no question card has focus.
+  const newestQuestion = view.items.findLast((item) => item.kind === "question" && item.state === "pending")?.id;
   // The agent waits while the user has its screen.
   const humanHasScreen = bot.screenControl === "human";
   // Null while a file is still being read: the message waits for it.
@@ -91,7 +94,14 @@ export function Chat({
         status={working ? view.working || "Working" : null}
         empty={`Send ${bot.name} a message to start.`}
         renderItem={(item, streaming) => (
-          <Message botId={bot.id} item={item} streaming={streaming} readImage={readImage} onOpenProject={onOpenProject} />
+          <Message
+            botId={bot.id}
+            item={item}
+            streaming={streaming}
+            shortcuts={item.id === newestQuestion}
+            readImage={readImage}
+            onOpenProject={onOpenProject}
+          />
         )}
       />
       <Composer
@@ -121,12 +131,15 @@ function Message({
   botId,
   item,
   streaming,
+  shortcuts,
   readImage,
   onOpenProject,
 }: {
   botId: BotId;
   item: LaneItem;
   streaming: boolean;
+  // Whether a question card takes keys 1–9 while no card has focus.
+  shortcuts: boolean;
   readImage: (id: AttachmentId) => Promise<unknown>;
   onOpenProject: (handoff: HandoffItem) => void;
 }) {
@@ -155,6 +168,14 @@ function Message({
       );
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.chat.answer(botId, item.approvalId, approved)} />;
+    case "question":
+      return (
+        <QuestionCard
+          item={item}
+          shortcuts={shortcuts}
+          onAnswer={(result) => window.chiefbot.chat.answerQuestion(botId, item.questionId, result)}
+        />
+      );
     // A chief's chat has none: it always runs on its owner's seat, as its header says.
     case "payer":
       return null;

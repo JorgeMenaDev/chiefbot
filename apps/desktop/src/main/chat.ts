@@ -8,6 +8,8 @@ import {
   type ChatItem,
   type ChatView,
   type HandoffId,
+  type QuestionId,
+  type QuestionResult,
   type ReplyToHandoffRequest,
 } from "@chiefbot/contracts";
 import { controlCaller } from "./controlApi.ts";
@@ -112,6 +114,12 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
       await call("POST", `/bots/${botId}/approvals/${approvalId}`, { approved });
     },
 
+    // Answers (or declines) one of the bot's pending questions. The card updates
+    // when control's question-answer comes back on the chat socket.
+    async answerQuestion(botId: BotId, questionId: QuestionId, result: QuestionResult) {
+      await call("POST", `/bots/${botId}/questions/${questionId}`, result);
+    },
+
     // The owner's answer to a handoff's question, from its card in the bot's chat.
     // Throws with control's refusal, e.g. 409 question_changed.
     async replyToHandoff(botId: BotId, handoffId: HandoffId, reply: ReplyToHandoffRequest) {
@@ -128,10 +136,18 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
 }
 
 const waitingForApproval = "Waiting for your approval";
+const waitingForAnswer = "Waiting for your answer";
+
+// What the bot's status says while a card is still pending (a question first),
+// whatever else the turn reports; "" once none is.
+function stillWaiting(items: ChatItem[]) {
+  const pending = (kind: "approval" | "question") => items.some((item) => item.kind === kind && item.state === "pending");
+  return pending("question") ? waitingForAnswer : pending("approval") ? waitingForApproval : "";
+}
 
 // Folds one stored chat event into what the window shows. Item ids are scoped
 // to their turn, since the SDK's message and tool ids are only unique per turn.
-// While an approval is pending, the bot's status says it waits for the user.
+// While an approval or a question is pending, the bot's status says it waits for the user.
 // The view is a bot's chat or a member's chat with a project's coordinator.
 export function foldChat<View extends Pick<ChatView, "items" | "working">>(view: View, { turnId, event }: ChatEvent): View {
   const upsert = (id: string, make: (existing: ChatItem | undefined) => ChatItem) => {
@@ -158,7 +174,7 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       return { ...view, items: upsert(id, () => ({ kind: "tool", id, name: event.name, status: event.status })) };
     }
     case "status":
-      return { ...view, working: event.text };
+      return { ...view, working: stillWaiting(view.items) || event.text };
     case "error":
       return { ...view, items: [...view.items, { kind: "error", id: `${turnId}:error`, message: event.message }] };
     case "approval-request": {
@@ -179,20 +195,36 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       const items = view.items.map(
         (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state } : item),
       );
-      return { ...view, working: "", items };
+      return { ...view, working: stillWaiting(items), items };
     }
     // A withdrawn approval can no longer be answered. The turn goes on.
     case "approval-withdrawn": {
       const items = view.items.map(
         (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state: "withdrawn" } : item),
       );
-      return { ...view, working: "", items };
+      return { ...view, working: stillWaiting(items), items };
     }
-    // Approvals left pending when a turn ends can no longer be answered.
+    case "question-request": {
+      const { questionId, form } = event;
+      const card: ChatItem = { kind: "question", id: `${turnId}:${questionId}`, questionId, form, state: "pending" };
+      return { ...view, working: waitingForAnswer, items: [...view.items, card] };
+    }
+    // An answer or a withdrawal settles only a question still pending.
+    case "question-answer":
+    case "question-withdrawn": {
+      const settled = event.type === "question-answer" ? { state: "answered" as const, answer: event.result } : { state: "withdrawn" as const };
+      const items = view.items.map(
+        (item): ChatItem => (item.kind === "question" && item.questionId === event.questionId && item.state === "pending" ? { ...item, ...settled } : item),
+      );
+      return { ...view, working: stillWaiting(items), items };
+    }
+    // Approvals and questions left pending when a turn ends can no longer be answered.
     case "done": {
       const items = view.items.map(
         (item): ChatItem =>
-          item.kind === "approval" && item.state === "pending" && item.id.startsWith(`${turnId}:`) ? { ...item, state: "expired" } : item,
+          (item.kind === "approval" || item.kind === "question") && item.state === "pending" && item.id.startsWith(`${turnId}:`)
+            ? { ...item, state: "expired" }
+            : item,
       );
       return { ...view, working: null, items };
     }

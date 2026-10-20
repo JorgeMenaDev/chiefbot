@@ -4,6 +4,7 @@ import type {
   BotAvatar,
   ConnectorInput,
   EnvironmentInput,
+  QuestionResult,
   ReplyToHandoffRequest,
   RoutineInput,
   ServiceInput,
@@ -54,6 +55,9 @@ const api = {
     attachment: (botId: string, attachmentId: string): Promise<unknown> => ipcRenderer.invoke("chat:attachment", botId, attachmentId),
     answer: (botId: string, approvalId: string, approved: boolean): Promise<void> =>
       ipcRenderer.invoke("chat:answer", botId, approvalId, approved),
+    // The user's answer to one of the bot's questions: every question answered, or declined.
+    answerQuestion: (botId: string, questionId: string, result: QuestionResult): Promise<void> =>
+      ipcRenderer.invoke("chat:answer-question", botId, questionId, result),
     // The owner's answer to a handoff's question, from its card.
     replyToHandoff: (botId: string, handoffId: string, reply: ReplyToHandoffRequest): Promise<void> =>
       ipcRenderer.invoke("chat:reply-to-handoff", botId, handoffId, reply),

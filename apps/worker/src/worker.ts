@@ -1,13 +1,15 @@
-import type { PermissionHandler, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
+import type { ElicitationResult, PermissionHandler, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import {
   ACCESS_MODES,
   ATTACHMENTS,
   ApprovalId,
   ControlToWorker,
   DEFAULT_ACCESS,
+  QuestionId,
   type AccessMode,
   type AgentConnection,
   type ApprovalKind,
+  type QuestionResult,
   type ReasoningEffort,
   type ScreenControl,
   type SentAttachment,
@@ -23,9 +25,10 @@ import { connectionsRoot as defaultConnectionsRoot, stageConnections } from "./c
 import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
-import type { BotSession, Copilot, FileAttachment } from "./copilot.ts";
+import type { BotSession, Copilot, FileAttachment, QuestionRequest, Questions } from "./copilot.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
+import { elicitationResult, questionForm } from "./questions.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
 
 export type WorkerOptions = {
@@ -75,6 +78,7 @@ export type WorkerOptions = {
 // and a computer call already running stops before its next command. One whose
 // turn ends, or that its runtime cancels, stops at once.
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
+// So does a bot's question to its user (Copilot's ask_user forms, questions.ts).
 // Pushes and pull requests go through control, which asks the user itself.
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
 // A bot's turn brings its owner's connections: staged for that turn only, their
@@ -116,6 +120,9 @@ export function startWorker({
   // Approvals the session waits on, each resolved by the user's answer, or with
   // null when its turn ends first.
   const waiting = new Map<ApprovalId, { turnId: TurnId; answer: (approved: boolean | null) => void }>();
+  // Questions the bot's agent waits on, by their SDK request's id too: each is
+  // settled by the user's answer, or with null once it is withdrawn.
+  const asking = new Map<QuestionId, { turnId: TurnId; requestId: string; answer: (result: QuestionResult | null) => void }>();
   // The running turn's staged connections, removed when it ends. Whatever a
   // turn a crash cut short left behind goes now.
   let staged: (ReturnType<typeof stageConnections> & { turnId: TurnId }) | null = null;
@@ -152,6 +159,34 @@ export function startWorker({
       await agentHasScreen();
       return ended() ? over : { kind: "approve-once", approvedInteractively: true };
     };
+
+  // Puts the agent's ask_user form in `turn`'s chat as a question card and waits,
+  // however long, for the user's answer (accept or decline). A request the card
+  // cannot show (URL mode, no questions), or one outside its turn, is cancelled
+  // at once, as is a question that is withdrawn.
+  async function askQuestion(turn: Turn, request: QuestionRequest): Promise<ElicitationResult> {
+    const form = questionForm(request);
+    if (!form || !link.running(turn)) return { action: "cancel" };
+    const questionId = QuestionId.parse(`question_${crypto.randomUUID()}`);
+    const answered = new Promise<QuestionResult | null>((answer) =>
+      asking.set(questionId, { turnId: turn.turnId, requestId: request.requestId, answer }),
+    );
+    link.emit(turn.turnId, { type: "question-request", questionId, form });
+    const result = await answered;
+    return result ? elicitationResult(form, result) : { action: "cancel" };
+  }
+
+  // The agent no longer waits on the questions that `match`: each card is
+  // withdrawn in its turn (still running: it is ending, or its SDK request
+  // ended), and its SDK wait ends with cancel.
+  function withdrawQuestions(match: (question: { turnId: TurnId; requestId: string }) => boolean) {
+    for (const [questionId, question] of asking) {
+      if (!match(question)) continue;
+      asking.delete(questionId);
+      link.emit(question.turnId, { type: "question-withdrawn", questionId });
+      question.answer(null);
+    }
+  }
 
   // A task worker's turn was cut short to renew the organization's token
   // (installationSession.ts): the permission requests its runtime waited on are
@@ -233,11 +268,21 @@ export function startWorker({
       ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : []),
     ];
     const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, instructions: computerInstructions, skillDirectories };
+    // Only a bot's turn asks its user questions; a task worker's runs alone. Once
+    // the SDK says a request is resolved (elicitation.completed), its card goes,
+    // unless answered: `ended` hears it from before the session opens.
+    const questions: Questions | null =
+      route === "worker" && turn
+        ? { ask: (request) => askQuestion(turn, request), ended: (requestId) => withdrawQuestions((question) => question.requestId === requestId) }
+        : null;
+    const asks = questions ? { questions } : {};
     // A chief always runs on its owner's own Copilot seat.
-    const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
-      if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
-      return opened;
-    });
+    const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", { ...options, ...asks }, () => token)).then(
+      (opened) => {
+        if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
+        return opened;
+      },
+    );
     open = { turn, session };
     session.catch(() => {
       if (open?.session === session) open = null;
@@ -321,12 +366,14 @@ export function startWorker({
     // run in between: its approvals still waiting are refused, the runs of its
     // connections' CLIs go to control in one message ahead of the done (read
     // once, bounded, never throwing: connections.ts), and its connections go.
+    // Its questions still waiting are withdrawn, ahead of the done.
     onTurnEnd(turnId) {
       for (const [approvalId, waiter] of waiting) {
         if (waiter.turnId !== turnId) continue;
         waiting.delete(approvalId);
         waiter.answer(null);
       }
+      withdrawQuestions((question) => question.turnId === turnId);
       if (staged?.turnId !== turnId) return;
       try {
         const calls = staged.calls();
@@ -373,6 +420,10 @@ export function startWorker({
           waiting.get(message.approvalId)?.answer(message.approved);
           waiting.delete(message.approvalId);
           break;
+        case "question-answer":
+          asking.get(message.questionId)?.answer(message.result);
+          asking.delete(message.questionId);
+          break;
       }
     },
   });
@@ -393,11 +444,14 @@ export function startWorker({
 
   return {
     screenControl: () => screenControl,
-    // Also on SIGTERM (index.ts): approvals still waiting are refused and the
-    // staged connections removed, so a stopped computer keeps no credential.
+    // Also on SIGTERM (index.ts): approvals still waiting are refused, questions
+    // cancelled and the staged connections removed, so a stopped computer keeps
+    // no credential. Control ends their turn: their cards expire.
     stop() {
       for (const { answer } of waiting.values()) answer(null);
       waiting.clear();
+      for (const { answer } of asking.values()) answer(null);
+      asking.clear();
       stageConnections(connectionsRoot, []);
       staged = null;
       link.stop();

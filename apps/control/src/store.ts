@@ -20,6 +20,8 @@ import {
   type BotToken,
   type ChatEvent,
   type HandoffCardEvent,
+  type QuestionId,
+  type QuestionResult,
   type TurnEvent,
   type GitHubTokens,
   type RoutineInput,
@@ -38,6 +40,7 @@ import { connectorStore } from "./connectors/connectorStore.ts";
 import { healthStore } from "./health/healthStore.ts";
 import { serviceStore } from "./health/serviceStore.ts";
 import { projectStore } from "./projectStore.ts";
+import { questionStore } from "./questionStore.ts";
 import { subscriptionStore } from "./subscriptionStore.ts";
 import { taskWorkerStore } from "./taskWorkerStore.ts";
 import { turnKeyStore } from "./turnKeys.ts";
@@ -202,6 +205,7 @@ export function openStore(path: string) {
   };
 
   const approvals = approvalRecords(db, { table: "approvals", owner: "bot_id", liveTurns: "SELECT id FROM turns WHERE done = 0" });
+  const questions = questionStore(db);
   const append = (botId: BotId, turnId: TurnId, event: ChatEvent["event"]) => {
     const row = db
       .query<ChatEventRow, [string, string, string]>(
@@ -437,12 +441,15 @@ export function openStore(path: string) {
     },
 
     // Adds the worker's event number `index` to the bot's unfinished turn; `done`
-    // finishes it and an approval-request records a pending approval. Null,
+    // finishes it, an approval-request records a pending approval and a
+    // question-request a pending question, until its question-withdrawn. Null,
     // storing nothing, for a repeat or another bot's or a done turn.
     appendTurnEvent: db.transaction((botId: BotId, turnId: TurnId, index: number, event: TurnEvent): ChatEvent | null => {
       if (!acceptEvent(db, "turns", "id = ?1 AND bot_id = ?2 AND done = 0", [turnId, botId], index)) return null;
       if (event.type === "done") db.query("UPDATE turns SET done = 1 WHERE id = ?1").run(turnId);
       if (event.type === "approval-request") approvals.record(botId, turnId, event, Date.now());
+      if (event.type === "question-request") questions.record(botId, turnId, event.questionId, event.form, Date.now());
+      if (event.type === "question-withdrawn") questions.withdraw(botId, event.questionId);
       return append(botId, turnId, event);
     }),
 
@@ -467,6 +474,24 @@ export function openStore(path: string) {
     // The answered approvals of one of the bot's turns, for its worker, which may
     // have missed the answers. Another bot's turn has none.
     answeredApprovals: (botId: BotId, turnId: TurnId) => approvals.answered(botId, turnId),
+
+    // The form of the bot's question while its owner can answer it; null otherwise.
+    answerableQuestion: (botId: BotId, questionId: string) => questions.answerableForm(botId, questionId),
+
+    // Records the owner's answer to the bot's question, while it can be
+    // answered. Null, storing nothing, when it cannot.
+    answerQuestion: db.transaction((botId: BotId, questionId: QuestionId, result: QuestionResult): ChatEvent | null => {
+      const turnId = questions.answer(botId, questionId, result);
+      return turnId && append(botId, turnId, { type: "question-answer", questionId, result });
+    }),
+
+    // The answered questions of one of the bot's turns, for its worker, which may have missed the answers.
+    answeredQuestions: (botId: BotId, turnId: TurnId) => questions.answered(botId, turnId),
+
+    // Withdraws the pending questions of the bot's turn (the bot is being stopped), each in its chat.
+    withdrawQuestions: db.transaction((botId: BotId, turnId: TurnId): ChatEvent[] =>
+      questions.withdrawTurn(botId, turnId).map((questionId) => append(botId, turnId, { type: "question-withdrawn", questionId })),
+    ),
 
     // Ends an unfinished turn from control's side (its worker lost it).
     abandonTurn: db.transaction((botId: BotId, turnId: TurnId, message: string): ChatEvent[] => {

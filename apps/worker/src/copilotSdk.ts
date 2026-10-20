@@ -1,6 +1,16 @@
-import { CopilotClient, type CopilotClientOptions, type MCPServerConfig, type ResumeSessionConfig, type SessionHooks } from "@github/copilot-sdk";
+import {
+  CopilotClient,
+  type CopilotClientOptions,
+  type ElicitationContext,
+  type ElicitationHandler,
+  type ElicitationResult,
+  type MCPServerConfig,
+  type ResumeSessionConfig,
+  type SessionEvent,
+  type SessionHooks,
+} from "@github/copilot-sdk";
 import { connectionsRoot } from "./connections.ts";
-import type { BotSession, Copilot } from "./copilot.ts";
+import type { BotSession, Copilot, Questions } from "./copilot.ts";
 
 // The real Copilot SDK in copilot-cli mode: the bundled runtime runs in the bot
 // computer with its full tool set (shell, files, git), working in `workingDirectory`.
@@ -92,11 +102,38 @@ function connectorConfig(mcpServers: Record<string, MCPServerConfig> = {}, onMcp
   };
 }
 
+// A session's ask_user tool as structured forms (askUserVariant "elicitation"),
+// each answered by `ask`. The SDK calls onElicitationRequest without the
+// request's id, but always synchronously while it dispatches the raw
+// elicitation.requested event, before any subscriber sees it (dist/session.js
+// _dispatchEvent). So each call waits in line until `onEvent` hands it that
+// event's requestId: two identical forms still get their own. `onEvent` also
+// passes each elicitation.completed to `ended`. It is in the config, so the SDK
+// subscribes it before it creates or resumes the session: a request made or
+// resolved while the session opens is heard too. `close` cancels the calls
+// still waiting for their event once the session closes.
+export function askUser({ ask, ended }: Questions) {
+  const waiting: Array<{ context: ElicitationContext; resolve: (result: ElicitationResult) => void; reject: (reason: unknown) => void }> = [];
+  const onElicitationRequest: ElicitationHandler = (context) => new Promise((resolve, reject) => void waiting.push({ context, resolve, reject }));
+  const onEvent = (event: SessionEvent) => {
+    if (event.type === "elicitation.completed") ended(event.data.requestId);
+    if (event.type !== "elicitation.requested") return;
+    const call = waiting.shift();
+    if (call) ask({ ...call.context, requestId: event.data.requestId }).then(call.resolve, call.reject);
+  };
+  return {
+    config: { askUserVariant: "elicitation" as const, onElicitationRequest, onEvent },
+    close() {
+      for (const { resolve } of waiting.splice(0)) resolve({ action: "cancel" });
+    },
+  };
+}
+
 // A Copilot on the SDK with `clientOptions`. Seat sessions share one runtime
 // and get their tokens from gitHubTokenProvider. An installation session gets a
 // runtime of its own, started with its token in COPILOT_GITHUB_TOKEN, which
 // stops when the session disconnects. Either resumes the session's history
-// when it exists on disk.
+// when it exists on disk. A session opened with `questions` gets the ask_user tool (askUser).
 function sdkCopilot(
   clientOptions: CopilotClientOptions & { env: Record<string, string | undefined> },
   sessionConfig: (options: Parameters<Copilot["openSession"]>[0]) => ResumeSessionConfig,
@@ -104,14 +141,23 @@ function sdkCopilot(
   const shared = new CopilotClient(clientOptions);
   return {
     async openSession(options) {
-      const config = sessionConfig(options);
+      const asks = options.questions && askUser(options.questions);
+      const config = { ...sessionConfig(options), ...asks?.config };
       if (options.auth.kind === "seat") {
         const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
-        return { ...bound(session), disconnect: () => session.disconnect() };
+        const disconnect = () => {
+          asks?.close();
+          return session.disconnect();
+        };
+        return { ...bound(session), disconnect };
       }
       const own = new CopilotClient({ ...clientOptions, env: { ...clientOptions.env, COPILOT_GITHUB_TOKEN: options.auth.token } });
       const session = await openOn(own, options.sessionId, config);
-      return { ...bound(session), disconnect: async () => void (await own.stop()) };
+      const disconnect = async () => {
+        asks?.close();
+        await own.stop();
+      };
+      return { ...bound(session), disconnect };
     },
   };
 }

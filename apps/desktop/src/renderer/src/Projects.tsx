@@ -245,6 +245,8 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
     case "handoff":
     case "notice":
+    // Only bots ask their user questions for now.
+    case "question":
       return null;
   }
 }
