@@ -45,6 +45,7 @@ test("a blocked engineer shows each setup step with its exit code, the failing s
 
 test("a queued engineer says what it waits for, and one that finished with no pull request shows its report", () => {
   expect(render(engineer({ state: "queued" }))).toContain("This project runs 2 engineers at once: it starts when one ends.");
+  expect(renderToStaticMarkup(<EngineerDetails worker={engineer({ state: "queued" })} max={1} />)).toContain("This project runs 1 engineer at once:");
 
   const report = render(engineer({ state: "finished", result: "**Nothing to change**: the typo is already fixed on main." }));
 

@@ -10,7 +10,7 @@ export function EngineerDetails({ worker, max }: { worker: TaskWorker; max: numb
   return (
     <>
       {worker.state === "queued" && (
-        <span className="text-muted-foreground text-xs">This project runs {max} engineers at once: it starts when one ends.</span>
+        <span className="text-muted-foreground text-xs">This project runs {max} {max === 1 ? "engineer" : "engineers"} at once: it starts when one ends.</span>
       )}
       {worker.setup.map((step) => (
         <SetupLog key={step.step} step={step} />

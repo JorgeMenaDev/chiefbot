@@ -19,6 +19,8 @@ User routes (`/bots/:id/...`) check that the signed-in user owns the bot. Anothe
 
 A project's task worker gets the same boundaries on its own throwaway computer (`chiefbot-worker_<id>`, with its own volume and network) and its own credential, `CHIEFBOT_TASK_WORKER_TOKEN`, valid only for its WebSocket on `/task-worker/<its id>`; everything else takes its turn's key. It acts for the member who asked for it: their GitHub access bounds what it may clone and push, and only they approve its pushes and pull requests. Proof: `taskWorkers.test.ts`.
 
+A project's secrets reach only its task workers (its engineers), each for one task. Control reads them when the task starts and sends them with it. The worker gives them to the setup command and to a Copilot runtime of the task's own, which stops when the turn ends. The project's computer and its coordinator never get them, and the setup's log shows each value as `***`. Proof: `taskWorkers.test.ts` "an engineer gets the project's secrets for its task only…".
+
 Proof:
 
 - `bun test` (fakes): `bots.test.ts` "a worker credential works only for its own bot", and `docker.test.ts` "each bot is locked down…".
@@ -65,6 +67,7 @@ Proof: `repo.test.ts` "the GitHub token a bot computer gets can neither push nor
 - **Unverified: a GitHub App with no permissions driving Copilot.** GitHub's Copilot SDK docs say GitHub App user tokens (`ghu_`) and OAuth App tokens (`gho_`) both work for user-billed sessions, but not whether the app needs any permission. The README manual check settles it. If the sign-in app's token cannot run Copilot, the OAuth App fallback (`read:user`) is the one known to work.
 - **GitHub tools in the runtime.** The Copilot runtime's built-in GitHub tools act with the sign-in token, so they cannot write to repos either. The worker still asks before one that writes, as a guardrail against mistakes, unless the owner puts the bot in **Full access** (README, "Access modes").
 - **A person's connection tokens are readable in their bot's computer during their turns** (`docs/connections.md`). The worker writes them to `/tmp/chiefbot` when a turn starts and deletes them when it ends, and asks before a command of the CLI that may write (except in **Full access**), but the agent can read the file and use the token directly. The token's own scope is the boundary.
+- **A project's secrets are readable by its engineers' agents** during their task: any command the agent runs can print or send them. The brief tells it never to print or commit them, but each secret's own scope is the boundary.
 - **The bot credential and the running turn's key are readable in the computer** (above). Neither is a GitHub token: the credential reaches only the bot's WebSocket and the broker, and the key only the routes above, each checked against the owner's access and approval, and only until its turn ends.
 
 ## What changes on GCP (one VM per bot, ticket #10)
