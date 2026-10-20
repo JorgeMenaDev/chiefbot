@@ -22,7 +22,8 @@ const SecretFields = z.record(z.string(), z.string());
 // Connections: the CLIs of `catalog` (catalog.ts) a person turns on with their own
 // fields, which their own bots then use as them (docs/connections.md). Coordinators
 // and task workers never get them. `googleTokenUrl` is where the google-access-token
-// exchange mints tokens (googleToken.ts; a fake in tests).
+// exchange mints tokens (googleToken.ts; a fake in tests). `onChange` hears each
+// save and turn-off (health drops its checks of the old fields).
 //
 // Person routes (a session):
 //   GET    /connections                 → Connection[]: the catalog, with `on` for the person
@@ -36,11 +37,13 @@ export function connectionHost({
   secrets,
   catalog,
   googleTokenUrl,
+  onChange = () => {},
 }: {
   store: ReturnType<typeof openStore>;
   secrets: SecretStore;
   catalog: CatalogConnection[];
   googleTokenUrl?: string;
+  onChange?: (userId: UserId, name: string) => void;
 }) {
   const found = (name: string) => catalog.find((connection) => connection.name === name);
 
@@ -93,6 +96,7 @@ export function connectionHost({
     const entries = Object.entries(fields);
     await secrets.put(secretName(userId, connection.name), JSON.stringify(Object.fromEntries(entries.filter(isSecret))));
     store.connections.save(userId, connection.name, Object.fromEntries(entries.filter((entry) => !isSecret(entry))));
+    onChange(userId, connection.name);
     return Response.json(rows(userId).find(({ name }) => name === connection.name) satisfies Connection | undefined);
   }
 
@@ -109,6 +113,7 @@ export function connectionHost({
         const connection = found(req.params.name);
         if (!connection) return apiError(404, "not_found");
         store.connections.remove(userId, connection.name);
+        onChange(userId, connection.name);
         await secrets.delete(secretName(userId, connection.name));
         return new Response(null, { status: 204 });
       }),

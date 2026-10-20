@@ -29,8 +29,9 @@ const gkeOff = {
 };
 
 // A fake Google: its token endpoint takes the key's refresh grant, and Cloud Run
-// (two pages), GKE and the status page answer what the test gives them, to that token only.
-function fakeGoogle(answers: { services: object[][]; clusters: { status: number; body: object }; incidents: object[] }) {
+// (a page per entry of `services`, with `unreachable` regions on the first), GKE and the
+// status page answer what the test gives them, to that token only.
+function fakeGoogle(answers: { services: object[][]; unreachable?: string[]; clusters: { status: number; body: object }; incidents: object[] }) {
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -43,7 +44,11 @@ function fakeGoogle(answers: { services: object[][]; clusters: { status: number;
       if (req.headers.get("authorization") !== "Bearer ya29.fake") return Response.json({ error: { message: "Request had invalid authentication credentials." } }, { status: 401 });
       if (pathname === "/v2/projects/demo-project/locations/-/services") {
         const page = Number(searchParams.get("pageToken") ?? 0);
-        return Response.json({ services: answers.services[page], ...(page + 1 < answers.services.length ? { nextPageToken: String(page + 1) } : {}) });
+        return Response.json({
+          services: answers.services[page],
+          ...(page === 0 && answers.unreachable ? { unreachable: answers.unreachable } : {}),
+          ...(page + 1 < answers.services.length ? { nextPageToken: String(page + 1) } : {}),
+        });
       }
       if (pathname === "/v1/projects/demo-project/locations/-/clusters") return Response.json(answers.clusters.body, { status: answers.clusters.status });
       return new Response("not found", { status: 404 });
@@ -112,6 +117,30 @@ test("ready services, running clusters and no incidents are ok; a degraded clust
     summary: "No Cloud Run services · 0 of 1 GKE cluster running · No Google Cloud incidents in europe-west2",
     items: [{ status: "degraded", title: "GKE cluster prod in europe-west2 is degraded", detail: "Node pool default is unhealthy." }],
   });
+});
+
+test("a partial answer from Google is unknown, never ok: unreachable Cloud Run regions, missing GKE zones, more pages than the probe reads", async () => {
+  const partial = fakeGoogle({
+    services: [[]],
+    unreachable: ["projects/demo-project/locations/us-east1"],
+    clusters: { status: 200, body: { missingZones: ["europe-west1-b"] } },
+    incidents: [],
+  });
+  const many = fakeGoogle({ services: Array.from({ length: 11 }, (_, page) => [service("europe-west2", `svc-${page}`, ready)]), clusters: { status: 200, body: {} }, incidents: [] });
+
+  const result = await partial(fields, signal());
+  const paged = await many(fields, signal());
+
+  expect(result).toMatchObject({
+    status: "unknown",
+    summary: "No Cloud Run services, 1 region not checked · No GKE clusters, 1 zone not checked · No Google Cloud incidents for Cloud Run or GKE",
+    items: [
+      { status: "unknown", title: "Couldn't list Cloud Run services in us-east1" },
+      { status: "unknown", title: "Couldn't list GKE clusters in europe-west1-b" },
+    ],
+  });
+  expect(paged).toMatchObject({ status: "unknown", items: [{ status: "unknown", title: "Couldn't list every Cloud Run service", detail: "The check reads the first 10 services of the project." }] });
+  expect(paged.summary).toStartWith("10 of 10 Cloud Run services ready, more not checked");
 });
 
 test("a key Google refuses is unknown, never ok, and the result never holds the key", async () => {

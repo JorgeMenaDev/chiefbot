@@ -8,11 +8,11 @@ afterEach(() => stops.splice(0).forEach((stop) => stop()));
 const secret = "aBcD1234eFgH5678iJkL9012";
 const signal = () => AbortSignal.timeout(5000);
 
-type Answers = { versions?: number; redirect?: boolean; activity?: number; errors?: object[]; schedules?: object[] };
+type Answers = { versions?: number; redirect?: boolean; activity?: number; errors?: object[]; schedules?: object[]; key?: string };
 
 // A fake Looker API 4.0: /versions, /login with the key's ID and secret, and
 // inline System Activity queries with the session token it handed out.
-function fakeLooker({ versions = 200, redirect = false, activity = 200, errors = [], schedules = [] }: Answers = {}) {
+function fakeLooker({ versions = 200, redirect = false, activity = 200, errors = [], schedules = [], key = secret }: Answers = {}) {
   const queries: object[] = [];
   const server = Bun.serve({
     port: 0,
@@ -24,7 +24,7 @@ function fakeLooker({ versions = 200, redirect = false, activity = 200, errors =
       }
       if (pathname === "/api/4.0/login") {
         const form = new URLSearchParams(await req.text());
-        const valid = form.get("client_id") === "client-id" && form.get("client_secret") === secret;
+        const valid = form.get("client_id") === "client-id" && form.get("client_secret") === key;
         return valid ? Response.json({ access_token: "session-token", token_type: "Bearer", expires_in: 3600 }) : Response.json({ message: "Not found" }, { status: 404 });
       }
       if (pathname === "/api/4.0/queries/run/json" && req.headers.get("authorization") === "token session-token") {
@@ -37,7 +37,7 @@ function fakeLooker({ versions = 200, redirect = false, activity = 200, errors =
     },
   });
   stops.push(() => server.stop(true));
-  return { fields: { url: server.url.origin, clientid: "client-id", secret }, queries };
+  return { fields: { url: server.url.origin, clientid: "client-id", secret: key }, queries };
 }
 
 test("Looker answering with query errors and failed schedules is degraded, one row per error and per schedule", async () => {
@@ -74,4 +74,17 @@ test("a quiet Looker is ok; answering 5xx is down; a refused key, no System Acti
   expect(noActivity.items[0]?.detail).toContain("see_system_activity");
   expect([moved.status, moved.items[0]?.detail]).toEqual(["unknown", expect.stringContaining("answered 302")]);
   expect(JSON.stringify([quiet, failing, wrongSecret, noActivity, moved])).not.toMatch(new RegExp(`${secret}|session-token`));
+});
+
+test("the secret and the session token never reach a result, in any form Looker echoes them", async () => {
+  const key = 'k3y+/&"=ü x';
+  const forms = (value: string) => [value, encodeURIComponent(value), new URLSearchParams({ x: value }).toString().slice(2), JSON.stringify(value).slice(1, -1)];
+  const echo = [...forms(key), ...forms("session-token")].join(" | ");
+  const { fields } = fakeLooker({ key, errors: [{ "history.message": `Bad query: ${echo}` }], schedules: [{ "scheduled_plan.name": echo, "scheduled_job.status_detail": echo }] });
+
+  const { summary, items } = await lookerProbe(fields, signal());
+
+  const shown = [summary, ...items.flatMap(({ title, detail = "" }) => [title, detail])].join("\n");
+  for (const form of [...forms(key), "session-token"]) expect(shown).not.toContain(form);
+  expect(items.map(({ title }) => title)).toEqual(["Bad query: [redacted] | [redacted] | [redacted] | [redacted] | [redacted] | [redacted] | [redacted] | [redacted]", expect.stringContaining("[redacted]")]);
 });

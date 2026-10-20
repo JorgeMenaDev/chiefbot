@@ -32,9 +32,9 @@ Before a shell command runs, the worker checks each command of a connection's CL
 
 - Google Cloud: the project's Cloud Run services and GKE clusters, and the open incidents on Google's status page in the regions they run in. The setup's viewer roles cover it.
 - Dynatrace: open problems, from a DQL query on `dt.davis.problems` through the Grail query API, with the setup's `storage:events:read` and `storage:buckets:read` scopes.
-- Looker: whether the instance answers and signs you in, then two System Activity queries: query errors in the last hour, and failed schedule deliveries in 24 hours. They need `see_system_activity`.
+- Looker: whether the instance answers and signs you in, then two System Activity queries: query errors in the last hour, and failed schedule deliveries in 24 hours. They need `see_system_activity`. The secret and the session token are cut out of everything Looker sends back, as the `looker` CLI does (`connections/looker/redact.ts`).
 
-Each check is ok, degraded, down or unknown. Unknown means the check could not run (a refused key, a missing permission, an API that is off, no answer in 30 seconds), with the reason, and is never ok. Control keeps each connection's checks for 24 hours, and deletes them when you turn it off. A card shows them as a bar, and each problem has **Ask my bot**, which opens your last bot with a message about it ready to send.
+Each check is ok, degraded, down or unknown. Unknown means the check could not run (a refused key, a missing permission, an API that is off, a region or zone Google could not list, no answer in 30 seconds), with the reason, and is never ok. Control runs at most 4 scheduled checks at once. A check still running when you save the connection again or turn it off, or when control stops, is aborted and its result dropped. Control keeps each connection's checks for 24 hours, and deletes them when you turn it off. A card shows them as a bar, and each problem has **Ask my bot**, which opens your last bot with a message about it ready to send.
 
 A probe is code, not YAML: a function in `apps/control/src/health/`, listed in `defaultProbes`. A connection without one is not on the screen.
 

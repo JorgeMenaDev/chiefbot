@@ -58,12 +58,20 @@ const Condition = z.object({ state: z.string().optional(), message: z.string().o
 const ServicePage = z.object({
   services: z.array(z.object({ name: z.string(), terminalCondition: Condition.optional() })).default([]),
   nextPageToken: z.string().optional(),
+  // Regions Google could not reach: their services are missing from the page.
+  unreachable: z.array(z.string()).default([]),
 });
 
+// The last part of a location Google names in full (projects/p/locations/us-east1).
+const lastPart = (name: string) => name.split("/").at(-1) ?? name;
+
 // Every Cloud Run service of the project, at most 10 pages: Ready (CONDITION_SUCCEEDED)
-// is ok, failed is down, anything else (deploying, pending) is degraded.
+// is ok, failed is down, anything else (deploying, pending) is degraded. A region
+// Google could not reach, or services past the 10th page, are unknown: an
+// incomplete list is never healthy.
 async function cloudRun(get: Get, url: string): Promise<Part & { regions: string[] }> {
   const services: z.infer<typeof ServicePage>["services"] = [];
+  const unreachable = new Set<string>();
   let pageToken = "";
   try {
     for (let page = 0; page < 10; page++) {
@@ -71,6 +79,7 @@ async function cloudRun(get: Get, url: string): Promise<Part & { regions: string
       const body = ServicePage.safeParse(res.body);
       if (res.status !== 200 || !body.success) return { ...refused("Cloud Run services", "Cloud Run not checked", res), regions: [] };
       services.push(...body.data.services);
+      for (const location of body.data.unreachable) unreachable.add(lastPart(location));
       pageToken = body.data.nextPageToken ?? "";
       if (!pageToken) break;
     }
@@ -92,16 +101,26 @@ async function cloudRun(get: Get, url: string): Promise<Part & { regions: string
     });
   }
   const ready = services.length - items.length;
-  const phrase = services.length === 0 ? "No Cloud Run services" : `${ready} of ${plural(services.length, "Cloud Run service")} ready`;
+  const missing = [...unreachable];
+  if (missing.length > 0) items.push({ status: "unknown", title: `Couldn't list Cloud Run services in ${missing.join(", ")}`, detail: "Google could not reach these regions, so their services were not checked." });
+  if (pageToken) items.push({ status: "unknown", title: "Couldn't list every Cloud Run service", detail: `The check reads the first ${services.length} services of the project.` });
+  const phrase = [
+    services.length === 0 ? "No Cloud Run services" : `${ready} of ${plural(services.length, "Cloud Run service")} ready`,
+    ...(missing.length > 0 ? [`${plural(missing.length, "region")} not checked`] : []),
+    ...(pageToken ? ["more not checked"] : []),
+  ].join(", ");
   return { status: worstStatus(items.map(({ status }) => status)), phrase, items, regions: [...regions] };
 }
 
 const ClusterList = z.object({
   clusters: z.array(z.object({ name: z.string(), location: z.string().default(""), status: z.string().default("STATUS_UNSPECIFIED"), statusMessage: z.string().optional() })).default([]),
+  // Zones Google could not list: their clusters may be missing.
+  missingZones: z.array(z.string()).default([]),
 });
 
 // GKE cluster status: RUNNING is ok, ERROR down, anything else (DEGRADED,
-// RECONCILING while it upgrades, PROVISIONING, STOPPING) degraded.
+// RECONCILING while it upgrades, PROVISIONING, STOPPING) degraded. Zones Google
+// could not list are unknown.
 async function clusters(get: Get, url: string): Promise<Part & { regions: string[] }> {
   let res: { status: number; body: unknown };
   try {
@@ -111,7 +130,7 @@ async function clusters(get: Get, url: string): Promise<Part & { regions: string
   }
   const list = ClusterList.safeParse(res.body);
   if (res.status !== 200 || !list.success) return { ...refused("GKE clusters", "GKE not checked", res), regions: [] };
-  const all = list.data.clusters;
+  const { clusters: all, missingZones } = list.data;
   const items: HealthItem[] = all
     .filter(({ status }) => status !== "RUNNING")
     .map(({ name, location, status, statusMessage }) => ({
@@ -119,7 +138,12 @@ async function clusters(get: Get, url: string): Promise<Part & { regions: string
       title: `GKE cluster ${name} in ${location} is ${status.toLowerCase()}`,
       ...(statusMessage ? { detail: statusMessage } : {}),
     }));
-  const phrase = all.length === 0 ? "No GKE clusters" : `${all.length - items.length} of ${plural(all.length, "GKE cluster")} running`;
+  const running = all.length - items.length;
+  if (missingZones.length > 0) items.push({ status: "unknown", title: `Couldn't list GKE clusters in ${missingZones.join(", ")}`, detail: "Google could not list these zones, so their clusters were not checked." });
+  const phrase = [
+    all.length === 0 ? "No GKE clusters" : `${running} of ${plural(all.length, "GKE cluster")} running`,
+    ...(missingZones.length > 0 ? [`${plural(missingZones.length, "zone")} not checked`] : []),
+  ].join(", ");
   // A zonal cluster's location is a zone (europe-west2-a): its region drops the letter.
   const regions = all.map(({ location }) => location.replace(/-[a-z]$/, "")).filter(Boolean);
   return { status: worstStatus(items.map(({ status }) => status)), phrase, items, regions };

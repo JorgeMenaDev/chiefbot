@@ -1,15 +1,17 @@
 import type { HealthItem } from "@chiefbot/contracts";
 import { z } from "zod";
+import { redact, redactJson } from "../../../../connections/looker/redact.ts";
 import { call, combine, failure, instanceOrigin, notChecked, plural, type Part, type Probe } from "./probe.ts";
 
 // The two System Activity queries (Looker's own database: they build no derived
 // tables), as inline queries: query errors in the last hour, grouped by message,
-// and failed schedule deliveries in the last 24 hours.
+// and failed schedule deliveries in the last 24 hours. "60 minutes" is a rolling
+// window (Looker's filter expressions); "1 hours" would be the clock hour only.
 export const errorsQuery = {
   model: "system__activity",
   view: "history",
   fields: ["history.message", "query.model", "query.view", "history.query_run_count"],
-  filters: { "history.status": "error", "history.created_time": "1 hours" },
+  filters: { "history.status": "error", "history.created_time": "60 minutes" },
   sorts: ["history.query_run_count desc"],
   limit: "20",
 };
@@ -17,7 +19,7 @@ export const failedSchedulesQuery = {
   model: "system__activity",
   view: "scheduled_plan",
   fields: ["scheduled_plan.name", "scheduled_job.status_detail", "scheduled_job.created_time"],
-  filters: { "scheduled_job.status": "failure", "scheduled_job.created_time": "24 hours" },
+  filters: { "scheduled_job.status": "failure", "scheduled_job.created_time": "1440 minutes" },
   sorts: ["scheduled_job.created_time desc"],
   limit: "100",
 };
@@ -27,13 +29,15 @@ const text = (value: unknown) => (typeof value === "string" ? value : typeof val
 
 // Looker's probe, with the Looker CLI's rules (connections/looker/looker.ts):
 // the instance URL is an https origin, redirects are refused, and neither the
-// secret nor the session token ever lands in a result. Looker answering 5xx
+// secret nor the session token ever lands in a result: `redact` cuts them out of
+// everything Looker sends back and of any error, before it is kept. Looker answering 5xx
 // on /versions is down; not answering at all is unknown (control may be the one
 // cut off). Query errors and failed schedules are degraded.
 export const lookerProbe: Probe = async ({ url = "", clientid = "", secret = "" }, signal) => {
   const origin = instanceOrigin(url);
   if (!origin) return combine([notChecked("Not checked", "Couldn't check Looker", "The instance URL must be https:// and the host only, like https://mycompany.cloud.looker.com.")]);
   const api = `${origin}/api/4.0`;
+  let token = "";
   try {
     const versions = await call(`${api}/versions`, { signal });
     if (versions.status >= 500) return combine([{ status: "down", phrase: "Not answering", items: [{ status: "down", title: "Looker is not answering", detail: `${origin} answered ${versions.status}.` }] }]);
@@ -41,20 +45,21 @@ export const lookerProbe: Probe = async ({ url = "", clientid = "", secret = "" 
     const login = await call(`${api}/login`, { method: "POST", body: new URLSearchParams({ client_id: clientid, client_secret: secret }), signal });
     const session = z.object({ access_token: z.string().regex(/^[\w.~+/=-]+$/) }).safeParse(login.body);
     if (login.status !== 200 || !session.success) return combine([notChecked("Reachable, not signed in", "Looker refused the API key", `Signing in answered ${login.status}. Check the client ID and secret.`)]);
+    token = session.data.access_token;
     const run = async (query: object) => {
       const res = await call(`${api}/queries/run/json`, {
         method: "POST",
-        headers: { authorization: `token ${session.data.access_token}`, "content-type": "application/json" },
+        headers: { authorization: `token ${token}`, "content-type": "application/json" },
         body: JSON.stringify(query),
         signal,
       });
-      const rows = Rows.safeParse(res.body);
+      const rows = Rows.safeParse(redactJson(res.body, [secret, token]));
       return res.status === 200 && rows.success ? rows.data : res.status;
     };
     const [errors, schedules] = await Promise.all([run(errorsQuery), run(failedSchedulesQuery)]);
     return combine([{ status: "ok", phrase: "Reachable", items: [] }, queryErrors(errors), failedSchedules(schedules)]);
   } catch (error) {
-    return combine([notChecked("Not checked", "Couldn't reach Looker", failure(error))]);
+    return combine([notChecked("Not checked", "Couldn't reach Looker", redact(failure(error), [secret, token]))]);
   }
 };
 

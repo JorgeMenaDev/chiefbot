@@ -228,7 +228,14 @@ export function startControl({
   // Who drives each screen and the viewers' streams (screens.ts).
   const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
   // People's connections, which their bots' turns carry (connections/connections.ts).
-  const connections = connectionHost({ store, secrets, catalog, ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }) });
+  // Saving or turning one off drops a health check of it still running.
+  const connections = connectionHost({
+    store,
+    secrets,
+    catalog,
+    ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }),
+    onChange: (userId, name) => health.changed(userId, name),
+  });
   // Control's health checks of people's connections (health/health.ts).
   const health = healthHost({ store, clock, catalog, probes, fieldsOf: connections.savedFields });
   // Starting turns, the chat topics and worker hellos (turns.ts).

@@ -4,7 +4,7 @@ import { fakeClock } from "@chiefbot/worker/clock";
 import { loadConnections, repoConnections } from "../connections/catalog.ts";
 import { cleanUp, eventually, hour, startTestControl, type TestUser } from "../testControl.ts";
 import { googleUrls } from "./gcloud.ts";
-import { defaultProbes, HEALTH_TICK_MS } from "./health.ts";
+import { defaultProbes, HEALTH_CONCURRENCY, HEALTH_TICK_MS } from "./health.ts";
 import type { Probe } from "./probe.ts";
 
 afterEach(cleanUp);
@@ -87,4 +87,62 @@ test("the screen shows the last 24 hours of checks, and none once the connection
   await user.api("DELETE", "/connections/looker");
   await user.api("PUT", "/connections/looker", { fields: looker });
   expect(await checks(user)).toEqual([]);
+});
+
+test("a check still running is aborted and dropped when its connection is saved again, turned off, or control stops", async () => {
+  const signals: AbortSignal[] = [];
+  const slow = { ...looker, url: "https://slow.example.com" };
+  // The slow instance answers only once aborted, with a result that must not be kept.
+  const { user, stopControl } = await setup((fields, signal) => {
+    if (fields.url !== slow.url) return Promise.resolve(ok);
+    signals.push(signal);
+    return new Promise((resolve) => signal.addEventListener("abort", () => resolve({ status: "down", summary: "Stale", items: [] })));
+  });
+
+  await user.api("PUT", "/connections/looker", { fields: slow });
+  const edited = report(user, true);
+  await eventually(async () => signals.length === 1);
+  await user.api("PUT", "/connections/looker", { fields: looker });
+  expect(signals[0]?.aborted).toBe(true);
+  expect((await edited).connections[0]?.history).toEqual([]);
+  // The new fields' own check is the only one kept.
+  expect((await report(user, true)).connections[0]?.history.map(({ summary }) => summary)).toEqual(["Reachable"]);
+
+  await user.api("PUT", "/connections/looker", { fields: slow });
+  const turnedOff = report(user, true);
+  await eventually(async () => signals.length === 2);
+  await user.api("DELETE", "/connections/looker");
+  expect(signals[1]?.aborted).toBe(true);
+  expect((await turnedOff).connections).toEqual([]);
+
+  await user.api("PUT", "/connections/looker", { fields: slow });
+  void report(user, true).catch(() => {});
+  await eventually(async () => signals.length === 3);
+  stopControl();
+  expect(signals[2]?.aborted).toBe(true);
+});
+
+test("scheduled checks run at most HEALTH_CONCURRENCY at a time, so a restart does not fire every probe at once", async () => {
+  let active = 0;
+  let most = 0;
+  const waiting: Array<() => void> = [];
+  const { user, time, signIn } = await setup(() => {
+    most = Math.max(most, ++active);
+    return new Promise((resolve) => waiting.push(() => (active--, resolve(ok))));
+  });
+  const others = await Promise.all([1, 2, 3, 4, 5].map((n) => signIn({ id: 6100 + n, login: `octo-${n}`, copilot: { plan: "individual", sku: "free_limited_copilot" } })));
+  const people = [user, ...others];
+  for (const person of people) await person.api("PUT", "/connections/looker", { fields: looker });
+
+  time.advance(HEALTH_TICK_MS);
+  await eventually(async () => waiting.length === HEALTH_CONCURRENCY);
+  await Bun.sleep(20);
+  expect(waiting.length).toBe(HEALTH_CONCURRENCY);
+  for (let answered = 0; answered < people.length; answered++) {
+    await eventually(async () => waiting.length > 0);
+    waiting.shift()?.();
+  }
+
+  await eventually(async () => (await Promise.all(people.map(checks))).every((each) => each.length === 1));
+  expect(most).toBe(HEALTH_CONCURRENCY);
 });

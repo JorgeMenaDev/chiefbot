@@ -12,6 +12,9 @@ import { clip, failure, type Probes } from "./probe.ts";
 export const HEALTH_TICK_MS = 60_000;
 // A probe that takes longer than this has not answered.
 export const PROBE_TIMEOUT_MS = 30_000;
+// How many scheduled checks run at once, so a restart after downtime, when
+// every connection is due, does not fire every probe and token exchange together.
+export const HEALTH_CONCURRENCY = 4;
 
 // The probes control runs, by connection name. `google` is where the gcloud probe reads.
 export const defaultProbes = (google: GoogleUrls): Probes => ({ gcloud: gcloudProbe(google), dynatrace: dynatraceProbe, looker: lookerProbe });
@@ -20,8 +23,11 @@ export const defaultProbes = (google: GoogleUrls): Probes => ({ gcloud: gcloudPr
 // read-only and with no AI, using their saved fields (`fieldsOf`; secrets never
 // leave control). A connection is checked when it has had no check for
 // HEALTH_INTERVAL_MS (looked for each HEALTH_TICK_MS, so a new one is checked
-// within a minute), and on Refresh. Checks are kept HEALTH_KEEP_MS, and go
-// when the connection is turned off.
+// within a minute), at most HEALTH_CONCURRENCY at a time, and on Refresh. Checks
+// are kept HEALTH_KEEP_MS, and go when the connection is turned off. A check
+// still running when its connection is saved again or turned off (`changed`),
+// or when control stops, is aborted and its result dropped: it was made with
+// fields that are no longer the connection's.
 //
 // Person routes (a session):
 //   GET  /health          → HealthReport from the kept checks
@@ -40,16 +46,22 @@ export function healthHost({
   fieldsOf: (userId: UserId, name: string) => Promise<Record<string, string> | null>;
 }) {
   const checkable = catalog.filter(({ name }) => probes[name] !== undefined);
-  const running = new Map<string, Promise<void>>();
+  // The checks running now, by person and connection, each with what aborts it.
+  const running = new Map<string, { job: Promise<void>; abort: AbortController }>();
   let stopped = false;
+  let draining = false;
   let cancelTick = () => {};
+  const keyOf = (userId: UserId, name: string) => `${userId}/${name}`;
 
   // What the probe says, or unknown when it failed outright or took too long.
-  async function outcome(name: string, fields: Record<string, string>): Promise<ProbeResult> {
+  // Settles when `stop` aborts or the time is up, even if the probe does not.
+  async function outcome(name: string, fields: Record<string, string>, stop: AbortSignal): Promise<ProbeResult> {
     try {
       const probe = probes[name];
       if (!probe) throw new Error(`${name} has no probe`);
-      return ProbeResult.parse(await probe(fields, AbortSignal.timeout(PROBE_TIMEOUT_MS)));
+      const signal = AbortSignal.any([stop, AbortSignal.timeout(PROBE_TIMEOUT_MS)]);
+      const gaveUp = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      return ProbeResult.parse(await Promise.race([probe(fields, signal), gaveUp]));
     } catch (error) {
       return { status: "unknown", summary: clip(`The check failed: ${failure(error)}`, 300), items: [] };
     }
@@ -57,22 +69,33 @@ export function healthHost({
 
   // Checks the person's connection now and keeps the result, unless it is
   // being checked already: then it waits for that check. Never rejects.
-  function check(userId: UserId, name: string) {
-    const key = `${userId}/${name}`;
-    const job =
-      running.get(key) ??
-      (async () => {
-        const at = clock.now();
-        const fields = await fieldsOf(userId, name);
-        if (!fields) return;
-        const result = await outcome(name, fields);
-        // Turned off meanwhile, or control stopped: nothing to keep.
-        if (!stopped && store.connections.on(userId).has(name)) store.health.record(userId, name, { ...result, at });
-      })()
-        .catch((error: unknown) => console.error(`health check of ${name} failed`, error))
-        .finally(() => running.delete(key));
-    running.set(key, job);
+  function check(userId: UserId, name: string): Promise<void> {
+    const key = keyOf(userId, name);
+    const current = running.get(key);
+    if (current) return current.job;
+    const abort = new AbortController();
+    const job = (async () => {
+      const at = clock.now();
+      const fields = await fieldsOf(userId, name);
+      if (!fields || abort.signal.aborted) return;
+      const result = await outcome(name, fields, abort.signal);
+      // Saved again, turned off or control stopped meanwhile: the result is stale.
+      if (!abort.signal.aborted && store.connections.on(userId).has(name)) store.health.record(userId, name, { ...result, at });
+    })()
+      .catch((error: unknown) => console.error(`health check of ${name} failed`, error))
+      .finally(() => {
+        if (running.get(key)?.job === job) running.delete(key);
+      });
+    running.set(key, { job, abort });
     return job;
+  }
+
+  // Checks `due` HEALTH_CONCURRENCY at a time, in turn.
+  async function drain(due: Array<{ userId: UserId; name: string }>) {
+    const worker = async () => {
+      for (let next = due.shift(); next && !stopped; next = due.shift()) await check(next.userId, next.name);
+    };
+    await Promise.all(Array.from({ length: HEALTH_CONCURRENCY }, worker));
   }
 
   function report(userId: UserId): HealthReport {
@@ -89,12 +112,16 @@ export function healthHost({
     };
   }
 
+  // Looks for connections due a check, unless the last look's checks still run.
   function tick() {
     if (stopped) return;
     try {
       const now = clock.now();
       store.health.prune(now - HEALTH_KEEP_MS);
-      for (const { userId, name } of store.health.due(checkable.map(({ name }) => name), now - HEALTH_INTERVAL_MS)) void check(userId, name);
+      if (!draining) {
+        draining = true;
+        void drain(store.health.due(checkable.map(({ name }) => name), now - HEALTH_INTERVAL_MS)).finally(() => (draining = false));
+      }
     } catch (error) {
       console.error("health tick failed", error);
     }
@@ -123,9 +150,17 @@ export function healthHost({
     routes,
     // Starts the schedule, with a first look now.
     start: tick,
+    // The person saved their connection `name` again or turned it off: a check
+    // of it still running is aborted and dropped.
+    changed(userId: UserId, name: string) {
+      const key = keyOf(userId, name);
+      running.get(key)?.abort.abort();
+      running.delete(key);
+    },
     stop() {
       stopped = true;
       cancelTick();
+      for (const { abort } of running.values()) abort.abort();
     },
   };
 }
