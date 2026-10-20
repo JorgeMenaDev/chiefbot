@@ -12,8 +12,7 @@
 // activity only System Activity queries (Looker's own database, no derived tables).
 // Anything else goes through `request`, which the connection always asks about.
 
-// A module, for its top-level awaits.
-export {};
+import { redact, redactJson } from "./redact.ts";
 
 const usage = `Usage:
   looker get <path>                      read the instance, a user, connections, schedules, dashboards, Looks, models or folders
@@ -109,21 +108,12 @@ if (args[0] === "get" && (/%2[ef]/i.test(sent) || !reads.some((read) => read.tes
 // form-encoded, or JSON-escaped) in case Looker or a proxy echoes them.
 // JSON strings are cut as Looker sent them and again once decoded.
 let token = "";
-function redacted(text: string) {
-  for (const hidden of [clientSecret, token]) {
-    if (!hidden) continue;
-    for (const form of [hidden, encodeURIComponent(hidden), new URLSearchParams({ x: hidden }).toString().slice(2), JSON.stringify(hidden).slice(1, -1)]) {
-      text = text.replaceAll(form, "[redacted]");
-    }
-  }
-  return text;
-}
 async function shown(response: Response) {
   const text = await response.text();
   try {
-    return redacted(JSON.stringify(JSON.parse(text, (_key, value: unknown) => (typeof value === "string" ? redacted(value) : value)), null, 2));
+    return redact(JSON.stringify(redactJson(JSON.parse(text), [clientSecret, token]), null, 2), [clientSecret, token]);
   } catch {
-    return redacted(text);
+    return redact(text, [clientSecret, token]);
   }
 }
 

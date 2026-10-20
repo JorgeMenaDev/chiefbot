@@ -20,6 +20,7 @@ import { join } from "node:path";
 import type { Clock } from "@chiefbot/worker/clock";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
+import type { Probes } from "./health/probe.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
 import { loadConnections, repoConnections } from "./connections/catalog.ts";
 import { startControl } from "./control.ts";
@@ -65,6 +66,8 @@ export type TestControlOptions = {
   secrets?: SecretStore;
   // Where connections mint Google access tokens: a fake token endpoint.
   googleTokenUrl?: string;
+  // Connections' health probes. Default: none, so no test reaches a vendor.
+  probes?: Probes;
   // How long the signed-in user's GitHub tokens have left.
   accessTokenLeftMs?: number;
   refreshTokenLeftMs?: number;
@@ -85,6 +88,7 @@ export async function startTestControl({
   copilotTokens,
   secrets,
   googleTokenUrl,
+  probes = {},
   accessTokenLeftMs = 8 * hour,
   refreshTokenLeftMs = 180 * 24 * hour,
 }: TestControlOptions = {}) {
@@ -110,6 +114,7 @@ export async function startTestControl({
     ...(copilotTokens === undefined ? {} : { copilotTokens }),
     ...(secrets === undefined ? {} : { secrets }),
     ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }),
+    probes,
   };
   let control = startControl(options);
   const url = control.url;

@@ -47,6 +47,9 @@ import { nextDueAt } from "./schedule.ts";
 import type { CatalogConnection } from "./connections/catalog.ts";
 import { connectionHost } from "./connections/connections.ts";
 import { connectorHost } from "./connectors/connectors.ts";
+import { defaultProbes, healthHost } from "./health/health.ts";
+import { googleUrls } from "./health/gcloud.ts";
+import type { Probes } from "./health/probe.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
 import { subscriptionHost } from "./subscriptions.ts";
@@ -109,6 +112,9 @@ export type ControlOptions = {
   connections?: CatalogConnection[];
   // Where connections mint Google access tokens (connections/googleToken.ts). Default: Google's.
   googleTokenUrl?: string;
+  // The health probe of each connection that has one (health/health.ts). Default: the
+  // vendors' own APIs, with Google's token from googleTokenUrl.
+  probes?: Probes;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -194,6 +200,8 @@ type SocketData =
 //   …      /connections, /bots/:id/connection-calls  people's
 //                             connections (CLIs their bots use as them) and the calls made with them
 //                             (connections/connections.ts)
+//   …      /health, /health/refresh  control's own read-only health checks of people's
+//                             connections (health/health.ts)
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
 //                             turn's key: handing work to projects and watching it (handoffs.ts)
 //
@@ -221,6 +229,7 @@ export function startControl({
   firstBot,
   connections: catalog = [],
   googleTokenUrl,
+  probes = defaultProbes({ ...googleUrls, ...(googleTokenUrl === undefined ? {} : { token: googleTokenUrl }) }),
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -241,7 +250,16 @@ export function startControl({
   // Who drives each screen and the viewers' streams (screens.ts).
   const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
   // People's connections, which their bots' turns carry (connections/connections.ts).
-  const connections = connectionHost({ store, secrets, catalog, ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }) });
+  // Saving or turning one off drops a health check of it still running.
+  const connections = connectionHost({
+    store,
+    secrets,
+    catalog,
+    ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }),
+    onChange: (userId, name) => health.changed(userId, name),
+  });
+  // Control's health checks of people's connections (health/health.ts).
+  const health = healthHost({ store, clock, catalog, probes, fieldsOf: connections.savedFields });
   // Messages with files being read now (MAX_UPLOADS).
   let uploads = 0;
   // Starting turns, the chat topics and worker hellos (turns.ts).
@@ -458,6 +476,7 @@ export function startControl({
       ...taskWorkers.routes,
       ...connectors.routes,
       ...connections.routes,
+      ...health.routes,
       ...chiefs.routes,
       ...subscriptions.routes,
       "/sessions": {
@@ -785,6 +804,7 @@ export function startControl({
   });
 
   subscriptions.start();
+  health.start();
   // Worker computers left behind by a control that stopped mid-way go now.
   void taskWorkers.recover().catch((error: unknown) => console.error("could not recover task workers:", error));
 
@@ -819,6 +839,7 @@ export function startControl({
       taskWorkers.stop();
       scheduler.stop();
       subscriptions.stop();
+      health.stop();
       server.stop(true);
       store.close();
       if (tempContext) rmSync(tempContext, { recursive: true, force: true });

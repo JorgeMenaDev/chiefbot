@@ -111,6 +111,12 @@ const api = {
     disconnect: (name: string): Promise<void> => ipcRenderer.invoke("connections:disconnect", name),
     calls: (botId: string): Promise<unknown> => ipcRenderer.invoke("connections:calls", botId),
   },
+  // Control's read-only health checks of the user's connections (Health).
+  health: {
+    get: (): Promise<unknown> => ipcRenderer.invoke("health:get"),
+    // Checks every connection again now; resolves with the report once done.
+    refresh: (): Promise<unknown> => ipcRenderer.invoke("health:refresh"),
+  },
   connectors: {
     list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("connectors:list", workspaceId),
     define: (workspaceId: string, input: ConnectorInput): Promise<unknown> => ipcRenderer.invoke("connectors:define", workspaceId, input),

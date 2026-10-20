@@ -26,6 +26,18 @@ When the turn ends, however it ends, the worker deletes `/tmp/chiefbot`, and aga
 
 Before a shell command runs, the worker checks each command of a connection's CLI in it against the connection's `readOnly` list. A match runs. Anything else waits for your approval: the chat shows a **Connector approval** card with the app and the command. A bot you put in **Full access** runs it without asking; one in **Supervised** asks before every command (README, "Access modes"). A command whose text has the CLI's name anywhere the worker cannot see it run (`env -Sacli …`, `sh -c "…"`, even `cat acli.txt`) asks too, for the whole command: a false alarm beats a missed write. When the turn ends, approvals still pending are refused. Then the worker reads the runs the wrapper noted, once, and sends them to control on its connection, just before the message that ends the turn; control logs them under that turn (`GET /bots/:id/connection-calls`). So a declined command, or one that never ran, is not logged, and the log fills in when the turn ends, not while it runs. The agent can write that file, so the worker reads at most its first 256 KB and 500 runs, only if it is a regular file, and never waits on it: anything wrong logs fewer calls, never a stuck turn. Control takes calls only for a turn of that bot that has not ended.
 
+## Health
+
+**Health**, at the top of the sidebar, shows whether the apps behind your connections are well, without asking a bot. For each connection that is on and has a probe, control runs fixed read-only API calls with your saved fields within a minute of you turning it on, then every 5 minutes, and when you click **Refresh**. No AI runs, and nothing reaches a bot's computer.
+
+- Google Cloud: the project's Cloud Run services and GKE clusters, and the open incidents on Google's status page in the regions they run in. The setup's viewer roles cover it.
+- Dynatrace: open problems, from a DQL query on `dt.davis.problems` through the Grail query API, with the setup's `storage:events:read` and `storage:buckets:read` scopes.
+- Looker: whether the instance answers and signs you in, then two System Activity queries: query errors in the last hour, and failed schedule deliveries in 24 hours. They need `see_system_activity`. The secret and the session token are cut out of everything Looker sends back, as the `looker` CLI does (`connections/looker/redact.ts`).
+
+Each check is ok, degraded, down or unknown. Unknown means the check could not run (saved fields control could not read, a refused key, a missing permission, an API that is off, a region or zone Google could not list, no answer in 30 seconds), with the reason, and is never ok. Control runs at most 4 scheduled checks at once. A check still running when you save the connection again or turn it off, or when control stops, is aborted and its result dropped. Control keeps each connection's checks for 24 hours, and deletes them when you turn it off. A card shows them as a bar, and each problem has **Ask my bot**, which opens your last bot with a message about it ready to send.
+
+A probe is code, not YAML: a function in `apps/control/src/health/`, listed in `defaultProbes`. A connection without one is not on the screen.
+
 ## Security position
 
 Approvals here are a guardrail against mistakes, not a boundary.

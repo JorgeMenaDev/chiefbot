@@ -9,6 +9,7 @@ export * from "./connections.ts";
 export * from "./connectors.ts";
 export * from "./errors.ts";
 export * from "./handoffs.ts";
+export * from "./health.ts";
 export * from "./models.ts";
 export * from "./projects.ts";
 export * from "./repos.ts";
