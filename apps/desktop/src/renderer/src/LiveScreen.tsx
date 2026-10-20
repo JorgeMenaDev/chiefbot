@@ -1,4 +1,4 @@
-import type { Bot } from "@chiefbot/contracts";
+import type { Bot, ScreenControl } from "@chiefbot/contracts";
 import RFB from "@novnc/novnc";
 import { EyeIcon, Maximize2Icon, Minimize2Icon, MousePointer2Icon, PowerIcon, RotateCwIcon } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
@@ -8,6 +8,35 @@ import { Button } from "./components/ui/button.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
 import { afterDisconnect, computerView, type ComputerView } from "./computerView.ts";
 import { cn } from "./lib/utils.ts";
+
+// A computer whose live screen shows: a bot's, or an engineer's (Engineers.tsx).
+//   id       remounts the screen when it changes
+//   name     its owner, for the full-screen bar and the dialog's label
+//   face     drawn before the name in the full-screen bar
+//   control  who drives it; online says Take control can work now
+//   url      its screen's WebSocket on control (main adds the session)
+export type ScreenTarget = {
+  id: string;
+  name: string;
+  face: ReactNode;
+  control: ScreenControl;
+  online: boolean;
+  url: () => Promise<string>;
+  takeOver: () => Promise<unknown>;
+  handBack: () => Promise<unknown>;
+};
+
+// The bot's computer as a screen target.
+const botScreen = (bot: Bot): ScreenTarget => ({
+  id: bot.id,
+  name: bot.name,
+  face: <Avatar avatar={bot.avatar} className="size-5" />,
+  control: bot.screenControl,
+  online: bot.status === "online",
+  url: () => window.chiefbot.bots.screenUrl(bot.id),
+  takeOver: () => window.chiefbot.bots.takeOver(bot.id),
+  handBack: () => window.chiefbot.bots.handBack(bot.id),
+});
 
 // The details panel's Computer tab. While the bot is online it shows the bot's live screen
 // through control, with full screen and the control pill. Otherwise it shows the bot's face:
@@ -22,15 +51,16 @@ export function ScreenPane({ bot }: { bot: Bot }) {
     setFailures(0);
   }
   const view = computerView(bot.status, failures);
+  const target = botScreen(bot);
   return (
     <div className="flex flex-col gap-3 border-t px-5 py-4">
       {view === "live" ? (
-        <LiveScreen key={bot.id} bot={bot} setFailures={setFailures} />
+        <LiveScreen key={bot.id} target={target} setFailures={setFailures} />
       ) : (
         <>
           <ComputerFace bot={bot} view={view} onRetry={() => setFailures(0)} />
           {/* The user can always hand the screen back, even while the bot is offline. */}
-          {bot.screenControl === "human" && <ControlPill bot={bot} />}
+          {bot.screenControl === "human" && <ControlPill target={target} />}
         </>
       )}
     </div>
@@ -82,10 +112,10 @@ function ComputerFace({ bot, view, onRetry }: { bot: Bot; view: Exclude<Computer
 }
 
 // noVNC on control's screen WebSocket. It reconnects 2 s after a drop and counts each attempt
-// that never connected (`setFailures`), so the tab can say it cannot reach the computer.
+// that never connected (`setFailures`), so the caller can say it cannot reach the computer.
 // noVNC draws into a div React does not manage (`screen`): full screen moves that div into its
 // dialog and back, so the connection stays open.
-function LiveScreen({ bot, setFailures }: { bot: Bot; setFailures: Dispatch<SetStateAction<number>> }) {
+export function LiveScreen({ target, setFailures }: { target: ScreenTarget; setFailures: Dispatch<SetStateAction<number>> }) {
   const [screen] = useState(() => {
     const element = document.createElement("div");
     element.style.cssText = "width: 100%; height: 100%";
@@ -95,12 +125,15 @@ function LiveScreen({ bot, setFailures }: { bot: Bot; setFailures: Dispatch<SetS
   const [connected, setConnected] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [full, setFull] = useState(false);
-  const interactive = bot.screenControl === "human";
+  const interactive = target.control === "human";
+  // The target's calls as they are now: a new render of the same computer must not reconnect.
+  const screenUrl = useRef(target.url);
+  screenUrl.current = target.url;
 
   useEffect(() => {
     let cancelled = false;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    void window.chiefbot.bots.screenUrl(bot.id).then((url) => {
+    void screenUrl.current().then((url) => {
       if (cancelled) return;
       const rfb = new RFB(screen, url);
       rfb.scaleViewport = true;
@@ -125,7 +158,7 @@ function LiveScreen({ bot, setFailures }: { bot: Bot; setFailures: Dispatch<SetS
       client.current?.disconnect();
       client.current = null;
     };
-  }, [bot.id, screen, setFailures, attempt]);
+  }, [target.id, screen, setFailures, attempt]);
 
   // Input reaches the bot's computer only while the user has control.
   useEffect(() => {
@@ -137,7 +170,7 @@ function LiveScreen({ bot, setFailures }: { bot: Bot; setFailures: Dispatch<SetS
     <>
       {full ? <div className="grid aspect-[16/10] place-items-center rounded-lg border border-dashed text-muted-foreground text-xs">Showing full screen</div> : frame}
       <div className="relative flex justify-center">
-        <ControlPill bot={bot} />
+        <ControlPill target={target} />
         <Button
           size="icon-xs"
           variant="ghost"
@@ -150,7 +183,7 @@ function LiveScreen({ bot, setFailures }: { bot: Bot; setFailures: Dispatch<SetS
         </Button>
       </div>
       {full && (
-        <FullScreen bot={bot} onClose={() => setFull(false)}>
+        <FullScreen target={target} onClose={() => setFull(false)}>
           {frame}
         </FullScreen>
       )}
@@ -180,11 +213,11 @@ function ScreenFrame({ screen, connected, interactive }: { screen: HTMLDivElemen
   );
 }
 
-// The bot's screen filling the window, after Grok's: a top bar with the bot and Exit full screen,
+// The screen filling the window, after Grok's: a top bar with its owner and Exit full screen,
 // the screen as large as fits, and the control pill under it. A native modal <dialog> keeps focus
 // inside and leaves on Escape, unless the user has control and the screen has focus: noVNC then
-// takes the key for the bot's computer. Closing on unmount hands focus back to Full screen.
-function FullScreen({ bot, onClose, children }: { bot: Bot; onClose: () => void; children: ReactNode }) {
+// takes the key for the computer. Closing on unmount hands focus back to Full screen.
+function FullScreen({ target, onClose, children }: { target: ScreenTarget; onClose: () => void; children: ReactNode }) {
   const ref = useRef<HTMLDialogElement>(null);
   useLayoutEffect(() => {
     const dialog = ref.current;
@@ -194,7 +227,7 @@ function FullScreen({ bot, onClose, children }: { bot: Bot; onClose: () => void;
   return (
     <dialog
       ref={ref}
-      aria-label={`${bot.name}'s screen`}
+      aria-label={`${target.name}'s screen`}
       className="m-0 size-full max-h-none max-w-none flex-col border-0 bg-background p-0 text-foreground outline-none [-webkit-app-region:no-drag] open:flex"
       onCancel={(event) => {
         event.preventDefault();
@@ -203,8 +236,8 @@ function FullScreen({ bot, onClose, children }: { bot: Bot; onClose: () => void;
     >
       {/* After the window buttons on macOS, as the sidebar's controls are. */}
       <div className="drag-region flex h-(--topbar-height) shrink-0 items-center gap-2 border-b ps-(--sidebar-controls-left) pe-3">
-        <Avatar avatar={bot.avatar} className="size-5" />
-        <h2 className="min-w-0 truncate font-medium text-sm">{bot.name}</h2>
+        {target.face}
+        <h2 className="min-w-0 truncate font-medium text-sm">{target.name}</h2>
         <Button size="icon-xs" variant="ghost" className="ms-auto" aria-label="Exit full screen" title="Exit full screen (Esc)" onClick={onClose}>
           <Minimize2Icon />
         </Button>
@@ -214,37 +247,36 @@ function FullScreen({ bot, onClose, children }: { bot: Bot; onClose: () => void;
         <div className="grid min-h-0 w-full flex-1 place-items-center [container-type:size]">
           <div className="w-[min(100cqw,160cqh)]">{children}</div>
         </div>
-        <ControlPill bot={bot} />
+        <ControlPill target={target} />
       </div>
     </dialog>
   );
 }
 
 // Who drives the screen and the switch, after Grok's floating pill: "Watching | Take control"
-// while the bot drives, "You're in control | Stop" while the user does (take-over, hand-back).
+// while the agent drives, "You're in control | Stop" while the user does (take-over, hand-back).
 // A refused switch shows a short line under the pill, with control's reason on hover, until the next try
 // or until who drives changes.
-function ControlPill({ bot }: { bot: Bot }) {
-  const { takeOver, handBack } = window.chiefbot.bots;
-  const human = bot.screenControl === "human";
+export function ControlPill({ target }: { target: ScreenTarget }) {
+  const human = target.control === "human";
   const [error, setError] = useState<{ text: string; reason: string } | null>(null);
   // A switch made since (in the other pill, or by control) makes an old refusal stale:
   // one already shown goes, and one that comes back later is dropped (`switches`).
-  const [control, setControl] = useState(bot.screenControl);
-  if (control !== bot.screenControl) {
-    setControl(bot.screenControl);
+  const [control, setControl] = useState(target.control);
+  if (control !== target.control) {
+    setControl(target.control);
     setError(null);
   }
   // Counted as the switch commits, before any refusal can be handled against it.
   const switches = useRef(0);
   useLayoutEffect(() => {
     switches.current += 1;
-  }, [bot.screenControl]);
+  }, [target.control]);
   const toggle = () => {
     setError(null);
     const text = human ? "Couldn't hand the screen back." : "Couldn't take control.";
     const at = switches.current;
-    (human ? handBack : takeOver)(bot.id).catch((caught: unknown) => {
+    (human ? target.handBack : target.takeOver)().catch((caught: unknown) => {
       if (switches.current === at) setError({ text, reason: caught instanceof Error ? caught.message : String(caught) });
     });
   };
@@ -265,7 +297,7 @@ function ControlPill({ bot }: { bot: Bot }) {
             size="xs"
             className="rounded-full"
             aria-label="Take control of the screen"
-            disabled={bot.status !== "online"}
+            disabled={!target.online}
             onClick={toggle}
           >
             Take control

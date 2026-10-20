@@ -1,4 +1,4 @@
-import { AuthState, Bot, type User } from "@chiefbot/contracts";
+import { AuthState, Bot, ProjectId, type User } from "@chiefbot/contracts";
 import {
   ActivityIcon,
   BlocksIcon,
@@ -6,10 +6,7 @@ import {
   CheckIcon,
   CopyIcon,
   FolderGit2Icon,
-  FolderPlusIcon,
   LogOutIcon,
-  PlugIcon,
-  PlusIcon,
   SearchIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -27,32 +24,37 @@ import { Connectors } from "./Connectors.tsx";
 import { Health } from "./Health.tsx";
 import { Settings } from "./Settings.tsx";
 import { NewBot } from "./NewBot.tsx";
-import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
+import { NewProject, ProjectList, useProjectStates, type ProjectView } from "./ProjectList.tsx";
+import { ProjectPane, useProjects } from "./Projects.tsx";
 import { Column, PaneHeader } from "./Pane.tsx";
-import { Members, useWorkspaces, WorkspaceSwitcher } from "./Workspaces.tsx";
+import { Members, useWorkspaces } from "./Workspaces.tsx";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert.tsx";
 import { Button, buttonVariants } from "./components/ui/button.tsx";
 import { Card, CardDescription, CardHeader, CardPanel } from "./components/ui/card.tsx";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "./components/ui/empty.tsx";
 import { MenuItem, MenuPopup, MenuSeparator } from "./components/ui/menu.tsx";
 import {
+  isMac,
   Sidebar,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarIconButton,
   SidebarLayout,
+  SidebarNewRow,
   SidebarRow,
+  SidebarRowNote,
   SidebarSearch,
   useSidebarOpen,
 } from "./components/ui/sidebar.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
+import { TabPanel, Tabs, useTabIds, type TabItem } from "./components/ui/tabs.tsx";
 import { copyText } from "./lib/clipboard.ts";
+import { tabForShortcut, type AppTab } from "./lib/appTabs.ts";
 import appIcon from "../../../../../docs/brand/icon.svg";
 import glyph from "../../../../../docs/brand/glyph.svg";
 
 const BotList = z.array(Bot);
 
-// Signed out: the sign-in screen. Signed in: the bot sidebar and the selected bot.
+// Signed out: the sign-in screen. Signed in: the sidebar (Bots | Projects) and what it selects.
 export function App() {
   const [state, setState] = useState<AuthState | null>(null);
 
@@ -163,27 +165,34 @@ function useBots() {
   return bots;
 }
 
-// The current workspace survives a restart; none means "Personal".
+// The current workspace and the open tab survive a restart; no workspace means "Personal".
 const currentWorkspaceKey = "chiefbot.workspace";
+const tabKey = "chiefbot.tab";
 
-// T3 Code's layout: a sidebar of bots on the left, the selected bot's chat in the
-// middle and its details panel on the right. The sidebar hides with its toggle or Cmd+B.
-// The switcher on top picks the current workspace, whose members screen and
-// projects open from the sidebar. Bots are personal, so the bot list is the same
-// in every workspace.
+// What the main column shows instead of either tab: the person's own screens,
+// opened from the sidebar's footer in any tab.
+type Screen = "connect-apps" | "health" | "settings";
+
+// T3 Code's layout: a sidebar on the left, the selected chat in the middle and its
+// panel on the right. The sidebar hides with its toggle or Cmd+B. Its two tabs,
+// Bots | Projects (Cmd+1, Cmd+2), each keep their own selection, and both panes
+// stay mounted, so a draft in one survives a visit to the other. Bots are
+// personal; Projects shows the current workspace's, with its Members and Connectors.
 function Workspace({ user }: { user: User }) {
   const bots = useBots();
   const teams = useWorkspaces();
   const sidebar = useSidebarOpen();
+  const states = useProjectStates();
+  const tabIds = useTabIds<AppTab>();
+  const [tab, setTab] = useState<AppTab>(() => (localStorage.getItem(tabKey) === "projects" ? "projects" : "bots"));
   const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem(currentWorkspaceKey));
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [botId, setBotId] = useState<string | null>(null);
+  const [projectView, setProjectView] = useState<ProjectView | null>(null);
+  const [screen, setScreen] = useState<Screen | null>(null);
   // Bumped by each click on Members, Connectors, Connect apps or Health, which remounts
   // (reloads) the screen: control sends no member, connector or health events.
-  const [membersVisit, setMembersVisit] = useState(0);
-  // Whether the new-bot dialog and the sidebar's new-project form are open. Each is
-  // its own, so one finishing never closes the other.
+  const [visit, setVisit] = useState(0);
   const [creatingBot, setCreatingBot] = useState(false);
-  const [creatingProject, setCreatingProject] = useState(false);
   // The dialog hands focus back to what opened it, but the empty list's New bot row is
   // gone by then, so focus lands on the search row's New bot button instead.
   const newBotButton = useRef<HTMLButtonElement>(null);
@@ -191,48 +200,72 @@ function Workspace({ user }: { user: User }) {
     flushSync(() => setCreatingBot(false));
     newBotButton.current?.focus();
   };
-  // The search row filters the sidebar's projects and bots by name.
+  // The search row filters the bots by name.
   const [query, setQuery] = useState("");
   const current = teams.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const { projects, reload: reloadProjects } = useProjects(current);
-  const showMembers = current !== null && selectedId === "members";
-  const showConnectors = current !== null && selectedId === "connectors";
-  // Connect apps (from the gear menu) and Health are the person's own, in any workspace.
-  const showConnectApps = selectedId === "connect-apps";
-  const showHealth = selectedId === "health";
-  const showSettings = selectedId === "settings";
-  const project = projects.find(({ id }) => id === selectedId);
-  const selected = bots.find((bot) => bot.id === selectedId) ?? bots[0];
-  const searching = query.trim() !== "";
-  const matches = (...names: string[]) => names.some((name) => name.toLowerCase().includes(query.trim().toLowerCase()));
-  const shownProjects = projects.filter(({ name, repo }) => matches(name, repo));
-  const shownBots = bots.filter(({ name }) => matches(name));
+  const selected = bots.find((bot) => bot.id === botId) ?? bots[0];
+  const shownBots = bots.filter(({ name }) => name.toLowerCase().includes(query.trim().toLowerCase()));
+  // The Projects tab shows Members, Connectors, or a project: the one picked, else the first.
+  const workspaceScreen = current && (projectView === "members" || projectView === "connectors") ? projectView : null;
+  const project = workspaceScreen ? undefined : (projects.find(({ id }) => id === projectView) ?? projects[0]);
 
-  // Ask my bot (Health): the bot the user last opened, or the first, opens with the
-  // problem in its composer. The draft goes once the user moves elsewhere.
-  const lastBot = useRef<string | null>(null);
+  const openTab = (next: AppTab) => {
+    setTab(next);
+    setScreen(null);
+    localStorage.setItem(tabKey, next);
+  };
+  const openScreen = (next: Screen) => {
+    setScreen(next);
+    setVisit((count) => count + 1);
+  };
+  // Cmd+1 and Cmd+2 (Ctrl off macOS), claimed before anything else sees them,
+  // as a live screen under Take control would send them on.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const next = event.defaultPrevented || event.repeat ? null : tabForShortcut(event, isMac);
+      if (!next) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openTab(next);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
+
+  // Ask my bot (Health): the bot selected in the Bots tab opens with the problem
+  // in its composer. The draft goes once the user picks another bot.
   const [askDraft, setAskDraft] = useState<{ botId: string; text: string } | null>(null);
   useEffect(() => {
-    if (askDraft && selectedId !== askDraft.botId) setAskDraft(null);
-  }, [selectedId]);
+    if (askDraft && selected?.id !== askDraft.botId) setAskDraft(null);
+  }, [selected?.id]);
   const askBot = (text: string) => {
-    const bot = bots.find(({ id }) => id === lastBot.current) ?? bots[0];
-    if (!bot) return;
-    setAskDraft({ botId: bot.id, text });
-    setSelectedId(bot.id);
+    if (!selected) return;
+    setAskDraft({ botId: selected.id, text });
+    openTab("bots");
   };
 
   const selectWorkspace = (id: string | null) => {
     setWorkspaceId(id);
     if (id === null) localStorage.removeItem(currentWorkspaceKey);
     else localStorage.setItem(currentWorkspaceKey, id);
-    setSelectedId(id === null ? null : "members");
+    setProjectView(null);
   };
   // A handoff card's Open in Projects: the project, in its workspace.
   const openProject = ({ workspaceId: workspace, projectId }: { workspaceId: string; projectId: string }) => {
     selectWorkspace(workspace);
-    setSelectedId(projectId);
+    setProjectView(ProjectId.parse(projectId));
+    openTab("projects");
   };
+  const tabs: Array<TabItem<AppTab>> = [
+    { key: "bots", label: "Bots", title: `Bots (${isMac ? "⌘" : "Ctrl+"}1)` },
+    {
+      key: "projects",
+      label: "Projects",
+      title: `Projects (${isMac ? "⌘" : "Ctrl+"}2)`,
+      note: Object.values(states).includes("needs_you") && <span role="img" aria-label="needs you" className="size-1.5 rounded-full bg-warning" />,
+    },
+  ];
 
   return (
     <SidebarLayout open={sidebar.open} onToggle={sidebar.toggle}>
@@ -241,100 +274,65 @@ function Workspace({ user }: { user: User }) {
           <img src={glyph} alt="" className="size-5" />
           Chiefbot
         </SidebarHeader>
-        <div className="flex shrink-0 flex-col gap-1 px-2 pb-1">
-          <WorkspaceSwitcher {...teams} current={current} onSelect={(workspace) => selectWorkspace(workspace?.id ?? null)} />
-          <div className="flex items-center gap-0.5">
-            <SidebarSearch icon={<SearchIcon />} placeholder="Search" aria-label="Search projects and bots" value={query} onChange={(event) => setQuery(event.target.value)} />
-            {current && (
-              <SidebarIconButton label="New project" onClick={() => setCreatingProject(true)}>
-                <FolderPlusIcon />
-              </SidebarIconButton>
-            )}
+        <div className="shrink-0 px-2 pb-2">
+          <Tabs label="Bots and projects" tabs={tabs} value={tab} ids={tabIds} onChange={openTab} />
+        </div>
+        <TabPanel ids={tabIds} tab="bots" value={tab} className="flex min-h-0 flex-1 flex-col">
+          <div className="flex shrink-0 items-center gap-0.5 px-2 pb-1">
+            <SidebarSearch icon={<SearchIcon />} placeholder="Search bots" aria-label="Search bots" value={query} onChange={(event) => setQuery(event.target.value)} />
             <SidebarIconButton ref={newBotButton} label="New bot" onClick={() => setCreatingBot(true)}>
               <SquarePenIcon />
             </SidebarIconButton>
           </div>
-        </div>
-        <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-2">
-          {current && !searching && (
-            <>
-              <SidebarGroupLabel>Workspace</SidebarGroupLabel>
+          <nav aria-label="Bots" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-2">
+            {shownBots.map((bot) => (
               <SidebarRow
-                active={showMembers}
+                key={bot.id}
+                active={screen === null && bot.id === selected?.id}
                 onClick={() => {
-                  setSelectedId("members");
-                  setMembersVisit(membersVisit + 1);
+                  setBotId(bot.id);
+                  setScreen(null);
                 }}
               >
-                <UsersIcon />
-                <span className="min-w-0 flex-1 truncate">Members</span>
-                <RowNote>{current.role}</RowNote>
+                <BotFace bot={bot} className="size-4.5" dotClassName="-end-1 -bottom-1 scale-75 bg-sidebar" />
+                <span className="min-w-0 flex-1 truncate">{bot.name}</span>
+                <SidebarRowNote>{bot.status}</SidebarRowNote>
               </SidebarRow>
-              <SidebarRow
-                active={showConnectors}
-                onClick={() => {
-                  setSelectedId("connectors");
-                  setMembersVisit(membersVisit + 1);
+            ))}
+            {creatingBot ? (
+              <NewBot
+                onCreated={(id) => {
+                  setBotId(id);
+                  setScreen(null);
                 }}
-              >
-                <PlugIcon />
-                <span className="min-w-0 flex-1 truncate">Connectors</span>
-                <RowNote>checklist</RowNote>
-              </SidebarRow>
-            </>
-          )}
-          {current && (shownProjects.length > 0 || !searching || creatingProject) && (
-            <>
-              <SidebarGroupLabel>Projects</SidebarGroupLabel>
-              {shownProjects.map(({ id, name, repo }) => (
-                <SidebarRow key={id} active={id === project?.id} onClick={() => setSelectedId(id)}>
-                  <FolderGit2Icon />
-                  <span className="min-w-0 flex-1 truncate">{name}</span>
-                  <RowNote>{repo.split("/")[0]}</RowNote>
-                </SidebarRow>
-              ))}
-              {creatingProject ? (
-                <NewProject
-                  workspace={current}
-                  onClose={() => setCreatingProject(false)}
-                  onCreated={(created) => {
-                    void reloadProjects();
-                    setSelectedId(created.id);
-                  }}
-                />
-              ) : (
-                projects.length === 0 && <NewRow label="New project" onClick={() => setCreatingProject(true)} />
-              )}
-            </>
-          )}
-          {(shownBots.length > 0 || !searching || creatingBot) && (
-            <>
-              <SidebarGroupLabel>Bots</SidebarGroupLabel>
-              {shownBots.map((bot) => (
-                <SidebarRow
-                  key={bot.id}
-                  active={!showMembers && !showConnectors && !showConnectApps && !showHealth && !showSettings && !project && bot.id === selected?.id}
-                  onClick={() => {
-                    lastBot.current = bot.id;
-                    setSelectedId(bot.id);
-                  }}
-                >
-                  <BotFace bot={bot} className="size-4.5" dotClassName="-end-1 -bottom-1 scale-75 bg-sidebar" />
-                  <span className="min-w-0 flex-1 truncate">{bot.name}</span>
-                  <RowNote>{bot.status}</RowNote>
-                </SidebarRow>
-              ))}
-              {creatingBot ? (
-                <NewBot onCreated={setSelectedId} onClose={closeNewBot} />
-              ) : (
-                bots.length === 0 && <NewRow label="New bot" onClick={() => setCreatingBot(true)} />
-              )}
-            </>
-          )}
-          {searching && shownProjects.length === 0 && shownBots.length === 0 && !creatingBot && !creatingProject && (
-            <p className="px-2.5 py-2 text-sidebar-muted-foreground text-xs">No projects or bots match.</p>
-          )}
-        </nav>
+                onClose={closeNewBot}
+              />
+            ) : (
+              bots.length === 0 && <SidebarNewRow label="New bot" onClick={() => setCreatingBot(true)} />
+            )}
+            {shownBots.length === 0 && bots.length > 0 && !creatingBot && <p className="px-2.5 py-2 text-sidebar-muted-foreground text-xs">No bots match.</p>}
+          </nav>
+        </TabPanel>
+        <TabPanel ids={tabIds} tab="projects" value={tab} className="flex min-h-0 flex-1 flex-col">
+          <ProjectList
+            teams={teams}
+            current={current}
+            onWorkspace={(workspace) => selectWorkspace(workspace?.id ?? null)}
+            projects={projects}
+            states={states}
+            view={screen === null ? (workspaceScreen ?? project?.id ?? null) : null}
+            onView={(view) => {
+              setProjectView(view);
+              setScreen(null);
+              setVisit((count) => count + 1);
+            }}
+            onCreated={(created) => {
+              void reloadProjects();
+              setProjectView(created.id);
+              setScreen(null);
+            }}
+          />
+        </TabPanel>
         {user.needsGitHubSignIn && (
           <div className="shrink-0 px-2 pb-1">
             <Alert variant="warning" className="text-xs">
@@ -351,97 +349,106 @@ function Workspace({ user }: { user: User }) {
         )}
         {/* A row of icons, after T3 Code's `SidebarUtilityMenu`: the gear menu, then Health. */}
         <footer className="flex shrink-0 items-center gap-1 px-2 pt-1 pb-2">
-          <SettingsMenu
-            user={user}
-            onConnectApps={() => {
-              setSelectedId("connect-apps");
-              setMembersVisit(membersVisit + 1);
-            }}
-            onSettings={() => setSelectedId("settings")}
-          />
-          <SidebarIconButton
-            label="Health"
-            active={showHealth}
-            onClick={() => {
-              setSelectedId("health");
-              setMembersVisit(membersVisit + 1);
-            }}
-          >
+          <SettingsMenu user={user} onConnectApps={() => openScreen("connect-apps")} onSettings={() => openScreen("settings")} />
+          <SidebarIconButton label="Health" active={screen === "health"} onClick={() => openScreen("health")}>
             <ActivityIcon />
           </SidebarIconButton>
         </footer>
       </Sidebar>
       <main className="flex min-w-0 flex-1">
-        {showConnectApps ? (
+        {screen === "connect-apps" ? (
           <Column>
-            <ConnectApps key={membersVisit} />
+            <ConnectApps key={visit} />
           </Column>
-        ) : showHealth ? (
+        ) : screen === "health" ? (
           <Column>
-            <Health
-              key={membersVisit}
-              onConnectApps={() => {
-                setSelectedId("connect-apps");
-                setMembersVisit(membersVisit + 1);
-              }}
-              onAsk={bots.length > 0 ? askBot : null}
-            />
+            <Health key={visit} onConnectApps={() => openScreen("connect-apps")} onAsk={bots.length > 0 ? askBot : null} />
           </Column>
-        ) : showSettings ? (
+        ) : screen === "settings" ? (
           <Column>
             <Settings />
           </Column>
-        ) : showMembers ? (
-          <Column>
-            <Members
-              key={`${current.id}:${membersVisit}`}
-              workspace={current}
-              user={user}
-              onLeft={() => {
-                selectWorkspace(null);
-                void teams.reload();
-              }}
-            />
-          </Column>
-        ) : showConnectors ? (
-          <Column>
-            <Connectors key={`${current.id}:${membersVisit}`} workspace={current} />
-          </Column>
-        ) : project && current ? (
-          <ProjectPane
-            key={project.id}
-            login={user.login}
-            project={project}
-            workspace={current}
-            onDeleted={() => {
-              setSelectedId(null);
-              void reloadProjects();
-            }}
-            onChanged={() => void reloadProjects()}
-          />
-        ) : selected ? (
-          <BotPane
-            key={selected.id}
-            bot={selected}
-            draft={askDraft?.botId === selected.id ? askDraft.text : undefined}
-            onOpenProject={openProject}
-          />
         ) : (
-          <Column>
-            <PaneHeader title="Chiefbot" />
-            <Empty>
-              <EmptyHeader>
-                <EmptyMedia>
-                  <BotIcon />
-                </EmptyMedia>
-                <EmptyTitle>No bots yet</EmptyTitle>
-                <EmptyDescription>Create a bot to start.</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          </Column>
+          <>
+            {/* Both tabs stay mounted, the other one hidden, so each keeps its drafts. */}
+            <div hidden={tab !== "bots"} className="flex min-w-0 flex-1">
+              {selected ? (
+                <BotPane
+                  key={selected.id}
+                  bot={selected}
+                  away={tab !== "bots"}
+                  draft={askDraft?.botId === selected.id ? askDraft.text : undefined}
+                  onOpenProject={openProject}
+                />
+              ) : (
+                <EmptyPane title="Chiefbot" icon={<BotIcon />} heading="No bots yet" text="Create a bot to start." />
+              )}
+            </div>
+            <div hidden={tab !== "projects"} className="flex min-w-0 flex-1">
+              {!current ? (
+                <EmptyPane title="Projects" icon={<UsersIcon />} heading="Projects live in a workspace" text="Pick a workspace in the sidebar, or make one. Then add a repo." />
+              ) : workspaceScreen === "members" ? (
+                <Column>
+                  <Members
+                    key={`${current.id}:${visit}`}
+                    workspace={current}
+                    user={user}
+                    onLeft={() => {
+                      selectWorkspace(null);
+                      void teams.reload();
+                    }}
+                  />
+                </Column>
+              ) : workspaceScreen === "connectors" ? (
+                <Column>
+                  <Connectors key={`${current.id}:${visit}`} workspace={current} />
+                </Column>
+              ) : project ? (
+                <ProjectPane
+                  key={project.id}
+                  login={user.login}
+                  project={project}
+                  workspace={current}
+                  onDeleted={() => {
+                    setProjectView(null);
+                    void reloadProjects();
+                  }}
+                  onChanged={() => void reloadProjects()}
+                />
+              ) : (
+                <EmptyPane title={current.name} icon={<FolderGit2Icon />} heading="No projects yet" text="Add a repo. Your bots can then hand work to it.">
+                  <NewProject
+                    workspace={current}
+                    onCreated={(created) => {
+                      void reloadProjects();
+                      setProjectView(created.id);
+                    }}
+                  />
+                </EmptyPane>
+              )}
+            </div>
+          </>
         )}
       </main>
     </SidebarLayout>
+  );
+}
+
+// A main column with nothing to show yet: its top bar, then a centred line, and
+// what starts it (`children`).
+function EmptyPane({ title, icon, heading, text, children }: { title: string; icon: ReactNode; heading: string; text: string; children?: ReactNode }) {
+  return (
+    <Column>
+      <PaneHeader title={title} />
+      <Empty>
+        <EmptyHeader>
+          <EmptyMedia>{icon}</EmptyMedia>
+          <EmptyTitle>{heading}</EmptyTitle>
+          <EmptyDescription>{text}</EmptyDescription>
+        </EmptyHeader>
+        {children}
+      </Empty>
+    </Column>
   );
 }
 
@@ -493,19 +500,4 @@ function SettingsMenu({ user, onConnectApps, onSettings }: { user: User; onConne
       </MenuPopup>
     </>
   );
-}
-
-// The quiet "+ New …" row an empty section shows; the search row's icons open the same form.
-function NewRow({ label, onClick }: { label: string; onClick: () => void }) {
-  return (
-    <SidebarRow className="text-sidebar-muted-foreground" onClick={onClick}>
-      <PlusIcon />
-      <span>{label}</span>
-    </SidebarRow>
-  );
-}
-
-// A sidebar row's quiet trailing note (a status, a role, a repo owner).
-function RowNote({ children }: { children: ReactNode }) {
-  return <span className="shrink-0 font-normal text-sidebar-muted-foreground text-xs">{children}</span>;
 }

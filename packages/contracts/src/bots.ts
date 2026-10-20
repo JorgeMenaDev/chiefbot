@@ -5,7 +5,7 @@ import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, QuestionId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
-import { ProjectState, ProjectTasks } from "./projects.ts";
+import { ProjectStateChange, ProjectTasks } from "./projects.ts";
 import { QuestionResult } from "./questions.ts";
 import { ScreenControl } from "./screens.ts";
 import { ProjectWorkers } from "./taskWorkers.ts";
@@ -80,7 +80,7 @@ export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("user"), user: User }),
   ProjectTasks.extend({ type: z.literal("tasks") }),
   ProjectWorkers.extend({ type: z.literal("workers") }),
-  z.object({ type: z.literal("project-state"), projectId: ProjectId, state: ProjectState }),
+  ProjectStateChange.extend({ type: z.literal("project-state") }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;
 

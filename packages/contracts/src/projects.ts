@@ -237,6 +237,11 @@ export type ProjectTasks = z.infer<typeof ProjectTasks>;
 export const ProjectState = z.enum(["idle", "working", "needs_you", "sleeping"]);
 export type ProjectState = z.infer<typeof ProjectState>;
 
+// A project's new state for the user: what /events sends (a `project-state`
+// ClientEvent), and what Electron main hands the renderer.
+export const ProjectStateChange = z.object({ projectId: ProjectId, state: ProjectState });
+export type ProjectStateChange = z.infer<typeof ProjectStateChange>;
+
 // The member `login`'s state of a project: `awake` while its computer runs the
 // project agent, `busy` while the agent has a message of any member to answer.
 export function projectState({ login, awake, busy, tasks, workers }: { login: string; awake: boolean; busy: boolean; tasks: Task[]; workers: TaskWorker[] }): ProjectState {
