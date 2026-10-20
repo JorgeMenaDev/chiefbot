@@ -222,11 +222,18 @@ function FullScreen({ bot, onClose, children }: { bot: Bot; onClose: () => void;
 
 // Who drives the screen and the switch, after Grok's floating pill: "Watching | Take control"
 // while the bot drives, "You're in control | Stop" while the user does (take-over, hand-back).
-// A refused switch shows a short line under the pill, with control's reason on hover, until the next try.
+// A refused switch shows a short line under the pill, with control's reason on hover, until the next try
+// or until who drives changes.
 function ControlPill({ bot }: { bot: Bot }) {
   const { takeOver, handBack } = window.chiefbot.bots;
   const human = bot.screenControl === "human";
   const [error, setError] = useState<{ text: string; reason: string } | null>(null);
+  // A switch made since (in the other pill, or by control) makes an old refusal stale.
+  const [control, setControl] = useState(bot.screenControl);
+  if (control !== bot.screenControl) {
+    setControl(bot.screenControl);
+    setError(null);
+  }
   const toggle = () => {
     setError(null);
     const text = human ? "Couldn't hand the screen back." : "Couldn't take control.";
