@@ -4,6 +4,8 @@ The first template in the template catalog (`templates/<name>/`, one folder per 
 
 **Each service folder stands in for a real repo.** `ui/`, `meta/` and `auth/` each have their own build file and Dockerfile, and nothing is shared between them. A later change lets a project point each service at its real repo.
 
+`template.yaml` tells Chiefbot what compose cannot: the services a project may point at a repo (`ui`, `meta`, `auth`), the setup stages, the seed and the notes for an engineer's brief (`docs/templates.md`).
+
 ## Shape
 
 | Service    | Folder      | Port | What it is                                                                                                                                                                                                                                                         |
@@ -27,7 +29,7 @@ The awkward parts it keeps on purpose:
 
 ## One shared network namespace per copy
 
-`compose.yaml` runs the stack the way Kubernetes runs a pod. A tiny `pod` service (the Kubernetes pause image) owns one network namespace, and every other service joins it with `network_mode: service:pod`. Inside a copy, everything is on `localhost` with the fixed ports above, exactly as a developer runs it on a laptop. `pod` does nothing else, so any app service can restart without taking the namespace with it. Nothing is published to this machine unless you ask.
+`compose.yaml` runs the stack the way Kubernetes runs a pod. A tiny `pod` service (the Kubernetes pause image) owns one network namespace, and every other service joins it with `network_mode: service:pod`. Inside a copy, everything is on `localhost` with the fixed ports above, exactly as a developer runs it on a laptop. `pod` does nothing else, so any app service can restart without taking the namespace with it. Its `expose` lists those ports, which Chiefbot checks against the engineer computer's own. Nothing is published to this machine unless you ask.
 
 This is what lets two copies run side by side, unchanged:
 
