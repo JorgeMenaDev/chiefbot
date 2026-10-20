@@ -1,5 +1,6 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import type { TurnEvent } from "@chiefbot/contracts";
+import { z } from "zod";
 import { computerRow, computerToolName } from "./computerUse.ts";
 
 // What one running turn has streamed so far: the messages that came in chunks
@@ -22,10 +23,10 @@ export function toTurnEvents(event: SessionEvent, { deltaMessageIds, toolNames }
     case "assistant.message":
       if (deltaMessageIds.has(event.data.messageId) || !event.data.content) return [];
       return [{ type: "text-delta", messageId: event.data.messageId, text: event.data.content }];
-    // A computer call's row also names its actions.
+    // A computer call's row also names its actions, and a task call's the helper it starts.
     case "tool.execution_start": {
       const { toolName, toolTitle, arguments: args } = event.data;
-      const name = toolName === computerToolName ? computerRow(args) : (toolTitle ?? toolName);
+      const name = toolName === computerToolName ? computerRow(args) : toolName === taskToolName ? taskRow(args) : (toolTitle ?? toolName);
       toolNames.set(event.data.toolCallId, name);
       return [{ type: "tool-call", toolCallId: event.data.toolCallId, name, status: "running" }];
     }
@@ -45,4 +46,13 @@ export function toTurnEvents(event: SessionEvent, { deltaMessageIds, toolNames }
     default:
       return [];
   }
+}
+
+// The runtime's task tool starts a helper (a custom or built-in agent) on a job
+// of a few words: its row reads "explore: Find the checkout button".
+const taskToolName = "task";
+const TaskArgs = z.object({ agent_type: z.string(), description: z.string() });
+function taskRow(args: unknown) {
+  const parsed = TaskArgs.safeParse(args);
+  return parsed.success ? `${parsed.data.agent_type}: ${parsed.data.description}` : taskToolName;
 }

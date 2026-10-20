@@ -1,5 +1,5 @@
 import type { ReasoningEffort } from "@chiefbot/contracts";
-import type { ElicitationResult, ElicitationSchema, JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
+import type { CustomAgentConfig, ElicitationResult, ElicitationSchema, JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
 import type { BotSession, Copilot, FileAttachment, SdkModelList } from "./copilot.ts";
 
 // A fake Copilot SDK for tests. Each send() plays a script of real-shaped SDK
@@ -64,6 +64,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const skillDirectories: string[][] = [];
   // Each opened session's instructions, in the order sessions opened.
   const instructions: Array<string | undefined> = [];
+  // Each opened session's custom agents (none: []), in the order sessions opened.
+  const agents: CustomAgentConfig[][] = [];
   // Each opened session's working directory and extra runtime environment (none: undefined), in the order sessions opened.
   const workingDirectories: Array<string | undefined> = [];
   const envs: Array<Record<string, string> | undefined> = [];
@@ -81,6 +83,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       mcpServers: servers = {},
       onMcpCall,
       skillDirectories: skills = [],
+      agents: helpers = [],
       questions,
       workingDirectory,
       env,
@@ -94,6 +97,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       mcpServers.push(servers);
       skillDirectories.push(skills);
       instructions.push(told);
+      agents.push(helpers);
       workingDirectories.push(workingDirectory);
       envs.push(env);
       const handlers = new Set<(event: SessionEvent) => void>();
@@ -203,7 +207,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
     },
   };
 
-  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, instructions, workingDirectories, envs, sends, script, shell };
+  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, instructions, agents, workingDirectories, envs, sends, script, shell };
   return fake;
 }
 

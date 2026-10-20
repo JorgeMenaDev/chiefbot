@@ -1,7 +1,7 @@
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, sep } from "node:path";
 import { instructionPaths, RepoReadArgs, RepoSearchArgs } from "@chiefbot/contracts";
-import type { Tool } from "@github/copilot-sdk";
+import type { CustomAgentConfig, Tool } from "@github/copilot-sdk";
 import type { z } from "zod";
 
 // The project's repo as its coordinator reads it: a copy of the default branch
@@ -297,3 +297,17 @@ export function repoTools(copy: RepoCopy) {
     tool("repo_search", "Search the text of the repo's files (its default branch) for a regular expression. Answers path:line:text.", RepoSearchArgs, search),
   ];
 }
+
+// The coordinator's explore helper: a custom agent of its session that the model
+// starts with the runtime's task tool. It reads in a context window of its own,
+// with the repo tools and no other tool, and answers the coordinator. The
+// session's config tells the coordinator of it (coordinatorSessionConfig).
+export const exploreAgent = {
+  name: "explore",
+  displayName: "Explore",
+  description: "For a question about the code that takes many reads. It reads and searches the repo (its default branch) and answers with the files it found. Read-only.",
+  tools: ["repo_read", "repo_search"],
+  prompt:
+    "You answer one question about a repo's code by reading it. repo_search searches the text of its files, and repo_read reads a file or lists a folder. " +
+    "Answer briefly, naming the files and lines your answer rests on. You can only read: you cannot change files or run commands.",
+} satisfies CustomAgentConfig;

@@ -1,11 +1,14 @@
 import {
   CopilotClient,
   type CopilotClientOptions,
+  type CopilotSession,
+  type CustomAgentConfig,
   type ElicitationContext,
   type ElicitationHandler,
   type ElicitationResult,
   type MCPServerConfig,
   type ResumeSessionConfig,
+  type SessionConfig,
   type SessionEvent,
   type SessionHooks,
 } from "@github/copilot-sdk";
@@ -66,16 +69,35 @@ export function agentEnv(env: Record<string, string | undefined>) {
 
 // The real Copilot SDK in empty mode, for a project's coordinator: no shell, no
 // file tools, no ambient config or skills. Each session can use only the custom
-// tools it is opened with, and skills from the skill folders it names. Session history
-// lives under `baseDirectory`.
-export function coordinatorSdk({ baseDirectory }: { baseDirectory: string }): Copilot {
-  return sdkCopilot({ mode: "empty", baseDirectory, useLoggedInUser: false, env: agentEnv(process.env) }, coordinatorSessionConfig);
+// tools it is opened with, skills from the skill folders it names, and the helpers
+// it names. Session history lives under `baseDirectory`. `connect` starts a
+// runtime (the SDK's CopilotClient; a stand-in in tests), and `log` reports
+// once that sessions run without their helpers.
+export function coordinatorSdk({
+  baseDirectory,
+  connect = sdkClient,
+  log = console.error,
+}: {
+  baseDirectory: string;
+  connect?: (options: RuntimeOptions) => SdkClient;
+  log?: (line: string) => void;
+}): Copilot {
+  const options = { mode: "empty" as const, baseDirectory, useLoggedInUser: false, env: agentEnv(process.env) };
+  return sdkCopilot(options, coordinatorSessionConfig, { connect, helpersReady: builtinAgentsOff, log });
 }
 
+// Turns the runtime's built-in agents off for the session (task, research,
+// rubber-duck and more), which would get every tool of the session, so the task
+// tool starts only the session's own helpers. Whether the runtime said it did:
+// the SDK takes this only as an update of an open session's options.
+const builtinAgentsOff = (session: SdkSession) => session.rpc.options.update({ includedBuiltinAgents: [] }).then(({ success }) => success, () => false);
+
 // A coordinator session's config: its tools and its MCP servers' tools are the
-// only ones it may use, plus the runtime's skill tool when it has skill folders
-// (the repo's, in the coordinator's copy: BuiltInTools.Isolated lists the tool as
-// safe in empty mode). Its instructions follow the SDK's own system message.
+// only ones it may use, plus two of the runtime's own, which BuiltInTools.Isolated
+// lists as safe in empty mode: the skill tool when it has skill folders (the
+// repo's, in the coordinator's copy), and the task tool when it has helpers
+// (`agents`), which starts them. Its instructions, and a line on its helpers,
+// follow the SDK's own system message.
 export function coordinatorSessionConfig({
   onPermissionRequest,
   tools,
@@ -83,20 +105,48 @@ export function coordinatorSessionConfig({
   mcpServers = {},
   onMcpCall,
   skillDirectories = [],
+  agents = [],
 }: Parameters<Copilot["openSession"]>[0]) {
   const hasMcp = Object.keys(mcpServers).length > 0;
   const hasSkills = skillDirectories.length > 0;
+  const { hooks, ...connectors } = connectorConfig(mcpServers, onMcpCall);
+  const told = [...(instructions === undefined ? [] : [instructions]), ...helpersLine(agents)];
   return {
     onPermissionRequest,
     tools,
     streaming: true,
-    availableTools: [...tools.map(({ name }) => `custom:${name}`), ...(hasMcp ? ["mcp:*"] : []), ...(hasSkills ? ["builtin:skill"] : [])],
+    availableTools: [
+      ...tools.map(({ name }) => `custom:${name}`),
+      ...(hasMcp ? ["mcp:*"] : []),
+      ...(hasSkills ? ["builtin:skill"] : []),
+      ...(agents.length > 0 ? ["builtin:task"] : []),
+    ],
     enableSkills: hasSkills,
     skillDirectories,
-    ...connectorConfig(mcpServers, onMcpCall),
-    ...appended(instructions),
+    customAgents: agents,
+    ...connectors,
+    ...(hooks || agents.length > 0 ? { hooks: { ...hooks, ...(agents.length > 0 ? { onPreToolUse: helperLimits(agents) } : {}) } satisfies SessionHooks } : {}),
+    ...appended(told.length > 0 ? told.join("\n\n") : undefined),
   };
 }
+
+// What the agent is told of its helpers, if it has any.
+function helpersLine(agents: CustomAgentConfig[]) {
+  if (agents.length === 0) return [];
+  const each = agents.map(({ name, description }) => `- ${name}${description ? `: ${description}` : ""}`);
+  return [['Start a helper with the task tool, mode "sync": it works in a context of its own and answers you.', ...each].join("\n")];
+}
+
+// Each helper may call only the tools its custom agent names: the runtime's own
+// limit, checked again before every call a helper makes. The coordinator's own
+// calls go on to its permission check.
+const helperLimits =
+  (agents: CustomAgentConfig[]): NonNullable<SessionHooks["onPreToolUse"]> =>
+  ({ agentType, toolName }) => {
+    const agent = agents.find(({ name }) => name === agentType);
+    if (!agent?.tools || agent.tools.includes(toolName)) return;
+    return { permissionDecision: "deny", permissionDecisionReason: `The ${agent.name} helper may only use ${agent.tools.join(", ")}.` };
+  };
 
 // A session's `instructions`, after the SDK's own system message.
 const appended = (instructions: string | undefined) =>
@@ -137,57 +187,96 @@ export function askUser({ ask, ended }: Questions) {
   };
 }
 
+// What starts a runtime: the SDK's client options, with its whole environment.
+type RuntimeOptions = CopilotClientOptions & { env: Record<string, string | undefined> };
+
+// The parts of the SDK's CopilotClient and CopilotSession that sdkCopilot uses,
+// so a test can stand in for the runtime.
+export type SdkSession = Pick<CopilotSession, "send" | "abort" | "disconnect"> & {
+  on(handler: (event: SessionEvent) => void): () => void;
+  rpc: { model: Pick<CopilotSession["rpc"]["model"], "switchTo" | "list">; options: Pick<CopilotSession["rpc"]["options"], "update"> };
+};
+export type SdkClient = {
+  start(): Promise<void>;
+  stop(): Promise<unknown>;
+  getSessionMetadata(sessionId: string): Promise<unknown>;
+  createSession(config: SessionConfig): Promise<SdkSession>;
+  resumeSession(sessionId: string, config: ResumeSessionConfig): Promise<SdkSession>;
+};
+const sdkClient = (options: RuntimeOptions): SdkClient => new CopilotClient(options);
+
 // A Copilot on the SDK with `clientOptions`. Seat sessions share one runtime
 // and get their tokens from gitHubTokenProvider. An installation session gets a
 // runtime of its own, started with its token in COPILOT_GITHUB_TOKEN, and so
 // does a session with an `env` (an engineer's secrets), whose variables the
-// runtime's own override. That runtime stops when the session disconnects.
-// Either resumes the session's history when it exists on disk. A session
-// opened with `questions` gets the ask_user tool (askUser).
+// runtime's own override. That runtime stops when the session disconnects, or
+// fails to open. Either resumes the session's history when it exists on disk. A
+// session opened with `questions` gets the ask_user tool (askUser). A session
+// with helpers keeps them only when `helpersReady` says the runtime will keep
+// them to their tools. Otherwise it closes and opens again without them, and so
+// does every session after it, which `log` reports once.
 function sdkCopilot(
-  clientOptions: CopilotClientOptions & { env: Record<string, string | undefined> },
+  clientOptions: RuntimeOptions,
   sessionConfig: (options: Parameters<Copilot["openSession"]>[0]) => ResumeSessionConfig,
+  {
+    connect = sdkClient,
+    helpersReady = async () => true,
+    log = console.error,
+  }: { connect?: (options: RuntimeOptions) => SdkClient; helpersReady?: (session: SdkSession) => Promise<boolean>; log?: (line: string) => void } = {},
 ): Copilot {
-  const shared = new CopilotClient(clientOptions);
-  return {
-    async openSession(options) {
-      const asks = options.questions && askUser(options.questions);
-      const config = { ...sessionConfig(options), ...asks?.config };
-      const extra = options.env ?? {};
-      if (options.auth.kind === "seat" && Object.keys(extra).length === 0) {
-        const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
-        const disconnect = () => {
-          asks?.close();
-          return session.disconnect();
-        };
-        return { ...bound(session), disconnect };
-      }
-      const env = { ...extra, ...clientOptions.env };
-      const own = new CopilotClient({ ...clientOptions, env: options.auth.kind === "seat" ? env : { ...env, COPILOT_GITHUB_TOKEN: options.auth.token } });
-      const auth = options.auth.kind === "seat" ? { gitHubTokenProvider: options.auth.gitHubTokenProvider } : {};
-      // A runtime whose session never opened stops at once, with the secrets or token it holds.
-      const session = await openOn(own, options.sessionId, { ...config, ...auth }).catch(async (error: unknown) => {
-        await own.stop().catch(() => []);
-        throw error;
-      });
-      const disconnect = async () => {
+  const shared = connect(clientOptions);
+  let withoutHelpers = false;
+
+  // The session as `options` say, on the shared runtime or one of its own.
+  async function open(options: Parameters<Copilot["openSession"]>[0]) {
+    const asks = options.questions && askUser(options.questions);
+    const config = { ...sessionConfig(options), ...asks?.config };
+    const extra = options.env ?? {};
+    if (options.auth.kind === "seat" && Object.keys(extra).length === 0) {
+      const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
+      const disconnect = () => {
         asks?.close();
-        await own.stop();
+        return session.disconnect();
       };
-      return { ...bound(session), disconnect };
+      return { session, bot: { ...bound(session), disconnect } };
+    }
+    const env = { ...extra, ...clientOptions.env };
+    const own = connect({ ...clientOptions, env: options.auth.kind === "seat" ? env : { ...env, COPILOT_GITHUB_TOKEN: options.auth.token } });
+    const auth = options.auth.kind === "seat" ? { gitHubTokenProvider: options.auth.gitHubTokenProvider } : {};
+    // A runtime whose session never opened stops at once, with the secrets or token it holds.
+    const session = await openOn(own, options.sessionId, { ...config, ...auth }).catch(async (error: unknown) => {
+      await own.stop().catch(() => []);
+      throw error;
+    });
+    const disconnect = async () => {
+      asks?.close();
+      await own.stop();
+    };
+    return { session, bot: { ...bound(session), disconnect } };
+  }
+
+  return {
+    async openSession(requested) {
+      const options = withoutHelpers ? { ...requested, agents: [] } : requested;
+      const { session, bot } = await open(options);
+      if ((options.agents ?? []).length === 0 || (await helpersReady(session))) return bot;
+      if (!withoutHelpers) log("The Copilot runtime would not turn off its built-in agents, so project sessions now run without their helpers.");
+      withoutHelpers = true;
+      await bot.disconnect();
+      return (await open({ ...requested, agents: [] })).bot;
     },
   };
 }
 
 // Starts the client and resumes the session, or creates it the first time.
-async function openOn(client: CopilotClient, sessionId: string, config: ResumeSessionConfig) {
+async function openOn(client: SdkClient, sessionId: string, config: ResumeSessionConfig) {
   await client.start();
   const existing = await client.getSessionMetadata(sessionId);
   return existing ? client.resumeSession(sessionId, config) : client.createSession({ ...config, sessionId });
 }
 
 // The session's methods a BotSession uses, bound to it.
-function bound(session: Awaited<ReturnType<typeof openOn>>): Omit<BotSession, "disconnect"> {
+function bound(session: SdkSession): Omit<BotSession, "disconnect"> {
   return {
     on: (handler) => session.on(handler),
     send: (prompt, files = []) => session.send(files.length > 0 ? { prompt, attachments: files } : { prompt }),
