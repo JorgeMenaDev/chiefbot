@@ -21,6 +21,13 @@ export const ConnectionField = z.strictObject({
 });
 export type ConnectionField = z.infer<typeof ConnectionField>;
 
+// How control turns a saved secret into a short-lived one before each turn, so the
+// saved secret itself never reaches a bot's computer:
+//   google-access-token  the secret field `key` (a service account key or an authorized_user
+//                        credentials JSON) becomes the field `token`, a one-hour Google access token
+export const ConnectionExchange = z.enum(["google-access-token"]);
+export type ConnectionExchange = z.infer<typeof ConnectionExchange>;
+
 // The `{x}` placeholders of an env template.
 const placeholders = (template: string) => [...template.matchAll(/\{([^{}]*)\}/g)].map(([, name]) => name ?? "");
 
@@ -31,6 +38,7 @@ const placeholders = (template: string) => [...template.matchAll(/\{([^{}]*)\}/g
 //             {dir} the connection's folder on the computer for the turn
 //   readOnly  shell globs over one command (`*` is any text): a command of `cli` that
 //             matches one runs without asking; any other waits for the person's approval
+//   exchange  a ConnectionExchange control runs before each turn; env may then name its output field
 export const ConnectionDefinition = z
   .strictObject({
     title: z.string().trim().min(1).max(60),
@@ -39,11 +47,17 @@ export const ConnectionDefinition = z
     fields: z.record(z.string().regex(/^[a-z][a-z0-9]*$/, "expected lower-case letters and digits, like token"), ConnectionField),
     env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/, "expected an environment variable name"), z.string()).default({}),
     readOnly: z.array(z.string().trim().min(1)).default([]),
+    exchange: ConnectionExchange.optional(),
   })
-  .superRefine(({ fields, env }, ctx) => {
+  .superRefine(({ fields, env, exchange }, ctx) => {
+    if (exchange === "google-access-token") {
+      if (fields.key?.secret !== true) ctx.addIssue({ code: "custom", path: ["exchange"], message: "google-access-token needs a secret field named key" });
+      if ("token" in fields) ctx.addIssue({ code: "custom", path: ["fields", "token"], message: "google-access-token makes the field token itself" });
+    }
+    const known = new Set(["dir", ...Object.keys(fields), ...(exchange === "google-access-token" ? ["token"] : [])]);
     for (const [variable, template] of Object.entries(env)) {
       for (const name of placeholders(template)) {
-        if (name !== "dir" && !(name in fields)) ctx.addIssue({ code: "custom", path: ["env", variable], message: `{${name}} names no field` });
+        if (!known.has(name)) ctx.addIssue({ code: "custom", path: ["env", variable], message: `{${name}} names no field` });
       }
     }
   });
@@ -66,7 +80,7 @@ export const ConnectRequest = z.object({ fields: z.record(z.string(), z.string()
 export type ConnectRequest = z.infer<typeof ConnectRequest>;
 
 // A connection as a bot's computer gets it for one turn (run-turn): its `fields`
-// values, which the computer writes to files in the connection's folder, and its
+// values (after its exchange, so a gcloud key arrives as a one-hour token only), which the computer writes to files in the connection's folder, and its
 // `env` templates, which the computer fills in ({field} and {dir}, the folder only
 // it knows) and hands the CLI through a wrapper. `skill` is its SKILL.md.
 export const AgentConnection = z.object({
