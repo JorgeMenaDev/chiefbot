@@ -26,6 +26,16 @@ services:
       # computers themselves all reach control through Caddy.
       CHIEFBOT_PUBLIC_URL: https://${CHIEFBOT_DOMAIN:?set CHIEFBOT_DOMAIN to this machine's DNS name}
       CHIEFBOT_WORKER_CONTROL_URL: https://${CHIEFBOT_DOMAIN}
+      # Behind a company proxy (docs/deploy.md): unset passes nothing. Each proxy
+      # variable takes its lower-case form when the upper-case one is unset, as
+      # control does. The CA file goes in ~/.chiefbot, so
+      # CHIEFBOT_CA_FILE=/chiefbot/<file>. Control's own calls trust it through NODE_EXTRA_CA_CERTS.
+      HTTP_PROXY: ${HTTP_PROXY:-${http_proxy:-}}
+      HTTPS_PROXY: ${HTTPS_PROXY:-${https_proxy:-}}
+      NO_PROXY: ${NO_PROXY:-${no_proxy:-}}
+      CHIEFBOT_CA_FILE: ${CHIEFBOT_CA_FILE:-}
+      NODE_EXTRA_CA_CERTS: ${CHIEFBOT_CA_FILE:-}
+      CHIEFBOT_IMAGE_PREFIX: ${CHIEFBOT_IMAGE_PREFIX:-}
     volumes:
       # SQLite (users, bots, projects, ledgers, chats) and projects' context files.
       - data:/data

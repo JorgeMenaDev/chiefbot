@@ -39,6 +39,7 @@ import {
 import type { controlApprovals } from "./approvals.ts";
 import type { Clock } from "@chiefbot/worker/clock";
 import type { ComputerProvider } from "./computers/computer.ts";
+import { proxyEnv, type CompanyNetwork } from "./computers/config.ts";
 import type { ContextStore } from "./contextStore.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
@@ -91,6 +92,8 @@ export type TaskWorkerHostOptions = {
   // stack runs (templates/stacks.ts): null where computers have none, as on GCE.
   templates: Template[];
   stacks: StackRunner | null;
+  // What each worker's computer and stack get behind a company network (computers/config.ts).
+  network: CompanyNetwork;
   // Whether a member may read a repo, and a token that reads it (repos.ts).
   repoReadable: ReturnType<typeof repoAccess>["readable"];
   repoReadToken: ReturnType<typeof repoAccess>["readToken"];
@@ -205,6 +208,7 @@ export function taskWorkerHost({
   computers,
   templates,
   stacks,
+  network,
   repoReadable,
   repoReadToken,
   approvals,
@@ -360,14 +364,23 @@ export function taskWorkerHost({
   const newToken = () => crypto.randomUUID() + crypto.randomUUID();
 
   // Makes the worker's computer, a launch that a resent dispatch and a reap wait
-  // for. A failure fails the worker and removes what was made, which frees its place.
+  // for. A failure fails the worker and removes what was made, which frees its
+  // place. Behind a company network, its env has the proxy, and the CA
+  // certificate as CHIEFBOT_CA_CERT, which the computer adds to its tools' trust
+  // (infra/computer/start.sh).
   function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
     const launched = (async () => {
       let failure: string | null = null;
       try {
         await computers.create({
           id: workerId,
-          env: { CHIEFBOT_CONTROL_URL: controlUrlForComputers(), CHIEFBOT_TASK_WORKER_ID: workerId, CHIEFBOT_TASK_WORKER_TOKEN: token },
+          env: {
+            CHIEFBOT_CONTROL_URL: controlUrlForComputers(),
+            CHIEFBOT_TASK_WORKER_ID: workerId,
+            CHIEFBOT_TASK_WORKER_TOKEN: token,
+            ...proxyEnv(network, controlUrlForComputers()),
+            ...(network.ca === null ? {} : { CHIEFBOT_CA_CERT: network.ca }),
+          },
         });
         await computers.start(workerId);
       } catch (error) {
@@ -650,8 +663,9 @@ export function taskWorkerHost({
     };
     for (const { id, label } of [BUILD_STAGE, ...stackStages(template, config.service)]) report({ id, label, state: "waiting", log: "" });
     let last = "";
+    const stackNetwork = { imagePrefix: network.imagePrefix, proxy: proxyEnv(network, controlUrlForComputers()), ca: network.ca };
     const outcome = await stacks
-      .start(workerId, { template, own: config.service, repos, secrets: Object.values(secrets) }, (stage) => {
+      .start(workerId, { template, own: config.service, repos, secrets: Object.values(secrets), network: stackNetwork }, (stage) => {
         last = stage.label;
         report(stage);
       })

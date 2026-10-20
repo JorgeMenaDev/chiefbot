@@ -2180,3 +2180,48 @@ test("where computers have no stacks, as on GCE, an engineer of a project with a
     setup: [],
   });
 });
+
+// The deployer's settings behind a company network (docs/deploy.md, "Behind a company proxy").
+const companyNetwork = {
+  imagePrefix: "registry.example.com/hub/",
+  proxy: { http: "http://proxy.example.com:3128", https: "http://proxy.example.com:3128", noProxy: ".corp.example.com" },
+  ca: "-----BEGIN CERTIFICATE-----\nMIIBacmeCA\n-----END CERTIFICATE-----\n",
+};
+
+test("behind a company network, an engineer's computer and its stack get the proxy, its NO_PROXY keeping localhost, and the CA certificate; the stack gets the image prefix too", async () => {
+  const control = await templateProject({ network: companyNetwork });
+  const { computers, stacks } = control;
+  const { tool } = await heldTurn(control);
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await eventually(() => stacks.started.length === 1);
+  const proxy = {
+    HTTP_PROXY: "http://proxy.example.com:3128",
+    http_proxy: "http://proxy.example.com:3128",
+    HTTPS_PROXY: "http://proxy.example.com:3128",
+    https_proxy: "http://proxy.example.com:3128",
+    NO_PROXY: ".corp.example.com,localhost,127.0.0.1,::1",
+    no_proxy: ".corp.example.com,localhost,127.0.0.1,::1",
+  };
+  expect(computers.computers.get(id)?.spec.env).toEqual({
+    CHIEFBOT_CONTROL_URL: control.url,
+    CHIEFBOT_TASK_WORKER_ID: id,
+    CHIEFBOT_TASK_WORKER_TOKEN: expect.any(String),
+    ...proxy,
+    CHIEFBOT_CA_CERT: companyNetwork.ca,
+  });
+  expect(stacks.started[0]?.plan.network).toEqual({ imagePrefix: "registry.example.com/hub/", proxy, ca: companyNetwork.ca });
+});
+
+test("with no company network set, an engineer's computer and its stack get no proxy, image prefix or CA certificate", async () => {
+  const control = await templateProject();
+  const { computers, stacks } = control;
+  const { tool } = await heldTurn(control);
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await eventually(() => stacks.started.length === 1);
+  expect(Object.keys(computers.computers.get(id)?.spec.env ?? {}).sort()).toEqual(["CHIEFBOT_CONTROL_URL", "CHIEFBOT_TASK_WORKER_ID", "CHIEFBOT_TASK_WORKER_TOKEN"]);
+  expect(stacks.started[0]?.plan.network).toEqual({ imagePrefix: null, proxy: {}, ca: null });
+});

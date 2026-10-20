@@ -41,6 +41,14 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 //                                A template that breaks a rule stops control here, naming the file.
 //                                With docker computers, engineers' stacks run from it (templates/stacks.ts),
 //                                through the docker CLI and its compose plugin.
+//   Behind a company network, with docker computers (docs/deploy.md, "Behind a company proxy";
+//   computers/config.ts reads them; gce ignores them):
+//   CHIEFBOT_IMAGE_PREFIX        a registry mirror put before template base images, e.g. registry.example.com/hub
+//   HTTP_PROXY, HTTPS_PROXY, NO_PROXY (or their lower-case forms)  passed on to engineers' computers,
+//                                their template stacks' builds and containers, and control's fetches of
+//                                services' repos. Bun's fetch reads them for control's own calls too.
+//   CHIEFBOT_CA_FILE             a PEM file of the network's CA certificate, added to the trust of the same.
+//                                A file control cannot read stops it here.
 const port = Number(process.env.CHIEFBOT_CONTROL_PORT ?? 7410);
 const idleStopMinutes = Number(process.env.CHIEFBOT_IDLE_STOP_MINUTES ?? 30);
 if (!(idleStopMinutes > 0)) throw new Error("CHIEFBOT_IDLE_STOP_MINUTES must be a positive number of minutes");
@@ -88,5 +96,6 @@ const control = startControl({
   connections,
   templates,
   stacks: config.provider === "gce" ? null : dockerStacks({ socketPath: config.socketPath, githubUrl, templatesDir }),
+  ...(config.provider === "gce" ? {} : { network: config.network }),
 });
 console.log(`control listening on ${control.url} with ${config.provider} computers`);

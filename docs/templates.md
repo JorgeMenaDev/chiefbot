@@ -71,6 +71,19 @@ An engineer's stack runs in the computer's namespace (`network_mode: container:â
 
 The computer's ports, each with its protocol, are one list: `computerPorts` in `packages/contracts/src/computer.ts`. The worker reads it, and the computer image gets it as `/opt/chiefbot/ports.env`, which `infra/computer/start.sh` reads. A new port there is checked against every template at once.
 
+### Company networks
+
+Behind a company proxy, the deployer gives Chiefbot a proxy, a CA certificate and a registry mirror (`docs/deploy.md`, **Behind a company proxy**). Each build of a stack gets the proxy variables as build args, which reach every `RUN` step with no `ARG` line, and the CA as the build secret `chiefbot-ca`. The mirror reaches a build only if its Dockerfile uses it. So write a stand-in's Dockerfile to build both with these settings and without them:
+
+- **The proxy:** nothing to write. Do not declare `HTTP_PROXY`, `HTTPS_PROXY` or `NO_PROXY` with an `ARG` of your own, or copy them into `ENV`. Docker leaves its own proxy build args out of the image's history, but an `ARG` or `ENV` of yours keeps them in the image.
+- **Base images:** declare `ARG CHIEFBOT_IMAGE_PREFIX=` before the first `FROM`, and write `FROM ${CHIEFBOT_IMAGE_PREFIX}node:24-alpine`. Set, it is the mirror with a trailing slash. Unset, it is empty, and the image comes from Docker Hub.
+- **The CA:** mount the secret in each `RUN` step that reaches the network: `RUN --mount=type=secret,id=chiefbot-ca â€¦`. It is at `/run/secrets/chiefbot-ca` only when set. Then add it to the trust of the tool the step runs:
+  - Node: `if [ -f /run/secrets/chiefbot-ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/chiefbot-ca; fi && npm ci`;
+  - Java: `keytool -importcert -noprompt -cacerts -storepass changeit -alias chiefbot-ca -file /run/secrets/chiefbot-ca` (only the file's first certificate) before `gradle build`;
+  - Debian, Ubuntu and Alpine images with `ca-certificates`, for git, curl and the package manager: copy it to `/usr/local/share/ca-certificates/chiefbot-ca.crt`, then run `update-ca-certificates`.
+
+The Dockerfiles of `java-react-enterprise` do all of this, for npm and Gradle. A service's `image:` needs nothing: Chiefbot puts the prefix before it. A real service repo's own Dockerfile gets the same build args and secret, but uses them only if it is written for them.
+
 ## An engineer's stack
 
 Each engineer and each verifier of a project with a template gets its own copy of the stack, inside its own computer's network namespace (`network_mode: container:chiefbot-<id>`). Every service keeps its fixed port on that computer's `localhost`, so the gateway's CORS origin and its cookies work unchanged, and the computer's Chromium reaches the app as a developer's browser does. Two engineers never collide: each has its own `localhost`. No service publishes a port on the Docker host.
@@ -80,6 +93,8 @@ After the computer starts, and before its setup clones the repo and runs `comman
 1. Checks the project's `template`, `service` and `services` against the catalog as it is now, and each service's repo against the member who asked for the engineer or verifier, as when settings are saved. It checks on every start, also when the image is already built: the member who saved the settings being able to read a repo is not enough.
 2. **Build**: for each service that runs from a repo, finds the commit its `ref` names now, then fetches that commit and builds the service's image from its `context`, tagged `chiefbot-stack-<template>:<service>-<commit>-<repo hash>`. An image that exists is reused, so a later engineer on the same commit skips the fetch and the build. Each stand-in builds from the template's folder, from Docker's build cache once it has built.
 3. Starts the services of each of the template's `stages`, in order, as compose project `chiefbot-<id>-stack`, and waits until they are healthy, and the `seed` until it has finished. The seed runs once.
+
+Behind a company proxy, the builds and the services get the proxy and the CA, and each service's `image:` gets the registry mirror (**Company networks**, above).
 
 The project's own `service` never starts as a container: the engineer runs it in its computer, after the stack is up. So nothing in the stack may need it (**Use one in a project** refuses such a `service`), and a stage that waits for it is left out. A seed that calls the project's own API without a `depends_on` on it still fails at its stage: compose cannot tell control about that need.
 
