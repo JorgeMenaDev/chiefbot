@@ -72,7 +72,8 @@ export type WorkerOptions = {
 // The agent sees and operates that screen with its `computer` tool, which its
 // instructions name (computerUse.ts).
 // While the human has the screen (take-over), every tool call waits for hand-back,
-// and a computer call already running stops before its next action.
+// and a computer call already running stops before its next command. One whose
+// turn ends, or that its runtime cancels, stops at once.
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
 // Pushes and pull requests go through control, which asks the user itself.
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
@@ -91,7 +92,7 @@ export function startWorker({
   copilot,
   gitSocket,
   screen = { hostname: "127.0.0.1", port: 5900 },
-  screenCommands = displayCommands,
+  screenCommands = displayCommands(),
   retryMs = 2000,
   onBound,
   onModelsError,
@@ -222,7 +223,7 @@ export function startWorker({
     const turnKey = keyOf(turn);
     const tools = [
       pullRequestTool({ base, turnKey }),
-      computerTool({ run: screenCommands, agentHasScreen: () => screenControl === "agent" }),
+      computerTool({ run: screenCommands, agentHasScreen: () => screenControl === "agent", turnRunning: () => turn !== null && link.running(turn) }),
       ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : []),
     ];
     const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, instructions: computerInstructions, skillDirectories };

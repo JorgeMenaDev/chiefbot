@@ -1,4 +1,4 @@
-import type { Tool, ToolResultObject } from "@github/copilot-sdk";
+import type { Tool, ToolInvocation, ToolResultObject } from "@github/copilot-sdk";
 import { z } from "zod";
 
 // The computer's screen: Xvfb :1 at 1280×800 (infra/computer/start.sh).
@@ -10,7 +10,34 @@ const Point = z.object({
   y: z.number().int().min(0).max(SCREEN.height - 1),
 });
 
-const keyNames = "xdotool key names joined by +, a space between presses, e.g. ctrl+l, Return, ctrl+a BackSpace";
+// Every xdotool command: `xdotool help` in the image (3.20160805.1), plus
+// getwindowclassname, windowquit and windowstate from later versions. An
+// argument of `xdotool key` that names one starts that command instead.
+const xdotoolCommands: ReadonlySet<string> = new Set([
+  "behave", "behave_screen_edge", "click", "exec", "get_desktop", "get_desktop_for_window", "get_desktop_viewport",
+  "get_num_desktops", "getactivewindow", "getdisplaygeometry", "getmouselocation", "getwindowclassname",
+  "getwindowfocus", "getwindowgeometry", "getwindowname", "getwindowpid", "help", "key", "keydown", "keyup",
+  "mousedown", "mousemove", "mousemove_relative", "mouseup", "search", "selectwindow", "set_desktop",
+  "set_desktop_for_window", "set_desktop_viewport", "set_num_desktops", "set_window", "sleep", "type", "version",
+  "windowactivate", "windowclose", "windowfocus", "windowkill", "windowmap", "windowminimize", "windowmove",
+  "windowquit", "windowraise", "windowreparent", "windowsize", "windowstate", "windowunmap",
+]);
+
+// One key or chord: X key names (modifiers such as ctrl, alt, shift and super
+// are key names too) joined by +, so it is a single argument of `xdotool key`.
+// No spaces, so nothing after it, and no part may name an xdotool command.
+const keyName = /^([A-Za-z][A-Za-z0-9_]*|[0-9])$/;
+const keyChord = "one key or chord of X key names joined by +, e.g. ctrl+l, Return, ctrl+shift+Tab, F5";
+const Keys = z
+  .string()
+  .max(64)
+  .refine((keys) => keys.split("+").every((part) => keyName.test(part) && !xdotoolCommands.has(part.toLowerCase())), keyChord)
+  .describe(keyChord);
+
+// The longest text one action types, and how much of it one xdotool command
+// types: the person can take over between chunks.
+const MAX_TEXT = 1000;
+const TEXT_CHUNK = 100;
 
 // One thing the bot does on its screen. A union, not a discriminated one: its
 // JSON Schema is anyOf, which every model's tool schema takes (oneOf is not).
@@ -29,14 +56,8 @@ const ComputerAction = z.union([
     direction: z.enum(["up", "down", "left", "right"]),
     amount: z.number().int().min(1).max(30).optional().describe("Wheel clicks. Default 5."),
   }),
-  z.object({ kind: z.literal("type"), text: z.string().min(1) }),
-  z.object({
-    kind: z.literal("key"),
-    keys: z
-      .string()
-      .regex(/^\w+(\+\w+)*( \w+(\+\w+)*)*$/, keyNames)
-      .describe(keyNames),
-  }),
+  z.object({ kind: z.literal("type"), text: z.string().min(1).max(MAX_TEXT) }),
+  z.object({ kind: z.literal("key"), keys: Keys }),
   z.object({ kind: z.literal("wait"), ms: z.number().int().min(0).max(5000) }),
   z.object({ kind: z.literal("screenshot") }),
 ]);
@@ -46,20 +67,34 @@ const ComputerArgs = z.object({ actions: z.array(ComputerAction).min(1).max(10) 
 type ComputerArgs = z.infer<typeof ComputerArgs>;
 
 // Runs one command (argv) against the computer's display and resolves with its
-// stdout, or throws with what went wrong. The tool's only seam: displayCommands
-// on the computer, fakeDisplay() in tests.
-export type CommandRunner = (command: string[]) => Promise<Uint8Array>;
+// stdout, or throws with what went wrong. It stops the command when `signal`
+// aborts. The tool's only seam: displayCommands() on the computer, fakeDisplay() in tests.
+export type CommandRunner = (command: string[], signal?: AbortSignal) => Promise<Uint8Array>;
 
 // The real CommandRunner, on the computer's screen (display :1). xdotool reads
 // typed text in the locale's encoding, and the image sets no locale: UTF-8 lets
 // it type non-ASCII text. A command fails when it exits non-zero or complains on
-// stderr: xdotool only warns about an unknown key name, and exits 0.
-export const displayCommands: CommandRunner = async (command) => {
-  const proc = Bun.spawn(command, { env: { ...process.env, DISPLAY: ":1", LC_ALL: "C.UTF-8" }, stdout: "pipe", stderr: "pipe" });
-  const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text(), proc.exited]);
-  if (exitCode !== 0 || stderr.trim() !== "") throw new Error(stderr.trim() || `${command[0]} exited with ${exitCode}`);
-  return stdout;
-};
+// stderr: xdotool only warns about an unknown key name, and exits 0. It is
+// killed past `deadlineMs`, once stdout or stderr passes `maxOutput` bytes
+// (8 MiB holds any 1280×800 PNG), or when its call is cancelled.
+export function displayCommands({ deadlineMs = 10_000, maxOutput = 8 * 1024 * 1024 } = {}): CommandRunner {
+  return async (command, signal) => {
+    const proc = Bun.spawn(command, {
+      env: { ...process.env, DISPLAY: ":1", LC_ALL: "C.UTF-8" },
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: deadlineMs,
+      maxBuffer: maxOutput,
+      killSignal: "SIGKILL",
+      ...(signal ? { signal } : {}),
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text(), proc.exited]);
+    if (signal?.aborted) throw new Error(`${command[0]} was cancelled`);
+    if (proc.signalCode !== null) throw new Error(`${command[0]} was stopped: over ${deadlineMs / 1000} s or ${maxOutput} bytes of output`);
+    if (exitCode !== 0 || stderr.trim() !== "") throw new Error(stderr.trim() || `${command[0]} exited with ${exitCode}`);
+    return stdout;
+  };
+}
 
 export const computerToolName = "computer";
 
@@ -69,26 +104,30 @@ export const computerInstructions = `You have your own Linux computer with a ${S
 const buttons = { left: "1", middle: "2", right: "3" } as const;
 const wheel = { up: "4", down: "5", left: "6", right: "7" } as const;
 
-// The xdotool command that does `action`, or null for one that only looks.
-function commandFor(action: ComputerAction): string[] | null {
+// The xdotool commands that do `action`: one, a text's chunks, or none for one that only looks.
+function commandsFor(action: ComputerAction): string[][] {
   const at = (point: z.infer<typeof Point>) => [String(point.x), String(point.y)];
   switch (action.kind) {
     case "click":
-      return ["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.count ?? 1), buttons[action.button ?? "left"]];
+      return [["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.count ?? 1), buttons[action.button ?? "left"]]];
     case "move":
-      return ["xdotool", "mousemove", ...at(action.at)];
+      return [["xdotool", "mousemove", ...at(action.at)]];
     case "drag":
-      return ["xdotool", "mousemove", ...at(action.from), "mousedown", "1", "sleep", "0.1", "mousemove", ...at(action.to), "sleep", "0.1", "mouseup", "1"];
+      return [["xdotool", "mousemove", ...at(action.from), "mousedown", "1", "sleep", "0.1", "mousemove", ...at(action.to), "sleep", "0.1", "mouseup", "1"]];
     case "scroll":
-      return ["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.amount ?? 5), wheel[action.direction]];
-    case "type":
-      return ["xdotool", "type", "--", action.text];
+      return [["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.amount ?? 5), wheel[action.direction]]];
+    case "type": {
+      // By code point, so no character is split.
+      const characters = Array.from(action.text);
+      const chunks = Array.from({ length: Math.ceil(characters.length / TEXT_CHUNK) }, (_, i) => characters.slice(i * TEXT_CHUNK, (i + 1) * TEXT_CHUNK).join(""));
+      return chunks.map((chunk) => ["xdotool", "type", "--", chunk]);
+    }
     case "key":
-      return ["xdotool", "key", ...action.keys.split(" ")];
+      return [["xdotool", "key", action.keys]];
     case "wait":
-      return ["xdotool", "sleep", String(action.ms / 1000)];
+      return [["xdotool", "sleep", String(action.ms / 1000)]];
     case "screenshot":
-      return null;
+      return [];
   }
 }
 
@@ -106,43 +145,65 @@ function cursorFrom(output: Uint8Array) {
   return { x: X, y: Y };
 }
 
+// Runs `actions` in order through `run`, checking before each command that the
+// call is still wanted (`stopIfAbandoned` throws if not) and that the agent has the
+// screen. How many actions went through, and why it stopped early.
+async function act(actions: ComputerAction[], run: (command: string[]) => Promise<unknown>, agentHasScreen: () => boolean, stopIfAbandoned: () => void) {
+  for (const [ran, action] of actions.entries()) {
+    for (const command of commandsFor(action)) {
+      stopIfAbandoned();
+      if (!agentHasScreen()) return { ran, error: "the person has the screen" };
+      try {
+        await run(command);
+      } catch (failure) {
+        stopIfAbandoned();
+        return { ran, error: `${action.kind} failed: ${failure instanceof Error ? failure.message : String(failure)}` };
+      }
+    }
+  }
+  return { ran: actions.length };
+}
+
 // The bot's `computer` tool: it sees and operates its own screen through `run`.
 // One call runs 1 to 10 actions in order and stops at the first that fails, or
-// before the next one once `agentHasScreen` says the person took the screen
+// before the next command once `agentHasScreen` says the person took the screen
 // over; `ran` says how many went through. Every call then settles for 300 ms
 // and returns the cursor and one PNG screenshot. The screenshot goes only to
 // the model: never to a file or to control. Invalid actions throw before
-// anything runs, so the model reads why.
-export function computerTool({ run, agentHasScreen }: { run: CommandRunner; agentHasScreen: () => boolean }) {
+// anything runs, so the model reads why. A call the runtime cancels, or whose
+// turn is over (`turnRunning`), stops the command it runs and throws.
+export function computerTool({
+  run,
+  agentHasScreen,
+  turnRunning,
+}: {
+  run: CommandRunner;
+  agentHasScreen: () => boolean;
+  turnRunning: () => boolean;
+}) {
   return {
     name: computerToolName,
     description:
       `See and operate your computer's ${SCREEN.width}×${SCREEN.height} screen, with Chromium open on it. Runs 1 to 10 actions in order and stops at the first that fails, ` +
       "then waits 300 ms and returns { ran, cursor, error? } with one screenshot. Coordinates are screenshot pixels. " +
-      'To look, send only { kind: "screenshot" }. To open a page in Chromium: key ctrl+l, type the address, key Return, wait.',
+      'To look, send only { kind: "screenshot" }. To open a page in Chromium: key ctrl+l, type the address, key Return, wait. ' +
+      `A key action presses one key or chord; a type action types up to ${MAX_TEXT} characters.`,
     parameters: ComputerArgs,
-    async handler(raw: unknown): Promise<ToolResultObject> {
-      const { actions } = ComputerArgs.parse(raw);
-      let ran = 0;
-      let error: string | undefined;
-      for (const action of actions) {
-        if (!agentHasScreen()) {
-          error = "the person has the screen";
-          break;
-        }
-        const command = commandFor(action);
-        try {
-          if (command) await run(command);
-        } catch (failure) {
-          error = `${action.kind} failed: ${failure instanceof Error ? failure.message : String(failure)}`;
-          break;
-        }
-        ran++;
-      }
-      await run(["xdotool", "sleep", "0.3"]);
-      const cursor = cursorFrom(await run(["xdotool", "getmouselocation", "--shell"]));
+    async handler(raw: unknown, { signal }: ToolInvocation): Promise<ToolResultObject> {
+      const parsed = ComputerArgs.safeParse(raw);
+      if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
+      const { actions } = parsed.data;
+      const stopIfAbandoned = () => {
+        if (signal?.aborted) throw new Error("This computer call was cancelled.");
+        if (!turnRunning()) throw new Error("This computer call's turn has ended.");
+      };
+      const runHere = (command: string[]) => run(command, signal);
+      const { ran, error } = await act(actions, runHere, agentHasScreen, stopIfAbandoned);
+      stopIfAbandoned();
+      await runHere(["xdotool", "sleep", "0.3"]);
+      const cursor = cursorFrom(await runHere(["xdotool", "getmouselocation", "--shell"]));
       // scrot writes "-" by opening /dev/stdout, which a socket (Bun's pipe to a child) refuses: a shell pipe is a real one.
-      const png = await run(["sh", "-c", "scrot - | cat"]);
+      const png = await runHere(["sh", "-c", "scrot - | cat"]);
       return {
         textResultForLlm: JSON.stringify({ ran, cursor, error }),
         binaryResultsForLlm: [{ type: "image", mimeType: "image/png", data: Buffer.from(png).toString("base64") }],

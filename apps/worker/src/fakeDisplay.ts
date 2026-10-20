@@ -13,12 +13,12 @@ export function fakeDisplay() {
     png: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]),
     // The error a command fails with, or null when it succeeds.
     fails: (_command: string[]): string | null => null,
-    // Awaited once a command starts.
-    hold: async (_command: string[]): Promise<void> => {},
+    // Awaited once a command starts, with the signal that would stop it.
+    hold: async (_command: string[], _signal?: AbortSignal): Promise<void> => {},
   };
-  const run: CommandRunner = async (command) => {
+  const run: CommandRunner = async (command, signal) => {
     display.commands.push(command);
-    await display.hold(command);
+    await display.hold(command, signal);
     const error = display.fails(command);
     if (error !== null) throw new Error(error);
     if (command.join(" ").includes("scrot")) return display.png;
