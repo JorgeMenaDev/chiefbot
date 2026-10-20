@@ -21,6 +21,7 @@ import type { Clock } from "@chiefbot/worker/clock";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { Probes } from "./health/probe.ts";
+import type { Net } from "./health/serviceCheck.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
 import { loadConnections, repoConnections } from "./connections/catalog.ts";
 import { startControl } from "./control.ts";
@@ -68,6 +69,8 @@ export type TestControlOptions = {
   googleTokenUrl?: string;
   // Connections' health probes. Default: none, so no test reaches a vendor.
   probes?: Probes;
+  // The network services are checked over. Default: one that reaches nothing.
+  serviceNet?: Net;
   // How long the signed-in user's GitHub tokens have left.
   accessTokenLeftMs?: number;
   refreshTokenLeftMs?: number;
@@ -89,6 +92,7 @@ export async function startTestControl({
   secrets,
   googleTokenUrl,
   probes = {},
+  serviceNet = offline,
   accessTokenLeftMs = 8 * hour,
   refreshTokenLeftMs = 180 * 24 * hour,
 }: TestControlOptions = {}) {
@@ -115,6 +119,7 @@ export async function startTestControl({
     ...(secrets === undefined ? {} : { secrets }),
     ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }),
     probes,
+    serviceNet,
   };
   let control = startControl(options);
   const url = control.url;
@@ -158,6 +163,12 @@ export async function startTestControl({
 }
 
 export type TestControl = Awaited<ReturnType<typeof startTestControl>>;
+
+// A network with nothing on it, so no test checks a real service by mistake.
+const offline: Net = {
+  fetch: () => Promise.reject(new Error("tests have no network")),
+  lookup: () => Promise.reject(new Error("tests have no network")),
+};
 
 // What a signed-in user does through control's API with their session.
 function userApi(url: string, sessionToken: string) {

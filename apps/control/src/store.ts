@@ -36,6 +36,7 @@ import { nextDueAt } from "./schedule.ts";
 import { connectionStore } from "./connections/connectionStore.ts";
 import { connectorStore } from "./connectors/connectorStore.ts";
 import { healthStore } from "./health/healthStore.ts";
+import { serviceStore } from "./health/serviceStore.ts";
 import { projectStore } from "./projectStore.ts";
 import { subscriptionStore } from "./subscriptionStore.ts";
 import { taskWorkerStore } from "./taskWorkerStore.ts";
@@ -246,6 +247,7 @@ export function openStore(path: string) {
   const connectors = connectorStore(db);
   const connections = connectionStore(db);
   const health = healthStore(db);
+  const services = serviceStore(db);
   const subscriptions = subscriptionStore(db, projects);
   // A note from control in a bot's chat, in a turn of its own that is done already.
   const postNotice = (botId: BotId, notice: HandoffUpdate) => {
@@ -268,6 +270,8 @@ export function openStore(path: string) {
     connections,
     // The health checks of people's connections (health/healthStore.ts).
     health,
+    // People's own services on Health and their checks (health/serviceStore.ts).
+    services,
     // What chiefs of staff handed to projects (handoffStore.ts).
     handoffs,
     // Projects' subscriptions and the events they saw (subscriptionStore.ts).

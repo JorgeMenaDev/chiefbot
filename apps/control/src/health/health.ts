@@ -1,4 +1,4 @@
-import { HEALTH_INTERVAL_MS, HEALTH_KEEP_MS, ProbeResult, type HealthReport, type UserId } from "@chiefbot/contracts";
+import { HEALTH_INTERVAL_MS, HEALTH_KEEP_MS, ProbeResult, type HealthReport, type ServiceHealth, type UserId } from "@chiefbot/contracts";
 import type { Clock } from "@chiefbot/worker/clock";
 import type { CatalogConnection } from "../connections/catalog.ts";
 import { bearer, unauthorized } from "../http.ts";
@@ -41,23 +41,27 @@ export const defaultProbes = (google: GoogleUrls): Probes => ({ gcloud: gcloudPr
 // are kept HEALTH_KEEP_MS, and go when the connection is turned off. A check
 // still running when its connection is saved again or turned off (`changed`),
 // or when control stops, is aborted and its result dropped: it was made with
-// fields that are no longer the connection's.
+// fields that are no longer the connection's. The report also carries the
+// person's own services (`services`, services.ts), which have no timer: Refresh
+// checks them too, and the tick prunes their checks with the connections'.
 //
 // Person routes (a session):
 //   GET  /health          → HealthReport from the kept checks
-//   POST /health/refresh  → HealthReport once each of the person's connections was checked again
+//   POST /health/refresh  → HealthReport once each of the person's connections and services was checked again
 export function healthHost({
   store,
   clock,
   catalog,
   probes,
   fieldsOf,
+  services,
 }: {
   store: ReturnType<typeof openStore>;
   clock: Clock;
   catalog: CatalogConnection[];
   probes: Probes;
   fieldsOf: (userId: UserId, name: string) => Promise<Record<string, string> | null>;
+  services: { report: (userId: UserId) => ServiceHealth[]; checkAll: (userId: UserId) => Promise<void> };
 }) {
   const checkable = catalog.filter(({ name }) => probes[name] !== undefined);
   // The checks running now, by person and connection, each with what aborts it.
@@ -128,6 +132,7 @@ export function healthHost({
           const checks = store.health.checks(userId, name, since);
           return { name, title, latest: checks.at(-1) ?? null, history: checks.map(({ at, status, summary }) => ({ at, status, summary })) };
         }),
+      services: services.report(userId),
     };
   }
 
@@ -137,6 +142,7 @@ export function healthHost({
     try {
       const now = clock.now();
       store.health.prune(now - HEALTH_KEEP_MS);
+      store.services.prune(now - HEALTH_KEEP_MS);
       if (!draining) {
         draining = true;
         void drain(store.health.due(checkable.map(({ name }) => name), now - HEALTH_INTERVAL_MS)).finally(() => (draining = false));
@@ -159,7 +165,7 @@ export function healthHost({
     "/health/refresh": {
       POST: signedIn(async (userId) => {
         const on = store.connections.on(userId);
-        await Promise.all(checkable.filter(({ name }) => on.has(name)).map(({ name }) => check(userId, name)));
+        await Promise.all([...checkable.filter(({ name }) => on.has(name)).map(({ name }) => check(userId, name)), services.checkAll(userId)]);
         return Response.json(report(userId) satisfies HealthReport);
       }),
     },
