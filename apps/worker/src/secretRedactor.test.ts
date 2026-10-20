@@ -33,6 +33,16 @@ test("overlapping secrets are hidden as one span, also when the text comes in ch
   expect(secretRedactor(["ab-ab-ab"]).redact("ab-ab-ab-ab.")).toBe("***.");
 });
 
+test("a secret that overlaps itself for 512 KiB goes out as one `***` at once: the stream holds back no more than the longest form", () => {
+  const stream = secretRedactor(["abababab"]).stream();
+  const run = "ab".repeat(2048);
+
+  const out = [stream.push(`x ${run}`), ...Array.from({ length: 127 }, () => stream.push(run)), stream.push(" done."), stream.end()];
+
+  expect(out[0]).toBe("x ***");
+  expect(out.join("")).toBe("x *** done.");
+});
+
 test("a secret under 6 characters is hidden only as it is", () => {
   const { redact } = secretRedactor(["p w!1"]);
 

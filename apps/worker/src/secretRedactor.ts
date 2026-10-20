@@ -17,8 +17,9 @@ export type SecretRedactor = {
   holds(text: string): boolean;
   // For text that comes in chunks: `push` gives back what may pass now and holds
   // back the end that could still start a form (as long as the longest form,
-  // less one, and any form found that reaches into it), so a form split across
-  // chunks is still found; `end` gives the rest.
+  // less one, and never more), so a form split across chunks is still found. A
+  // find that reaches into that end goes out as `***` at once, and the stream
+  // keeps masking it, with no second `***`, while finds continue it. `end` gives the rest.
   stream(): { push(chunk: string): string; end(): string };
 };
 
@@ -31,11 +32,12 @@ type Span = [start: number, end: number];
 export function secretRedactor(values: string[]): SecretRedactor {
   const forms = [...new Set(values.flatMap(formsOf))].filter((form) => form.length > 0);
   const held = Math.max(1, ...forms.map((form) => form.length)) - 1;
-  // Every place a form is found (overlaps too), merged into spans in order. Each
-  // find costs its form's length, so this is linear in the text, but for a long
-  // secret that overlaps itself (`aaaa…`) printed over and over.
-  const spansIn = (text: string) => {
-    const found: Span[] = [];
+  // Every place a form is found (overlaps too), merged into spans in order, with
+  // the first `covered` characters counted as found. Each find costs its form's
+  // length, so this is linear in the text, but for a long secret that overlaps
+  // itself (`aaaa…`) printed over and over.
+  const spansIn = (text: string, covered = 0) => {
+    const found: Span[] = covered > 0 ? [[0, covered]] : [];
     for (const form of forms) {
       for (let at = text.indexOf(form); at !== -1; at = text.indexOf(form, at + 1)) found.push([at, at + form.length]);
     }
@@ -47,11 +49,12 @@ export function secretRedactor(values: string[]): SecretRedactor {
     }
     return spans;
   };
-  const mask = (text: string, spans: Span[]) => {
+  // `open`: a `***` already went out for a span the text starts in.
+  const mask = (text: string, spans: Span[], open = false) => {
     let out = "";
     let from = 0;
     for (const [start, end] of spans) {
-      out += `${text.slice(from, start)}***`;
+      out += text.slice(from, start) + (open && start === 0 ? "" : "***");
       from = end;
     }
     return out + text.slice(from);
@@ -61,25 +64,30 @@ export function secretRedactor(values: string[]): SecretRedactor {
     redact,
     holds: (text) => spansIn(text).length > 0,
     stream() {
+      // The end held back, and how much of its start is a find whose `***` went out.
       let rest = "";
+      let covered = 0;
       return {
         push(chunk) {
           const text = rest + chunk;
-          const spans = spansIn(text);
-          let cut = Math.max(0, text.length - held);
-          // A span that reaches into the held end waits whole: a form not yet
-          // complete there may overlap it.
-          for (const [start, end] of spans) if (start < cut && end > cut) cut = start;
-          rest = text.slice(cut);
-          return mask(
+          const spans = spansIn(text, covered);
+          const cut = Math.max(0, text.length - held);
+          const out = mask(
             text.slice(0, cut),
-            spans.filter(([, end]) => end <= cut),
+            spans.flatMap(([start, end]): Span[] => (start < cut ? [[start, Math.min(end, cut)]] : [])),
+            covered > 0,
           );
+          // The span that goes on past the cut, its `***` sent (or sent before).
+          const open = spans.find(([start, end]) => end > cut && (start < cut || (start === 0 && covered > 0)));
+          covered = open ? open[1] - cut : 0;
+          rest = text.slice(cut);
+          return out;
         },
         end() {
-          const last = rest;
+          const out = mask(rest, spansIn(rest, covered), covered > 0);
           rest = "";
-          return redact(last);
+          covered = 0;
+          return out;
         },
       };
     },
