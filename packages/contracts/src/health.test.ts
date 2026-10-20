@@ -22,6 +22,9 @@ test("a service has 1 to 6 environments with names of their own, and http or htt
   expect(refused({ icon: "rocket" })).toBe(true);
   expect(refused(env({ name: "x".repeat(21) }))).toBe(true);
   expect(refused(env({ url: "ftp://meta.example.com/health" }))).toBe(true);
+  // Half-typed in the dialog: refused, never thrown.
+  expect(refused(env({ url: "" }))).toBe(true);
+  expect(refused(env({ url: "meta.example" }))).toBe(true);
   expect(refused(env({ url: "https://user:pass@meta.example.com/health" }))).toBe(true);
   expect(refused(env({ auth: { kind: "header", header: "Host" } }))).toBe(true);
   expect(refused(env({ auth: { kind: "header", header: "X Api Key" } }))).toBe(true);

@@ -79,10 +79,8 @@ export const ServiceUrl = z
   .trim()
   .max(2000)
   .pipe(z.url({ protocol: /^https?$/, error: "expected an http or https URL" }))
-  .refine((text) => {
-    const { username, password } = new URL(text);
-    return username === "" && password === "";
-  }, "put a credential under authentication, not in the URL");
+  // Zod runs this even when the URL check failed, so it must not throw then.
+  .refine((text) => !URL.canParse(text) || (new URL(text).username === "" && new URL(text).password === ""), "put a credential under authentication, not in the URL");
 
 // How control signs the check: no credential, `Authorization: Bearer <secret>`,
 // or the header `header` with the secret as its value (an API key, or Basic auth).
