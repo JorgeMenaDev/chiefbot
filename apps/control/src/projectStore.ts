@@ -13,7 +13,8 @@ import {
   type ApprovalId,
   type ApprovalKind,
   type ChatEvent,
-  type CopilotPayer,
+  type AutoFallback,
+  CopilotPayer,
   type CreateTaskArgs,
   type ProjectMember,
   type ReasoningEffort,
@@ -98,6 +99,8 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     event TEXT NOT NULL
   )`);
   db.run("CREATE INDEX IF NOT EXISTS coordinator_events_by_chat ON coordinator_events (project_id, user_id, seq)");
+  // Who pays for the turn (JSON CopilotPayer), from when the scheduler starts it. NULL before, and for turns started before the column.
+  addColumn(db, "coordinator_turns", "payer", "TEXT");
   // What control asked the member of a coordinator turn to approve (a connector
   // call, connectors.ts), and the answer (NULL while pending) (turnRecords.ts approvalRecords).
   db.run(`CREATE TABLE IF NOT EXISTS coordinator_approvals (
@@ -420,11 +423,12 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         : null;
     }),
 
-    // Says in the turn's chat who pays for it, and the project's model when that
-    // payer's plan does not offer it (the turn runs on Auto). Outside the coordinator's numbering.
-    addPayer(turnId: TurnId, payer: CopilotPayer, unavailableModel: string | null): MemberEvent {
-      return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer, unavailableModel }) };
-    },
+    // Records who pays for the turn, and says so in its chat, with why it runs
+    // on Auto when it does. Outside the coordinator's numbering.
+    addPayer: db.transaction((turnId: TurnId, payer: CopilotPayer, fallback: AutoFallback | null): MemberEvent => {
+      db.query("UPDATE coordinator_turns SET payer = ?2 WHERE id = ?1").run(turnId, JSON.stringify(payer));
+      return { userId: userOfTurn(turnId), event: append(turnId, { type: "payer", payer, fallback }) };
+    }),
 
     // Whether a turn waits for the project's coordinator.
     hasQueuedTurn(projectId: ProjectId): boolean {
@@ -434,6 +438,14 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     // Whether a turn of the project runs or waits for its coordinator.
     hasUnfinishedTurn(projectId: ProjectId): boolean {
       return db.query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND state != 'done'").get(projectId) !== null;
+    },
+
+    // Who pays for the project's turn, as recorded when it started, while it runs; null otherwise.
+    runningTurnPayer(projectId: ProjectId, turnId: TurnId): CopilotPayer | null {
+      const row = db
+        .query<{ payer: string | null }, [string, string]>("SELECT payer FROM coordinator_turns WHERE id = ?1 AND project_id = ?2 AND state = 'running'")
+        .get(turnId, projectId);
+      return row?.payer ? CopilotPayer.parse(JSON.parse(row.payer)) : null;
     },
 
     // The member the project's turn runs for, while it runs; null otherwise.

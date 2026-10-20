@@ -1,4 +1,4 @@
-import { type CopilotPayer, Project, ProjectChatView, type ProjectId, type Workspace } from "@chiefbot/contracts";
+import { type AutoFallback, type CopilotPayer, Project, ProjectChatView, type ProjectId, type Workspace } from "@chiefbot/contracts";
 import { FolderGit2Icon, PlugIcon, RadioIcon, SettingsIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
@@ -208,7 +208,7 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
       return (
         <p className="text-muted-foreground text-xs">
           {payerText(item.payer)}
-          {item.unavailableModel && <span className="block">{fellBack(item.payer, item.unavailableModel)}</span>}
+          {item.fallback && <span className="block">{fellBack(item.payer, item.fallback)}</span>}
         </p>
       );
     case "approval":
@@ -221,7 +221,9 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
   }
 }
 
-// Why a turn ran on Auto: the plan of who paid does not offer the project's `model`.
-function fellBack(payer: CopilotPayer, model: string) {
-  return `${model} isn't on ${payer.kind === "seat" ? payer.login : payer.account}'s plan; this turn ran on Auto.`;
+// Why a turn ran on Auto: the plan of who paid does not offer the project's
+// model, or no turn on it has listed its models yet.
+function fellBack(payer: CopilotPayer, { model, reason }: AutoFallback) {
+  const who = payer.kind === "seat" ? payer.login : payer.account;
+  return reason === "plan_unknown" ? `${who}'s plan isn't known yet; this turn ran on Auto.` : `${model} isn't on ${who}'s plan; this turn ran on Auto.`;
 }

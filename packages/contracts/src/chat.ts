@@ -94,11 +94,15 @@ export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>;
 export const QuestionAnswer = z.object({ type: z.literal("question-answer"), questionId: QuestionId, result: QuestionResult });
 export type QuestionAnswer = z.infer<typeof QuestionAnswer>;
 
+// Why a turn runs on Auto rather than the project's `model`: the payer's plan
+// does not offer it (not_on_plan), or no turn on that plan has listed its models yet (plan_unknown).
+export const AutoFallback = z.object({ model: z.string(), reason: z.enum(["not_on_plan", "plan_unknown"]) });
+export type AutoFallback = z.infer<typeof AutoFallback>;
+
 // Who pays for the turn's Copilot requests. Control adds it when a project's
-// coordinator starts the turn, outside the runtime's numbering.
-// `unavailableModel` names the project's model when the payer's plan does not
-// offer it, so the turn runs on Auto (null: it runs on the project's model).
-export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer, unavailableModel: z.string().nullable().default(null) });
+// coordinator starts the turn, outside the runtime's numbering. `fallback` is
+// null when the turn runs on the project's model.
+export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) });
 
 // Body of POST /bots/:id/approvals/:approvalId (204; 409 when it is not pending).
 export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
@@ -194,7 +198,7 @@ export const ChatItem = z.discriminatedUnion("kind", [
   // Control's note about a handoff, from before cards (HandoffUpdate).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
   // Who pays for the turn that follows.
-  z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer, unavailableModel: z.string().nullable().default(null) }),
+  z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) }),
   // expired: the turn ended before anyone answered (its worker restarted).
   // withdrawn: the agent stopped waiting on it (approval-withdrawn); the turn goes on.
   z.object({

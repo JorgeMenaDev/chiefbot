@@ -2,7 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { ApiError, ModelOption, Project, User, Workspace, WorkspaceInvite, type ChatEvent, type ModelReport } from "@chiefbot/contracts";
+import { ApiError, ModelOption, Project, User, Workspace, WorkspaceInvite, type ChatEvent, type ModelReport, type TurnId } from "@chiefbot/contracts";
 import { defaultFakeUser, type FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, fakeRequest, sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions } from "./testControl.ts";
@@ -321,15 +321,17 @@ test("any member picks the project's model and effort among the models their tur
   ]);
 });
 
+// A plan's models, as a session lists them, offering `ids`.
+const offering = (...ids: string[]): ModelReport => ({
+  selectable: ids.map((id) => ({ id, name: id, disabled: false, efforts: [], defaultEffort: null, vision: null })),
+  catalog: [],
+});
+
 test("control keeps the models a coordinator reports only from a running turn, as its member's", async () => {
   const control = await projectOf(shop, { user: { ...defaultFakeUser, copilot: { plan: "individual", sku: "monthly_subscriber" } } });
   const { owner, project } = control;
   const coordinator = await fakeCoordinator(control, project.id);
   coordinator.hello(null);
-  const offering = (...ids: string[]): ModelReport => ({
-    selectable: ids.map((id) => ({ id, name: id, disabled: false, efforts: [], defaultEffort: null, vision: null })),
-    catalog: [],
-  });
   const offered = async () => ModelOption.array().parse(await (await owner.api("GET", "/models")).json()).map(({ id }) => id);
   await owner.api("POST", `/projects/${project.id}/messages`, { text: "Plan the cart" });
   const first = await coordinator.nth("run-turn");
@@ -348,9 +350,45 @@ test("control keeps the models a coordinator reports only from a running turn, a
   expect(await offered()).toEqual(["auto", "claude-sonnet-4.6"]);
 });
 
+test("a turn's model report counts for the payer the turn started on, even after the workspace changes who pays", async () => {
+  const mint = async (repo: string) => ({ token: "ghs_org_1", expiresAt: Date.now() + 3_600_000, account: repo.split("/")[0] ?? repo });
+  const control = await projectOf(shop, { user: paid, copilotTokens: mint });
+  const { owner, workspace, project } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const billing = (mode: "org" | "personal") => owner.api("PUT", `/workspaces/${workspace.id}/copilot-mode`, { mode });
+  const offered = async () => ModelOption.array().parse(await (await owner.api("GET", "/models")).json()).map(({ id }) => id);
+  // The owner's nth message, run to its end; `during` runs while it runs. Resolves with what control sent the coordinator.
+  const turn = async (text: string, n: number, during: (turnId: TurnId) => unknown) => {
+    const chat = owner.watchProjectChat(project.id);
+    await owner.api("POST", `/projects/${project.id}/messages`, { text });
+    const run = await coordinator.nth("run-turn", n);
+    coordinator.newTurn();
+    await during(run.turnId);
+    coordinator.event(run.turnId, { type: "done" });
+    await chat.until(doneCount(n));
+    return run;
+  };
+  await turn("Plan the cart", 1, (turnId) => coordinator.models(turnId, offering("claude-sonnet-4.6")));
+  await owner.api("PUT", `/projects/${project.id}/model`, { model: "claude-sonnet-4.6" });
+  await billing("org");
+
+  // The organization-paid turn's session lists the organization's plan after the owner switched back to personal billing.
+  await turn("Plan the checkout", 2, async (turnId) => {
+    await billing("personal");
+    coordinator.models(turnId, offering("claude-sonnet-4.6", "org-only"));
+  });
+  const seat = [await offered(), (await owner.api("PUT", `/projects/${project.id}/model`, { model: "org-only" })).status];
+  await billing("org");
+  const next = await turn("And the receipt?", 3, () => {});
+
+  expect(seat).toEqual([["auto", "claude-sonnet-4.6"], 400]);
+  expect(next.model).toBe("claude-sonnet-4.6");
+});
+
 const sonnet = { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", capabilities: { supports: { reasoningEffort: true } }, supportedReasoningEfforts: ["low", "medium", "high"] };
 const paid: FakeGitHubUser = { ...defaultFakeUser, copilot: { plan: "individual", sku: "monthly_subscriber" } };
-const payerLines = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "payer" ? [[event.payer.kind, event.unavailableModel]] : []));
+const payerLines = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "payer" ? [[event.payer.kind, event.fallback]] : []));
 
 test("a member whose plan does not offer the project's model has their turn run on Auto, and their chat says so", async () => {
   const copilot = fakeCopilot({ models: { list: [sonnet], modelPriceCategories: [] } });
@@ -369,8 +407,8 @@ test("a member whose plan does not offer the project's model has their turn run 
   ]);
   // Before the member's first turn their plan's models are unknown; after it, Free offers Sonnet locked.
   expect(payerLines(chat)).toEqual([
-    ["seat", "claude-sonnet-4.6"],
-    ["seat", "Claude Sonnet 4.6"],
+    ["seat", { model: "claude-sonnet-4.6", reason: "plan_unknown" }],
+    ["seat", { model: "Claude Sonnet 4.6", reason: "not_on_plan" }],
   ]);
 });
 
@@ -393,7 +431,7 @@ test("an organization-paid turn runs on the project's model once the organizatio
   ]);
   expect(payerLines(chat)).toEqual([
     ["seat", null],
-    ["org", "claude-sonnet-4.6"],
+    ["org", { model: "claude-sonnet-4.6", reason: "plan_unknown" }],
     ["org", null],
   ]);
 });

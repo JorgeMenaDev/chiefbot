@@ -19,6 +19,7 @@ import {
   type ContextFile,
   type ContextFileText,
   type ControlToCoordinator,
+  type AutoFallback,
   type CopilotPayer,
   type Project,
   type ProjectId,
@@ -225,9 +226,9 @@ export function projectHost({
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
     const project = projects.project(projectId);
     if (!next || !run || !project) return;
-    const { unavailable, ...model } = turnModel(project, run.payer, next.member.userId);
+    const { fallback, ...model } = turnModel(project, run.payer, next.member.userId);
     const turnKey = store.turnKeys.issue({ agent: "coordinator", projectId, userId: next.member.userId, turnId: next.turnId });
-    publishChat(projectId, projects.addPayer(next.turnId, run.payer, unavailable));
+    publishChat(projectId, projects.addPayer(next.turnId, run.payer, fallback));
     void connectorsFor(projectId, next.member.userId)
       .catch(() => [])
       .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, ...model, turnKey, payer: run.payer, connectors }));
@@ -236,12 +237,14 @@ export function projectHost({
   // The model and effort a turn of the project runs on: the project's, as far as
   // the plan of who pays offers them (the member's on their seat, the
   // organization's on its billing, as their turns last listed them), else Auto.
-  // `unavailable` then names the project's model, for the turn's payer line.
+  // `fallback` then says why, for the turn's payer line.
   const turnModel = (project: Project, payer: CopilotPayer, userId: UserId) => {
-    const options = payer.kind === "seat" ? modelOptionsOf(store.user(userId)) : modelOptions(store.orgModelReport(payer.account), null);
+    const report = payer.kind === "seat" ? store.modelReport(userId) : store.orgModelReport(payer.account);
+    const options = modelOptions(report, payer.kind === "seat" ? store.user(userId).copilotPlan : null);
     const offered = options.find(({ id, lockedReason }) => id === project.model && lockedReason === null);
-    if (offered) return { model: project.model, effort: supportedEffort(offered.efforts, project.effort), unavailable: null };
-    return { model: AUTO_MODEL, effort: null, unavailable: options.find(({ id }) => id === project.model)?.name ?? project.model };
+    if (offered) return { model: project.model, effort: supportedEffort(offered.efforts, project.effort), fallback: null };
+    const model = options.find(({ id }) => id === project.model)?.name ?? project.model;
+    return { model: AUTO_MODEL, effort: null, fallback: { model, reason: report ? "not_on_plan" : "plan_unknown" } satisfies AutoFallback };
   };
   // The model picker's rows for the user's Copilot plan (models.ts).
   const modelOptionsOf = (user: User) => modelOptions(store.modelReport(user.id), user.copilotPlan);
@@ -664,14 +667,14 @@ export function projectHost({
         return;
       }
       // The plan's models, as a turn's session listed them, while the turn runs:
-      // its member's on their own seat (the project's model picker offers them),
-      // the organization's on its billing. Turns pick their model by them (turnModel).
+      // the plan of who pays for that turn, as recorded when it started (not as the
+      // workspace bills now). The member's on their own seat (the project's model
+      // picker offers them), the organization's on its billing. Turns pick their
+      // model by them (turnModel). A turn with no recorded payer reports nothing.
       if (message.type === "models") {
-        const userId = projects.runningTurnMember(projectId, message.turnId);
-        const run = userId && payerOf({ kind: "project", projectId, askerId: userId });
-        if (!userId || !run) return;
-        if (run.payer.kind === "org") store.setOrgModelReport(run.payer.account, message.report);
-        else if (run.payer.userId === userId) store.setModelReport(userId, message.report);
+        const payer = projects.runningTurnPayer(projectId, message.turnId);
+        if (payer?.kind === "org") store.setOrgModelReport(payer.account, message.report);
+        else if (payer) store.setModelReport(payer.userId, message.report);
         return;
       }
       // The coordinator lost the running turn unless it says it still runs it.
