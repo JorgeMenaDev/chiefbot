@@ -4,9 +4,9 @@ import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, Con
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { setupShell, type SetupShell } from "@chiefbot/worker/engineer-setup";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
@@ -1314,6 +1314,35 @@ test("a verifier that gives no verdict is BLOCKED on the task: its setup failed,
   expect(await verificationOf()).toMatchObject({ result: "blocked", worker: second.id, summary: "It ended without a verdict. Its last message: I looked around." });
 });
 
+test("a verifier's ending that fails, as its BLOCKED report cannot be written, leaves control running: it is logged and done when control starts again", async () => {
+  const control = await teamProject({ persistent: true });
+  const { owner, project, dbPath } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "I looked around.");
+    yield sdk.idle();
+  });
+  await pullRequestOnTask(control, tool);
+  const verificationOf = async () => Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json())[0]?.verification;
+  // A file where the report's folder goes, so control cannot write the report.
+  const inTheWay = join(dirname(dbPath), "context", project.id, "verify");
+  mkdirSync(dirname(inTheWay), { recursive: true });
+  writeFileSync(inTheWay, "");
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+    await eventually(() => logged.mock.calls.some(([line]) => String(line).startsWith(`could not end ${verifier.id}:`)));
+    expect(await verificationOf()).toBeNull();
+  } finally {
+    logged.mockRestore();
+  }
+
+  rmSync(inTheWay);
+  control.restart();
+
+  await eventually(async () => (await verificationOf())?.result === "blocked");
+  expect(await verificationOf()).toMatchObject({ result: "blocked", summary: "It ended without a verdict. Its last message: I looked around." });
+});
+
 test("a verifier whose computer runs an image that cannot verify is blocked at once, told to rebuild the image, and BLOCKED on the task", async () => {
   const tokens = new Map<string, string>();
   const control = await teamProject({
@@ -1413,37 +1442,6 @@ test("the project agent marks a task done only with a PASS for its pull request'
   await verify("v-3");
 
   expect(Task.parse((await done(1)).body)).toMatchObject({ status: "done", verification: { result: "pass", sha: moved, stale: false } });
-});
-
-test("the task list re-reads a current verdict's pull request on GitHub, at most once a minute: a push from outside Chiefbot makes it stale, and a done task keeps its verdict", async () => {
-  const time = fakeClock(Date.now());
-  const control = await teamProject({ clock: time.clock });
-  const { owner, project, github } = control;
-  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
-    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
-    yield sdk.idle();
-  });
-  const verify = async (creationId: string) => {
-    const { id } = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId })).body);
-    await workerWhen(owner, project, id, ({ state }) => state === "finished");
-  };
-  const verificationOf = async () => Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json())[0]?.verification;
-  const { head } = await pullRequestOnTask(control, tool);
-  await verify("v-1");
-  expect(await verificationOf()).toMatchObject({ result: "pass", sha: head, stale: false });
-
-  const moved = github.commit("octo-org/shop", { "CHANGELOG.md": "Fixed a typo.\n" }, "fix-typo");
-
-  expect(await verificationOf()).toMatchObject({ sha: head, stale: false });
-  time.advance(60_000);
-  expect(await verificationOf()).toMatchObject({ sha: head, stale: true });
-
-  // A new PASS at the new head, and the task is done: its verdict stays, naming the commit it checked.
-  await verify("v-2");
-  expect(Task.parse((await tool({ tool: "update_task", number: 1, status: "done" })).body).status).toBe("done");
-  github.commit("octo-org/shop", { "NOTES.md": "Later.\n" }, "fix-typo");
-  time.advance(60_000);
-  expect(await verificationOf()).toMatchObject({ sha: moved, stale: false });
 });
 
 test("a member marks a task done in the app over the done rule, and the task records who did, when and its verdict then", async () => {

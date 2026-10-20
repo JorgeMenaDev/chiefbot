@@ -13,8 +13,9 @@ export type SecretStore = {
   delete(name: string): Promise<void>;
 };
 
-// What control logs of a SecretStore failure: the error's kind, if a known one,
-// and its numeric code. Never its message or any other name, which may quote the value.
+// What control logs of an error that may quote a secret (a SecretStore's, a
+// service check's): the error's kind, if a known one, and its numeric code.
+// Never its message or any other name, which may quote the value.
 const knownErrors = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError"]);
 export function secretFailure(error: unknown) {
   const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? ` ${error.code}` : "";

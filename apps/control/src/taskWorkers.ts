@@ -5,7 +5,6 @@ import {
   type ApprovalId,
   ContextImagePath,
   ContextPath,
-  currentVerification,
   isPng,
   latestPullRequest,
   PullRequestArgs,
@@ -145,7 +144,7 @@ export type TaskWorkerHostOptions = {
 // with nobody's nudge (workerEnded; at most CONTINUATIONS_MAX per task,
 // taskWorkerStore.ts). A push through the git proxy since its commit was
 // pinned, or GitHub's head when the coordinator marks the task done
-// (doneCheck) or a verdict is read (refreshVerdicts), makes a verdict stale.
+// (doneCheck), makes a verdict stale.
 // Control counts the pushes through the proxy to each branch, those started
 // and those in flight (projectStore.ts branch_pushes), so a check that reads
 // GitHub can tell whether a push came in between.
@@ -224,10 +223,6 @@ export function taskWorkerHost({
   const holders = new Map<TaskWorkerId, { userId: UserId; login: string }>();
   // The sockets following a worker's transcript, with the last event each was sent.
   const followers = new Map<Socket, Watcher & { after: number }>();
-  // The head of each pull request refreshVerdicts read on GitHub, by its URL,
-  // and when: reused for headTtlMs. A verdict on it drops it (recordVerdict),
-  // so no verdict is checked against a head read before it.
-  const heads = new Map<string, { at: number; sha: Promise<string | null> }>();
 
   const controlOf = (workerId: TaskWorkerId): ScreenControl => (holders.has(workerId) ? "human" : "agent");
   const watching = (workerId: TaskWorkerId, userId: UserId) =>
@@ -399,9 +394,15 @@ export function taskWorkerHost({
   // without a verdict gets BLOCKED first (noVerdict). Then the project's
   // coordinator continues the task, told how the worker ended, in a turn of the
   // chat of the member who requested it (continueTask). Control stopping
-  // first leaves that to recover.
+  // first, or a BLOCKED report it cannot write (logged), leaves that to
+  // recover: callers start this and move on, so it never rejects.
   async function workerEnded(workerId: TaskWorkerId) {
-    await noVerdict(workerId);
+    try {
+      await noVerdict(workerId);
+    } catch (error) {
+      console.error(`could not end ${workerId}:`, error);
+      return;
+    }
     const worker = workers.worker(workerId);
     if (stopped || !worker) return;
     const verification = projects.tasks(worker.projectId).find(({ number }) => number === worker.taskNumber)?.verification ?? null;
@@ -729,24 +730,11 @@ export function taskWorkerHost({
       const pinned = workers.setVerdict(workerId, verdict.result);
       if (pinned === null) return null;
       const { result, summary, testsOnly } = verdict;
-      heads.delete(pullRequest);
       projects.setVerdict(projectId, taskNumber, { result, sha, testsOnly, summary, pullRequest, branch, evidence, worker: workerId, at }, pinned.revision);
       publishTasks(projectId);
       publish(projectId);
       return { result, summary, evidence };
     });
-  }
-
-  // The head of the project's pull request `url` on GitHub, as `userId` may read
-  // it, read again once the last read is headTtlMs old; null when it cannot be read.
-  function headOf({ repo }: Project, userId: UserId, url: string) {
-    const now = clock.now();
-    const cached = heads.get(url);
-    if (cached && now - cached.at < headTtlMs) return cached.sha;
-    const number = pullRequestNumber(url, repo);
-    const sha = number === null ? Promise.resolve(null) : pullRequestHead(userId, repo, number).then((head) => ("error" in head ? null : head.sha));
-    heads.set(url, { at: now, sha });
-    return sha;
   }
 
   // The token for the turn the request's key holds, if who pays for it is of `kind`; 404 otherwise.
@@ -918,27 +906,6 @@ export function taskWorkerHost({
       }
       if (head.branch !== verification.branch) return { refused: movedWhileChecking(number) };
       return { verified: { pullRequest: url, sha: head.sha, revision: pushes.revision } };
-    },
-
-    // A task's verdict is about to be read (the task list, the panel's Tasks
-    // and Engineers tabs, handoff_status): each current one that is not stale,
-    // on a task that is not done or abandoned, is checked against its pull
-    // request's head on GitHub (headOf, as `userId` may read it), so a push
-    // from anywhere makes it stale. A done task keeps its verdict as history: it
-    // names the commit it checked.
-    async refreshVerdicts(projectId: ProjectId, userId: UserId) {
-      const project = projects.project(projectId);
-      if (!project) return;
-      for (const [url, { at }] of heads) if (clock.now() - at >= headTtlMs) heads.delete(url);
-      const moved = await Promise.all(
-        projects.tasks(projectId).map(async (task) => {
-          const verification = currentVerification(task);
-          if (!verification || verification.stale || task.status === "done" || task.status === "abandoned") return false;
-          const sha = await headOf(project, userId, verification.pullRequest);
-          return sha !== null && sha !== verification.sha && projects.markStale(projectId, task.number, verification.worker);
-        }),
-      );
-      if (moved.includes(true)) publishTasks(projectId);
     },
 
     // A push through the git proxy is about to move `branches` of `repo`
@@ -1209,9 +1176,6 @@ const outdatedImage = (kind: TaskWorker["kind"]) =>
 
 // How long control waits to try again to stop or remove a worker's computer.
 const retryMs = 30_000;
-
-// How long a pull request's head read on GitHub serves refreshVerdicts.
-const headTtlMs = 60_000;
 
 // The number of a pull request of `repo` from its page's URL (GitHub's html_url), or null.
 function pullRequestNumber(url: string, repo: string): number | null {

@@ -420,7 +420,7 @@ export function startControl({
     for (const userId of userIds) server.publish(topic(userId), statesEvent(userId));
   };
   // Chiefs of staff handing work to projects (handoffs.ts).
-  const chiefs = chiefHost({ store, projects, workers: taskWorkers });
+  const chiefs = chiefHost({ store, projects });
   // What projects listen to: polled CI runs and issue queries, and schedules (subscriptions.ts).
   const subscriptions = subscriptionHost({ store, clock, connectors, projects });
 

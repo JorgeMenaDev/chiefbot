@@ -2,7 +2,6 @@ import { ChiefToolCall, HandoffId, ReplyToHandoffRequest, type BotId, type Hando
 import { apiError, bearer, unauthorized } from "./http.ts";
 import type { projectHost } from "./projects.ts";
 import type { openStore } from "./store.ts";
-import type { taskWorkerHost } from "./taskWorkers.ts";
 import { botTurn, heldTurn } from "./turnKeys.ts";
 
 // Handoffs: a person's chief of staff (their own bot) hands work to a project
@@ -25,12 +24,9 @@ import { botTurn, heldTurn } from "./turnKeys.ts";
 export function chiefHost({
   store,
   projects,
-  workers,
 }: {
   store: ReturnType<typeof openStore>;
   projects: Pick<ReturnType<typeof projectHost>, "queued" | "ledgerChanged">;
-  // handoff_status checks each task's current verdict on GitHub first.
-  workers: Pick<ReturnType<typeof taskWorkerHost>, "refreshVerdicts">;
 }) {
   // Sends a follow-up to the bot's handoff (handoffStore.ts followUp): the
   // owner's chat with the coordinator shows it, and the members the task's new
@@ -53,7 +49,7 @@ export function chiefHost({
   }
 
   // One chief tool call of the bot, whose owner is `owner`.
-  async function runTool(botId: BotId, owner: User, call: ChiefToolCall): Promise<Response> {
+  function runTool(botId: BotId, owner: User, call: ChiefToolCall): Response {
     switch (call.tool) {
       case "list_projects":
         return Response.json(
@@ -73,8 +69,6 @@ export function chiefHost({
         return sent instanceof Response ? sent : Response.json(sent satisfies Handoff);
       }
       case "handoff_status": {
-        const projectIds = new Set(store.handoffs.of(botId, call.handoff).map(({ projectId }) => projectId));
-        for (const projectId of projectIds) await workers.refreshVerdicts(projectId, owner.id);
         const handoffs = store.handoffs.of(botId, call.handoff);
         if (!call.handoff) return Response.json(handoffs satisfies Handoff[]);
         const [handoff] = handoffs;

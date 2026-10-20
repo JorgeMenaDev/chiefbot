@@ -123,9 +123,8 @@ const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.r
 //   PUT    /projects/:id/secrets/:name  body SetProjectSecretRequest → 204, for a name the config declares
 //                                    (400 invalid_secret; 503 secrets_unavailable)
 //   DELETE /projects/:id/secrets/:name  → 204: its value goes
-//   GET    /projects/:id/tasks       → Task[]: the ledger, each current verdict checked against its pull
-//                                    request's head on GitHub first (taskWorkers.ts refreshVerdicts). Every
-//                                    change also reaches each member's /events as a `tasks` ClientEvent.
+//   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
+//                                    as a `tasks` ClientEvent.
 //   POST   /projects/:id/tasks/:number/done  → Task: the member marks it done, over the done rule
 //                                    (taskWorkers.ts doneCheck), recorded in its `overrides`
 //                                    (404 not_found; 409 task_closed when it is done or abandoned)
@@ -348,7 +347,6 @@ export function projectHost({
         return Response.json(task satisfies Task);
       }
       case "list_tasks":
-        await workers.refreshVerdicts(projectId, asker.userId);
         return Response.json(projects.tasks(projectId, call.status) satisfies Task[]);
       case "read_context": {
         if (!call.path) return Response.json((await context.list(projectId)) satisfies ContextFile[]);
@@ -488,12 +486,10 @@ export function projectHost({
         });
       }),
     },
-    // The panel's Tasks and Engineers tabs read this: each current verdict is checked on GitHub first.
     "/projects/:id/tasks": {
-      GET: member(async (user, { project }, _req: Bun.BunRequest<"/projects/:id/tasks">) => {
-        await workers.refreshVerdicts(project.id, user.id);
-        return Response.json(projects.tasks(project.id) satisfies Task[]);
-      }),
+      GET: member((_user, { project }, _req: Bun.BunRequest<"/projects/:id/tasks">) =>
+        Response.json(projects.tasks(project.id) satisfies Task[]),
+      ),
     },
     "/projects/:id/tasks/:number/done": {
       POST: member((user, { project }, req: Bun.BunRequest<"/projects/:id/tasks/:number/done">) => {
