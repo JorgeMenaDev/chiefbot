@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test";
 import { HealthReport, type ProbeResult } from "@chiefbot/contracts";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { loadConnections, repoConnections } from "../connections/catalog.ts";
+import type { SecretStore } from "../secrets/secretStore.ts";
 import { cleanUp, eventually, hour, startTestControl, type TestUser } from "../testControl.ts";
 import { googleUrls } from "./gcloud.ts";
 import { defaultProbes, HEALTH_CONCURRENCY, HEALTH_TICK_MS } from "./health.ts";
@@ -15,11 +16,11 @@ const ok: ProbeResult = { status: "ok", summary: "Reachable", items: [] };
 
 // Control on a fake clock whose Looker probe answers `answer` (default ok) and
 // records the fields it got.
-async function setup(answer: Probe = async () => ok) {
+async function setup(answer: Probe = async () => ok, secrets?: SecretStore) {
   const time = fakeClock(Date.UTC(2026, 9, 20, 9));
   const seen: Array<Record<string, string>> = [];
   const probe: Probe = (fields, signal) => (seen.push(fields), answer(fields, signal));
-  const control = await startTestControl({ clock: time.clock, probes: { looker: probe } });
+  const control = await startTestControl({ clock: time.clock, probes: { looker: probe }, ...(secrets === undefined ? {} : { secrets }) });
   return { ...control, time, seen };
 }
 
@@ -87,6 +88,38 @@ test("the screen shows the last 24 hours of checks, and none once the connection
   await user.api("DELETE", "/connections/looker");
   await user.api("PUT", "/connections/looker", { fields: looker });
   expect(await checks(user)).toEqual([]);
+});
+
+test("saved fields the secret store refuses or lacks are unknown, never the last ok; a stalled read is dropped when the connection goes off", async () => {
+  const saved = new Map<string, string>();
+  let reading: "works" | "refused" | "missing" | "stalls" = "works";
+  const secrets: SecretStore = {
+    get: async (name) => {
+      if (reading === "refused") throw new Error(`PERMISSION_DENIED on projects/acme/secrets/${name}`);
+      if (reading === "stalls") return new Promise(() => {});
+      return reading === "missing" ? null : (saved.get(name) ?? null);
+    },
+    put: async (name, value) => void saved.set(name, value),
+    delete: async (name) => void saved.delete(name),
+  };
+  const { user } = await setup(undefined, secrets);
+  await user.api("PUT", "/connections/looker", { fields: looker });
+  expect((await report(user, true)).connections[0]?.latest?.status).toBe("ok");
+
+  reading = "refused";
+  const refused = (await report(user, true)).connections[0]?.latest;
+  reading = "missing";
+  const missing = (await report(user, true)).connections[0]?.latest;
+
+  for (const latest of [refused, missing]) {
+    expect(latest).toMatchObject({ status: "unknown", items: [{ status: "unknown", title: "Couldn't read this connection's credentials" }] });
+  }
+  expect(JSON.stringify(refused)).not.toMatch(/PERMISSION_DENIED|acme/);
+  reading = "stalls";
+  const stalled = report(user, true);
+  await Bun.sleep(20);
+  await user.api("DELETE", "/connections/looker");
+  expect((await stalled).connections).toEqual([]);
 });
 
 test("a check still running is aborted and dropped when its connection is saved again, turned off, or control stops", async () => {

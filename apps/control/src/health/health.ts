@@ -16,6 +16,20 @@ export const PROBE_TIMEOUT_MS = 30_000;
 // every connection is due, does not fire every probe and token exchange together.
 export const HEALTH_CONCURRENCY = 4;
 
+// A check whose saved fields could not be read: the secret store refused, has
+// none, or did not answer in time. Why goes to control's log, never the screen.
+const unreadable: ProbeResult = {
+  status: "unknown",
+  summary: "Not checked",
+  items: [
+    {
+      status: "unknown",
+      title: "Couldn't read this connection's credentials",
+      detail: "Control could not load its saved fields from its secret store; control's log says why. If it stays, save the connection again under Connect apps.",
+    },
+  ],
+};
+
 // The probes control runs, by connection name. `google` is where the gcloud probe reads.
 export const defaultProbes = (google: GoogleUrls): Probes => ({ gcloud: gcloudProbe(google), dynatrace: dynatraceProbe, looker: lookerProbe });
 
@@ -53,14 +67,21 @@ export function healthHost({
   let cancelTick = () => {};
   const keyOf = (userId: UserId, name: string) => `${userId}/${name}`;
 
-  // What the probe says, or unknown when it failed outright or took too long.
-  // Settles when `stop` aborts or the time is up, even if the probe does not.
-  async function outcome(name: string, fields: Record<string, string>, stop: AbortSignal): Promise<ProbeResult> {
+  // What the probe says of the person's saved fields, or unknown when they could
+  // not be read, or the probe failed outright. Reading them and probing share
+  // one PROBE_TIMEOUT_MS, and it settles when `stop` aborts or the time is up,
+  // even if the secret store or the probe does not.
+  async function outcome(userId: UserId, name: string, stop: AbortSignal): Promise<ProbeResult> {
+    const signal = AbortSignal.any([stop, AbortSignal.timeout(PROBE_TIMEOUT_MS)]);
+    const gaveUp = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    const fields = await Promise.race([fieldsOf(userId, name), gaveUp]).catch((error: unknown) => {
+      if (!stop.aborted) console.error(`health check of ${name} could not read its saved fields`, error);
+      return null;
+    });
+    if (!fields) return unreadable;
     try {
       const probe = probes[name];
       if (!probe) throw new Error(`${name} has no probe`);
-      const signal = AbortSignal.any([stop, AbortSignal.timeout(PROBE_TIMEOUT_MS)]);
-      const gaveUp = new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
       return ProbeResult.parse(await Promise.race([probe(fields, signal), gaveUp]));
     } catch (error) {
       return { status: "unknown", summary: clip(`The check failed: ${failure(error)}`, 300), items: [] };
@@ -76,9 +97,7 @@ export function healthHost({
     const abort = new AbortController();
     const job = (async () => {
       const at = clock.now();
-      const fields = await fieldsOf(userId, name);
-      if (!fields || abort.signal.aborted) return;
-      const result = await outcome(name, fields, abort.signal);
+      const result = await outcome(userId, name, abort.signal);
       // Saved again, turned off or control stopped meanwhile: the result is stale.
       if (!abort.signal.aborted && store.connections.on(userId).has(name)) store.health.record(userId, name, { ...result, at });
     })()
