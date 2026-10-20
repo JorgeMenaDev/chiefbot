@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { computerView } from "./computerView.ts";
+import { afterDisconnect, computerView } from "./computerView.ts";
 
 test("each bot status has its own Computer tab view", () => {
   expect(computerView("starting", 0)).toBe("waking");
@@ -14,4 +14,17 @@ test("an online bot's screen is unreachable after 3 connection attempts in a row
   // Failed attempts only count while the bot is online.
   expect(computerView("starting", 3)).toBe("waking");
   expect(computerView("stopped", 3)).toBe("asleep");
+});
+
+test("a screen that connected and then dropped does not count as a failure; attempts that never connect do", () => {
+  // Connected, dropped, then two reconnects that fail: still trying.
+  let failures = afterDisconnect(0, true);
+  failures = afterDisconnect(failures, false);
+  failures = afterDisconnect(failures, false);
+  expect(computerView("online", failures)).toBe("live");
+  // The third attempt in a row that never connects gives up.
+  failures = afterDisconnect(failures, false);
+  expect(computerView("online", failures)).toBe("unreachable");
+  // A drop after a good connection starts the count afresh.
+  expect(afterDisconnect(2, true)).toBe(0);
 });

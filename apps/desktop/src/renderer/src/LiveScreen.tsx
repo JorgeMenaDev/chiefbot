@@ -6,7 +6,7 @@ import { Avatar, type AvatarMood } from "./Avatar.tsx";
 import { ErrorText } from "./Pane.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
-import { computerView, type ComputerView } from "./computerView.ts";
+import { afterDisconnect, computerView, type ComputerView } from "./computerView.ts";
 import { cn } from "./lib/utils.ts";
 
 // The details panel's Computer tab. While the bot is online it shows the bot's live screen
@@ -81,8 +81,8 @@ function ComputerFace({ bot, view, onRetry }: { bot: Bot; view: Exclude<Computer
   );
 }
 
-// noVNC on control's screen WebSocket. It reconnects 2 s after a drop and counts each drop
-// until it connects again (`setFailures`), so the tab can say it cannot reach the computer.
+// noVNC on control's screen WebSocket. It reconnects 2 s after a drop and counts each attempt
+// that never connected (`setFailures`), so the tab can say it cannot reach the computer.
 // noVNC draws into a div React does not manage (`screen`): full screen moves that div into its
 // dialog and back, so the connection stays open.
 function LiveScreen({ bot, setFailures }: { bot: Bot; setFailures: Dispatch<SetStateAction<number>> }) {
@@ -105,14 +105,16 @@ function LiveScreen({ bot, setFailures }: { bot: Bot; setFailures: Dispatch<SetS
       const rfb = new RFB(screen, url);
       rfb.scaleViewport = true;
       rfb.viewOnly = true;
+      let opened = false;
       rfb.addEventListener("connect", () => {
+        opened = true;
         setConnected(true);
         setFailures(0);
       });
       rfb.addEventListener("disconnect", () => {
         setConnected(false);
         if (cancelled) return;
-        setFailures((count) => count + 1);
+        setFailures((count) => afterDisconnect(count, opened));
         retry = setTimeout(() => setAttempt((count) => count + 1), 2000);
       });
       client.current = rfb;
@@ -207,7 +209,7 @@ function FullScreen({ bot, onClose, children }: { bot: Bot; onClose: () => void;
           <Minimize2Icon />
         </Button>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col items-center gap-4 p-6">
+      <div className="flex min-h-0 flex-1 flex-col items-center gap-4 p-6 pb-8">
         {/* The largest 16:10 box that fits: as wide as the space, or 1.6 times its height. */}
         <div className="grid min-h-0 w-full flex-1 place-items-center [container-type:size]">
           <div className="w-[min(100cqw,160cqh)]">{children}</div>
@@ -220,30 +222,45 @@ function FullScreen({ bot, onClose, children }: { bot: Bot; onClose: () => void;
 
 // Who drives the screen and the switch, after Grok's floating pill: "Watching | Take control"
 // while the bot drives, "You're in control | Stop" while the user does (take-over, hand-back).
+// A refused switch shows a short line under the pill, with control's reason on hover, until the next try.
 function ControlPill({ bot }: { bot: Bot }) {
   const { takeOver, handBack } = window.chiefbot.bots;
   const human = bot.screenControl === "human";
+  const [error, setError] = useState<{ text: string; reason: string } | null>(null);
+  const toggle = () => {
+    setError(null);
+    const text = human ? "Couldn't hand the screen back." : "Couldn't take control.";
+    (human ? handBack : takeOver)(bot.id).catch((caught: unknown) => setError({ text, reason: caught instanceof Error ? caught.message : String(caught) }));
+  };
   return (
-    <div role="group" aria-label="Screen control" className="dropdown-glass flex items-center gap-2 rounded-full py-1 ps-3 pe-1 text-xs shadow-lg/5">
-      <span aria-live="polite" className="flex items-center gap-1.5 font-medium">
-        {human ? <MousePointer2Icon className="size-3.5 text-success" /> : <EyeIcon className="size-3.5 text-muted-foreground" />}
-        {human ? "You're in control" : "Watching"}
-      </span>
-      <span aria-hidden="true" className="h-4 w-px bg-border" />
-      {human ? (
-        <Button size="xs" variant="ghost" className="rounded-full" aria-label="Stop and hand the screen back" onClick={() => void handBack(bot.id)}>
-          Stop
-        </Button>
-      ) : (
-        <Button
-          size="xs"
-          className="rounded-full"
-          aria-label="Take control of the screen"
-          disabled={bot.status !== "online"}
-          onClick={() => void takeOver(bot.id)}
-        >
-          Take control
-        </Button>
+    <div className="relative">
+      <div role="group" aria-label="Screen control" className="dropdown-glass flex items-center gap-2 rounded-full py-1 ps-3 pe-1 text-xs shadow-lg/5">
+        <span aria-live="polite" className="flex items-center gap-1.5 font-medium">
+          {human ? <MousePointer2Icon className="size-3.5 text-success" /> : <EyeIcon className="size-3.5 text-muted-foreground" />}
+          {human ? "You're in control" : "Watching"}
+        </span>
+        <span aria-hidden="true" className="h-4 w-px bg-border" />
+        {human ? (
+          <Button size="xs" variant="ghost" className="rounded-full" aria-label="Stop and hand the screen back" onClick={toggle}>
+            Stop
+          </Button>
+        ) : (
+          <Button
+            size="xs"
+            className="rounded-full"
+            aria-label="Take control of the screen"
+            disabled={bot.status !== "online"}
+            onClick={toggle}
+          >
+            Take control
+          </Button>
+        )}
+      </div>
+      {/* Under the pill without moving it, so the buttons beside it stay in line. */}
+      {error && (
+        <p role="alert" title={error.reason} className="absolute top-full left-1/2 mt-1 -translate-x-1/2 whitespace-nowrap text-destructive-foreground text-xs">
+          {error.text}
+        </p>
       )}
     </div>
   );
