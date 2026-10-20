@@ -3,11 +3,13 @@
 # writes one to /etc/dtctl/config.yaml whose URL and token are ${DT_ENVIRONMENT_URL}
 # and ${DT_API_TOKEN}: dtctl fills them from its environment when it loads a file
 # named by DTCTL_CONFIG. The file is root's, so the agent cannot repoint it.
-# DTCTL_TOKEN_STORAGE=file keeps dtctl off any OS keyring, and HOME in the turn's
-# folder takes its query spills and usage ledger with the turn.
+# DTCTL_TOKEN_STORAGE=file keeps dtctl off any OS keyring. HOME, DTCTL_SPILL_DIR
+# and XDG_CACHE_HOME in the turn's folder (set after any the command brings) take
+# its query spills and usage ledger with the turn.
 # guard.sh, installed in front of dtctl, refuses --config (another config could
 # send the token elsewhere) and --spill-to (a write outside the turn's folder),
-# which the read-only globs below cannot tell apart.
+# which the read-only globs below cannot tell apart, and a bare -- (after it,
+# --help is an argument, and `dtctl apply -f x -- --help` would apply).
 title: Dynatrace
 description: Dynatrace problems, logs, services and SLOs through dtctl, as you.
 cli: dtctl
@@ -20,9 +22,11 @@ env:
   DTCTL_CONFIG: "/etc/dtctl/config.yaml"
   DTCTL_TOKEN_STORAGE: "file"
   HOME: "{dir}"
+  DTCTL_SPILL_DIR: "{dir}/spill"
+  XDG_CACHE_HOME: "{dir}/cache"
 readOnly:
   - "dtctl version*"
-  - "dtctl * --help"
+  - "dtctl --help"
   - "dtctl doctor*"
   - "dtctl commands*"
   - "dtctl auth status*"
