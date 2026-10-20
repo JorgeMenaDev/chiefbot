@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
@@ -1385,6 +1386,42 @@ test("a member marks a task done in the app over the done rule, and the task rec
   expect((await owner.api("POST", `/projects/${project.id}/tasks/9/done`)).status).toBe(404);
 });
 
+// What the done rule answers when task #1's pull request moved while control checked it.
+const moved = {
+  status: 400,
+  body: { error: "invalid_tool_call", message: "Task #1 is not done: its pull request moved while Chiefbot checked it. Verify it again. A member can still mark it done in the app." },
+};
+
+// A script where a verifier passes the pull request and an engineer pushes one
+// commit to its branch, fix-typo, through Chiefbot.
+const verifyOrPush = (copilot: FakeCopilot): FakeScript =>
+  async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
+    else if (isWorker(prompt)) {
+      const clone = copilot.workingDirectories.at(-1) ?? "";
+      await runtime.shell(`cd ${clone} && git checkout -q fix-typo && git commit -q --allow-empty -m more && git push -q origin fix-typo`);
+    }
+    yield sdk.idle();
+  };
+
+// Dispatches an engineer on a new task #`number` (verifyOrPush), and approves its push once it asks.
+async function pushFromTask(control: Awaited<ReturnType<typeof teamProject>>, tool: (call: Record<string, unknown>) => Promise<{ body: unknown }>, number: number) {
+  const { owner, project } = control;
+  await tool({ tool: "create_task", title: `Tidy the README, part ${number}` });
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: number, creationId: `c-${number}` })).body);
+  const [push] = (await workerWhen(owner, project, engineer.id, ({ pendingApprovals }) => pendingApprovals.length > 0)).pendingApprovals;
+  await owner.api("POST", `/projects/${project.id}/workers/${engineer.id}/approvals/${push?.approvalId}`, { approved: true });
+  return engineer;
+}
+
+// Dispatches a verifier on task #1 and waits until it has its verdict: then task #1's verification.
+async function verifyTask(control: Awaited<ReturnType<typeof teamProject>>, tool: (call: Record<string, unknown>) => Promise<{ body: unknown }>, creationId: string) {
+  const { owner, project } = control;
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId })).body);
+  await workerWhen(owner, project, id, ({ verdict }) => verdict !== null);
+  return Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification;
+}
+
 test("the project agent cannot mark a task done while a push through Chiefbot moves its pull request: one that lands while control reads the head on GitHub, or one in flight", async () => {
   const control = await gitProject();
   const { owner, project, copilot, github } = control;
@@ -1412,10 +1449,6 @@ test("the project agent cannot mark a task done while a push through Chiefbot mo
   };
   const approve = (approvalId: string) => owner.api("POST", `/projects/${project.id}/workers/${engineer.id}/approvals/${approvalId}`, { approved: true });
   const done = () => tool({ tool: "update_task", number: 1, status: "done" });
-  const moved = {
-    status: 400,
-    body: { error: "invalid_tool_call", message: "Task #1 is not done: its pull request moved while Chiefbot checked it. Verify it again. A member can still mark it done in the app." },
-  };
   const first = await nextPush();
   const reads = github.holdPullRequests();
   const landing = done();
@@ -1437,6 +1470,81 @@ test("the project agent cannot mark a task done while a push through Chiefbot mo
   pushes.release();
   await workerWhen(owner, project, engineer.id, ({ state }) => state === "finished");
   expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]).toMatchObject({ status: "open", verification: { result: "pass", stale: true } });
+});
+
+test("the project agent cannot mark a task done while two pushes through Chiefbot to its pull request's branch overlap", async () => {
+  const control = await gitProject("commands:\n  test: bun test\nworkers:\n  max: 3\n");
+  const { copilot, github } = control;
+  const { tool } = await heldTurn(control, verifyOrPush(copilot));
+  await pullRequestOnTask(control, tool);
+  expect(await verifyTask(control, tool, "v-1")).toMatchObject({ result: "pass", stale: false });
+  const pushes = github.holdPushes();
+  await pushFromTask(control, tool, 2);
+  await pushFromTask(control, tool, 3);
+  await eventually(() => pushes.held() === 2);
+
+  expect(await tool({ tool: "update_task", number: 1, status: "done" })).toEqual(moved);
+
+  pushes.release();
+});
+
+test("a push through Chiefbot whose answer from GitHub is lost makes every verdict on its branch stale, so the project agent cannot mark the task done", async () => {
+  const control = await gitProject();
+  const { owner, project, copilot, github } = control;
+  const { tool } = await heldTurn(control, verifyOrPush(copilot));
+  const { url, head } = await pullRequestOnTask(control, tool);
+  await verifyTask(control, tool, "v-1");
+  const pushes = github.holdPushes();
+  const engineer = await pushFromTask(control, tool, 2);
+  await eventually(() => pushes.held() === 1);
+
+  pushes.cut();
+
+  await workerWhen(owner, project, engineer.id, ({ state }) => state === "finished");
+  expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification).toMatchObject({ result: "pass", sha: head, stale: true });
+  expect(await tool({ tool: "update_task", number: 1, status: "done" })).toEqual({
+    status: 400,
+    body: {
+      error: "invalid_tool_call",
+      message: `Task #1 is not done: its PASS for ${head.slice(0, 7)} is stale, as a push may have moved ${url} since. Dispatch a verifier again. A member can still mark it done in the app.`,
+    },
+  });
+});
+
+test("on restart a push through Chiefbot that was in flight is over: every verdict on its branch is stale, and a new verifier's is current", async () => {
+  const control = await teamProject({ persistent: true });
+  const { owner, project, copilot } = control;
+  const { tool, release } = await heldTurn(control, verifyOrPush(copilot));
+  const { head } = await pullRequestOnTask(control, tool);
+  await verifyTask(control, tool, "v-1");
+  release();
+  control.stopControl();
+  // Control stopped while it forwarded a push to the pull request's branch.
+  const db = new Database(control.dbPath);
+  db.run("INSERT INTO branch_pushes (repo, branch, revision, active) VALUES ('octo-org/shop', 'fix-typo', 1, 1)");
+  db.close();
+
+  control.startControl();
+
+  const [task] = Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json());
+  expect(task?.verification).toMatchObject({ result: "pass", sha: head, stale: true });
+  const again = await heldTurn(control, verifyOrPush(copilot));
+  expect(await verifyTask(control, again.tool, "v-2")).toMatchObject({ result: "pass", sha: head, stale: false });
+});
+
+test("a verifier dispatched while a push through Chiefbot to the pull request's branch is in flight gives a stale verdict", async () => {
+  const control = await gitProject();
+  const { copilot, github } = control;
+  const { tool } = await heldTurn(control, verifyOrPush(copilot));
+  const { head } = await pullRequestOnTask(control, tool);
+  const pushes = github.holdPushes();
+  await pushFromTask(control, tool, 2);
+  await eventually(() => pushes.held() === 1);
+
+  const verification = await verifyTask(control, tool, "v-1");
+
+  expect(verification).toMatchObject({ result: "pass", sha: head, stale: true });
+  pushes.release();
 });
 
 test("a pull request linked on a done task reopens it, so done needs a PASS for it; a member can still mark it done, and a task that ended in a report stays done", async () => {

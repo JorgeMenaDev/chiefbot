@@ -134,9 +134,9 @@ export type TaskWorkerHostOptions = {
 // sets on the task (recordVerdict), BLOCKED when it ends without one
 // (noVerdict). A push through the git proxy since its commit was pinned, or
 // GitHub's head when the coordinator marks the task done (doneCheck), makes a
-// verdict stale. Each push through the proxy bumps its branch's push revision
-// as it starts and ends (projectStore.ts branch_pushes), so a check that reads
-// GitHub can tell whether a push came in between.
+// verdict stale. Control counts the pushes through the proxy to each branch,
+// those started and those in flight (projectStore.ts branch_pushes), so a check
+// that reads GitHub can tell whether a push came in between.
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's
@@ -683,9 +683,9 @@ export function taskWorkerHost({
           "",
         ].join("\n"),
       );
-      const revision = workers.setVerdict(workerId, verdict.result);
-      if (revision === null) return null;
-      projects.setVerdict(projectId, taskNumber, { result: verdict.result, sha, summary: verdict.summary, pullRequest, branch, evidence, worker: workerId, at }, revision);
+      const pinned = workers.setVerdict(workerId, verdict.result);
+      if (pinned === null) return null;
+      projects.setVerdict(projectId, taskNumber, { result: verdict.result, sha, summary: verdict.summary, pullRequest, branch, evidence, worker: workerId, at }, pinned.revision);
       publishTasks(projectId);
       publish(projectId);
       return evidence;
@@ -737,8 +737,9 @@ export function taskWorkerHost({
 
   // Starts a verifier on the task's pull request (the one named, else the latest
   // the task links), pinned to its head now, read on GitHub as `asker` may, and
-  // to its branch's push revision read before that head (a first read names the
-  // branch): a push through Chiefbot after it makes its verdict stale.
+  // to the revision of the pushes through Chiefbot to its branch, read before
+  // that head (a first read names the branch). Its verdict is stale when a push
+  // was in flight then, or one started since.
   // Like an engineer, it takes one of the project's workers.max places, and
   // waits while another worker of the task is unended.
   async function dispatchVerifier(project: Project, asker: ProjectMember, call: Extract<WorkerToolCall, { tool: "dispatch_verifier" }>) {
@@ -753,9 +754,10 @@ export function taskWorkerHost({
     if (number === null) return refused(`${url} is not a pull request of ${project.repo}.`);
     const first = await pullRequestHead(asker.userId, project.repo, number);
     if ("error" in first) return refused(`Couldn't read ${url} on GitHub: ${first.message}`, 502);
-    const revision = projects.pushRevision(project.repo, first.branch);
+    const pushes = projects.pushesTo(project.repo, first.branch);
     const head = await pullRequestHead(asker.userId, project.repo, number);
     if ("error" in head) return refused(`Couldn't read ${url} on GitHub: ${head.message}`, 502);
+    const revision = pushes.active === 0 && head.branch === first.branch ? pushes.revision : null;
     const token = newToken();
     const record = workers.launch({
       projectId: project.id,
@@ -831,7 +833,9 @@ export function taskWorkerHost({
     // request has nothing to verify, and one already done stays so unless it
     // gets a new pull request. Answers why not (`refused`), or what the done
     // write must find unchanged (`verified`, projectStore.ts completeTask): the
-    // head GitHub showed and its branch's push revision, read before GitHub.
+    // head GitHub showed, and the revision of the pushes through Chiefbot to its
+    // branch, read before GitHub, none in flight. A stale PASS stays stale: only
+    // a new verifier's verdict is current.
     // A member may mark it done over this in the app (projects.ts).
     async doneCheck(project: Project, asker: ProjectMember, number: number, links: TaskLink[] = []): Promise<{ refused: string } | { verified?: VerifiedHead }> {
       const task = projects.tasks(project.id).find((candidate) => candidate.number === number);
@@ -843,25 +847,29 @@ export function taskWorkerHost({
       const at = verification.sha.slice(0, 7);
       if (verification.result === "issues") return refused(`Task #${number} is not done: its verifier found issues in ${url} at ${at}. ${verification.summary}`);
       if (verification.result === "blocked") return refused(`Task #${number} is not done: its verifier could not check ${url} at ${at}. ${verification.summary}`);
-      const revision = projects.pushRevision(project.repo, verification.branch);
-      if (revision % 2 === 1) return { refused: movedWhileChecking(number) };
+      if (verification.stale) return refused(`Task #${number} is not done: its PASS for ${at} is stale, as a push may have moved ${url} since. Dispatch a verifier again.`);
+      const pushes = projects.pushesTo(project.repo, verification.branch);
+      if (pushes.active > 0) return { refused: movedWhileChecking(number) };
       const prNumber = pullRequestNumber(url, project.repo);
       const head = prNumber === null ? null : await pullRequestHead(asker.userId, project.repo, prNumber);
       if (head === null || "error" in head) {
         return refused(`Task #${number} is not done: Chiefbot couldn't read ${url} on GitHub to check that its PASS is for its head${head ? ` (${head.message})` : ""}. Try again.`);
       }
-      const stale = head.sha !== verification.sha;
-      if (projects.setStale(project.id, number, verification.worker, stale, revision)) publishTasks(project.id);
-      if (stale) return refused(`Task #${number} is not done: its PASS is for ${at}, and ${url} has moved to ${head.sha.slice(0, 7)} since. Dispatch a verifier again.`);
-      return { verified: { pullRequest: url, sha: head.sha, revision } };
+      if (head.sha !== verification.sha) {
+        if (projects.markStale(project.id, number, verification.worker)) publishTasks(project.id);
+        return refused(`Task #${number} is not done: its PASS is for ${at}, and ${url} has moved to ${head.sha.slice(0, 7)} since. Dispatch a verifier again.`);
+      }
+      if (head.branch !== verification.branch) return { refused: movedWhileChecking(number) };
+      return { verified: { pullRequest: url, sha: head.sha, revision: pushes.revision } };
     },
 
     // A push through the git proxy is about to move `branches` of `repo`
-    // (repos.ts): their push revisions count it in flight until it ends. Once it
-    // has, each verdict on a branch it moved, at another commit, is stale.
+    // (repos.ts): they count it in flight until it ends. Then each verdict on a
+    // branch it moved, at another commit, is stale; when GitHub's answer was
+    // lost (`moved` null), each verdict on its branches (projectStore.ts pushEnded).
     pushing(repo: string, branches: string[]) {
       projects.pushStarted(repo, branches);
-      return (moved: Array<{ branch: string; sha: string }>) => {
+      return (moved: Array<{ branch: string; sha: string }> | null) => {
         for (const projectId of projects.pushEnded(repo, branches, moved)) publishTasks(projectId);
       };
     },

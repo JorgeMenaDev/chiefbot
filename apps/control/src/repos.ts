@@ -43,9 +43,10 @@ export type RepoAccessOptions = {
   // The agent whose running turn a key is (a bot's, task worker's or coordinator's), if any.
   agentFor: (key: string) => RepoAgent | RepoReader | null;
   // An approved push to the repo is about to reach GitHub, to move `branches`.
-  // What it returns is called once GitHub has answered, or failed to: with each
-  // branch GitHub took the push for and the commit it moves it to, none when it refused it.
-  onPush: (fullName: string, branches: string[]) => (moved: Array<{ branch: string; sha: string }>) => void;
+  // What it returns is called once the push is over: with each branch GitHub
+  // took it for and the commit it moves it to, none when GitHub refused it, or
+  // null when GitHub's answer was lost, so the push may land yet.
+  onPush: (fullName: string, branches: string[]) => (moved: Array<{ branch: string; sha: string }> | null) => void;
 };
 
 type Refusal = { error: ApiErrorCode; status: number; message: string };
@@ -147,17 +148,20 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor,
       const rest = url.pathname.slice(`/git/${owner}/${repo}`.length);
       const moves = (pushed?.refs ?? []).flatMap(({ ref, sha }) => (ref.startsWith("refs/heads/") ? [{ branch: ref.slice("refs/heads/".length), sha }] : []));
       const ended = pushed ? onPush(fullName, moves.map(({ branch }) => branch)) : null;
-      let res: Response | null = null;
+      let res: Response;
       let answer: ArrayBuffer | ReadableStream<Uint8Array> | null;
       try {
         res = await fetch(`${githubUrl}/${fullName}.git${rest}${url.search}`, { method: req.method, headers, body, timeout: false });
         // A push is over once GitHub's whole answer, each ref's status, is in.
         answer = pushed ? await res.arrayBuffer() : res.body;
-      } finally {
-        // GitHub may still refuse a ref (a push that is not a fast-forward): what
-        // hears of it checks GitHub again before it counts on it (taskWorkers.ts's done check).
-        ended?.(res?.ok ? moves : []);
+      } catch (error) {
+        if (!ended) throw error;
+        ended(null);
+        return text(502, "Chiefbot lost GitHub's answer to this push, so it may land yet. Fetch to see whether it did.");
       }
+      // GitHub may still refuse a ref (a push that is not a fast-forward): what
+      // hears of it checks GitHub again before it counts on it (taskWorkers.ts's done check).
+      ended?.(res.ok ? moves : []);
       // Without an installation token GitHub sees an anonymous request, which only a public repo answers.
       if (!token && (res.status === 401 || res.status === 404)) return text(403, notInstalled(fullName).message);
       // Only what git reads: GitHub's auth challenge must not reach git, and the body is already decoded.
