@@ -124,6 +124,14 @@ export type TaskWorkerHostOptions = {
 // keeping its disk, and goes once the worker is stopped or its task is done or
 // abandoned; on start, control stops every computer of an ended turn, removes
 // every one that should be gone and launches what the queue has room for (`recover`).
+// A verifier (dispatch_verifier) is a worker of the same kind on a computer of
+// its own: it checks a task's pull request at the head control read on GitHub
+// when it was dispatched, which its setup checks out. Control refuses its
+// pushes and pull requests. It ends with a verdict (report_verdict), which
+// control keeps with its report and screenshots in the project's context and
+// sets on the task (recordVerdict), BLOCKED when it ends without one
+// (noVerdict). A push through the git proxy, or GitHub's head when the
+// coordinator marks the task done (doneRefusal), makes a verdict stale.
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's

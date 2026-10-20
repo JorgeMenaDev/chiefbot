@@ -1096,9 +1096,11 @@ test("when the organization pays, a worker runs on its installation token", asyn
   expect(copilot.tokens).toEqual(["ghs_org_1"]);
 });
 
-// A project for octo-org/shop whose computers use real git: each worker's setup
-// and its agent's shell reach the fake GitHub through control's git proxy, with
-// the turn's key from the worker's credential helper, as in a real computer.
+// A project for octo-org/shop whose computers use real git: unlike
+// gitTeamProject's, each worker's setup runs too (clone, a verifier's checkout),
+// and it and the agent's shell reach the fake GitHub as github.com through
+// control's git proxy, with the turn's key from the worker's credential helper,
+// as in a real computer.
 async function gitProject(projectFile?: string) {
   const home = mkdtempSync(join(tmpdir(), "chiefbot-home-"));
   atCleanUp(() => rmSync(home, { recursive: true, force: true }));
@@ -1379,4 +1381,27 @@ test("a member marks a task done in the app over the done rule, and the task rec
   const again = await owner.api("POST", `/projects/${project.id}/tasks/1/done`);
   expect([again.status, ApiError.parse(await again.json()).error]).toEqual([409, "task_closed"]);
   expect((await owner.api("POST", `/projects/${project.id}/tasks/9/done`)).status).toBe(404);
+});
+
+test("a verifier takes one of the project's workers.max places, as an engineer does: beyond it, it is queued, and checks its pinned commit once one ends", async () => {
+  let finish = () => {};
+  const finished = new Promise<void>((resolve) => (finish = resolve));
+  const control = await teamProject({}, "commands:\n  test: bun test\nworkers:\n  max: 1\n");
+  const { owner, project, computers } = control;
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
+    else await finished;
+    yield sdk.idle();
+  });
+  const { head } = await pullRequestOnTask(control, tool);
+  await tool({ tool: "create_task", title: "Add dark mode" });
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-1" })).body);
+  await workerWhen(owner, project, engineer.id, ({ state }) => state === "working");
+
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(verifier).toMatchObject({ state: "queued", sha: head });
+  expect(computers.computers.has(verifier.id)).toBe(false);
+  finish();
+  expect(await workerWhen(owner, project, verifier.id, ({ verdict }) => verdict !== null)).toMatchObject({ state: "finished", verdict: "pass", sha: head });
 });
