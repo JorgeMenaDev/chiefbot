@@ -428,3 +428,98 @@
     }
   }
 }
+
+/* A bot's face in the Computer tab (Avatar's `mood`). The eyes move in their own box, so
+   a blink closes each capsule about its middle. Shut eyes stay shut under reduced motion. */
+.avatar-eyes {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+[data-mood="sleep"] .avatar-eyes {
+  scale: 1 0.16;
+}
+
+/* The title while a computer wakes or goes to sleep: a light sweeps across the words. */
+.shimmer-text {
+  color: var(--foreground);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-mood="gaze"] .avatar-eyes {
+    animation:
+      avatar-gaze 6s ease-in-out infinite,
+      avatar-blink 6s infinite;
+  }
+
+  [data-mood="blink"] .avatar-eyes {
+    animation: avatar-blink 6s infinite;
+  }
+
+  [data-mood="sleep"] {
+    animation: avatar-breathe 4s ease-in-out infinite;
+  }
+
+  .shimmer-text {
+    background: linear-gradient(90deg, var(--muted-foreground) 40%, var(--foreground) 50%, var(--muted-foreground) 60%) 0 0 / 300% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer 2.4s linear infinite;
+  }
+}
+
+/* Rest, glance left, right, down, back. */
+@keyframes avatar-gaze {
+  0%,
+  12% {
+    translate: 0 0;
+  }
+  20%,
+  36% {
+    translate: -7px -2px;
+  }
+  44%,
+  60% {
+    translate: 7px -3px;
+  }
+  68%,
+  84% {
+    translate: 2px 4px;
+  }
+  92%,
+  100% {
+    translate: 0 0;
+  }
+}
+
+/* Two quick blinks a cycle. */
+@keyframes avatar-blink {
+  0%,
+  38%,
+  42%,
+  86%,
+  90%,
+  100% {
+    scale: 1 1;
+  }
+  40%,
+  88% {
+    scale: 1 0.1;
+  }
+}
+
+@keyframes avatar-breathe {
+  50% {
+    scale: 1.04;
+  }
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: 0 0;
+  }
+}

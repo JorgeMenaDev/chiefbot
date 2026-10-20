@@ -36,15 +36,22 @@ export const avatarColors: Record<AvatarColor, { label: string; hex: string }> =
 export const avatarShapes = AvatarShape.options.map((shape) => ({ shape, label: shapes[shape].label }));
 export const avatarColorOptions = AvatarColor.options.map((color) => ({ color, ...avatarColors[color] }));
 
+// How a face's eyes move (the Computer tab; `avatar-*` in styles.css): `gaze` looks around and
+// blinks, `blink` only blinks, `sleep` shuts them while the face breathes. Reduced motion holds them still.
+export type AvatarMood = "gaze" | "blink" | "sleep";
+
 // Sized by className (e.g. size-6); decorative, so screen readers skip it.
-export function Avatar({ avatar, className }: { avatar: BotAvatar; className?: string }) {
+export function Avatar({ avatar, className, mood }: { avatar: BotAvatar; className?: string; mood?: AvatarMood }) {
   const { d, eyes: [x, y, angle, scale] } = shapes[avatar.shape];
   return (
-    <svg viewBox="0 0 100 100" aria-hidden="true" className={cn("block shrink-0", className)} style={{ color: avatarColors[avatar.color].hex }}>
+    <svg viewBox="0 0 100 100" aria-hidden="true" data-mood={mood} className={cn("block shrink-0", className)} style={{ color: avatarColors[avatar.color].hex }}>
       <path d={d} fill="currentColor" />
       <g fill="#fff" transform={`translate(${x} ${y}) rotate(${angle}) scale(${scale})`}>
-        <rect x={-19} y={-12.5} width={12} height={25} rx={6} />
-        <rect x={7} y={-12.5} width={12} height={25} rx={6} />
+        {/* Its own group, as a CSS transform would replace the placing transform above. */}
+        <g className="avatar-eyes">
+          <rect x={-19} y={-12.5} width={12} height={25} rx={6} />
+          <rect x={7} y={-12.5} width={12} height={25} rx={6} />
+        </g>
       </g>
     </svg>
   );
