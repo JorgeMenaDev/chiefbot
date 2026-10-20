@@ -1,0 +1,22 @@
+# Fixed ports on localhost, as on a developer's laptop. Paths are kept as they are.
+server:
+  port: 8081
+spring:
+  config:
+    import: file:./users.yaml
+  cloud:
+    gateway:
+      server:
+        webflux:
+          routes:
+            - id: meta
+              uri: http://localhost:8082
+              predicates: [Path=/acme-meta/**]
+            - id: ui
+              uri: http://localhost:3000
+              predicates: [Path=/acme-ui/**]
+acme:
+  # Shared with meta, which checks the tokens this gateway signs.
+  jwt-secret: ${ACME_JWT_SECRET}
+management:
+  endpoints.web.exposure.include: health

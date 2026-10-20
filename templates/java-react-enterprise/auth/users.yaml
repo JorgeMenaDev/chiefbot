@@ -1,0 +1,8 @@
+# The gateway's users: id, display name, bcrypt hash and groups. Read at startup.
+# alice's password is alice-password. Stand-in data only.
+acme:
+  users:
+    - id: alice
+      name: Alice Example
+      bcrypt: $2a$10$iHFLd6kSoLmbEOIHazvlhOkjqmtTnTNIDAs5U1wE1chfK.ZAmpE2a
+      groups: [engineers]

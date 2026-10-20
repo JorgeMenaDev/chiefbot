@@ -1,0 +1,8 @@
+# For a person to look at one copy: publishes the UI and the gateway on this
+# machine's localhost. Ports go on `pod`, which owns the namespace. Only one copy
+# can publish at a time (README.md has the cookie limit).
+services:
+  pod:
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:8081:8081"
