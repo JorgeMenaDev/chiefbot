@@ -10,7 +10,7 @@ The `looker` command calls the Looker API 4.0 as the user, for this turn only: i
 ```sh
 looker get <path>                       # the instance, users, connections, schedules, dashboards, Looks, models, folders
 looker activity '<query json>'          # a System Activity query
-looker test-connection <name>           # test a database connection
+looker test-connection <name>           # check Looker can connect to a database
 looker request <method> <path> ['<json>']   # anything else
 ```
 
@@ -41,7 +41,7 @@ Schedules that failed:
 looker activity '{"model":"system__activity","view":"scheduled_plan","fields":["scheduled_job.finalized_time","scheduled_plan.id","scheduled_plan.name","scheduled_job.status_detail"],"filters":{"scheduled_job.status":"failure","scheduled_job.finalized_time":"7 days"},"sorts":["scheduled_job.finalized_time desc"],"limit":"50"}'
 ```
 
-Database connections: list them, then test each one. A test reports each step (`connect`, `kill`, `query`…) with its status and message:
+Database connections: list them, then check Looker can connect to each one. The answer has the `connect` test's status and message. The full test suite (`looker request PUT '/connections/<name>/test'`) can create views or tables to probe the database, so it asks first:
 
 ```sh
 looker get '/connections?fields=name,dialect_name,host'
