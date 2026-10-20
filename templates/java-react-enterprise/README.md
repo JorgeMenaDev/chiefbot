@@ -46,12 +46,18 @@ You need Docker with Compose. Images build from source in Docker, so no local JD
 ./check.sh                      # the two-copy check (below)
 ```
 
-With `--publish`, open http://localhost:3000/acme-ui. Only one copy can publish at a time, since every copy wants this machine's 3000 and 8081.
+With `--publish`, open http://localhost:3000/acme-ui. Only one copy can publish at a time, since every copy wants this machine's 3000 and 8081. A start that fails removes what it created. A copy that existed before is left as it is.
 
 **The one known limit:** two copies published to one browser, one after the other, share that browser's `localhost` cookies. The second copy gets the first copy's `auth` and `token` cookies. They work there only because every copy signs with the same default secret (`ACME_JWT_SECRET`). Give each published copy its own browser profile or a private window.
 
 ## The two-copy check
 
-`./check.sh` builds the images, starts two copies at once, and runs a real browser (Playwright, `probe/`) inside each copy's namespace. In each copy the browser logs in at the gateway (Basic, then the `auth` cookie), opens the UI on port 3000, sees the seeded records and creates one. Then it confirms that neither copy sees the other's record, and removes both copies with their volumes. It needs Docker, so `bun run check` leaves it out.
+`./check.sh` builds the images, starts two copies at once, and runs a real browser (Playwright with Chromium, `probe/`) inside each copy's namespace. In each copy the browser:
+
+1. logs in at the gateway with Basic and gets the `auth` cookie;
+2. proves the cookie alone gets in: a clean browser with nothing but that cookie reads every seeded record in all three schemas, and gets 401 once the cookie is cleared;
+3. opens the UI on port 3000, sees the seeded records and creates one.
+
+Then it confirms that neither copy sees the other's record, and removes both copies with their volumes. Each run names its copies afresh (`acme-check-<random>-a` and `-b`) and removes only those. The check fails if a removal fails or leaves a container or volume behind. It needs Docker, so `bun run check` leaves it out.
 
 The gateway's auth decisions have focused tests (`auth/src/test`). `gradle build` runs them in the gateway's image build, so a failing test fails the image.

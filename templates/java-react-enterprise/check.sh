@@ -1,31 +1,40 @@
 #!/usr/bin/env bash
 # The two-copy check. It starts two copies of the stack at once and, in each, runs
-# a real browser inside that copy's network namespace: it logs in, sees the seeded
-# records and creates one. Then it checks that neither copy sees the other's
-# record, and removes both copies. Needs Docker, so `bun run check` leaves it out.
+# a real browser inside that copy's network namespace: it logs in, proves the
+# gateway's cookie alone authenticates, sees every seeded record and creates one.
+# Then it checks that neither copy sees the other's record, and removes both
+# copies. Needs Docker, so `bun run check` leaves it out.
 set -euo pipefail
 cd "$(dirname "$0")"
 export COMPOSE_PROGRESS=quiet
-copies=(check-a check-b)
+
+# Names no other stack has, so this run removes only what it made.
+run=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+copies=("check-$run-a" "check-$run-b")
+started=()
 
 finish() {
-  local status=$?
-  for copy in "${copies[@]}"; do
-    ((status == 0)) || docker compose -p "acme-$copy" logs --tail 30 || true
-    ./stack.sh down "$copy" || true
+  local status=$? copy project
+  for copy in ${started[@]+"${started[@]}"}; do
+    project="acme-$copy"
+    ((status == 0)) || docker compose -p "$project" logs --tail 30 || true
+    ./stack.sh down "$copy" || status=1
+    if [[ -n $(docker ps -aq --filter "label=com.docker.compose.project=$project") ||
+      -n $(docker volume ls -q --filter "label=com.docker.compose.project=$project") ]]; then
+      echo "teardown left containers or volumes of $project behind" >&2
+      status=1
+    fi
   done
-  echo "removed both copies; left behind: $(docker ps -aq --filter name=acme-check- | wc -l | tr -d ' ') containers," \
-    "$(docker volume ls -q --filter name=acme-check- | wc -l | tr -d ' ') volumes"
-  ((status == 0)) && echo "check: passed" || echo "check: FAILED"
+  ((status == 0)) && echo "removed both copies, nothing left behind" && echo "check: passed" || echo "check: FAILED"
   exit "$status"
 }
 trap finish EXIT
 
 # Runs one step for both copies at once, each line prefixed with its copy.
 both() {
-  local pids=() failed=0
+  local pids=() failed=0 copy pid
   for copy in "${copies[@]}"; do
-    "$@" "$copy" 2>&1 | sed "s/^/[$copy] /" &
+    "$@" "$copy" 2>&1 | sed "s/^/[${copy##*-}] /" &
     pids+=($!)
   done
   for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
@@ -45,9 +54,10 @@ isolated() { probe "$1" isolated "record-from-$1" "record-from-$(other "$1")"; }
 
 echo "== build the images from source"
 docker compose --profile probe build
-echo "== start two copies at once"
+echo "== start two copies at once: acme-${copies[0]} and acme-${copies[1]}"
+started=("${copies[@]}")
 both start
-echo "== in each copy, a browser logs in, sees the seed and creates a record"
+echo "== in each copy, a browser logs in, uses the auth cookie alone, sees the seed and creates a record"
 both create
 echo "== neither copy sees the other's record"
 both isolated
