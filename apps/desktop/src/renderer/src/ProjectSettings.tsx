@@ -1,5 +1,5 @@
 import { ConfigKey, ProjectSecret, projectFileName, type Project, type ProjectConfig } from "@chiefbot/contracts";
-import { useEffect, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { ErrorText, Muted, PaneBody, Row, Section } from "./Pane.tsx";
 import { Badge } from "./components/ui/badge.tsx";
@@ -8,29 +8,29 @@ import { Input, Textarea } from "./components/ui/input.tsx";
 
 const SecretList = z.array(ProjectSecret);
 
-// A project's settings view: the config its agents get with where each key comes
-// from, the settings members keep in the app (the project file's keys, as YAML)
-// and the project's secrets. Any member edits them. `onSaved` runs once new
+// A project's settings view: the settings members keep in the app (the project
+// file's keys, as YAML), the project's secrets, and the config its agents get with
+// where each key comes from. Any member edits them. `onSaved` runs once new
 // settings are saved, so the caller fetches the project again.
 export function ProjectSettings({ project, onSaved }: { project: Project; onSaved: () => void }) {
   return (
     <PaneBody>
-      <EffectiveConfig project={project} />
       <SettingsEditor project={project} onSaved={onSaved} />
       <Secrets project={project} />
+      <EffectiveConfig project={project} />
     </PaneBody>
   );
 }
 
-// What the header and the config say about the repo's file.
+// What the header and the settings say about the repo's file.
 export function fileNote(project: Project) {
   switch (project.file.status) {
     case "found":
-      return `From ${projectFileName} and the settings below. A key the settings set wins.`;
+      return `Using ${projectFileName} from the default branch`;
     case "missing":
-      return "No project file, using app settings.";
+      return "No project file, using app settings";
     case "invalid":
-      return `${projectFileName} has errors, using app settings.`;
+      return `${projectFileName} has errors, using app settings`;
   }
 }
 
@@ -52,25 +52,22 @@ const shown: Record<ConfigKey, (config: ProjectConfig) => string> = {
   "workers.max": ({ workers }) => String(workers.max),
 };
 
+// Every key, its value and where it comes from: file, settings or its default.
 function EffectiveConfig({ project }: { project: Project }) {
   return (
-    <Section title="Config" description={fileNote(project)}>
-      {project.file.status === "invalid" && (
-        <p className="whitespace-pre-wrap rounded-lg bg-destructive/8 px-3 py-2 font-mono text-destructive-foreground text-xs dark:bg-destructive/16">
-          {project.file.error}
-        </p>
-      )}
-      {ConfigKey.options.map((key) => {
-        const source = project.sources[key];
-        return (
-          <Row
-            key={key}
-            title={<code className="font-mono text-xs">{key}</code>}
-            meta={<span className="break-all font-mono">{shown[key](project.config)}</span>}
-            actions={<Badge variant={source === "settings" ? "info" : source === "file" ? "secondary" : "outline"}>{source ?? "default"}</Badge>}
-          />
-        );
-      })}
+    <Section title="Config" description="What the project's agents get, and where each key comes from.">
+      <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2 py-2 font-mono text-xs">
+        {ConfigKey.options.map((key) => {
+          const source = project.sources[key];
+          return (
+            <Fragment key={key}>
+              <code>{key}</code>
+              <span className="break-all text-muted-foreground">{shown[key](project.config)}</span>
+              <Badge variant={source === "settings" ? "info" : source === "file" ? "secondary" : "outline"}>{source ?? "default"}</Badge>
+            </Fragment>
+          );
+        })}
+      </div>
     </Section>
   );
 }
@@ -100,7 +97,15 @@ function SettingsEditor({ project, onSaved }: { project: Project; onSaved: () =>
   }
 
   return (
-    <Section title="Settings" description={`The keys of ${projectFileName}, kept in the app for this project. Commands and workers merge key by key; any other key replaces the file's.`}>
+    <Section
+      title="Settings"
+      description={`${fileNote(project)}. Settings take the same keys as the file: a key set here wins over the file's, and commands and workers merge key by key.`}
+    >
+      {project.file.status === "invalid" && (
+        <p className="mt-2 whitespace-pre-wrap rounded-lg bg-destructive/8 px-3 py-2 font-mono text-destructive-foreground text-xs dark:bg-destructive/16">
+          {project.file.error}
+        </p>
+      )}
       <form className="flex flex-col gap-2 py-2" onSubmit={(event) => void save(event)}>
         <Textarea
           aria-label="Settings"
@@ -147,7 +152,7 @@ function Secrets({ project }: { project: Project }) {
   }
 
   return (
-    <Section title="Secrets" description="Values stay in control: nobody can read them back. A worker gets them as environment variables for one job.">
+    <Section title="Secrets" description="Values for the names under secrets. They stay in control, and nobody can read them back.">
       {secrets.length === 0 && <Muted>No secrets. Name them under secrets: in the settings, then set their values here.</Muted>}
       {secrets.map((secret) => (
         <SecretRow

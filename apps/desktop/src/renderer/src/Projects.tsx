@@ -126,13 +126,17 @@ export function ProjectPane({
       <Column>
         <PaneHeader
           icon={<FolderGit2Icon className="size-4 text-muted-foreground" />}
-          title={project.name}
-          note={[
-            project.repo,
-            ...(project.file.status === "found" ? [] : [fileNote(project)]),
-            ...(commands.build ? [`build: ${commands.build}`] : []),
-            ...(commands.test ? [`test: ${commands.test}`] : []),
-          ].join(" · ")}
+          title={
+            <span className="flex items-center gap-2">
+              {project.name}
+              {project.file.status !== "found" && (
+                <Badge variant={project.file.status === "invalid" ? "warning" : "outline"} title={fileNote(project)}>
+                  {project.file.status === "invalid" ? "Invalid project file" : "No project file"}
+                </Badge>
+              )}
+            </span>
+          }
+          note={`${project.repo}${commands.build ? ` · build: ${commands.build}` : ""}${commands.test ? ` · test: ${commands.test}` : ""}`}
         >
           <Button size="xs" variant="outline" pressed={showSettings} onClick={() => setShowSettings(!showSettings)}>
             <Settings2Icon />
