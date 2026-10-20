@@ -2,7 +2,8 @@ import { afterEach, expect, test } from "bun:test";
 import { ApiError, Bot, ControlToWorker, type BotId } from "@chiefbot/contracts";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { tmpdir } from "node:os";
-import { cleanUp, doneCount, startTestControl } from "./testControl.ts";
+import { cleanUp, doneCount, eventually, startTestControl } from "./testControl.ts";
+import { computerOutdated } from "./turns.ts";
 
 afterEach(cleanUp);
 
@@ -215,6 +216,28 @@ test("a bot's access mode reaches its worker: supervised asks before a command",
   expect(supervised.access).toBe("supervised");
   expect(request?.event).toMatchObject({ type: "approval-request", kind: "command", detail: "echo checked" });
   expect(ran).toEqual(["checked\n"]);
+});
+
+test("a computer from before access modes runs only Auto turns: control refuses the others with how to update it", async () => {
+  const { url, api, computers, botToken, onlineBot } = await setup();
+  const bot = await onlineBot("Ada");
+  await api("PUT", `/bots/${bot.id}/access`, { access: "supervised" });
+  // An old worker: its hello names no capabilities.
+  await computers.provider.stop(bot.id);
+  const received: string[] = [];
+  const socket = new WebSocket(`${url.replace("http", "ws")}/worker/${bot.id}`, { headers: { authorization: `Bearer ${botToken(bot.id)}` } });
+  socket.onmessage = (event) => received.push(ControlToWorker.parse(JSON.parse(String(event.data))).type);
+  socket.onopen = () => socket.send(JSON.stringify({ type: "hello", activeTurnId: null }));
+  await eventually(() => received.includes("bound"));
+
+  const supervised = await api("POST", `/bots/${bot.id}/messages`, { text: "check" });
+  await api("PUT", `/bots/${bot.id}/access`, { access: "auto" });
+  const auto = await api("POST", `/bots/${bot.id}/messages`, { text: "check" });
+  await eventually(() => received.includes("run-turn"));
+  socket.close();
+
+  expect([supervised.status, ApiError.parse(await supervised.json())]).toEqual([409, { error: "computer_outdated", message: computerOutdated }]);
+  expect(auto.status).toBe(202);
 });
 
 test("full access runs a GitHub write without asking, but still waits while the human has the screen", async () => {

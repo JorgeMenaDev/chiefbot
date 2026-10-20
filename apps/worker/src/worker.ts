@@ -1,5 +1,6 @@
 import type { PermissionHandler, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import {
+  ACCESS_MODES,
   ApprovalId,
   ControlToWorker,
   DEFAULT_ACCESS,
@@ -264,6 +265,7 @@ export function startWorker({
     base,
     token,
     retryMs,
+    capabilities: [ACCESS_MODES],
     ...(clock === undefined ? {} : { clock }),
     parse: (json) => ControlToWorker.parse(json),
     // Called synchronously just before the turn's done goes out, so nothing can
