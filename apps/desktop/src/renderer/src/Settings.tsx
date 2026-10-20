@@ -13,32 +13,31 @@ export function Settings() {
     <>
       <PaneHeader icon={<SettingsIcon className="size-4 text-muted-foreground" />} title="Settings" note="Appearance" />
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <section aria-labelledby="color-scheme" className="mx-auto flex w-full max-w-4xl flex-col gap-3 px-5 pt-6 pb-12 sm:px-6">
-          <h3 id="color-scheme" className="px-3 font-normal text-foreground/70 text-sm sm:px-4">
+        {/* Native radios sharing a name, drawn as T3's tiles: Tab lands on the chosen one, arrows move the choice. */}
+        <fieldset className="mx-auto w-full max-w-4xl px-5 pt-6 pb-12 sm:px-6">
+          <legend className="sr-only">Color scheme</legend>
+          <p aria-hidden className="mb-3 px-3 font-normal text-foreground/70 text-sm sm:px-4">
             Color scheme
-          </h3>
-          <div aria-label="Appearance mode" className="grid w-full grid-cols-3 gap-3" role="group">
+          </p>
+          <div className="grid w-full grid-cols-3 gap-3">
             {modes.map(({ mode, label }) => {
               const active = theme === mode;
               return (
-                <button
+                <label
                   key={mode}
-                  type="button"
-                  aria-label={mode === "system" ? "Follow the system appearance" : `Use ${mode} mode`}
-                  aria-pressed={active}
                   className={cn(
-                    "flex cursor-pointer flex-col items-stretch gap-1.5 rounded-xl border p-2 outline-none transition-colors focus-visible:outline-2 focus-visible:outline-ring focus-visible:outline-solid focus-visible:-outline-offset-2",
+                    "flex cursor-pointer flex-col items-stretch gap-1.5 rounded-xl border p-2 transition-colors has-focus-visible:outline-2 has-focus-visible:outline-ring has-focus-visible:outline-solid has-focus-visible:-outline-offset-2",
                     active ? "border-transparent bg-accent/30 shadow-[inset_0_0_0_1px_var(--ring)]" : "border-border/70 bg-card/60 hover:bg-accent/10",
                   )}
-                  onClick={() => setTheme(mode)}
                 >
+                  <input type="radio" name="color-scheme" value={mode} checked={active} onChange={() => setTheme(mode)} className="sr-only" />
                   <Wireframe panes={mode === "system" ? ["light", "dark"] : [mode]} />
                   <span className={cn("flex items-center justify-center font-medium text-xs", active ? "text-foreground" : "text-muted-foreground")}>{label}</span>
-                </button>
+                </label>
               );
             })}
           </div>
-        </section>
+        </fieldset>
       </div>
     </>
   );

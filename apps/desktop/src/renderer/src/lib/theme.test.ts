@@ -1,13 +1,22 @@
 import { Theme } from "@chiefbot/contracts";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { parseTheme, resolveTheme } from "./theme.ts";
+import { parseTheme, readTheme, resolveTheme } from "./theme.ts";
 
 test("Dark until the user picks another theme, and for anything unknown", () => {
   expect(parseTheme(null)).toBe("dark");
   expect(parseTheme("sepia")).toBe("dark");
   expect(parseTheme("light")).toBe("light");
   expect(parseTheme("system")).toBe("system");
+});
+
+test("Dark when storage cannot be read, so the app still starts", () => {
+  const unreadable = () => {
+    throw new Error("SecurityError");
+  };
+  expect(readTheme(unreadable)).toBe("dark");
+  expect(readTheme(() => ({ getItem: unreadable }))).toBe("dark");
+  expect(readTheme(() => ({ getItem: () => "light" }))).toBe("light");
 });
 
 test("System follows the OS; Light and Dark ignore it", () => {
