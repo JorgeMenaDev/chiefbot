@@ -33,6 +33,7 @@ import {
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
+  type Template,
   type User,
   type UserId,
 } from "@chiefbot/contracts";
@@ -51,6 +52,7 @@ import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
 import type { CatalogConnection } from "./connections/catalog.ts";
 import { connectionHost } from "./connections/connections.ts";
+import { templateRoutes } from "./templates/templates.ts";
 import { connectorHost } from "./connectors/connectors.ts";
 import { defaultProbes, healthHost } from "./health/health.ts";
 import { googleUrls } from "./health/gcloud.ts";
@@ -117,6 +119,8 @@ export type ControlOptions = {
   firstBot?: string;
   // The connections people may turn on (connections/catalog.ts loadConnections). Default: none.
   connections?: CatalogConnection[];
+  // The template catalog (templates/catalog.ts loadTemplates). Default: none.
+  templates?: Template[];
   // Where connections mint Google access tokens (connections/googleToken.ts). Default: Google's.
   googleTokenUrl?: string;
   // The health probe of each connection that has one (health/health.ts). Default: the
@@ -214,6 +218,7 @@ type SocketData =
 //   …      /connections, /bots/:id/connection-calls  people's
 //                             connections (CLIs their bots use as them) and the calls made with them
 //                             (connections/connections.ts)
+//   GET    /templates          the template catalog, read-only (templates/templates.ts)
 //   …      /health, /health/refresh  control's own read-only health checks of people's
 //                             connections (health/health.ts)
 //   …      /health/services  people's own services on Health, checked on demand (health/services.ts)
@@ -246,6 +251,7 @@ export function startControl({
   publicUrl,
   firstBot,
   connections: catalog = [],
+  templates = [],
   googleTokenUrl,
   probes = defaultProbes({ ...googleUrls, ...(googleTokenUrl === undefined ? {} : { token: googleTokenUrl }) }),
   serviceNet = systemNet,
@@ -548,6 +554,7 @@ export function startControl({
       ...taskWorkers.routes,
       ...connectors.routes,
       ...connections.routes,
+      ...templateRoutes({ store, catalog: templates }),
       ...health.routes,
       ...services.routes,
       ...chiefs.routes,

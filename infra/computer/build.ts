@@ -8,9 +8,12 @@
 // 2. Writes dist/package.json with the worker's exact SDK version, so the image
 //    installs that SDK with the Linux runtime for its own CPU.
 // 3. Draws the desktop's wallpaper into dist/wallpaper.png (wallpaper.ts).
+// 4. Writes the computer's own ports into dist/ports.env (VNC_PORT=5900), from the one
+//    list in packages/contracts (computer.ts), for start.sh.
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import workerPackage from "../../apps/worker/package.json" with { type: "json" };
+import { computerPorts } from "../../packages/contracts/src/computer.ts";
 import { wallpaper } from "./wallpaper.ts";
 
 const root = join(import.meta.dir, "../..");
@@ -48,3 +51,4 @@ for (const [entry, naming] of [
 await Bun.write(join(dist, "package.json"), JSON.stringify({ private: true, dependencies: { [sdk]: version } }, null, 2));
 // The screen's size: Xvfb in start.sh.
 await Bun.write(join(dist, "wallpaper.png"), wallpaper(1280, 800));
+await Bun.write(join(dist, "ports.env"), Object.entries(computerPorts).map(([name, { port }]) => `${name.toUpperCase()}_PORT=${port}\n`).join(""));

@@ -27,6 +27,7 @@ import type { Net } from "./health/serviceCheck.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
 import { loadConnections, repoConnections } from "./connections/catalog.ts";
 import { startControl } from "./control.ts";
+import { loadTemplates, repoTemplates } from "./templates/catalog.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 
 // Shared fixtures for control's tests: control with a fake GitHub and fake bot
@@ -117,6 +118,8 @@ export async function startTestControl({
     githubApp: github.app,
     // The connections the repo ships.
     connections: loadConnections(repoConnections),
+    // The templates the repo ships.
+    templates: loadTemplates(repoTemplates),
     computers: provider ? provider(computers.provider) : computers.provider,
     ...(firstBot === undefined ? {} : { firstBot }),
     ...(clock === undefined ? {} : { clock }),

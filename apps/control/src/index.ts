@@ -8,6 +8,7 @@ import { loadConnections, repoConnections } from "./connections/catalog.ts";
 import { dockerProvider } from "./computers/docker.ts";
 import { gceProvider } from "./computers/gce.ts";
 import { startControl } from "./control.ts";
+import { loadTemplates, repoTemplates } from "./templates/catalog.ts";
 import { googleSecretManager, restoreSetup, secretManagerStore } from "./secrets/secretManager.ts";
 import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 
@@ -35,6 +36,8 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 //                                (connector OAuth sign-ins return to <it>/connectors/oauth/callback)
 //   CHIEFBOT_CONNECTIONS_DIR     default the repo's connections/: the connections people may turn on.
 //                                A folder that breaks a rule stops control here, naming the file.
+//   CHIEFBOT_TEMPLATES_DIR       default the repo's templates/: the template catalog (docs/templates.md).
+//                                A template that breaks a rule stops control here, naming the file.
 const port = Number(process.env.CHIEFBOT_CONTROL_PORT ?? 7410);
 const idleStopMinutes = Number(process.env.CHIEFBOT_IDLE_STOP_MINUTES ?? 30);
 if (!(idleStopMinutes > 0)) throw new Error("CHIEFBOT_IDLE_STOP_MINUTES must be a positive number of minutes");
@@ -49,6 +52,7 @@ if (signIn === null || githubApp === null) {
   process.exit(1);
 }
 const connections = loadConnections(process.env.CHIEFBOT_CONNECTIONS_DIR ?? repoConnections);
+const templates = loadTemplates(process.env.CHIEFBOT_TEMPLATES_DIR ?? repoTemplates);
 const dbPath = process.env.CHIEFBOT_DB_PATH ?? ".data/control.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
 
@@ -77,5 +81,6 @@ const control = startControl({
   ...(process.env.CHIEFBOT_PUBLIC_URL ? { publicUrl: process.env.CHIEFBOT_PUBLIC_URL } : {}),
   firstBot: "Chief of Staff",
   connections,
+  templates,
 });
 console.log(`control listening on ${control.url} with ${config.provider} computers`);
