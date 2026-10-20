@@ -19,6 +19,7 @@ import { ApprovalCard } from "./ApprovalCard.tsx";
 import { AssistantMessage, ChatTimeline, ErrorMessage, UserMessage } from "./Chat.tsx";
 import type { LaneItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
+import { EngineerDetails } from "./EngineerDetails.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
 import { Column, ErrorText, PaneHeader, SidePanel } from "./Pane.tsx";
 import { fileNote, ProjectSettings } from "./ProjectSettings.tsx";
@@ -316,13 +317,14 @@ function payerText(payer: CopilotPayer) {
   return payer.kind === "seat" ? `On ${payer.login}'s Copilot seat` : `Billed to ${payer.account}'s Copilot (organization)`;
 }
 
-// One worker of a task: its state, who pays for it, its pull request and what it waits on. Only
-// the member who asked for it answers its approvals; the others see who must.
+// One engineer of a task: its state, who pays for it, its pull request, its setup and how it ended
+// (EngineerDetails), and what it waits on. Only the member who asked for it answers its approvals;
+// the others see who must.
 function WorkerRow({ project, worker, login }: { project: Project; worker: TaskWorker; login: string }) {
   return (
     <div className="flex flex-col gap-2 border-l-2 ps-3">
       <span className="text-muted-foreground text-xs">
-        Worker: {workerStateText[worker.state]}
+        Engineer: {workerStateText[worker.state]}
         {worker.payer && ` · ${payerText(worker.payer)}`}
         {worker.pullRequest && (
           <>
@@ -333,6 +335,7 @@ function WorkerRow({ project, worker, login }: { project: Project; worker: TaskW
           </>
         )}
       </span>
+      <EngineerDetails worker={worker} max={project.config.workers.max} />
       {worker.pendingApprovals.map(({ approvalId, kind, detail }) =>
         worker.requestedBy === login ? (
           <ApprovalCard
