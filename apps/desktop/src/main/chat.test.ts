@@ -201,6 +201,7 @@ test("a handoff's cards fold into one card, where it first appeared, that shows 
     stage: "accepted",
     question: null,
     pullRequests: [],
+    verification: null,
   };
   const pullRequest = "https://github.com/octo-org/shop/pull/7";
   const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };

@@ -268,6 +268,13 @@ export const Task = z.object({
 });
 export type Task = z.infer<typeof Task>;
 
+// The task's verification when it is about its latest pull request, else null:
+// a verdict on an older one says nothing of the newest.
+export function currentVerification({ links, verification }: Pick<Task, "links" | "verification">): Verification | null {
+  const latest = links.flatMap((link) => (link.kind === "pull-request" ? [link.url] : [])).at(-1);
+  return verification !== null && verification.pullRequest === latest ? verification : null;
+}
+
 // What control answers a verifier's verdict: where its report is in the project's context.
 export const RecordedVerdict = z.object({ evidence: ContextPath });
 export type RecordedVerdict = z.infer<typeof RecordedVerdict>;

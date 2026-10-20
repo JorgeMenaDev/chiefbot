@@ -67,6 +67,8 @@ export function createProjects({ controlUrl, session, onChat, onWorkerChat, retr
       chats.delete(projectId);
     },
     tasks: async (projectId: ProjectId) => Task.array().parse(await (await call("GET", `/projects/${projectId}/tasks`)).json()),
+    // The user marks the task done, which the done rule does not stop for a member: the task records it.
+    markDone: async (projectId: ProjectId, number: number) => Task.parse(await (await call("POST", `/projects/${projectId}/tasks/${number}/done`)).json()),
     workers: async (projectId: ProjectId) => TaskWorker.array().parse(await (await call("GET", `/projects/${projectId}/workers`)).json()),
     // Approves or declines what control asked in the user's running turn with the
     // coordinator (a connector call). The card updates when the answer comes back on the chat socket.
@@ -77,6 +79,11 @@ export function createProjects({ controlUrl, session, onChat, onWorkerChat, retr
     context: async (projectId: ProjectId) => ContextFile.array().parse(await (await call("GET", `/projects/${projectId}/context`)).json()),
     contextFile: async (projectId: ProjectId, path: string) =>
       ContextFileText.parse(await (await call("GET", `/projects/${projectId}/context/file?path=${encodeURIComponent(path)}`)).json()),
+    // One of its PNG images (a verifier's screenshot), as a data URL the window may show (its CSP allows data: images).
+    contextImage: async (projectId: ProjectId, path: string) => {
+      const res = await call("GET", `/projects/${projectId}/context/image?path=${encodeURIComponent(path)}`);
+      return `data:image/png;base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
+    },
     // The user drives a worker's screen from their open view of it until handBack; its tool calls
     // wait meanwhile. Any member may, one at a time.
     takeOver: async (projectId: ProjectId, workerId: TaskWorkerId) =>

@@ -38,3 +38,9 @@ test("raw HTML in a reply never renders", () => {
   expect(html).not.toContain("<img");
   expect(html).toContain("there");
 });
+
+test("a text's images show as its `image` says", () => {
+  const html = renderToStaticMarkup(<Markdown text="![Screenshot 1](task-1-1.png)" image={(src, alt) => <b>{`${alt}: ${src}`}</b>} />);
+
+  expect(html).toContain("<b>Screenshot 1: task-1-1.png</b>");
+});

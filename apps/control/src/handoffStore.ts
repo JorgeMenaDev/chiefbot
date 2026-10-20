@@ -9,6 +9,9 @@ import {
   HandoffCard,
   TaskLink,
   TaskStatus,
+  VerdictLine,
+  Verification,
+  currentVerification,
   type ChatEvent,
   type HandoffCardEvent,
   type HandoffStage,
@@ -77,6 +80,7 @@ export function handoffStore(
     status: string;
     question: string | null;
     links: string;
+    verification: string | null;
     watched_card: string | null;
     created_at: number;
   };
@@ -84,12 +88,18 @@ export function handoffStore(
   // member of the project's workspace: a chief sees no project its owner left.
   const select = `SELECT handoffs.id, handoffs.bot_id, projects.workspace_id, handoffs.project_id, projects.name AS project,
       project_tasks.title, users.login AS requested_by, handoffs.request, handoffs.acceptance, handoffs.task_number,
-      project_tasks.status, project_tasks.question, project_tasks.links, handoffs.watched_card, handoffs.created_at
+      project_tasks.status, project_tasks.question, project_tasks.links, project_tasks.verification, handoffs.watched_card, handoffs.created_at
     FROM handoffs
     JOIN projects ON projects.id = handoffs.project_id
     JOIN project_tasks ON project_tasks.project_id = handoffs.project_id AND project_tasks.number = handoffs.task_number
     JOIN users ON users.id = handoffs.user_id
     JOIN workspace_members ON workspace_members.workspace_id = projects.workspace_id AND workspace_members.user_id = handoffs.user_id`;
+  // The task's verdict on its latest pull request, as a line.
+  const verdictOf = (row: HandoffRow) => {
+    const links = TaskLink.array().parse(JSON.parse(row.links));
+    const verification = currentVerification({ links, verification: row.verification === null ? null : Verification.parse(JSON.parse(row.verification)) });
+    return verification && VerdictLine.parse(verification);
+  };
   const toHandoff = (row: HandoffRow): Handoff =>
     Handoff.parse({
       id: row.id,
@@ -105,6 +115,7 @@ export function handoffStore(
       question: row.question,
       links: JSON.parse(row.links),
       workers: workers.workersOf(ProjectId.parse(row.project_id)).filter(({ taskNumber }) => taskNumber === row.task_number),
+      verification: verdictOf(row),
       summary: projects.lastReply(
         db
           .query<{ turn_id: string }, [string]>("SELECT turn_id FROM handoff_messages WHERE handoff_id = ?1")
@@ -118,6 +129,7 @@ export function handoffStore(
     const pullRequests = TaskLink.array()
       .parse(JSON.parse(row.links))
       .flatMap((link) => (link.kind === "pull-request" ? [link.url] : []));
+    const verification = verdictOf(row);
     return HandoffCard.parse({
       handoffId: row.id,
       workspaceId: row.workspace_id,
@@ -125,9 +137,10 @@ export function handoffStore(
       project: row.project,
       title: row.title,
       taskNumber: row.task_number,
-      stage: stageOf(TaskStatus.parse(row.status), pullRequests.length > 0),
+      stage: stageOf(TaskStatus.parse(row.status), pullRequests.length > 0, verification?.result === "pass" && !verification.stale),
       question: row.question,
       pullRequests,
+      verification,
     });
   };
   const byId = (handoffId: string) => {
@@ -221,7 +234,9 @@ export function handoffStore(
       return rows.flatMap((row) => {
         const card = cardOf(row);
         const shown = JSON.stringify(card);
-        if (shown === row.watched_card) return [];
+        // The card last posted, as it shows now: one from before a field was added gets its default, so no change is seen.
+        const last = row.watched_card ? JSON.stringify(HandoffCard.parse(JSON.parse(row.watched_card))) : row.watched_card;
+        if (shown === last) return [];
         db.query("UPDATE handoffs SET watched_card = ?2 WHERE id = ?1").run(row.id, shown);
         if (row.watched_card === null) return [];
         const botId = BotId.parse(row.bot_id);
@@ -255,8 +270,9 @@ function requestMessage({ requestedBy, taskNumber, request, acceptance }: Handof
   ].join("\n");
 }
 
-function stageOf(status: TaskStatus, pullRequest: boolean): HandoffStage {
+function stageOf(status: TaskStatus, pullRequest: boolean, passed: boolean): HandoffStage {
   if (status === "done" || status === "abandoned" || status === "needs_input") return status;
+  if (passed) return "verified";
   if (pullRequest) return "pr_opened";
   return status === "in_progress" ? "working" : "accepted";
 }

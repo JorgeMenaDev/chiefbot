@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ApprovalId, AttachmentId, BotId, HandoffId, ProjectId, QuestionId, TurnId, TurnKey, WorkspaceId } from "./ids.ts";
 import { QuestionForm, QuestionResult } from "./questions.ts";
+import { VerdictLine } from "./verification.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
@@ -136,12 +137,14 @@ export type AnswerApprovalRequest = z.infer<typeof AnswerApprovalRequest>;
 //   working      the task is in progress
 //   needs_input  the task waits on the owner's answer to `question`
 //   pr_opened    the task, in progress or open, links a pull request
+//   verified     and a verifier passed that pull request's head
 //   done, abandoned  the task is closed
-export const HandoffStage = z.enum(["accepted", "working", "needs_input", "pr_opened", "done", "abandoned"]);
+export const HandoffStage = z.enum(["accepted", "working", "needs_input", "pr_opened", "verified", "done", "abandoned"]);
 export type HandoffStage = z.infer<typeof HandoffStage>;
 
 // What a handoff's card in its chief's chat shows. `project` is the project's
-// name; `question` is set only at needs_input; `pullRequests` are the task's.
+// name; `question` is set only at needs_input; `pullRequests` are the task's;
+// `verification` is its verdict on the latest of them, or null for none.
 export const HandoffCard = z.object({
   handoffId: HandoffId,
   workspaceId: WorkspaceId,
@@ -152,6 +155,7 @@ export const HandoffCard = z.object({
   stage: HandoffStage,
   question: z.string().nullable(),
   pullRequests: z.array(z.url()),
+  verification: VerdictLine.nullable().default(null),
 });
 export type HandoffCard = z.infer<typeof HandoffCard>;
 

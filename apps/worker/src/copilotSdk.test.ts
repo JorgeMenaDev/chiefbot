@@ -40,6 +40,7 @@ test("a coordinator session may use only its task, context and worker tools: no 
     "custom:read_context",
     "custom:write_context",
     "custom:dispatch_worker",
+    "custom:dispatch_verifier",
     "custom:worker_status",
     "custom:worker_transcript",
     "custom:stop_worker",

@@ -1,25 +1,44 @@
-import type { CopilotPayer, Project, Task, TaskStatus, TaskWorker, TaskWorkerId, TaskWorkerState } from "@chiefbot/contracts";
-import { MonitorIcon } from "lucide-react";
+import {
+  currentVerification,
+  type ContextPath,
+  type CopilotPayer,
+  type Project,
+  type Task,
+  type TaskStatus,
+  type TaskWorker,
+  type TaskWorkerId,
+  type TaskWorkerState,
+  type VerdictLine,
+  type VerdictResult,
+} from "@chiefbot/contracts";
+import { CheckIcon, MonitorIcon } from "lucide-react";
+import { useState } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
 import { EngineerDetails } from "./EngineerDetails.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
+import { cn } from "./lib/utils.ts";
 
 // The Tasks tab of a project's panel: its task ledger, each task with its
-// engineers, what they wait on and their pull requests. `onWatch` opens an
-// engineer in the Engineers tab.
+// engineers and verifiers, what they wait on, their pull requests and the
+// verifier's verdict. `onWatch` opens a worker in the Engineers tab, and
+// `onEvidence` a verdict's report in the Context tab. Any member may mark an
+// open task with a pull request done, which the done rule does not stop for
+// them: the task shows each time one did.
 export function TaskLedger({
   project,
   login,
   tasks,
   workers,
   onWatch,
+  onEvidence,
 }: {
   project: Project;
   login: string;
   tasks: Task[];
   workers: TaskWorker[];
   onWatch: (workerId: TaskWorkerId) => void;
+  onEvidence: (path: ContextPath) => void;
 }) {
   return (
     <div className="flex flex-col gap-2 p-3">
@@ -35,6 +54,12 @@ export function TaskLedger({
               {task.owner && `owner ${task.owner} ·`} asked by {task.requestedBy}
             </span>
             {task.question && <span className="text-warning-foreground text-xs">Asks: {task.question}</span>}
+            <TaskVerification task={task} onEvidence={onEvidence} />
+            {task.overrides.map(({ by, at, verification }) => (
+              <span key={at} className="text-muted-foreground text-xs" title={new Date(at).toLocaleString()}>
+                Marked done in the app by {by} · {verification ? verdictText(verification) : "not verified"}
+              </span>
+            ))}
           </div>
           {workers
             .filter(({ taskNumber }) => taskNumber === task.number)
@@ -47,20 +72,76 @@ export function TaskLedger({
   );
 }
 
+// The task's verdict on its latest pull request, with its report; nothing before one.
+function TaskVerification({ task, onEvidence }: { task: Task; onEvidence: (path: ContextPath) => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const verification = currentVerification(task);
+  const closed = task.status === "done" || task.status === "abandoned";
+  const markable = !closed && task.links.some(({ kind }) => kind === "pull-request");
+  if (!verification && !markable) return null;
+  return (
+    <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+      {verification && (
+        <>
+          <span className={verdictColor(verification)}>
+            {verdictText(verification)}
+            {verification.result !== "pass" && `: ${verification.summary}`}
+          </span>
+          <button type="button" className="cursor-pointer text-primary underline-offset-4 hover:underline" onClick={() => onEvidence(verification.evidence)}>
+            Report
+          </button>
+        </>
+      )}
+      {markable && (
+        <Button
+          size="xs"
+          variant="outline"
+          className="ms-auto"
+          disabled={busy}
+          title="Mark it done without a verifier's PASS for its head. The task records that you did."
+          onClick={() => {
+            setBusy(true);
+            setError(null);
+            window.chiefbot.projects
+              .markDone(task.projectId, task.number)
+              .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)))
+              .finally(() => setBusy(false));
+          }}
+        >
+          <CheckIcon />
+          Mark done
+        </Button>
+      )}
+      {error && <span className="w-full text-destructive-foreground">{error}</span>}
+    </span>
+  );
+}
+
+const verdictLabel: Record<VerdictResult, string> = { pass: "Verified PASS", issues: "ISSUES", blocked: "BLOCKED" };
+
+// A verdict in a line: "Verified PASS @abc1234", "ISSUES @abc1234" or
+// "BLOCKED @abc1234", then "· stale" once the pull request has moved since.
+export const verdictText = ({ result, sha, stale }: VerdictLine) => `${verdictLabel[result]} @${sha.slice(0, 7)}${stale ? " · stale" : ""}`;
+
+// A verdict's colour: success for a PASS at the head, a warning for one gone stale or a check that was blocked.
+export const verdictColor = ({ result, stale }: VerdictLine) =>
+  cn(result === "issues" ? "text-destructive-foreground" : result === "blocked" || stale ? "text-warning-foreground" : "text-success-foreground");
+
 // Who pays for a run, in a line.
 export function payerText(payer: CopilotPayer) {
   return payer.kind === "seat" ? `On ${payer.login}'s Copilot seat` : `Billed to ${payer.account}'s Copilot (organization)`;
 }
 
-// One engineer of a task: its state, who pays for it, its pull request, its setup and how it ended
-// (EngineerDetails), and what it waits on. Only the member who asked for it answers its approvals;
-// the others see who must.
+// One engineer or verifier of a task: its state, who pays for it, its pull request, its setup and
+// how it ended (EngineerDetails), and what it waits on. Only the member who asked for it answers its
+// approvals; the others see who must.
 function WorkerRow({ project, worker, login, onWatch }: { project: Project; worker: TaskWorker; login: string; onWatch: () => void }) {
   return (
     <div className="flex flex-col gap-2 border-l-2 ps-3">
       <div className="flex items-start gap-2">
         <span className="min-w-0 flex-1 text-muted-foreground text-xs">
-          Engineer: {workerStateText[worker.state]}
+          {worker.kind === "verifier" ? "Verifier" : "Engineer"}: {workerStateText[worker.state]}
           {worker.payer && ` · ${payerText(worker.payer)}`}
           {worker.pullRequest && (
             <>

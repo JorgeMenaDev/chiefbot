@@ -4,6 +4,9 @@ import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createBots } from "./bots.ts";
 import { createProjects } from "./projects.ts";
 
@@ -34,7 +37,7 @@ async function projectControl(copilot: FakeCopilot = fakeCopilot()) {
     await (await fetch(`${control.url}/workspaces/${team.id}/projects`, { method: "POST", headers, body: '{"repo":"octo-org/shop"}' })).json(),
   );
   const session = () => sessionToken;
-  return { control, computers, headers, project, session };
+  return { control, computers, github, headers, project, session };
 }
 
 // Resolves once check passes, failing after two seconds.
@@ -102,4 +105,38 @@ test("main follows one engineer's transcript at a time until the window leaves i
   await new Promise((resolve) => (screen.onopen = resolve));
   expect((await projects.takeOver(project.id, engineer.id)).screenHolder).toBe("octo-user");
   expect((await projects.handBack(project.id, engineer.id)).screenHolder).toBeNull();
+});
+
+test("main reads a verifier's screenshot from the shared context as an image the window can show, and marks a task done over the done rule", async () => {
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+  const shots = mkdtempSync(join(tmpdir(), "chiefbot-shots-"));
+  stops.push(() => rmSync(shots, { recursive: true, force: true }));
+  writeFileSync(join(shots, "home.png"), png);
+  let pullRequest = "";
+  const copilot = fakeCopilot({
+    script: async function* (prompt, runtime) {
+      if (prompt.startsWith("You are the verifier")) {
+        await runtime.tool("report_verdict", { result: "issues", summary: "The README still says Teh.", screenshots: [join(shots, "home.png")] });
+      } else {
+        await runtime.tool("create_task", { title: "Fix the typo" });
+        await runtime.tool("update_task", { number: 1, links: [{ kind: "pull-request", url: pullRequest }] });
+        await runtime.tool("dispatch_verifier", { task: 1 });
+      }
+      yield sdk.idle();
+    },
+  });
+  const { control, github, project, session } = await projectControl(copilot);
+  github.commit("octo-org/shop", { "README.md": "# Shop\nThe shop.\n" }, "fix-typo");
+  pullRequest = github.openPullRequest("octo-org/shop", { head: "fix-typo", title: "Fix a typo" });
+  const projects = createProjects({ controlUrl: control.url, session, retryMs: 20, onChat: () => {}, onWorkerChat: () => {} });
+  stops.push(projects.disconnect);
+
+  await projects.send(project.id, "Fix the typo");
+  const verificationOf = async () => (await projects.tasks(project.id))[0]?.verification ?? null;
+  await eventually(async () => (await verificationOf()) !== null);
+  const report = await projects.contextFile(project.id, (await verificationOf())?.evidence ?? "");
+  const shot = /\]\(([^)]+\.png)\)/.exec(report.content)?.[1] ?? "";
+
+  expect(await projects.contextImage(project.id, `verify/${shot}`)).toBe(`data:image/png;base64,${Buffer.from(png).toString("base64")}`);
+  expect(await projects.markDone(project.id, 1)).toMatchObject({ status: "done", overrides: [{ by: "octo-user", verification: { result: "issues" } }] });
 });

@@ -352,6 +352,43 @@ test("the chief's chat has one card per handoff that follows its task, posted on
   expect(cards(await owner.watchChat(chief.id).settled())).toEqual(cards(chiefChat.events));
 });
 
+test("a handoff's card and handoff_status show its task's verdict: Verified PASS at a commit, then stale once the pull request moves", async () => {
+  const { owner, project, chief, copilot, github } = await setup();
+  const head = github.commit("octo-org/shop", { "checkout.html": "<form></form>\n" }, "checkout");
+  const pullRequest = github.openPullRequest("octo-org/shop", { head: "checkout", title: "Add a checkout page" });
+  const answers: unknown[] = [];
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt.startsWith("You are the verifier")) await runtime.tool("report_verdict", { result: "pass", summary: "The checkout takes a test card." });
+    else if (prompt === "hand off the checkout") await runtime.tool("send_to_project", checkout(project));
+    else if (prompt.includes("task #1 in the ledger")) {
+      await runtime.tool("update_task", { number: 1, status: "in_progress", links: [{ kind: "pull-request", url: pullRequest }] });
+      await runtime.tool("dispatch_verifier", { task: 1 });
+    } else if (prompt === "Mark task #1 done.") answers.push(await answer(runtime.tool("update_task", { number: 1, status: "done" })));
+    else if (prompt === "how is it going?") answers.push(await answer(runtime.tool("handoff_status", {})));
+    yield sdk.idle();
+  };
+  const chiefChat = owner.watchChat(chief.id);
+  await owner.send(chief.id, "hand off the checkout");
+  await chiefChat.until(doneCount(1));
+  await eventually(() => cards(chiefChat.events).length === 3);
+  // The pull request moves outside Chiefbot; the coordinator's done finds it.
+  const moved = github.commit("octo-org/shop", { "checkout.html": "<form>pay</form>\n" }, "checkout");
+  await owner.api("POST", `/projects/${project.id}/messages`, { text: "Mark task #1 done." });
+  await eventually(() => cards(chiefChat.events).length === 4);
+  await owner.send(chief.id, "how is it going?");
+  await chiefChat.until(doneCount(2));
+
+  const verdict = { result: "pass" as const, sha: head, summary: "The checkout takes a test card." };
+  expect(cards(chiefChat.events).map(({ stage, verification }) => [stage, verification])).toEqual([
+    ["accepted", null],
+    ["pr_opened", null],
+    ["verified", { ...verdict, stale: false }],
+    ["pr_opened", { ...verdict, stale: true }],
+  ]);
+  expect(answers[0]).toMatchObject({ refused: expect.stringContaining(`has moved to ${moved.slice(0, 7)}`) });
+  expect(Handoff.array().parse(answers[1])).toMatchObject([{ status: "in_progress", verification: { ...verdict, stale: true } }]);
+});
+
 test("a card change a crash kept from the chief reaches it when control starts again", async () => {
   const { owner, project, chief, copilot, dbPath, stopControl, startControl } = await setup({ persistent: true });
   copilot.script = async function* (prompt, runtime) {
