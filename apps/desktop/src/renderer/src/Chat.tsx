@@ -8,6 +8,7 @@ import { ModelPicker } from "./ModelPicker.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
+import { bottomFollower } from "./lib/followBottom.ts";
 import { cn } from "./lib/utils.ts";
 
 // The bot's chat as Electron main folds it, kept live over chat:state.
@@ -138,44 +139,31 @@ export function ChatTimeline({
   );
 }
 
-// Within this many pixels of the bottom, the lane counts as at the bottom.
-const bottomSlackPx = 16;
-
-// The scrolling lane. While the user is at the bottom it stays there: a
-// ResizeObserver pins it as rows arrive and text streams, before the frame
-// paints, so nothing jumps. Scrolled up to read, it leaves the view alone. A new
-// `bottomKey` (another chat, or the user's new message) goes back to the bottom.
+// The scrolling lane. While the user is at the bottom it stays there
+// (lib/followBottom.ts): a ResizeObserver pins it as rows arrive and text
+// streams, before the frame paints, so nothing jumps. Scrolled up to read, it
+// leaves the view alone. A new `bottomKey` (another chat, or the user's new
+// message) goes back to the bottom.
 function Timeline({ bottomKey, children }: { bottomKey: string; children: ReactNode }) {
   const scroller = useRef<HTMLDivElement>(null);
   const lane = useRef<HTMLDivElement>(null);
-  const atBottom = useRef(true);
+  const [follow] = useState(bottomFollower);
 
   useLayoutEffect(() => {
-    const element = scroller.current;
-    if (!element) return;
-    atBottom.current = true;
-    element.scrollTop = element.scrollHeight;
-  }, [bottomKey]);
+    if (scroller.current) follow.pin(scroller.current);
+  }, [follow, bottomKey]);
 
   useEffect(() => {
     const element = scroller.current;
     if (!element || !lane.current) return;
-    const observer = new ResizeObserver(() => {
-      if (atBottom.current) element.scrollTop = element.scrollHeight;
-    });
+    const observer = new ResizeObserver(() => follow.grew(element));
     observer.observe(lane.current);
     observer.observe(element);
     return () => observer.disconnect();
-  }, []);
+  }, [follow]);
 
   return (
-    <div
-      ref={scroller}
-      className="min-h-0 flex-1 overflow-y-auto"
-      onScroll={({ currentTarget: { scrollHeight, scrollTop, clientHeight } }) => {
-        atBottom.current = scrollHeight - scrollTop - clientHeight <= bottomSlackPx;
-      }}
-    >
+    <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto" onScroll={(event) => follow.scrolled(event.currentTarget)}>
       <div ref={lane} className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-4 px-5 py-6">
         {children}
       </div>
