@@ -11,7 +11,7 @@ export const TemplateName = ConnectorName;
 export type TemplateName = z.infer<typeof TemplateName>;
 
 // A service's name in the template's compose file.
-const ComposeService = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/, "expected a compose service name, like api");
+export const TemplateServiceName = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/, "expected a compose service name, like api");
 
 // A service a project may point at one of its repos instead of the stand-in.
 //   context  the folder inside that repo its image builds from, like . or services/api
@@ -27,7 +27,7 @@ export type TemplateService = z.infer<typeof TemplateService>;
 // that must be healthy (or, for a one-shot service, finished) before it passes.
 export const TemplateStage = z.strictObject({
   label: z.string().trim().min(1).max(40),
-  waitsFor: z.array(ComposeService).min(1),
+  waitsFor: z.array(TemplateServiceName).min(1),
 });
 export type TemplateStage = z.infer<typeof TemplateStage>;
 
@@ -43,9 +43,9 @@ export const TemplateManifest = z.strictObject({
   title: z.string().trim().min(1).max(60),
   description: z.string().trim().min(1).max(200),
   compose: z.string().regex(/^[\w.-]+\.ya?ml$/, "expected a compose file in the template's folder, like compose.yaml"),
-  services: z.record(ComposeService, TemplateService).refine((services) => Object.keys(services).length > 0, "expected at least one service"),
+  services: z.record(TemplateServiceName, TemplateService).refine((services) => Object.keys(services).length > 0, "expected at least one service"),
   stages: z.array(TemplateStage).min(1),
-  seed: ComposeService,
+  seed: TemplateServiceName,
   notes: z.array(z.string().trim().min(1).max(300)).min(1).max(10),
 });
 export type TemplateManifest = z.infer<typeof TemplateManifest>;

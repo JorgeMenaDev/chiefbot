@@ -13,7 +13,10 @@ test("a project file takes every key, each optional, and refuses unknown ones", 
     mcp: { playwright: { command: "npx", args: ["-y", "@playwright/mcp"] } },
     secrets: ["CLERK_PUBLISHABLE_KEY"],
     workers: { max: 3 },
-  };
+    template: "java-react-enterprise",
+    service: "ui",
+    services: { meta: { repo: "octo-org/meta-api", ref: "main" }, auth: "stand-in" },
+  } satisfies ProjectFile;
   expect(ProjectFile.parse(full)).toEqual(full);
   expect(ProjectFile.parse({})).toEqual({});
 
@@ -28,6 +31,15 @@ test("a project file takes every key, each optional, and refuses unknown ones", 
     { workers: { max: 0 } },
     // As YAML and JSON parse it: an own key, which a record would drop without a word.
     { mcp: JSON.parse('{"__proto__": {"command": "npx"}}') },
+    { services: JSON.parse('{"__proto__": "stand-in"}') },
+    { template: "Java React" },
+    { service: ["ui"] },
+    { services: { meta: { repo: "octo-org/meta-api" } } },
+    { services: { meta: { repo: "meta-api", ref: "main" } } },
+    { services: { meta: { repo: "octo-org/meta-api", ref: "main", context: "." } } },
+    { services: { meta: { repo: "octo-org/meta-api", ref: "../main" } } },
+    { services: { meta: { repo: "octo-org/meta-api", ref: "-main" } } },
+    { services: { meta: "standin" } },
   ]) {
     expect(ProjectFile.safeParse(wrong).success).toBe(false);
   }
@@ -51,6 +63,7 @@ test("settings fill in or override the file key by key, and each key names where
       mcp: {},
       secrets: ["API_KEY"],
       workers: { max: 3 },
+      services: {},
     },
     sources: {
       "commands.setup": "settings",
@@ -64,9 +77,38 @@ test("settings fill in or override the file key by key, and each key names where
   });
 });
 
+test("a template, the project's own service and the other services come from the settings or the file, each whole", () => {
+  const file = ProjectFile.parse({
+    template: "java-react-enterprise",
+    service: "ui",
+    services: { meta: { repo: "octo-org/meta-api", ref: "main" }, auth: { repo: "octo-org/gateway", ref: "v2" } },
+  });
+  const settings = ProjectFile.parse({ services: { meta: { repo: "octo-org/meta-api", ref: "fix/login" } } });
+
+  expect(effectiveConfig(file, settings)).toMatchObject({
+    // The settings' services replace the file's: auth is back on its stand-in.
+    config: { template: "java-react-enterprise", service: "ui", services: { meta: { repo: "octo-org/meta-api", ref: "fix/login" } } },
+    sources: { template: "file", service: "file", services: "settings" },
+  });
+  expect(effectiveConfig(null, { template: "java-react-enterprise", service: "ui" })).toMatchObject({
+    config: { template: "java-react-enterprise", service: "ui", services: {} },
+    sources: { template: "settings", service: "settings" },
+  });
+});
+
+test("template: null in the settings turns the file's template off, and its service and services with it", () => {
+  const file = ProjectFile.parse({ template: "java-react-enterprise", service: "ui", services: { auth: "stand-in" }, workers: { max: 3 } });
+  const settings = ProjectFile.parse({ template: null });
+
+  const { config, sources } = effectiveConfig(file, settings);
+
+  expect([config.template, config.service, config.services, config.workers.max]).toEqual([undefined, undefined, {}, 3]);
+  expect(sources).toEqual({ template: "settings", "workers.max": "file" });
+});
+
 test("with no project file, the settings and the defaults make the config", () => {
   expect(effectiveConfig(null, {})).toEqual({
-    config: { instructions: [], commands: {}, skills: [], connectors: [], mcp: {}, secrets: [], workers: { max: 2 } },
+    config: { instructions: [], commands: {}, skills: [], connectors: [], mcp: {}, secrets: [], workers: { max: 2 }, services: {} },
     sources: {},
   });
   expect(effectiveConfig(null, { verify: "verify-app" })).toMatchObject({ config: { verify: "verify-app" }, sources: { verify: "settings" } });

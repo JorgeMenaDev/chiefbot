@@ -379,6 +379,8 @@ export function startControl({
     approvals,
     githubApiUrl,
     repoReadToken: repos.readToken,
+    repoReadable: repos.readable,
+    templates,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publish: (topic, message) => server.publish(topic, message),
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),

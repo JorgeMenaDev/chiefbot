@@ -135,6 +135,12 @@ export function startFakeGitHub({
   // or applied with a 502 answer, as a gateway that timed out gives.
   let pushGate: Promise<"apply" | "cut" | "502"> | null = null;
   let pushesHeld = 0;
+  // API paths that answer a status of their own (failApi), as during an outage.
+  const apiFailures = new Map<string, number>();
+  const failure = (req: Request) => {
+    const status = apiFailures.get(new URL(req.url).pathname);
+    return status === undefined ? null : Response.json({ message: "Service Unavailable" }, { status });
+  };
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
   // Each repo: its id (as GitHub numbers repos), whether the app is installed on it, and who may do what.
   const repos = new Map<string, { id: number; installed: boolean; access: Record<string, FakeRepoAccess> }>();
@@ -269,6 +275,8 @@ export function startFakeGitHub({
       // The repo itself. Like GitHub, 404 for a repo the token cannot read.
       "/repos/:owner/:repo": {
         GET: (req) => {
+          const failed = failure(req);
+          if (failed) return failed;
           const repository = `${req.params.owner}/${req.params.repo}`;
           if (!reader(bearerToken(req), repository)) return Response.json({ message: "Not Found" }, { status: 404 });
           return Response.json({ id: repos.get(repository)?.id, full_name: repository, private: true, default_branch: "main" });
@@ -277,6 +285,8 @@ export function startFakeGitHub({
       // A user's permission on the repo, read with an installation token for it.
       "/repos/:owner/:repo/collaborators/:username/permission": {
         GET: (req) => {
+          const failed = failure(req);
+          if (failed) return failed;
           const repository = `${req.params.owner}/${req.params.repo}`;
           if (!installationTokens.get(bearerToken(req))?.repos.has(repository)) return Response.json({ message: "Not Found" }, { status: 404 });
           return Response.json({ permission: repos.get(repository)?.access[req.params.username] ?? "none" });
@@ -285,6 +295,8 @@ export function startFakeGitHub({
       // The app's installation on the repo's account, with the app's JWT.
       "/repos/:owner/:repo/installation": {
         GET: (req) => {
+          const failed = failure(req);
+          if (failed) return failed;
           if (!appAuthorized(req)) return Response.json({ message: "A JSON web token could not be decoded" }, { status: 401 });
           if (!repos.get(`${req.params.owner}/${req.params.repo}`)?.installed) {
             return Response.json({ message: "Not Found" }, { status: 404 });
@@ -534,6 +546,12 @@ export function startFakeGitHub({
         settle(how);
       };
       return { held: () => pushesHeld, release: () => end("apply"), cut: () => end("cut"), timeOut: () => end("502") };
+    },
+    // Makes GET `path` (a repo, its installation or a user's permission on it, like
+    // /repos/octo-org/shop/installation) answer `status`, or answer again (null).
+    failApi(path: string, status: number | null) {
+      if (status === null) apiFailures.delete(path);
+      else apiFailures.set(path, status);
     },
     // Gives `login` `access` to the repo, or takes theirs away (null).
     setAccess(fullName: string, login: string, access: FakeRepoAccess | null) {

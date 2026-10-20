@@ -88,6 +88,80 @@ test("a repo with no project file, or an invalid one, still makes a project, whi
   }
 });
 
+test("a project file's template is checked when the project is made: a name the catalog lacks, or a repo the member cannot read, makes the file invalid", async () => {
+  const template = "template: java-react-enterprise\nservice: ui\n";
+  const cases: Array<[string, ProjectFileState]> = [
+    [
+      `${template}services:\n  meta: { repo: octo-org/meta-api, ref: v1.2 }\n`,
+      { status: "found", file: { template: "java-react-enterprise", service: "ui", services: { meta: { repo: "octo-org/meta-api", ref: "v1.2" } } } },
+    ],
+    [
+      `${template}services: { db: stand-in }\n`,
+      { status: "invalid", error: "chiefbot.project.yaml: services.db: java-react-enterprise has no service db. Its services are ui, meta, auth." },
+    ],
+    [
+      `${template}services: { meta: { repo: octo-org/hidden, ref: main } }\n`,
+      { status: "invalid", error: "chiefbot.project.yaml: services.meta: octo-org/hidden was not found, or your GitHub account cannot see it." },
+    ],
+  ];
+  for (const [yaml, file] of cases) {
+    const { createProject, github } = await team({ "chiefbot.project.yaml": yaml });
+    github.createRepo("octo-org/meta-api", { "README.md": "# Meta API" });
+    github.createRepo("octo-org/hidden", { "README.md": "# Hidden" }, { access: { [friend.login]: "write" } });
+
+    const project = Project.parse(await (await createProject()).json());
+
+    expect(project.file).toEqual(file);
+    expect(project.config.template).toBe(file.status === "found" ? "java-react-enterprise" : undefined);
+    cleanUp();
+  }
+});
+
+test("GitHub failing while control checks a service's repo refuses the project or the save as github_failed, which a retry clears, and keeps nothing", async () => {
+  const file = "template: java-react-enterprise\nservice: ui\nservices:\n  meta: { repo: octo-org/meta-api, ref: main }\n";
+  const { owner, workspace, createProject, github, computers } = await team({ "chiefbot.project.yaml": file });
+  github.createRepo("octo-org/meta-api", { "README.md": "# Meta API" });
+  github.createRepo("octo-org/legacy-gateway", { "README.md": "# Legacy" }, { installed: false });
+  github.failApi("/repos/octo-org/meta-api/installation", 503);
+
+  const failed = await createProject();
+
+  const body = ApiError.parse(await failed.json());
+  expect([failed.status, body.error]).toEqual([502, "github_failed"]);
+  expect(body.message).toContain("octo-org/meta-api");
+  expect(Project.array().parse(await (await owner.api("GET", `/workspaces/${workspace.id}/projects`)).json())).toEqual([]);
+  expect(computers.computers.size).toBe(0);
+  // Once GitHub answers again, the same file makes the project.
+  github.failApi("/repos/octo-org/meta-api/installation", null);
+  const project = Project.parse(await (await createProject()).json());
+  expect(project.file.status).toBe("found");
+
+  // A repo the app is not installed on is checked as a public repo: GitHub failing there fails the save.
+  github.failApi("/repos/octo-org/legacy-gateway", 503);
+  const text = "services:\n  auth: { repo: octo-org/legacy-gateway, ref: main }\n";
+  const refused = await owner.api("PUT", `/projects/${project.id}/settings`, { text });
+  const refusal = ApiError.parse(await refused.json());
+  expect([refused.status, refusal.error]).toEqual([502, "github_failed"]);
+  expect(refusal.message).toContain("octo-org/legacy-gateway");
+  expect(Project.parse(await (await owner.api("GET", `/projects/${project.id}`)).json())).toEqual(project);
+  github.failApi("/repos/octo-org/legacy-gateway", null);
+  const notFound = ApiError.parse(await (await owner.api("PUT", `/projects/${project.id}/settings`, { text })).json());
+  expect(notFound).toMatchObject({ error: "invalid_settings", message: "Settings: services.auth: octo-org/legacy-gateway was not found, or your GitHub account cannot see it." });
+});
+
+test("template: null in the settings turns the file's template off, with its service and services", async () => {
+  const file = "template: java-react-enterprise\nservice: ui\nservices:\n  auth: stand-in\n";
+  const { owner, createProject } = await team({ "chiefbot.project.yaml": file });
+  const project = Project.parse(await (await createProject()).json());
+  const save = (text: string) => owner.api("PUT", `/projects/${project.id}/settings`, { text });
+
+  const saved = Project.parse(await (await save("template: null\n")).json());
+
+  expect([saved.config.template, saved.config.service, saved.config.services, saved.sources]).toEqual([undefined, undefined, {}, { template: "settings" }]);
+  const refused = ApiError.parse(await (await save("template: null\nservice: ui\n")).json());
+  expect(refused).toMatchObject({ error: "invalid_settings", message: "Settings: service: pick a template first." });
+});
+
 test("a project whose stored file no longer fits the project file's rules opens as an invalid file: members still edit its settings, and the owner deletes it", async () => {
   const { owner, workspace, createProject, stopControl, startControl, dbPath } = await team(undefined, { persistent: true });
   const project = Project.parse(await (await createProject()).json());
@@ -382,6 +456,59 @@ test("any member edits the settings: the config takes them key by key, names eac
   // Anyone outside the workspace gets 404.
   const stranger = await signIn({ id: 6161, login: "octo-stranger", copilot: null });
   expect((await stranger.api("PUT", `/projects/${project.id}/settings`, { text: "" })).status).toBe(404);
+});
+
+test("a member picks a template in the settings and maps its services to repos; a wrong name, the project's repo on a second service or a repo they cannot read is refused", async () => {
+  const { owner, guest, project, github } = await teamProject();
+  github.createRepo("octo-org/meta-api", { "README.md": "# Meta API" }, { access: { [friend.login]: "read" } });
+  github.createRepo("octo-org/gateway", { "README.md": "# Gateway" });
+  github.createRepo("octo-org/legacy-gateway", { "README.md": "# Legacy" }, { installed: false });
+  const save = (text: string) => guest.api("PUT", `/projects/${project.id}/settings`, { text });
+
+  const text = "template: java-react-enterprise\nservice: ui\nservices:\n  meta: { repo: octo-org/meta-api, ref: main }\n  auth: stand-in\n";
+  const res = await save(text);
+
+  expect(res.status).toBe(200);
+  const saved = Project.parse(await res.json());
+  expect(saved).toMatchObject({
+    config: { template: "java-react-enterprise", service: "ui", services: { meta: { repo: "octo-org/meta-api", ref: "main" }, auth: "stand-in" } },
+    sources: { template: "settings", service: "settings", services: "settings" },
+  });
+
+  const refusals: Array<[string, string]> = [
+    ["template: rails-app\nservice: web\n", "Settings: template: no template is named rails-app. The catalog has java-react-enterprise."],
+    ["template: java-react-enterprise\nservice: web\n", "Settings: service: java-react-enterprise has no service web. Its services are ui, meta, auth."],
+    ["template: java-react-enterprise\nservice: ui\nservices: { postgres: stand-in }\n", "Settings: services.postgres: java-react-enterprise has no service postgres. Its services are ui, meta, auth."],
+    ["template: java-react-enterprise\n", "Settings: service: name the template service octo-org/shop is, one of ui, meta, auth."],
+    ["service: ui\n", "Settings: service: pick a template first."],
+    ["services: { meta: stand-in }\n", "Settings: services: pick a template first."],
+    [
+      "template: java-react-enterprise\nservice: ui\nservices: { ui: { repo: octo-org/meta-api, ref: main } }\n",
+      "Settings: services.ui: ui is this project's own service. It runs from octo-org/shop, in each engineer's clone.",
+    ],
+    [
+      "template: java-react-enterprise\nservice: ui\nservices: { meta: { repo: Octo-Org/Shop, ref: main } }\n",
+      "Settings: services.meta: octo-org/shop is this project's own repo, which is already its ui service.",
+    ],
+    [
+      "template: java-react-enterprise\nservice: ui\nservices: { auth: { repo: octo-org/gateway, ref: main } }\n",
+      "Settings: services.auth: octo-org/gateway was not found, or your GitHub account cannot see it.",
+    ],
+    [
+      "template: java-react-enterprise\nservice: ui\nservices: { auth: { repo: octo-org/legacy-gateway, ref: main } }\n",
+      "Settings: services.auth: octo-org/legacy-gateway was not found, or your GitHub account cannot see it.",
+    ],
+  ];
+  for (const [wrong, message] of refusals) {
+    const refused = await save(wrong);
+
+    const body = ApiError.parse(await refused.json());
+    expect([refused.status, body.error, body.message]).toEqual([400, "invalid_settings", message]);
+  }
+  expect(Project.parse(await (await owner.api("GET", `/projects/${project.id}`)).json())).toEqual(saved);
+  // The owner may read octo-org/gateway.
+  const theirs = await owner.api("PUT", `/projects/${project.id}/settings`, { text: refusals[8]?.[0] ?? "" });
+  expect(Project.parse(await theirs.json()).config.services).toEqual({ auth: { repo: "octo-org/gateway", ref: "main" } });
 });
 
 test("a member sets, replaces and clears a declared secret, and its value never comes back in a response, event or log", async () => {
