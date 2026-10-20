@@ -81,11 +81,12 @@ export type ProjectHostOptions = {
 // gets its own, so two writes never touch the same one.
 const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.randomUUID()}`;
 
-// What control logs of a SecretStore failure: the error's kind and code, never
-// its message, which may quote the value.
+// What control logs of a SecretStore failure: the error's kind, if a known one,
+// and its numeric code. Never its message or any other name, which may quote the value.
+const knownErrors = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError"]);
 const failure = (error: unknown) => {
   const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? ` ${error.code}` : "";
-  return `${error instanceof Error ? error.name : "unknown error"}${code}`;
+  return `${error instanceof Error && knownErrors.has(error.name) ? error.name : "other"}${code}`;
 };
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
@@ -166,6 +167,9 @@ export function projectHost({
       secretNames.map(async (secretName) => {
         try {
           await secrets.delete(secretName);
+          // Secret Manager answers a delete of a secret it does not find as done
+          // (secretManager.ts), and it is eventually consistent: a value written
+          // just before may still be there after its record goes (docs/deploy.md).
           projects.secretDeleted(secretName);
         } catch (error) {
           console.error(`could not delete the project secret value ${secretName}: ${failure(error)}`);

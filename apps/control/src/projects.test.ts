@@ -532,6 +532,27 @@ test("a secret the store fails to save keeps its last value, its value stays out
   expect(await store.values()).toEqual(["sk-kept"]);
 });
 
+test("a SecretStore error is logged by a known kind and its code, so a crafted error name cannot carry the value", async () => {
+  const secrets: SecretStore = {
+    get: async () => null,
+    put: async (name, value) => {
+      if (name.startsWith("project-")) throw Object.assign(new Error("refused"), { name: `Leak ${value}`, code: 14 });
+    },
+    delete: async () => {},
+  };
+  const { owner, project } = await teamProject({ secrets });
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "secrets: [API_KEY]\n" });
+  const log = spyOn(console, "error");
+  atCleanUp(() => log.mockRestore());
+
+  const res = await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "sk-crafted" });
+
+  expect(res.status).toBe(503);
+  const logged = log.mock.calls.map((args) => args.map(String).join(" "));
+  expect(logged.filter((text) => text.includes("sk-crafted"))).toEqual([]);
+  expect(logged).toContain(`could not save the secret API_KEY of ${project.id}: other 14`);
+});
+
 test("deleting a project while a member saves a secret waits for the save, then deletes its value too", async () => {
   const store = secretManagerSecrets();
   const { owner, project, computers } = await teamProject({ secrets: store.secrets });
