@@ -29,6 +29,7 @@ import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { parseProjectFile, readProjectFile } from "./projectFile.ts";
+import { queue } from "./queue.ts";
 import type { repoAccess } from "./repos.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 import type { openStore } from "./store.ts";
@@ -76,8 +77,16 @@ export type ProjectHostOptions = {
   onActivity: (projectId: ProjectId) => void;
 };
 
-// The SecretStore name of a project secret's value.
-const projectSecretName = (projectId: ProjectId, name: string) => `project-${projectId}-${name}`;
+// A new SecretStore name for a project secret's value being written: each value
+// gets its own, so two writes never touch the same one.
+const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.randomUUID()}`;
+
+// What control logs of a SecretStore failure: the error's kind and code, never
+// its message, which may quote the value.
+const failure = (error: unknown) => {
+  const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? ` ${error.code}` : "";
+  return `${error instanceof Error ? error.name : "unknown error"}${code}`;
+};
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
 // (from the ComputerProvider), a task ledger and shared context in control,
@@ -95,7 +104,8 @@ const projectSecretName = (projectId: ProjectId, name: string) => `project-${pro
 //                                    project: Project.file says so, and the settings alone make its config.
 //   GET    /projects/:id             → Project
 //   DELETE /projects/:id             → 204 (workspace owner only): its computer, its workers' computers,
-//                                    ledger, chats, context, settings and secrets go
+//                                    ledger, chats, context, settings and secrets go, once the secret
+//                                    writes already asked for are done
 //   PUT    /projects/:id/settings    body ProjectSettingsRequest → Project with the new config (400
 //                                    invalid_settings says what is wrong)
 //   GET    /projects/:id/secrets     → ProjectSecret[]: names, never a value
@@ -146,6 +156,24 @@ export function projectHost({
   // Projects whose computer control is stopping (no turn may land on it), and those it is starting.
   const stopping = new Set<ProjectId>();
   const waking = new Set<ProjectId>();
+  // A project's secret writes and clears, and its deletion, run one at a time, in order.
+  const inOrder = queue<ProjectId>();
+
+  // Deletes leftover secret values (projectStore) from the SecretStore. One it
+  // refuses stays a leftover, logged, and goes when control next starts.
+  const forget = (secretNames: string[]) =>
+    Promise.all(
+      secretNames.map(async (secretName) => {
+        try {
+          await secrets.delete(secretName);
+          projects.secretDeleted(secretName);
+        } catch (error) {
+          console.error(`could not delete the project secret value ${secretName}: ${failure(error)}`);
+        }
+      }),
+    );
+  // What writes and deletes left before control stopped, or failed to delete.
+  void forget(projects.secretLeftovers());
 
   const chatTopic = (projectId: ProjectId, userId: UserId) => `project-chat:${projectId}:${userId}`;
   const publishChat = (projectId: ProjectId, { userId, event }: { userId: UserId; event: ChatEvent }) =>
@@ -327,12 +355,10 @@ export function projectHost({
         await computers.destroy(project.id, { deleteData: true });
         coordinators.get(project.id)?.close();
         await context.remove(project.id);
-        // Declared names too: a value saved just before control stopped may have no record.
-        for (const name of new Set([...projects.secretNames(project.id), ...project.config.secrets])) {
-          await secrets.delete(projectSecretName(project.id, name));
-        }
-        projects.delete(project.id);
-        return new Response(null, { status: 204 });
+        return inOrder(project.id, async () => {
+          await forget(projects.delete(project.id));
+          return new Response(null, { status: 204 });
+        });
       }),
     },
     // Any member saves the settings; the coordinator gets the new config at once.
@@ -351,28 +377,40 @@ export function projectHost({
     "/projects/:id/secrets": {
       GET: member((_user, { project }, _req: Bun.BunRequest<"/projects/:id/secrets">) => Response.json(secretsOf(project) satisfies ProjectSecret[])),
     },
-    // The value goes to the SecretStore only, and never comes back.
+    // The value goes to the SecretStore only, and never comes back. It is
+    // written under a new name, recorded as a leftover first; then the secret
+    // points at it, and the value it replaced goes. A failed write leaves the
+    // secret as it was, and its leftover goes.
     "/projects/:id/secrets/:name": {
       PUT: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/secrets/:name">) => {
         const { name } = req.params;
-        if (!project.config.secrets.includes(name)) return apiError(400, "invalid_secret", `${project.name}'s config declares no secret ${name}.`);
         const body = SetProjectSecretRequest.safeParse(await req.json().catch(() => null));
-        if (!body.success) return apiError(400, "invalid_secret", "expected { value } of 1 to 16384 characters");
-        try {
-          await secrets.put(projectSecretName(project.id, name), body.data.value);
-        } catch (error) {
-          console.error(`could not save the secret ${name} of ${project.id}:`, error);
-          return apiError(503, "secrets_unavailable", "Couldn't save the secret, so nothing changed. Try again.");
-        }
-        projects.secretSet(project.id, name);
-        return new Response(null, { status: 204 });
+        return inOrder(project.id, async () => {
+          // The project as it is now: it may have gone, or its config changed, meanwhile.
+          const current = projects.project(project.id);
+          if (!current) return apiError(404, "not_found");
+          if (!current.config.secrets.includes(name)) return apiError(400, "invalid_secret", `${current.name}'s config declares no secret ${name}.`);
+          if (!body.success) return apiError(400, "invalid_secret", "expected { value } of 1 to 16384 characters");
+          const secretName = newSecretName(current.id);
+          projects.stageSecret(secretName);
+          try {
+            await secrets.put(secretName, body.data.value);
+          } catch (error) {
+            console.error(`could not save the secret ${name} of ${current.id}: ${failure(error)}`);
+            await forget([secretName]);
+            return apiError(503, "secrets_unavailable", "Couldn't save the secret, so it keeps its last value. Try again.");
+          }
+          await forget(projects.publishSecret(current.id, name, secretName));
+          return new Response(null, { status: 204 });
+        });
       }),
-      DELETE: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/secrets/:name">) => {
+      DELETE: member((_user, { project }, req: Bun.BunRequest<"/projects/:id/secrets/:name">) => {
         const name = SecretName.safeParse(req.params.name);
         if (!name.success) return apiError(404, "not_found");
-        await secrets.delete(projectSecretName(project.id, name.data));
-        projects.secretCleared(project.id, name.data);
-        return new Response(null, { status: 204 });
+        return inOrder(project.id, async () => {
+          await forget(projects.clearSecret(project.id, name.data));
+          return new Response(null, { status: 204 });
+        });
       }),
     },
     "/projects/:id/tasks": {

@@ -1,9 +1,12 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { ApiError, ClientEvent, ContextFile, Project, ProjectSecret, Task, Workspace, WorkspaceInvite, type ChatEvent, type ProjectFileState } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
+import { fakeSecretManager } from "./secrets/fakeSecretManager.ts";
+import { secretManagerStore } from "./secrets/secretManager.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 
 afterEach(cleanUp);
@@ -65,6 +68,9 @@ test("a repo with no project file, or an invalid one, still makes a project, whi
     [{ "chiefbot.project.yaml": "commands: [unclosed" }, "invalid", "chiefbot.project.yaml: not valid YAML"],
     [{ "chiefbot.project.yaml": "commands:\n  test: 42\n" }, "invalid", "commands.test: Invalid input: expected string, received number"],
     [{ "chiefbot.project.yaml": "conectors: [github]\n" }, "invalid", 'Unrecognized key: "conectors"'],
+    // Control reads no more than 64 KB, and keeps a short error.
+    [{ "chiefbot.project.yaml": `# ${"x".repeat(64 * 1024)}\n` }, "invalid", "chiefbot.project.yaml: larger than 64 KB"],
+    [{ "chiefbot.project.yaml": Array.from({ length: 500 }, (_, key) => `unknown_key_${key}: 1\n`).join("") }, "invalid", "Unrecognized keys"],
   ];
   for (const [files, status, error] of cases) {
     const { createProject, computers } = await team(files);
@@ -75,10 +81,30 @@ test("a repo with no project file, or an invalid one, still makes a project, whi
     const project = Project.parse(await res.json());
     expect(project.file.status).toBe(status);
     expect(project.file.status === "invalid" ? project.file.error : "").toContain(error);
+    expect(project.file.status === "invalid" ? project.file.error.length : 0).toBeLessThanOrEqual(1000);
     expect([project.config.connectors, project.config.commands, project.sources]).toEqual([[], {}, {}]);
     expect(await computers.provider.status(project.id)).toBe("running");
     cleanUp();
   }
+});
+
+test("a project whose stored file no longer fits the project file's rules opens as an invalid file: members still edit its settings, and the owner deletes it", async () => {
+  const { owner, workspace, createProject, stopControl, startControl, dbPath } = await team(undefined, { persistent: true });
+  const project = Project.parse(await (await createProject()).json());
+  // As a build from before command limits stored it: the file itself, with a 2,001-character command.
+  stopControl();
+  const db = new Database(dbPath);
+  db.query("UPDATE projects SET file = ?1 WHERE id = ?2").run(JSON.stringify({ connectors: [], commands: { build: "x".repeat(2001) } }), project.id);
+  db.close();
+  startControl();
+
+  const [listed] = Project.array().parse(await (await owner.api("GET", `/workspaces/${workspace.id}/projects`)).json());
+
+  expect(listed?.file.status).toBe("invalid");
+  expect(listed?.file.status === "invalid" && listed.file.error).toContain("commands.build: Too big");
+  const saved = await owner.api("PUT", `/projects/${project.id}/settings`, { text: "commands:\n  build: bun run build\n" });
+  expect(Project.parse(await saved.json()).config.commands).toEqual({ build: "bun run build" });
+  expect((await owner.api("DELETE", `/projects/${project.id}`)).status).toBe(204);
 });
 
 test("a repo the member cannot see makes no project", async () => {
@@ -408,6 +434,119 @@ test("a member sets, replaces and clears a declared secret, and its value never 
   expect([(await call(stranger, "GET", "/secrets")).status, (await call(stranger, "PUT", "/secrets/DATABASE_URL", { value: "x" })).status]).toEqual([404, 404]);
   const logged = logs.flatMap((log) => log.mock.calls.map((args) => args.map(String).join(" ")));
   for (const value of values) expect([...seen, ...logged].filter((text) => text.includes(value))).toEqual([]);
+});
+
+// Control's SecretStore on Secret Manager, over the fake one, as on GCP. For
+// project secrets only (users' GitHub tokens are kept there too), it can hold
+// each write until released, and fail writes after saving them (as Secret
+// Manager can, while destroying old versions) and deletes.
+function secretManagerSecrets() {
+  const store = secretManagerStore(fakeSecretManager().client);
+  const names = new Set<string>();
+  let held: Promise<void> | null = null;
+  let release = () => {};
+  let failing = false;
+  let started = 0;
+  const projectSecret = (name: string) => name.startsWith("project-");
+  const secrets: SecretStore = {
+    get: store.get,
+    async put(name, value) {
+      if (!projectSecret(name)) return store.put(name, value);
+      names.add(name);
+      started++;
+      if (held) await held;
+      await store.put(name, value);
+      if (failing) throw new Error(`Secret Manager could not destroy an old version after saving ${value}`);
+    },
+    async delete(name) {
+      if (failing && projectSecret(name)) throw new Error("Secret Manager is unavailable");
+      await store.delete(name);
+    },
+  };
+  return {
+    secrets,
+    // Every project secret value the store holds now.
+    values: async () => (await Promise.all([...names].map((name) => store.get(name)))).filter((value) => value !== null),
+    started: () => started,
+    hold() {
+      held = new Promise((resolve) => (release = resolve));
+    },
+    release() {
+      held = null;
+      release();
+    },
+    failing(on: boolean) {
+      failing = on;
+    },
+  };
+}
+
+test("two members replacing a secret at once leave one value, and a replaced or cleared value leaves the store", async () => {
+  const store = secretManagerSecrets();
+  const { owner, guest, project } = await teamProject({ secrets: store.secrets });
+  const path = `/projects/${project.id}/secrets/API_KEY`;
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "secrets: [API_KEY]\n" });
+  await owner.api("PUT", path, { value: "sk-first" });
+
+  store.hold();
+  const replacing = [owner.api("PUT", path, { value: "sk-owner" }), guest.api("PUT", path, { value: "sk-guest" })];
+  await eventually(() => store.started() >= 2);
+  await Bun.sleep(50);
+  store.release();
+
+  expect((await Promise.all(replacing)).map(({ status }) => status)).toEqual([204, 204]);
+  const values = await store.values();
+  expect(values).toHaveLength(1);
+  expect(["sk-owner", "sk-guest"]).toContain(values[0] ?? "");
+  expect((await owner.api("DELETE", path)).status).toBe(204);
+  expect(await store.values()).toEqual([]);
+});
+
+test("a secret the store fails to save keeps its last value, its value stays out of the log, and what the write left goes once the store works again", async () => {
+  const store = secretManagerSecrets();
+  const { owner, project, restart } = await teamProject({ secrets: store.secrets, persistent: true });
+  const secretPath = (name: string) => `/projects/${project.id}/secrets/${name}`;
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "secrets: [API_KEY, DATABASE_URL]\n" });
+  await owner.api("PUT", secretPath("API_KEY"), { value: "sk-kept" });
+  const logs = (["log", "warn", "error"] as const).map((method) => spyOn(console, method));
+  atCleanUp(() => logs.forEach((log) => log.mockRestore()));
+
+  // The store saves each value, then fails, and fails to delete it too.
+  store.failing(true);
+  const replaced = await owner.api("PUT", secretPath("API_KEY"), { value: "sk-lost" });
+  const first = await owner.api("PUT", secretPath("DATABASE_URL"), { value: "postgres://lost" });
+
+  expect([replaced.status, ApiError.parse(await replaced.json()).error, first.status]).toEqual([503, "secrets_unavailable", 503]);
+  expect(ProjectSecret.array().parse(await (await owner.api("GET", `/projects/${project.id}/secrets`)).json())).toEqual([
+    { name: "API_KEY", declared: true, set: true },
+    { name: "DATABASE_URL", declared: true, set: false },
+  ]);
+  const logged = logs.flatMap((log) => log.mock.calls.map((args) => args.map(String).join(" ")));
+  expect(logged.filter((text) => text.includes("lost"))).toEqual([]);
+  expect((await store.values()).sort()).toEqual(["postgres://lost", "sk-kept", "sk-lost"]);
+
+  // Control deletes what the failed writes left when it next starts.
+  store.failing(false);
+  restart();
+  await eventually(async () => (await store.values()).length === 1);
+  expect(await store.values()).toEqual(["sk-kept"]);
+});
+
+test("deleting a project while a member saves a secret waits for the save, then deletes its value too", async () => {
+  const store = secretManagerSecrets();
+  const { owner, project, computers } = await teamProject({ secrets: store.secrets });
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "secrets: [API_KEY]\n" });
+
+  store.hold();
+  const saving = owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "sk-late" });
+  await eventually(() => store.started() === 1);
+  const deleting = owner.api("DELETE", `/projects/${project.id}`);
+  await eventually(() => computers.destroyed.length === 1);
+  await Bun.sleep(50);
+  store.release();
+
+  expect([(await saving).status, (await deleting).status]).toEqual([204, 204]);
+  expect(await store.values()).toEqual([]);
 });
 
 test("deleting a project deletes its settings and its secrets' values", async () => {

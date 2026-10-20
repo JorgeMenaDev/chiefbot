@@ -24,6 +24,8 @@ test("a project file takes every key, each optional, and refuses unknown ones", 
     { secrets: ["NOT A NAME"] },
     { mcp: { playwright: { command: "npx", url: "https://example.com" } } },
     { workers: { max: 0 } },
+    // As YAML and JSON parse it: an own key, which a record would drop without a word.
+    { mcp: JSON.parse('{"__proto__": {"command": "npx"}}') },
   ]) {
     expect(ProjectFile.safeParse(wrong).success).toBe(false);
   }

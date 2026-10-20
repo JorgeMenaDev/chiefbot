@@ -32,6 +32,11 @@ export type ProjectCommands = z.infer<typeof ProjectCommands>;
 
 // A stdio MCP server that runs inside the project's workers only.
 export const ProjectMcpServer = z.strictObject({ command: z.string().trim().min(1).max(500), args: z.array(z.string().max(2000)).max(50).default([]) });
+// The stdio servers by name. A record drops a "__proto__" key without a word,
+// so one is refused before it gets there.
+const ProjectMcpServers = z
+  .custom<object>((servers) => typeof servers !== "object" || servers === null || !Object.hasOwn(servers, "__proto__"), "__proto__ cannot name a server")
+  .pipe(z.record(ConnectorName, ProjectMcpServer));
 
 // The repo's chiefbot.project.yaml, at its root on the default branch, and the
 // project's settings in the app: the same keys, every one optional. Unknown keys
@@ -50,7 +55,7 @@ export const ProjectFile = z.strictObject({
   skills: z.array(RepoPath).max(50).optional(),
   verify: z.string().trim().min(1).max(100).optional(),
   connectors: z.array(z.string().trim().min(1)).optional(),
-  mcp: z.record(ConnectorName, ProjectMcpServer).optional(),
+  mcp: ProjectMcpServers.optional(),
   secrets: z.array(SecretName).max(50).optional(),
   workers: z.strictObject({ max: z.int().min(1).max(10).optional() }).optional(),
 });

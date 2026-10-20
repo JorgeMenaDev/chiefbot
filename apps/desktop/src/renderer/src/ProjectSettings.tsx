@@ -131,11 +131,15 @@ function SettingsEditor({ project, onSaved }: { project: Project; onSaved: () =>
 // declares. A value goes to control and never comes back.
 function Secrets({ project }: { project: Project }) {
   const api = window.chiefbot.projects;
-  const [secrets, setSecrets] = useState<ProjectSecret[]>([]);
+  // Null until the list loads.
+  const [secrets, setSecrets] = useState<ProjectSecret[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const failed = (caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught));
   const reload = async () => setSecrets(SecretList.parse(await api.secrets(project.id)));
   useEffect(() => {
-    void reload();
+    setSecrets(null);
+    setError(null);
+    reload().catch(failed);
   }, [project.id, project.config.secrets.join()]);
 
   // Runs one change, then reloads; false when control refused it.
@@ -146,15 +150,15 @@ function Secrets({ project }: { project: Project }) {
       await reload();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      failed(caught);
       return false;
     }
   }
 
   return (
     <Section title="Secrets" description="Values for the names under secrets. They stay in control, and nobody can read them back.">
-      {secrets.length === 0 && <Muted>No secrets. Name them under secrets: in the settings, then set their values here.</Muted>}
-      {secrets.map((secret) => (
+      {secrets?.length === 0 && <Muted>No secrets. Name them under secrets: in the settings, then set their values here.</Muted>}
+      {secrets?.map((secret) => (
         <SecretRow
           key={secret.name}
           secret={secret}
