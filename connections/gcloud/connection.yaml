@@ -1,0 +1,46 @@
+# Google Cloud through the gcloud CLI (docs/connections.md).
+# The key stays in control: before each turn control mints a one-hour access token
+# from it (exchange: google-access-token), and only that token, as the field
+# `token`, reaches the computer. gcloud reads it from its file through
+# CLOUDSDK_AUTH_ACCESS_TOKEN_FILE, and keeps its config under CLOUDSDK_CONFIG, in
+# the turn's folder. Reads are the list/describe/get commands of the health
+# recipes in SKILL.md; global flags before the command group make it ask.
+title: Google Cloud
+description: Cloud Run, GKE, Monitoring and Logging health through the gcloud CLI, with a one-hour token.
+cli: gcloud
+fields:
+  key: { label: "Service account key or authorized_user JSON, with only the roles it needs", secret: true }
+  project: { label: "Default project ID" }
+exchange: google-access-token
+env:
+  CLOUDSDK_AUTH_ACCESS_TOKEN_FILE: "{dir}/token"
+  CLOUDSDK_CORE_PROJECT: "{project}"
+  CLOUDSDK_CONFIG: "{dir}/config"
+  CLOUDSDK_CORE_DISABLE_PROMPTS: "1"
+  CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK: "1"
+readOnly:
+  - "gcloud --version"
+  - "gcloud version*"
+  - "gcloud * --help"
+  - "gcloud config list*"
+  - "gcloud projects describe *"
+  - "gcloud run services list*"
+  - "gcloud run services describe *"
+  - "gcloud run revisions list*"
+  - "gcloud run revisions describe *"
+  - "gcloud container clusters list*"
+  - "gcloud container clusters describe *"
+  - "gcloud container node-pools list*"
+  - "gcloud container node-pools describe *"
+  - "gcloud container operations list*"
+  - "gcloud monitoring alerts list*"
+  - "gcloud monitoring alerts describe *"
+  - "gcloud monitoring policies list*"
+  - "gcloud monitoring policies describe *"
+  - "gcloud monitoring uptime list-configs*"
+  - "gcloud monitoring uptime describe *"
+  - "gcloud logging read *"
+  - "gcloud compute regions list*"
+  - "gcloud compute regions describe *"
+  - "gcloud compute zones list*"
+  - "gcloud compute zones describe *"

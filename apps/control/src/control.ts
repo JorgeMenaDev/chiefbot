@@ -96,6 +96,8 @@ export type ControlOptions = {
   firstBot?: string;
   // The connections people may turn on (connections/catalog.ts loadConnections). Default: none.
   connections?: CatalogConnection[];
+  // Where connections mint Google access tokens (connections/googleToken.ts). Default: Google's.
+  googleTokenUrl?: string;
   // Where projects' shared context files live. Defaults to a context folder
   // next to dbPath (a fresh temporary one for an in-memory database).
   context?: ContextStore;
@@ -196,6 +198,7 @@ export function startControl({
   publicUrl,
   firstBot,
   connections: catalog = [],
+  googleTokenUrl,
 }: ControlOptions) {
   const store = openStore(dbPath);
   // An in-memory database gets a temporary context folder, removed on stop.
@@ -216,7 +219,7 @@ export function startControl({
   // Who drives each screen and the viewers' streams (screens.ts).
   const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
   // People's connections, which their bots' turns carry (connections/connections.ts).
-  const connections = connectionHost({ store, secrets, catalog });
+  const connections = connectionHost({ store, secrets, catalog, ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }) });
   // Starting turns, the chat topics and worker hellos (turns.ts).
   const turns = chatTurns({
     store,

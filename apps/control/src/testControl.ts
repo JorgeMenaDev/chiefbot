@@ -63,6 +63,8 @@ export type TestControlOptions = {
   copilotTokens?: CopilotTokenMinter;
   // Where control keeps secrets. Default: control's own encrypted store.
   secrets?: SecretStore;
+  // Where connections mint Google access tokens: a fake token endpoint.
+  googleTokenUrl?: string;
   // How long the signed-in user's GitHub tokens have left.
   accessTokenLeftMs?: number;
   refreshTokenLeftMs?: number;
@@ -82,6 +84,7 @@ export async function startTestControl({
   idleStopMinutes,
   copilotTokens,
   secrets,
+  googleTokenUrl,
   accessTokenLeftMs = 8 * hour,
   refreshTokenLeftMs = 180 * 24 * hour,
 }: TestControlOptions = {}) {
@@ -106,6 +109,7 @@ export async function startTestControl({
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),
     ...(copilotTokens === undefined ? {} : { copilotTokens }),
     ...(secrets === undefined ? {} : { secrets }),
+    ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }),
   };
   let control = startControl(options);
   const url = control.url;
