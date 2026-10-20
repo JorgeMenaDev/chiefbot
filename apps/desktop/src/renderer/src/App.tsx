@@ -251,18 +251,6 @@ function Workspace({ user }: { user: User }) {
           </div>
         </div>
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-2">
-          {!searching && (
-            <SidebarRow
-              active={showHealth}
-              onClick={() => {
-                setSelectedId("health");
-                setMembersVisit(membersVisit + 1);
-              }}
-            >
-              <ActivityIcon />
-              <span className="min-w-0 flex-1 truncate">Health</span>
-            </SidebarRow>
-          )}
           {current && !searching && (
             <>
               <SidebarGroupLabel>Workspace</SidebarGroupLabel>
@@ -356,7 +344,8 @@ function Workspace({ user }: { user: User }) {
             </Alert>
           </div>
         )}
-        <footer className="flex shrink-0 items-center px-2 pt-1 pb-2">
+        {/* A row of icons, after T3 Code's `SidebarUtilityMenu`: the gear menu, then Health. */}
+        <footer className="flex shrink-0 items-center gap-1 px-2 pt-1 pb-2">
           <SettingsMenu
             user={user}
             onConnectApps={() => {
@@ -365,6 +354,16 @@ function Workspace({ user }: { user: User }) {
             }}
             onSettings={() => setSelectedId("settings")}
           />
+          <SidebarIconButton
+            label="Health"
+            active={showHealth}
+            onClick={() => {
+              setSelectedId("health");
+              setMembersVisit(membersVisit + 1);
+            }}
+          >
+            <ActivityIcon />
+          </SidebarIconButton>
         </footer>
       </Sidebar>
       <main className="flex min-w-0 flex-1">

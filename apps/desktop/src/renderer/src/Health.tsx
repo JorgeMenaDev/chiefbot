@@ -19,11 +19,11 @@ import { cn, listOf } from "./lib/utils.ts";
 // The screen reloads control's kept checks this often while it is open.
 const RELOAD_MS = 60_000;
 
-// Health, from the sidebar, after T3 Code's usage page (apps/web/src/components/usage,
-// MIT): one overall status, then a card per connection control checks, each with
-// its latest status, a 24-hour status bar and the problems it found. Ask my bot
-// opens a bot's chat with the problem written in. Control runs the checks
-// (read-only, no AI), every 5 minutes and on Refresh.
+// Health, from its icon beside the gear at the sidebar's bottom left, after T3 Code's
+// usage page (apps/web/src/components/usage, MIT): one overall status, then a card per
+// connection control checks, each with its latest status, a 24-hour status bar and the
+// problems it found. Ask my bot opens a bot's chat with the problem written in.
+// Control runs the checks (read-only, no AI), every 5 minutes and on Refresh.
 export function Health({ onConnectApps, onAsk }: { onConnectApps: () => void; onAsk: ((text: string) => void) | null }) {
   const [report, setReport] = useState<HealthReport | null>(null);
   const [now, setNow] = useState(() => Date.now());
