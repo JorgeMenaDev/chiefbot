@@ -33,6 +33,8 @@ export function fakeComputers({
     // A project's computer runs its coordinator instead.
     coordinator: ReturnType<typeof startCoordinator> | null;
     screen: TCPSocketListener | null;
+    // Where a project's coordinator keeps its copy of the repo, on the computer's own disk.
+    repoRoot: string;
   };
   const computers = new Map<ComputerId, FakeComputer>();
   const attachmentsRoot = mkdtempSync(join(tmpdir(), "chiefbot-attachments-"));
@@ -73,7 +75,7 @@ export function fakeComputers({
 
   const provider: ComputerProvider = {
     async create(spec) {
-      computers.set(spec.id, { spec, worker: null, coordinator: null, screen: null });
+      computers.set(spec.id, { spec, worker: null, coordinator: null, screen: null, repoRoot: join(mkdtempSync(join(tmpdir(), "chiefbot-computer-")), "repo") });
     },
     async start(id) {
       const computer = get(id);
@@ -87,6 +89,7 @@ export function fakeComputers({
           projectId: env.CHIEFBOT_PROJECT_ID,
           projectToken: env.CHIEFBOT_PROJECT_TOKEN,
           copilot: copilot.copilot,
+          repoRoot: computer.repoRoot,
           retryMs: 20,
         });
         return;

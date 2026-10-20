@@ -21,6 +21,7 @@ import type { LaneItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
 import { Column, ErrorText, PaneHeader, SidePanel } from "./Pane.tsx";
+import { ProjectComposerControls } from "./ProjectComposerControls.tsx";
 import { fileNote, ProjectSettings } from "./ProjectSettings.tsx";
 import { ListeningTo } from "./Subscriptions.tsx";
 import { Badge } from "./components/ui/badge.tsx";
@@ -93,7 +94,7 @@ export function NewProject({ workspace, onCreated, onClose }: { workspace: Works
 
 // A project: the user's chat with its coordinator (or its settings view in its
 // place), and the task ledger beside it. The workspace owner can delete it;
-// `onDeleted` runs once it is gone, and `onChanged` once its settings are saved.
+// `onDeleted` runs once it is gone, and `onChanged` once its settings or model are saved.
 // `login` is the signed-in user's.
 export function ProjectPane({
   project,
@@ -165,7 +166,7 @@ export function ProjectPane({
         {showListening && <ListeningTo project={project} />}
         {showCalls && <ConnectorCalls project={project} />}
         {showSettings && <ProjectSettings project={project} onSaved={onChanged} />}
-        <CoordinatorChat project={project} hidden={showSettings} />
+        <CoordinatorChat project={project} hidden={showSettings} onChanged={onChanged} />
       </Column>
       <TaskLedger project={project} login={login} />
     </>
@@ -188,8 +189,9 @@ function useCoordinatorChat(projectId: ProjectId) {
 
 // The bot chat's shape (Chat.tsx). Every member has their own chat; the
 // coordinator answers one member at a time, so a message may wait its turn.
-// `hidden` keeps the draft while the settings view takes its place.
-function CoordinatorChat({ project, hidden }: { project: Project; hidden: boolean }) {
+// `hidden` keeps the draft while the settings view takes its place. The
+// composer picks the project's model; `onChanged` runs once one is saved.
+function CoordinatorChat({ project, hidden, onChanged }: { project: Project; hidden: boolean; onChanged: () => void }) {
   const view = useCoordinatorChat(project.id);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -223,7 +225,9 @@ function CoordinatorChat({ project, hidden }: { project: Project; hidden: boolea
         onSend={() => void submit()}
         canSend={canSend}
         error={error}
-      />
+      >
+        <ProjectComposerControls project={project} onSaved={onChanged} onError={setError} />
+      </Composer>
     </section>
   );
 }

@@ -6,6 +6,7 @@ import {
   ProjectSettingsRequest,
   SecretName,
   SendMessageRequest,
+  SetBotModelRequest,
   SetProjectSecretRequest,
   type AgentConnector,
   type ApprovalKind,
@@ -14,6 +15,7 @@ import {
   type ContextFile,
   type ControlToCoordinator,
   type CopilotPayer,
+  type ModelOption,
   type Project,
   type ProjectId,
   type ProjectMember,
@@ -28,6 +30,7 @@ import type { ApprovalOutcome, controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
+import { currentEffort, pickModel } from "./models.ts";
 import { parseProjectFile, readProjectFile } from "./projectFile.ts";
 import { queue } from "./queue.ts";
 import type { repoAccess } from "./repos.ts";
@@ -61,6 +64,8 @@ export type ProjectHostOptions = {
   githubApiUrl: string;
   // A token to read a repo for a user, or why not (repos.ts readToken).
   repoReadToken: ReturnType<typeof repoAccess>["readToken"];
+  // The model picker's rows for the user's Copilot plan (models.ts).
+  modelOptions: (user: User) => ModelOption[];
   // Control's URL as a computer reaches it.
   controlUrlForComputers: () => string;
   // Publishes to a WebSocket topic.
@@ -109,6 +114,9 @@ const failure = (error: unknown) => {
 //                                    writes already asked for are done
 //   PUT    /projects/:id/settings    body ProjectSettingsRequest → Project with the new config (400
 //                                    invalid_settings says what is wrong)
+//   PUT    /projects/:id/model       body SetBotModelRequest → Project: the coordinator's next turn runs on
+//                                    it (400 model_unavailable when the member's plan does not offer it or it is
+//                                    locked, effort_unavailable when the model does not support the effort)
 //   GET    /projects/:id/secrets     → ProjectSecret[]: names, never a value
 //   PUT    /projects/:id/secrets/:name  body SetProjectSecretRequest → 204, for a name the config declares
 //                                    (400 invalid_secret; 503 secrets_unavailable)
@@ -140,6 +148,7 @@ export function projectHost({
   approvals,
   githubApiUrl,
   repoReadToken,
+  modelOptions,
   controlUrlForComputers,
   publish,
   publishToUser,
@@ -192,7 +201,8 @@ export function projectHost({
 
   // The project's scheduler: once its coordinator is ready, hands it the oldest
   // queued turn, unless a turn is running (the store's claim refuses then), with
-  // who pays for its Copilot and the connectors ready for that turn's member.
+  // the project's model (at its effort while the member's plan still offers it
+  // for the model), who pays for its Copilot and the connectors ready for that turn's member.
   // The turn's chat says who pays. Connectors act as the member (or the
   // workspace, for a shared one) whoever pays: org billing changes only
   // Copilot's identity. If they cannot be read, the turn runs without connectors.
@@ -201,12 +211,14 @@ export function projectHost({
     if (!greeted.has(projectId)) return wake(projectId);
     const next = projects.claimNextTurn(projectId);
     const run = next && payerOf({ kind: "project", projectId, askerId: next.member.userId });
-    if (!next || !run) return;
+    const project = projects.project(projectId);
+    if (!next || !run || !project) return;
+    const model = { model: project.model, effort: currentEffort(store.modelReport(next.member.userId), project.model, project.effort) };
     const turnKey = store.turnKeys.issue({ agent: "coordinator", projectId, userId: next.member.userId, turnId: next.turnId });
     publishChat(projectId, projects.addPayer(next.turnId, run.payer));
     void connectorsFor(projectId, next.member.userId)
       .catch(() => [])
-      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, turnKey, payer: run.payer, connectors }));
+      .then((connectors) => toCoordinator(projectId, { type: "run-turn", ...next, ...model, turnKey, payer: run.payer, connectors }));
   };
 
   // Starts the project's computer when a turn waits and no coordinator is
@@ -376,6 +388,17 @@ export function projectHost({
         if (!saved) return apiError(404, "not_found");
         toCoordinator(project.id, { type: "bound", project: saved });
         return Response.json(saved satisfies Project);
+      }),
+    },
+    // Any member picks the coordinator's model, among those their own plan offers.
+    "/projects/:id/model": {
+      PUT: member(async (user, { project }, req: Bun.BunRequest<"/projects/:id/model">) => {
+        const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "model_unavailable");
+        const picked = pickModel(modelOptions(user), body.data, project.effort);
+        if ("error" in picked) return apiError(400, picked.error);
+        const saved = projects.setModel(project.id, picked.model, picked.effort);
+        return saved ? Response.json(saved satisfies Project) : apiError(404, "not_found");
       }),
     },
     "/projects/:id/secrets": {

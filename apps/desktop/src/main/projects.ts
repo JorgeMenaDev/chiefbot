@@ -8,6 +8,7 @@ import {
   type ApprovalId,
   type ProjectChatView,
   type ProjectId,
+  type SetBotModelRequest,
   type SubscriptionId,
   type SubscriptionInput,
   type TaskWorkerId,
@@ -43,6 +44,10 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
     // with the project and its new config; throws with what is wrong in them.
     saveSettings: async (projectId: ProjectId, text: string) =>
       Project.parse(await (await call("PUT", `/projects/${projectId}/settings`, { text })).json()),
+    // The coordinator's next turn runs on the request's model and effort; throws
+    // when the user's plan does not offer them.
+    setModel: async (projectId: ProjectId, request: SetBotModelRequest) =>
+      Project.parse(await (await call("PUT", `/projects/${projectId}/model`, request)).json()),
     // The project's secrets, which control never sends the value of.
     secrets: async (projectId: ProjectId) => ProjectSecret.array().parse(await (await call("GET", `/projects/${projectId}/secrets`)).json()),
     setSecret: async (projectId: ProjectId, name: string, value: string) =>

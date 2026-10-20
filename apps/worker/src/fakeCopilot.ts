@@ -33,6 +33,9 @@ export type FakeRuntime = {
   // The runtime resolved request `requestId` without the session's answer (it gave
   // up, or another client answered): elicitation.completed goes out.
   resolveQuestion(requestId: string): void;
+  // Asks the session's permission handler about `request` (fakeRequest), as the
+  // runtime does before one of its own tools runs: resolves with whether it approved.
+  permission(request: PermissionRequest): Promise<boolean>;
 };
 
 // What every session's model listing returns. The default is Copilot Free with an empty catalog.
@@ -141,6 +144,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           return result;
         },
         resolveQuestion: (requestId) => publish(sdk.elicitationCompleted(requestId)),
+        permission: allowed,
       };
       async function runShell(command: string, toolCallId: string) {
         if (!(await allowed(fakeRequest.shell(command, toolCallId)))) return { approved: false, exitCode: -1, output: "" };
@@ -287,6 +291,7 @@ export const fakeRequest = {
   // A command the runtime sees only reading, such as `ls`.
   readOnlyShell: (fullCommandText: string) => shellRequest(fullCommandText, true),
   write: (fileName: string): PermissionRequest => ({ kind: "write", fileName, intention: "Edit a file", diff: "", canOfferSessionApproval: false }),
+  read: (path: string): PermissionRequest => ({ kind: "read", path, intention: "Read a file" }),
   tool: (toolName: string, args: JsonValue): PermissionRequest => ({ kind: "custom-tool", toolName, toolDescription: toolName, args }),
   mcp: (serverName: string, toolTitle: string, readOnly: boolean): PermissionRequest => ({
     kind: "mcp",

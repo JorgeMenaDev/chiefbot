@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
-import { createBareRepo, git, gitHttpBackend } from "./git.ts";
+import { commitFiles, createBareRepo, git, gitHttpBackend } from "./git.ts";
 
 // A fake github.com + api.github.com for tests: the OAuth device flow, the
 // refresh grant, the two API reads control makes at sign-in, private git repos
@@ -441,6 +441,15 @@ export function startFakeGitHub({
     createRepo(fullName: string, files: Record<string, string>, { access = { [user.login]: "write" }, installed = true }: FakeRepoOptions = {}) {
       createBareRepo(repoRoot, fullName, files);
       repos.set(fullName, { id: 9000 + repos.size, installed, access });
+    },
+    // A new commit on the repo's main holding `files`, as if someone pushed it.
+    commit: (fullName: string, files: Record<string, string>) => commitFiles(bareRepo(fullName), files),
+    // Gives `login` `access` to the repo, or takes theirs away (null).
+    setAccess(fullName: string, login: string, access: FakeRepoAccess | null) {
+      const repo = repos.get(fullName);
+      if (!repo) throw new Error(`no repo ${fullName}`);
+      if (access === null) delete repo.access[login];
+      else repo.access[login] = access;
     },
     // Runs git in the repo's bare copy, e.g. to read what a push left there.
     git: (fullName: string, ...args: string[]) => git(bareRepo(fullName), args),

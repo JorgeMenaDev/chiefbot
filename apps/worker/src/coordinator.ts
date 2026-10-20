@@ -12,6 +12,7 @@ import { connectorServers } from "./connectorServers.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
+import { locate, refreshCopy, repoInstructions, repoTools, skillRoots, type RepoCopy } from "./repoCopy.ts";
 
 export type CoordinatorOptions = {
   // Control's base URL as seen from the computer.
@@ -22,6 +23,8 @@ export type CoordinatorOptions = {
   projectToken: string;
   // The agent engine: the Copilot SDK in empty mode on a project computer, a fake in tests.
   copilot: Copilot;
+  // The folder that holds the copy of the project's repo the coordinator reads (repoCopy.ts).
+  repoRoot: string;
   // Wait between reconnects after the connection drops.
   retryMs?: number;
   onBound?: (project: Project) => void;
@@ -35,14 +38,16 @@ export type CoordinatorOptions = {
 // token control brokers for the turn's member), or, when the
 // workspace's organization pays, an installation token control mints, on a
 // runtime of the session's own, renewed when it runs low (installationSession.ts).
-// Control's scheduler sends one turn at a time for the whole project. The
-// coordinator plans, tracks and dispatches work: its tools are the task ledger,
-// the shared context and the project's workers, all kept by control, plus the
-// project's connectors that control sends with each turn, which act as the
-// member whoever pays for Copilot. No shell, no files. Every call a member's
+// Control's scheduler sends one turn at a time for the whole project, on the
+// project's model. The coordinator plans, tracks and dispatches work: its tools
+// are the task ledger, the shared context and the project's workers, all kept by
+// control, plus the project's connectors that control sends with each turn,
+// which act as the member whoever pays for Copilot. It reads the repo too: a
+// copy of its default branch that each turn fetches (repoCopy.ts), with its
+// instructions and skills. No shell, and it writes no files. Every call a member's
 // session makes to control carries the key of the turn it was opened for. A
 // member who leaves the workspace has their session stopped.
-export function startCoordinator({ controlUrl, projectId, projectToken, copilot, retryMs = 2000, onBound }: CoordinatorOptions) {
+export function startCoordinator({ controlUrl, projectId, projectToken, copilot, repoRoot, retryMs = 2000, onBound }: CoordinatorOptions) {
   const base = `${controlUrl}/coordinator/${projectId}`;
   let project: Project | null = null;
   // Each member's session of their latest turn, and that turn. A session is
@@ -52,14 +57,16 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   const sessions = new Map<UserId, { turn: Turn; session: Promise<BotSession>; unsubscribe: () => void }>();
 
   // Only the coordinator's own tools and its session's connectors run; the
-  // empty-mode runtime offers no others anyway.
+  // empty-mode runtime offers no others anyway, but its skill tool. That may read
+  // a skill's files, so the runtime may read inside the turn's `copy`, and nowhere else.
   const permissionFor =
-    (toolNames: Set<string>, connectors: AgentConnector[]): PermissionHandler =>
+    (toolNames: Set<string>, connectors: AgentConnector[], copy: RepoCopy): PermissionHandler =>
     async (request) =>
       (request.kind === "custom-tool" && toolNames.has(request.toolName)) ||
-      (request.kind === "mcp" && connectors.some(({ name }) => name === request.serverName))
+      (request.kind === "mcp" && connectors.some(({ name }) => name === request.serverName)) ||
+      (request.kind === "read" && "root" in copy && "real" in (await locate(copy.root, request.path)))
         ? { kind: "approve-once" }
-        : { kind: "reject", feedback: "The coordinator can only use its task, context and worker tools and the project's connectors." };
+        : { kind: "reject", feedback: "The coordinator can only use its task, context, worker and repo tools and the project's connectors." };
 
   // Stops the session's events reaching the chat and closes it (an
   // organization's runtime stops with it), cutting its running turn short first when `abort`.
@@ -71,20 +78,26 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   }
 
   // The member's session for `turn`, in place of the one of their previous turn.
-  async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[], turn: Turn) {
+  // Its repo tools, the repo's instructions and its skills come from `copy`, the
+  // repo as this turn fetched it.
+  async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[], turn: Turn, copy: RepoCopy) {
     if (!project) throw new Error("A turn came before control said which project this is");
     const previous = sessions.get(member.userId);
     sessions.delete(member.userId);
     if (previous) await close(previous, false);
     const bearer = () => turn.key;
-    const tools = coordinatorTools(async (toolCall: CoordinatorToolCall) =>
-      (await link.fromControl("/tools", turn.key, { method: "POST", body: JSON.stringify(toolCall) })).text(),
-    );
+    const tools = [
+      ...coordinatorTools(async (toolCall: CoordinatorToolCall) =>
+        (await link.fromControl("/tools", turn.key, { method: "POST", body: JSON.stringify(toolCall) })).text(),
+      ),
+      ...repoTools(copy),
+    ];
     const options = {
       sessionId: `${projectId}-${member.userId}`,
-      onPermissionRequest: permissionFor(new Set(tools.map(({ name }) => name)), connectors),
+      onPermissionRequest: permissionFor(new Set(tools.map(({ name }) => name)), connectors, copy),
       tools,
-      instructions: instructions(project, member),
+      instructions: [instructions(project, member), await repoInstructions(copy, project.config.instructions)].join("\n\n"),
+      skillDirectories: await skillRoots(copy, project.config.skills),
       mcpServers: connectorServers(connectors, (name) => link.connector(turn, name)),
       onMcpCall: link.reportCalls(connectors, bearer),
     };
@@ -102,10 +115,27 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     return session;
   }
 
-  async function runTurn({ turnId, turnKey, member, text, payer, connectors }: Extract<ControlToCoordinator, { type: "run-turn" }>) {
+  // Each turn first refreshes the copy of the repo, with the turn's key. The
+  // chat shows the fetch as a tool call, so a member sees when it fails. The turn
+  // runs on the project's `model` at `effort`, set on the session first (the SDK
+  // switches an open session's model, keeping its conversation; a null effort
+  // clears the last one).
+  async function runTurn({ turnId, turnKey, member, text, model, effort, payer, connectors }: Extract<ControlToCoordinator, { type: "run-turn" }>) {
     const turn = link.begin(turnId, turnKey);
     try {
-      await (await sessionFor(member, payer, connectors, turn)).send(text);
+      if (!project) throw new Error("A turn came before control said which project this is");
+      const { repo } = project;
+      const fetchRow = (status: "running" | "succeeded" | "failed") => {
+        if (link.running(turn)) link.emit(turnId, { type: "tool-call", toolCallId: "repo-copy", name: `Fetch ${repo}`, status });
+      };
+      fetchRow("running");
+      const copy = await refreshCopy(repoRoot, `${controlUrl}/git/${repo}.git`, turn.key);
+      fetchRow("error" in copy ? "failed" : "succeeded");
+      // Control ended the turn while it fetched (its member left): nothing more of it runs.
+      if (!link.running(turn)) return;
+      const session = await sessionFor(member, payer, connectors, turn, copy);
+      await session.setModel(model, effort);
+      await session.send(text);
     } catch (error) {
       link.fail(turnId, error);
     }

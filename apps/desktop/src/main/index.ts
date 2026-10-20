@@ -215,6 +215,7 @@ ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) 
 ipcMain.handle("projects:save-settings", (_event, id: unknown, text: unknown) =>
   projects.saveSettings(ProjectId.parse(id), ProjectSettingsRequest.parse({ text }).text),
 );
+ipcMain.handle("projects:set-model", (_event, id: unknown, request: unknown) => projects.setModel(ProjectId.parse(id), SetBotModelRequest.parse(request)));
 ipcMain.handle("projects:secrets", (_event, id: unknown) => projects.secrets(ProjectId.parse(id)));
 ipcMain.handle("projects:set-secret", (_event, id: unknown, name: unknown, value: unknown) =>
   projects.setSecret(ProjectId.parse(id), SecretName.parse(name), SetProjectSecretRequest.parse({ value }).value),

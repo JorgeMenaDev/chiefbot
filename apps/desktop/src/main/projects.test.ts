@@ -69,14 +69,17 @@ test("a member creates a project from a repo, chats with its coordinator and see
 
   projects.openChat(project.id);
   await projects.send(project.id, "Add dark mode");
-  const view = await until(project.id, (view) => view.working === null && view.items.length >= 3);
+  const view = await until(project.id, (view) => view.working === null && view.items.length >= 4);
 
   // The member's own seat pays for the turn, and the chat says so.
   expect(view.items.map((item) => (item.kind === "user" || item.kind === "assistant" ? item.text : item.kind))).toEqual([
     "Add dark mode",
     "payer",
+    "tool",
     "Filed it.",
   ]);
+  // The coordinator fetched the repo's default branch first.
+  expect(view.items[2]).toMatchObject({ kind: "tool", name: "Fetch octo-org/shop", status: "succeeded" });
   expect(view.items[1]).toMatchObject({ kind: "payer", payer: { kind: "seat", login: "octo-user" } });
   const ledger = await projects.tasks(project.id);
   expect(ledger.map(({ number, title, status }) => [number, title, status])).toEqual([[1, "Add dark mode", "open"]]);
@@ -136,4 +139,16 @@ test("a member saves a project's settings and sets and clears its secrets, whose
   expect(await projects.secrets(project.id)).toEqual([{ name: "API_KEY", declared: true, set: false }]);
   await expect(projects.saveSettings(project.id, "workers:\n  max: 0\n")).rejects.toThrow("invalid_settings: Settings: workers.max");
   await expect(projects.setSecret(project.id, "OTHER_KEY", "x")).rejects.toThrow("invalid_secret");
+});
+
+test("a member picks the model the project's coordinator runs on, among those their plan offers", async () => {
+  const { github, team, projects } = await signedIn();
+  github.createRepo("octo-org/shop", { "README.md": "# Shop" });
+  const project = await projects.create(team.id, "octo-org/shop");
+
+  const picked = await projects.setModel(project.id, { model: "auto", effort: null });
+
+  expect([project.model, picked.model, picked.effort]).toEqual(["auto", "auto", null]);
+  // The fake's user is on Copilot Free, which offers only Auto.
+  await expect(projects.setModel(project.id, { model: "gpt-6.1-sol" })).rejects.toThrow("model_unavailable");
 });

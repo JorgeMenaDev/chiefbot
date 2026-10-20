@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import {
+  AUTO_MODEL,
   effectiveConfig,
   Project,
   ProjectFile,
@@ -15,6 +16,7 @@ import {
   type CopilotPayer,
   type CreateTaskArgs,
   type ProjectMember,
+  type ReasoningEffort,
   type TaskStatus,
   type TurnEvent,
   type UpdateTaskArgs,
@@ -44,6 +46,10 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     UNIQUE (workspace_id, repo)
   )`);
   addColumn(db, "projects", "settings", "TEXT NOT NULL DEFAULT ''");
+  // The coordinator's Copilot model id, and its reasoning effort (NULL: the
+  // model's default). Projects from before the model picker run on Auto.
+  addColumn(db, "projects", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
+  addColumn(db, "projects", "effort", "TEXT");
   // The project's secrets that control holds a value for, each with the
   // SecretStore name its value is under. Each value written gets a new one.
   db.run(`CREATE TABLE IF NOT EXISTS project_secrets (
@@ -119,7 +125,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     return names;
   };
 
-  type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string; settings: string };
+  type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string; settings: string; model: string; effort: string | null };
   // What control stored of the project file. Projects made before a missing
   // file was allowed store the file itself, and those made before `environments`
   // left the project file (it was never used) still carry it: it is dropped.
@@ -140,9 +146,11 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   const toProject = (row: ProjectRow): Project => {
     const file = storedFile(row.file);
     const { config, sources } = effectiveConfig(file.status === "found" ? file.file : null, storedSettings(row.settings));
-    return Project.parse({ id: row.id, workspaceId: row.workspace_id, name: row.name, repo: row.repo, file, settings: row.settings, config, sources });
+    const { id, workspace_id: workspaceId, name, repo, settings, model, effort } = row;
+    return Project.parse({ id, workspaceId, name, repo, file, settings, config, sources, model, effort });
   };
-  const projectColumns = "projects.id, projects.workspace_id, projects.name, projects.repo, projects.file, projects.settings";
+  const projectColumns = "projects.id, projects.workspace_id, projects.name, projects.repo, projects.file, projects.settings, projects.model, projects.effort";
+  const returnedColumns = "RETURNING id, workspace_id, name, repo, file, settings, model, effort";
 
   type TaskRow = {
     project_id: string;
@@ -204,7 +212,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       const row = db
         .query<ProjectRow, [string, string, string, string, string, string, number]>(
           `INSERT INTO projects (id, workspace_id, name, repo, file, token_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-           ON CONFLICT (workspace_id, repo) DO NOTHING RETURNING id, workspace_id, name, repo, file, settings`,
+           ON CONFLICT (workspace_id, repo) DO NOTHING ${returnedColumns}`,
         )
         .get(`project_${crypto.randomUUID()}`, workspaceId, repo.split("/")[1] ?? repo, repo, JSON.stringify(file), hash(token), Date.now());
       return row ? toProject(row) : "exists";
@@ -298,8 +306,16 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     // Saves the project's settings, YAML its caller has checked (parseProjectFile).
     setSettings(projectId: ProjectId, text: string): Project | null {
       const row = db
-        .query<ProjectRow, [string, string]>("UPDATE projects SET settings = ?2 WHERE id = ?1 RETURNING id, workspace_id, name, repo, file, settings")
+        .query<ProjectRow, [string, string]>(`UPDATE projects SET settings = ?2 WHERE id = ?1 ${returnedColumns}`)
         .get(projectId, text);
+      return row ? toProject(row) : null;
+    },
+
+    // The coordinator's turns run on `model` at `effort` from the next one on.
+    setModel(projectId: ProjectId, model: string, effort: ReasoningEffort | null): Project | null {
+      const row = db
+        .query<ProjectRow, [string, string, string | null]>(`UPDATE projects SET model = ?2, effort = ?3 WHERE id = ?1 ${returnedColumns}`)
+        .get(projectId, model, effort);
       return row ? toProject(row) : null;
     },
 

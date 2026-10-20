@@ -64,27 +64,34 @@ export function agentEnv(env: Record<string, string | undefined>) {
 }
 
 // The real Copilot SDK in empty mode, for a project's coordinator: no shell, no
-// files, no ambient config or skills. Each session can use only the custom tools
-// it is opened with. Session history lives under `baseDirectory`.
+// file tools, no ambient config or skills. Each session can use only the custom
+// tools it is opened with, and skills from the skill folders it names. Session history
+// lives under `baseDirectory`.
 export function coordinatorSdk({ baseDirectory }: { baseDirectory: string }): Copilot {
   return sdkCopilot({ mode: "empty", baseDirectory, useLoggedInUser: false, env: agentEnv(process.env) }, coordinatorSessionConfig);
 }
 
 // A coordinator session's config: its tools and its MCP servers' tools are the
-// only ones it may use, and its instructions follow the SDK's own system message.
+// only ones it may use, plus the runtime's skill tool when it has skill folders
+// (the repo's, in the coordinator's copy: BuiltInTools.Isolated lists the tool as
+// safe in empty mode). Its instructions follow the SDK's own system message.
 export function coordinatorSessionConfig({
   onPermissionRequest,
   tools,
   instructions,
   mcpServers = {},
   onMcpCall,
+  skillDirectories = [],
 }: Parameters<Copilot["openSession"]>[0]) {
   const hasMcp = Object.keys(mcpServers).length > 0;
+  const hasSkills = skillDirectories.length > 0;
   return {
     onPermissionRequest,
     tools,
     streaming: true,
-    availableTools: [...tools.map(({ name }) => `custom:${name}`), ...(hasMcp ? ["mcp:*"] : [])],
+    availableTools: [...tools.map(({ name }) => `custom:${name}`), ...(hasMcp ? ["mcp:*"] : []), ...(hasSkills ? ["builtin:skill"] : [])],
+    enableSkills: hasSkills,
+    skillDirectories,
     ...connectorConfig(mcpServers, onMcpCall),
     ...appended(instructions),
   };
