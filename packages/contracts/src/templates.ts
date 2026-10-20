@@ -24,7 +24,7 @@ export const TemplateService = z.strictObject({
 export type TemplateService = z.infer<typeof TemplateService>;
 
 // One setup step an engineer's task shows: its label, and the compose services
-// that must be healthy (or, for a one-shot service, finished) before it passes.
+// that must be healthy (or, for the seed, finished) before it passes.
 export const TemplateStage = z.strictObject({
   label: z.string().trim().min(1).max(40),
   waitsFor: z.array(TemplateServiceName).min(1),

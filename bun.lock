@@ -14,6 +14,7 @@
       "dependencies": {
         "@chiefbot/contracts": "workspace:*",
         "@chiefbot/setup": "workspace:*",
+        "@chiefbot/worker": "workspace:*",
         "@google-cloud/compute": "^7.8.0",
         "@google-cloud/secret-manager": "^7.2.0",
         "croner": "10.0.1",
@@ -21,7 +22,6 @@
       },
       "devDependencies": {
         "@chiefbot/fake-github": "workspace:*",
-        "@chiefbot/worker": "workspace:*",
       },
     },
     "apps/desktop": {

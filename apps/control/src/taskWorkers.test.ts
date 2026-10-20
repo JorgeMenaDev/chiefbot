@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { setupShell, type SetupShell } from "@chiefbot/worker/engineer-setup";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
+import { loadTemplates, repoTemplates } from "./templates/catalog.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
 // A project's workers end to end: the coordinator (fake Copilot) dispatches a
@@ -1895,4 +1896,183 @@ test("a member's message queues behind their task's continuation instead of bein
   expect(continued.text).toStartWith("Engineer for task #1 ended:");
   await ends(continued.turnId);
   expect(await coordinator.nth("run-turn", 4)).toMatchObject({ text: "Use the footer too" });
+});
+
+// Settings that give the project the java-react-enterprise template: its repo is
+// the ui service, and meta runs from octo-org/meta-api at main.
+const templateSettings = "template: java-react-enterprise\nservice: ui\nservices:\n  meta: { repo: octo-org/meta-api, ref: main }\n";
+
+// teamProject with octo-org/meta-api, which both members may read, and `settings` saved by `saver` (the owner by default).
+async function templateProject(options: TestControlOptions = {}, projectFile?: string, settings = templateSettings, saver: "owner" | "guest" = "owner") {
+  const control = await teamProject(options, projectFile);
+  control.github.createRepo("octo-org/meta-api", { "README.md": "# Meta API" }, { access: { "octo-user": "read", "octo-friend": "read" } });
+  const saved = await control[saver].api("PUT", `/projects/${control.project.id}/settings`, { text: settings });
+  if (saved.status !== 200) throw new Error(`settings not saved: ${saved.status} ${await saved.text()}`);
+  return control;
+}
+
+// A worker's setup as its transcript shows it, in order: each stage of its stack
+// with its state, then each step of its computer's setup.
+const setupLines = (events: ChatEvent[]) =>
+  events.flatMap(({ event }) =>
+    event.type === "stack-stage" ? [`${event.stage.label} ${event.stage.state}`] : event.type === "setup-step" ? [`${event.step.step} ${event.step.exitCode}`] : [],
+  );
+
+test("an engineer of a project with a template gets its own stack before its setup: each stage streams into its transcript in order, its brief has the template's notes, and the stack goes with its computer", async () => {
+  const setup = fakeSetup();
+  const control = await templateProject({ setupShell: setup.run }, "commands:\n  setup: bun install\n  dev: bun run dev\n");
+  const { owner, project, copilot, computers, stacks } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Fixed the typo.");
+    yield sdk.idle();
+  });
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  const transcript = await owner.watchWorkerTranscript(project.id, id).settled();
+  expect(setupLines(transcript)).toEqual([
+    ...["Build", "Database", "API", "Gateway", "Seed"].flatMap((label) => [`${label} running`, `${label} passed`]),
+    "clone 0",
+    "setup 0",
+  ]);
+  // meta runs from its repo at its ref, read as the member who asked; the project's own ui runs in the computer.
+  expect(stacks.started.map(({ id, plan }) => [id, plan.template.name, plan.own, plan.repos])).toEqual([
+    [id, "java-react-enterprise", "ui", { meta: { repo: "octo-org/meta-api", ref: "main", token: expect.stringMatching(/^ghs_fake_/) } }],
+  ]);
+  const brief = copilot.sends.find(({ sessionId }) => sessionId === id)?.prompt ?? "";
+  expect(brief).toContain("This repo is its ui service");
+  expect(brief).toContain("- Sign in as alice, password alice-password.");
+  // Its turn is over: its computer stops, and its stack goes with it.
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
+  expect(stacks.stopped).toEqual([id]);
+});
+
+test("a stage of the stack that fails blocks the engineer with that stage's log, the project's secrets hidden: its setup never runs, and its stack goes as its computer stops", async () => {
+  const setup = fakeSetup();
+  const control = await templateProject({ setupShell: setup.run }, "commands:\n  setup: bun install\nsecrets: [DB_PASSWORD]\n");
+  const { owner, project, copilot, computers, stacks } = control;
+  expect((await owner.api("PUT", `/projects/${project.id}/secrets/DB_PASSWORD`, { value: "hunter2-dev" })).status).toBe(204);
+  const { tool } = await heldTurn(control);
+  stacks.failAt("API", "meta exited with 1: could not connect as acme:hunter2-dev\n");
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  expect(blocked.result).toBe("Its stack did not start: its API stage failed.");
+  const transcript = await owner.watchWorkerTranscript(project.id, id).settled();
+  expect(setupLines(transcript)).toEqual(["Build running", "Build passed", "Database running", "Database passed", "API running", "API failed"]);
+  expect(transcript.flatMap(({ event }) => (event.type === "stack-stage" && event.stage.state === "failed" ? [event.stage.log] : []))).toEqual([
+    "meta exited with 1: could not connect as acme:***\n",
+  ]);
+  expect(setup.runs).toEqual([]);
+  expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
+  expect(stacks.stopped).toEqual([id]);
+  expect(WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body).lines.slice(-2)).toEqual([
+    "stack API: failed\nmeta exited with 1: could not connect as acme:***\n",
+    "error: Its stack did not start: its API stage failed.",
+  ]);
+});
+
+test("every engineer and verifier gets a stack of its own: two engineers at once get two, and a verifier a fresh one, whose failed stage is its BLOCKED report", async () => {
+  const control = await templateProject();
+  const { owner, project, stacks } = control;
+  const { tool } = await heldTurn(control);
+  await tool({ tool: "create_task", title: "Fix the footer" });
+
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-2" })).body);
+
+  await eventually(() => stacks.running.size === 2);
+  expect(stacks.started.map(({ id }) => id).sort()).toEqual([first.id, second.id].sort());
+  await tool({ tool: "stop_worker", worker: first.id });
+  await eventually(() => !stacks.running.has(first.id));
+  expect(stacks.running.has(second.id)).toBe(true);
+
+  await pullRequestOnTask(control, tool);
+  stacks.failAt("Seed", "seed 2/4 live records: answered 500\n");
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(await workerWhen(owner, project, verifier.id, ({ verdict }) => verdict !== null)).toMatchObject({ state: "blocked", verdict: "blocked" });
+  expect(stacks.started.map(({ id, plan }) => [id, plan.template.name, plan.own]).at(-1)).toEqual([verifier.id, "java-react-enterprise", "ui"]);
+  const verification = Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification;
+  expect(verification).toMatchObject({ result: "blocked", summary: "Its stack did not start: its Seed stage failed." });
+  const file = ContextFileText.parse(await (await owner.api("GET", `/projects/${project.id}/context/file?path=${verification?.evidence}`)).json());
+  expect(file.content).toContain("Its stack's Seed stage failed:\n\n```\nseed 2/4 live records: answered 500\n\n```");
+});
+
+test("every stack start checks each service's repo as the member who asked: one they can no longer read blocks the engineer naming it, and GitHub failing blocks it saying to try again", async () => {
+  const control = await templateProject();
+  const { owner, project, github, stacks } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  const dispatch = async (creationId: string) => {
+    const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId })).body);
+    return workerWhen(owner, project, id, ({ state }) => state === "finished" || state === "blocked");
+  };
+  expect((await dispatch("c-1")).state).toBe("finished");
+
+  github.setAccess("octo-org/meta-api", "octo-user", null);
+  expect((await dispatch("c-2")).result).toBe("Its stack cannot start: services.meta: octo-org/meta-api was not found, or your GitHub account cannot see it.");
+
+  github.setAccess("octo-org/meta-api", "octo-user", "read");
+  github.failApi("/repos/octo-org/meta-api/installation", 503);
+  expect((await dispatch("c-3")).result).toBe(
+    "Its stack cannot start: services.meta: GitHub failed while control checked octo-org/meta-api (GitHub /repos/octo-org/meta-api/installation failed: 503). Try again.",
+  );
+  expect(stacks.started).toHaveLength(1);
+});
+
+test("a stack start checks the project's template choices against the catalog as it is now: a template or service it no longer has blocks the engineer, naming the key to fix in Settings", async () => {
+  const control = await templateProject({ persistent: true });
+  const { owner, project, stacks } = control;
+  const [template] = loadTemplates(repoTemplates);
+  if (!template) throw new Error("the repo ships no template");
+  const { meta: _gone, ...services } = template.services;
+  const blockedOn = async (templates: (typeof template)[]) => {
+    control.stopControl();
+    control.startControl({ templates });
+    const { tool } = await heldTurn(control);
+    const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: `c-${templates.length}` })).body);
+    return (await workerWhen(owner, project, id, ({ state }) => state === "blocked")).result;
+  };
+
+  expect(await blockedOn([{ ...template, services }])).toBe(
+    "Its stack cannot start: services.meta: java-react-enterprise has no service meta. Its services are ui, auth. Fix it in the project's Settings.",
+  );
+  expect(await blockedOn([])).toBe(
+    "Its stack cannot start: template: no template is named java-react-enterprise. The catalog has none. Fix it in the project's Settings.",
+  );
+  expect(stacks.started).toEqual([]);
+});
+
+test("template: null in the settings turns the file's template off: the engineer gets no stack, and its brief says none", async () => {
+  const control = await templateProject({}, "template: java-react-enterprise\nservice: ui\n", "template: null\n");
+  const { owner, project, copilot, stacks } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  expect(setupLines(await owner.watchWorkerTranscript(project.id, id).settled())).toEqual(["clone 0"]);
+  expect(stacks.started).toEqual([]);
+  expect(copilot.sends.find(({ sessionId }) => sessionId === id)?.prompt).not.toContain("template");
+});
+
+test("where computers have no stacks, as on GCE, an engineer of a project with a template is blocked at once", async () => {
+  const control = await templateProject({ stacks: null });
+  const { tool } = await heldTurn(control);
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  expect(await workerWhen(control.owner, control.project, id, ({ state }) => state === "blocked")).toMatchObject({
+    result: "templates need the local Docker provider",
+    setup: [],
+  });
 });

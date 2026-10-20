@@ -9,6 +9,7 @@ import {
   latestPullRequest,
   PullRequestArgs,
   SCREENSHOT_BYTES_MAX,
+  SETUP_LOG_MAX,
   VerdictReport,
   WorkerToControl,
   type AgentConnector,
@@ -27,6 +28,7 @@ import {
   type ScreenControl,
   type Task,
   type TaskLink,
+  type Template,
   type TaskWorker,
   type TaskWorkerId,
   type TurnId,
@@ -44,8 +46,11 @@ import { apiError, bearer, unauthorized } from "./http.ts";
 import type { PullRequestHead } from "./github.ts";
 import type { repoAccess, RepoAgent, RepoReader } from "./repos.ts";
 import { viewerBytes } from "./rfbViewer.ts";
+import { secretRedactor } from "@chiefbot/worker/secret-redactor";
 import { screenTunnel } from "./screens.ts";
 import { secretFailure } from "./secrets/secretStore.ts";
+import { templateProblem } from "./templates/projectTemplate.ts";
+import type { StackPlan, StackRunner } from "./templates/stacks.ts";
 import type { VerifiedHead } from "./projectStore.ts";
 import type { openStore } from "./store.ts";
 import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
@@ -83,6 +88,13 @@ export type TaskWorkerHostOptions = {
   // The values of the project's secrets that are set, by name (projects.ts). Throws when they cannot be read.
   secretsFor: (projectId: ProjectId) => Promise<Record<string, string>>;
   computers: ComputerProvider;
+  // The template catalog, and where each worker's copy of its project's template
+  // stack runs (templates/stacks.ts): null where computers have none, as on GCE.
+  templates: Template[];
+  stacks: StackRunner | null;
+  // Whether a member may read a repo, and a token that reads it (repos.ts).
+  repoReadable: ReturnType<typeof repoAccess>["readable"];
+  repoReadToken: ReturnType<typeof repoAccess>["readToken"];
   approvals: ReturnType<typeof controlApprovals>;
   // A worker that waits this long on one approval stops, keeping its disk.
   approvalWaitMinutes: number;
@@ -118,7 +130,10 @@ export type TaskWorkerHostOptions = {
 // control's /task-worker routes: it runs the task as one turn for the member who
 // asked, on the Copilot that pays for it (their seat, or their organization's:
 // copilotIdentity.ts) and with the project's connectors ready for them (through
-// connectors.ts's proxy). It first sets up (setting_up): it clones the repo
+// connectors.ts's proxy). It first sets up (setting_up): when the project has a
+// template, control starts the worker's own copy of its stack in the computer's
+// network namespace (startStack), each stage in its transcript, and a stage
+// that fails blocks it. Then the worker clones the repo
 // through control's git proxy and runs the project's setup command with the
 // project's secrets, which control sends with its task and nowhere else
 // (EngineerSetup), only while its turn is live on the connection that asked; a
@@ -128,7 +143,7 @@ export type TaskWorkerHostOptions = {
 // control, each push and pull request approved by that member, or ends with a
 // report when nothing needs to change. Its last message is its result; its pull
 // request is linked on the task. Its computer stops as soon as its turn ends,
-// keeping its disk, and goes once the worker is stopped or its task is done or
+// keeping its disk (its stack goes then), and goes once the worker is stopped or its task is done or
 // abandoned; on start, control stops every computer of an ended turn, removes
 // every one that should be gone and launches what the queue has room for (`recover`).
 // A verifier (dispatch_verifier) is a worker of the same kind on a computer of
@@ -189,6 +204,10 @@ export function taskWorkerHost({
   connectorsFor,
   secretsFor,
   computers,
+  templates,
+  stacks,
+  repoReadable,
+  repoReadToken,
   approvals,
   approvalWaitMinutes,
   clock,
@@ -413,19 +432,21 @@ export function taskWorkerHost({
 
   // A verifier that ended (its turn did, or its launch failed) without a verdict
   // gets BLOCKED, so the task shows that nobody checked the pull request. Its
-  // summary says why: its error, or its last message. A failed setup step's log
-  // is its report. A stopped verifier gets none: someone chose to stop it.
+  // summary says why: its error, or its last message. A failed setup step's log,
+  // or its stack's failed stage's, is its report. A stopped verifier gets none: someone chose to stop it.
   // Settles once any verdict of the verifier is recorded.
   async function noVerdict(workerId: TaskWorkerId) {
     const worker = workers.worker(workerId);
     if (worker?.kind !== "verifier" || worker.verdict !== null || !["finished", "blocked", "failed"].includes(worker.state)) return;
     const failed = worker.setup.find(({ exitCode }) => exitCode !== 0);
+    const stage = workers.transcript(workerId).flatMap(({ event }) => (event.type === "stack-stage" && event.stage.state === "failed" ? [event.stage] : []))[0];
+    const log = failed ? { title: `\`${failed.command}\` exited with ${failed.exitCode}:`, text: failed.log } : stage ? { title: `Its stack's ${stage.label} stage failed:`, text: stage.log } : null;
     await recordVerdict(
       workerId,
       {
         result: "blocked",
         summary: worker.state === "finished" ? `It ended without a verdict. Its last message: ${worker.result ?? ""}` : (worker.result ?? "It ended without a verdict."),
-        report: failed ? [`\`${failed.command}\` exited with ${failed.exitCode}:`, "", "```", failed.log, "```"].join("\n") : "",
+        report: log ? [log.title, "", "```", log.text, "```"].join("\n") : "",
       },
       [],
     );
@@ -453,7 +474,7 @@ export function taskWorkerHost({
     return chore;
   }
 
-  // One step of settle: the provider call the computer needs, if any.
+  // One step of settle: the provider call the computer needs, if any, after its stack goes.
   async function settleStep(workerId: TaskWorkerId) {
     const goes = workers.mustGo(workerId);
     if (!goes && !workers.stopPending(workerId)) return;
@@ -464,6 +485,8 @@ export function taskWorkerHost({
     }
     holders.delete(workerId);
     try {
+      // Its stack lives in the computer's network namespace: it goes first.
+      await stacks?.stop(workerId);
       await (goes ? computers.destroy(workerId, { deleteData: true }) : computers.stop(workerId));
     } catch (error) {
       console.error(`could not ${goes ? "remove" : "stop"} the computer of ${workerId}:`, error);
@@ -499,9 +522,23 @@ export function taskWorkerHost({
     if (turnId) approvals.turnEnded(turnId);
   }
 
-  // The engineer's brief, its first message: the task, the project and how to
-  // hand back the work. Its instructions say where its setup cloned the repo.
-  function taskPrompt({ name, repo, config }: Project, task: Task, instructions: string) {
+  // What a worker's brief says of its own copy of the project's template stack
+  // (startStack): what runs and how its own service runs, and the template's notes.
+  function stackBrief({ config }: Project): string[] {
+    const template = stacks && templates.find(({ name }) => name === config.template);
+    if (!template || config.service === undefined) return [];
+    const dev = config.commands.dev ? ` with \`${config.commands.dev}\`` : "";
+    return [
+      `Before you started, Chiefbot started the services of the project's template, ${template.title}, on this computer, each on its usual localhost port. This repo is its ${config.service} service: run it from your clone${dev}.`,
+      ...template.notes.map((note) => `- ${note}`),
+      "",
+    ];
+  }
+
+  // The engineer's brief, its first message: the task, the project, its stack
+  // and how to hand back the work. Its instructions say where its setup cloned the repo.
+  function taskPrompt(project: Project, task: Task, instructions: string) {
+    const { name, repo, config } = project;
     const commands = Object.entries(config.commands).map(([command, line]) => `- ${command}: ${line}`);
     return [
       `You are an engineer of the project ${name} (GitHub repo ${repo}). You have this computer to yourself for one task. Chiefbot cloned the repo and set it up for you.`,
@@ -511,6 +548,7 @@ export function taskWorkerHost({
       ...(instructions ? ["", "From the project agent:", instructions] : []),
       "",
       ...(commands.length > 0 ? ["The repo's commands:", ...commands, ""] : []),
+      ...stackBrief(project),
       "First reproduce the problem, or see how the code behaves now, on the base branch as cloned, before you change anything.",
       "If nothing needs to change (it is already fixed, or the task only asks a question), push nothing: end with a report of what you checked and what you found.",
       "Otherwise work on a new branch, push it and open a draft pull request with create_pull_request. The member who asked for this approves each push and the pull request.",
@@ -523,9 +561,11 @@ export function taskWorkerHost({
   // default playbook for a web app when the project sets none. The skill gets
   // the project's dev command and URL too, and every verifier its test
   // command: the app's settings may set them, which the repo does not show.
+  // A project with a template gets the verifier a fresh stack, as an engineer's.
   // With a devUrl it checks in the browser, as a pass needs a screenshot
   // (evidenced); without one, by tests and code only. It ends with report_verdict.
-  function verifierPrompt({ name, repo, config }: Project, task: Task, pr: PullRequestHead & { url: string }, instructions: string) {
+  function verifierPrompt(project: Project, task: Task, pr: PullRequestHead & { url: string }, instructions: string) {
+    const { name, repo, config } = project;
     const { dev, devUrl, test } = config.commands;
     const app = [...(dev ? [`Start the app with \`${dev}\` in the clone.`] : []), ...(devUrl ? [`It answers at ${devUrl}.`] : [])];
     const start = dev ? `run \`${dev}\` in the background in the clone` : "the project sets no `commands.dev`, so start it as the repo says, in the background";
@@ -555,6 +595,7 @@ export function taskWorkerHost({
       ...(instructions ? ["", "From the project agent:", instructions] : []),
       "",
       "Chiefbot cloned the repo, checked that commit out and ran the repo's setup.",
+      ...stackBrief(project),
       ...playbook,
       evidence,
       ...(test ? [`Run its tests with \`${test}\` in the clone.`] : []),
@@ -572,6 +613,51 @@ export function taskWorkerHost({
     if (!project) return null;
     const { repo, config } = project;
     return { repo, sha, command: config.commands.setup ?? null, instructions: config.instructions, skills: config.skills, mcp: config.mcp, secrets: await secretsFor(projectId) };
+  }
+
+  // Starts the worker's own copy of its project's template stack, when the
+  // project has a template, before its setup: each stage goes into its
+  // transcript as the stack reports it, its log with the project's `secrets`
+  // and the repo tokens hidden. The project's template keys are checked against
+  // the catalog as it is now, and each service's repo against the member who
+  // asked (`userId`), on every start: the member who saved the settings being
+  // able to read it is not enough, and a cached image is no exception. Null
+  // once the stack is ready, or when the project has none; else why the worker
+  // is blocked. A stack that started for a worker that ended meanwhile goes again.
+  async function startStack(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId, secrets: Record<string, string>): Promise<string | null> {
+    const project = projects.project(projectId);
+    if (project?.config.template === undefined) return null;
+    if (!stacks) return "templates need the local Docker provider";
+    const { config } = project;
+    const template = templates.find(({ name }) => name === config.template);
+    const problem = templateProblem(config, project.repo, templates);
+    // templateProblem also checks that the template is in the catalog and the project names its own service.
+    if (problem !== null || !template || config.service === undefined) return `Its stack cannot start: ${problem} Fix it in the project's Settings.`;
+    const repos: StackPlan["repos"] = {};
+    for (const [service, source] of Object.entries(config.services)) {
+      if (source === "stand-in") continue;
+      const refusal = await repoReadable(userId, source.repo);
+      if (refusal) return `Its stack cannot start: services.${service}: ${refusal.message}`;
+      const access = await repoReadToken(userId, source.repo).catch(() => null);
+      if (access === null || "error" in access) return `Its stack cannot start: services.${service}: GitHub failed while control read ${source.repo}. Try again.`;
+      repos[service] = { ...source, token: access.token };
+    }
+    if (workers.worker(workerId)?.state !== "setting_up") return null;
+    const hide = secretRedactor([...Object.values(secrets), ...Object.values(repos).flatMap(({ token }) => (token === null ? [] : [token]))]);
+    let last = "";
+    const outcome = await stacks
+      .start(workerId, { template, own: config.service, repos }, (stage) => {
+        last = stage.label;
+        const event = workers.stackStage(workerId, { ...stage, log: hide.redact(stage.log).slice(-SETUP_LOG_MAX), at: clock.now() });
+        if (event) publish(projectId);
+      })
+      .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
+    if (workers.worker(workerId)?.state !== "setting_up") {
+      await stacks.stop(workerId).catch((error: unknown) => console.error(`could not remove the stack of ${workerId}:`, error));
+      return null;
+    }
+    if (outcome instanceof Error) return `Its stack did not start: ${hide.redact(outcome.message)}`;
+    return outcome === "ready" ? null : `Its stack did not start: its ${last} stage failed.`;
   }
 
   const routes = {
@@ -751,7 +837,8 @@ export function taskWorkerHost({
   // Starts the worker's task, once: on the Copilot of whoever pays for the
   // member who asked, with the connectors ready for them and its setup. On the
   // organization's Copilot the worker renews its one-hour token mid-task
-  // (installationSession.ts). Secrets control cannot read block it: its setup cannot run.
+  // (installationSession.ts). Secrets control cannot read block it: its setup
+  // cannot run. So does a stack that cannot start (startStack).
   async function startTask({ id: workerId, projectId, kind, sha }: TaskWorker, userId: UserId) {
     // The connection whose hello started it: the task goes there or nowhere.
     const socket = sockets.get(workerId);
@@ -773,8 +860,15 @@ export function taskWorkerHost({
       publish(projectId);
       return;
     }
+    const blocked = await startStack(workerId, projectId, userId, setup.secrets);
+    if (stopped) return;
+    if (blocked !== null) {
+      if (workers.end(workerId, "blocked", blocked).length > 0) turnOver(workerId, started.turnId);
+      publish(projectId);
+      return;
+    }
     // The turn may have ended, its member left or its worker reconnected while
-    // control read the secrets: then they, and the task, go nowhere.
+    // control read the secrets or started the stack: then they, and the task, go nowhere.
     const live = socket && sockets.get(workerId) === socket && store.turnKeys.holder(turnKey) && store.projects.member(projectId, { userId });
     if (!live) return;
     socket.send(JSON.stringify({ type: "run-task", kind, turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors, setup } satisfies ControlToWorker));
@@ -992,6 +1086,7 @@ export function taskWorkerHost({
       for (const workerId of workers.toReap(projectId)) {
         await launches.get(workerId);
         sockets.get(workerId)?.close();
+        await stacks?.stop(workerId);
         await computers.destroy(workerId, { deleteData: true });
         workers.computerRemoved(workerId);
       }
@@ -1183,8 +1278,9 @@ function pullRequestNumber(url: string, repo: string): number | null {
   return fullName?.toLowerCase() === repo.toLowerCase() && number ? Number(number) : null;
 }
 
-// A worker's turn as transcript lines for the coordinator: each setup step with
-// its exit code (and its log when it failed), each message whole, each tool call
+// A worker's turn as transcript lines for the coordinator: each stage of its
+// stack that ended and each setup step with its exit code (and its log when it
+// failed), each message whole, each tool call
 // with its latest status, approvals, answers and errors.
 function transcriptLines(events: ChatEvent[]): string[] {
   const lines: string[] = [];
@@ -1218,6 +1314,11 @@ function transcriptLines(events: ChatEvent[]): string[] {
       case "setup-step": {
         const { step, command, exitCode, log } = event.step;
         lines.push(`${step}: ${command} (exit ${exitCode})${exitCode === 0 ? "" : `\n${log}`}`);
+        break;
+      }
+      case "stack-stage": {
+        const { label, state, log } = event.stage;
+        if (state !== "running") lines.push(`stack ${label}: ${state}${state === "failed" ? `\n${log}` : ""}`);
         break;
       }
       case "setup-done":

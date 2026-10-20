@@ -229,6 +229,9 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
     }
     case "setup-done":
       return view;
+    // A stage of the worker's template stack (StackStage) adds no chat row.
+    case "stack-stage":
+      return view;
     // Approvals and questions left pending when a turn ends can no longer be answered.
     case "done": {
       const items = view.items.map(
