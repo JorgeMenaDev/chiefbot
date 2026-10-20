@@ -184,6 +184,10 @@ export type ContextPath = z.infer<typeof ContextPath>;
 export const ContextFile = z.object({ path: ContextPath, size: z.number().int(), updatedAt: z.number() });
 export type ContextFile = z.infer<typeof ContextFile>;
 
+// One shared context file's Markdown, as a member reads it.
+export const ContextFileText = z.object({ path: ContextPath, content: z.string() });
+export type ContextFileText = z.infer<typeof ContextFileText>;
+
 // open         nobody works on it yet
 // in_progress  someone (a person or a worker) works on it
 // needs_input  it waits for a person's answer or decision

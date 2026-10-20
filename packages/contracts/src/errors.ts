@@ -10,8 +10,8 @@ import { z } from "zod";
 //   reauth_needed         the bot owner (or the member asking a project's coordinator, or creating
 //                         a project) must sign in to GitHub again (403, BrokerRefusal)
 //   invalid_tokens, invalid_bot, invalid_message, invalid_answer, invalid_routine,
-//   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request, invalid_copilot_mode
-//                         the body or query failed its schema (400)
+//   invalid_after, invalid_workspace, invalid_invite, invalid_pull_request, invalid_copilot_mode,
+//   invalid_path          the body or query failed its schema (400)
 //   invalid_schedule      a routine's or schedule subscription's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
 //   effort_unavailable    the model does not support that reasoning effort (400)
@@ -78,6 +78,7 @@ export const ApiErrorCode = z.enum([
   "invalid_answer",
   "invalid_routine",
   "invalid_after",
+  "invalid_path",
   "invalid_pull_request",
   "invalid_workspace",
   "invalid_invite",

@@ -1,11 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { ChatEvent, ClientEvent, Project, TaskWorker, Workspace, WorkspaceInvite, type ProjectId, type ProjectState } from "@chiefbot/contracts";
+import { ChatEvent, ClientEvent, ContextFile, ContextFileText, ContextPath, Project, TaskWorker, Workspace, WorkspaceInvite, type ProjectId, type ProjectState } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { atCleanUp, cleanUp, eventually, fakeCoordinator, startTestControl, type TestControl, type TestUser } from "./testControl.ts";
 
 // What the desktop's Projects tab reads from control: each project's state dot,
-// and a running engineer's screen and transcript.
+// a running engineer's screen and transcript, and the shared context.
 
 afterEach(cleanUp);
 
@@ -187,4 +187,22 @@ test("a member follows an engineer's transcript: what it did so far, then live, 
   expect(resumed.map(({ seq }) => seq)).toEqual(all.filter(({ seq }) => seq > seen).map(({ seq }) => seq));
   const outsider = await signIn({ id: 666, login: "mallory", copilot: null });
   expect((await fetch(`${url}/projects/${project.id}/workers/${engineer.id}/transcript`, { headers: outsider.auth })).status).toBe(404);
+});
+
+test("a member reads the project's shared context: the list of files, then one file", async () => {
+  const control = await teamProject();
+  const { project, guest, signIn, url } = control;
+  const { tool } = await heldTurn(control);
+  await tool({ tool: "write_context", path: "plans/checkout.md", content: "# Checkout\nTwo steps." });
+  await tool({ tool: "write_context", path: "notes.md", content: "Started task #1." });
+
+  const files = ContextFile.array().parse(await (await guest.api("GET", `/projects/${project.id}/context`)).json());
+  const file = ContextFileText.parse(await (await guest.api("GET", `/projects/${project.id}/context/file?path=plans/checkout.md`)).json());
+
+  expect(files.map(({ path }) => String(path)).sort()).toEqual(["notes.md", "plans/checkout.md"]);
+  expect(file).toEqual({ path: ContextPath.parse("plans/checkout.md"), content: "# Checkout\nTwo steps." });
+  expect((await guest.api("GET", `/projects/${project.id}/context/file?path=missing.md`)).status).toBe(404);
+  expect((await guest.api("GET", `/projects/${project.id}/context/file?path=../secrets.md`)).status).toBe(400);
+  const outsider = await signIn({ id: 666, login: "mallory", copilot: null });
+  expect((await fetch(`${url}/projects/${project.id}/context`, { headers: outsider.auth })).status).toBe(404);
 });
