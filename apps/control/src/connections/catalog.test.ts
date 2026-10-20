@@ -28,6 +28,7 @@ test("every connection the repo ships loads, in folder order, with its skill", (
 
   expect(catalog.map(({ name, cli }) => [name, cli])).toEqual([
     ["dynatrace", "dtctl"],
+    ["gcloud", "gcloud"],
     ["harness", "harness"],
     ["jira", "acli"],
   ]);

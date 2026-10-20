@@ -12,6 +12,7 @@ import { apiError, bearer, unauthorized } from "../http.ts";
 import type { SecretStore } from "../secrets/secretStore.ts";
 import type { openStore } from "../store.ts";
 import type { CatalogConnection } from "./catalog.ts";
+import { googleAccessToken, parseGoogleKey } from "./googleToken.ts";
 
 // The SecretStore name of a person's secret fields of one connection, as one JSON object.
 const secretName = (userId: UserId, name: string) => `connection-${userId}-${name}`;
@@ -20,7 +21,8 @@ const SecretFields = z.record(z.string(), z.string());
 
 // Connections: the CLIs of `catalog` (catalog.ts) a person turns on with their own
 // fields, which their own bots then use as them (docs/connections.md). Coordinators
-// and task workers never get them.
+// and task workers never get them. `googleTokenUrl` is where the google-access-token
+// exchange mints tokens (googleToken.ts; a fake in tests).
 //
 // Person routes (a session):
 //   GET    /connections                 → Connection[]: the catalog, with `on` for the person
@@ -29,7 +31,17 @@ const SecretFields = z.record(z.string(), z.string());
 //   DELETE /connections/:name           → 204; its fields go, secret ones too
 //   GET    /bots/:id/connection-calls   → ConnectionCall[]: the bot's call log, oldest first
 // The bot's worker sends a turn's calls on its WebSocket before the turn's done (`logCalls`).
-export function connectionHost({ store, secrets, catalog }: { store: ReturnType<typeof openStore>; secrets: SecretStore; catalog: CatalogConnection[] }) {
+export function connectionHost({
+  store,
+  secrets,
+  catalog,
+  googleTokenUrl,
+}: {
+  store: ReturnType<typeof openStore>;
+  secrets: SecretStore;
+  catalog: CatalogConnection[];
+  googleTokenUrl?: string;
+}) {
   const found = (name: string) => catalog.find((connection) => connection.name === name);
 
   const rows = (userId: UserId): Connection[] => {
@@ -56,6 +68,9 @@ export function connectionHost({ store, secrets, catalog }: { store: ReturnType<
     if (missing) return apiError(400, "invalid_connection", `${missing} is missing`);
     const unknown = Object.keys(fields).find((field) => !(field in connection.fields));
     if (unknown) return apiError(400, "invalid_connection", `${connection.name} has no field ${unknown}`);
+    if (connection.exchange === "google-access-token" && !parseGoogleKey(fields.key ?? "")) {
+      return apiError(400, "invalid_connection", "key is not a service account key or authorized_user credentials JSON");
+    }
     const isSecret = ([field]: [string, string]) => connection.fields[field]?.secret === true;
     const entries = Object.entries(fields);
     await secrets.put(secretName(userId, connection.name), JSON.stringify(Object.fromEntries(entries.filter(isSecret))));
@@ -102,17 +117,26 @@ export function connectionHost({ store, secrets, catalog }: { store: ReturnType<
     // The person's connections that are on, as their bot's computer gets them for
     // a turn: every saved field and the catalog's env templates, skill and
     // read-only commands. Read at each turn's start, so a change applies from the
-    // next turn. A field derived from a saved one (a short-lived token minted from
-    // a key that stays in control) would be added here.
+    // next turn. A connection with an exchange gets what it makes instead of the
+    // saved secret (google-access-token: a one-hour `token` for the `key`, which
+    // stays here); one whose exchange fails is left out of the turn.
     async forTurn(userId: UserId): Promise<AgentConnection[]> {
       const on = store.connections.on(userId);
       const connections = await Promise.all(
-        catalog.map(async ({ name, title, cli, skill, env, readOnly }): Promise<AgentConnection | null> => {
+        catalog.map(async ({ name, title, cli, skill, env, readOnly, exchange }): Promise<AgentConnection | null> => {
           const plain = on.get(name);
           if (!plain) return null;
           const secret = SecretFields.safeParse(JSON.parse((await secrets.get(secretName(userId, name))) ?? "null"));
           if (!secret.success) return null;
-          return { name, title, cli, skill, env, readOnly, fields: { ...plain, ...secret.data } };
+          const saved = { ...plain, ...secret.data };
+          try {
+            if (exchange !== "google-access-token") return { name, title, cli, skill, env, readOnly, fields: saved };
+            const { key = "", ...rest } = saved;
+            return { name, title, cli, skill, env, readOnly, fields: { ...rest, token: await googleAccessToken(key, googleTokenUrl) } };
+          } catch (error) {
+            console.error(`Chiefbot left the ${name} connection out of a turn: ${error instanceof Error ? error.message : String(error)}`);
+            return null;
+          }
         }),
       );
       return connections.filter((connection) => connection !== null);

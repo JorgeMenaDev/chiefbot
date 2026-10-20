@@ -1,6 +1,6 @@
 # Connections
 
-A **connection** gives your own bots a command-line tool signed in as you: Jira through Atlassian's `acli`, Harness through the `harness` CLI. You turn one on once, with your own token, and every bot you own can use it from its next message.
+A **connection** gives your own bots a command-line tool signed in as you: Jira through Atlassian's `acli`, Harness through the `harness` CLI, Google Cloud through `gcloud`. You turn one on once, with your own token, and every bot you own can use it from its next message.
 
 Connections differ from connectors (`docs/connectors.md`): a connector is an MCP server a workspace shares with a project's agents, reached only through control's proxy; a connection is yours alone, a CLI on your bot's own computer, and it reaches nothing of a workspace.
 
@@ -16,11 +16,12 @@ Connections differ from connectors (`docs/connectors.md`): a connector is an MCP
 | --- | --- |
 | Jira | Site (like `mysite.atlassian.net`), your Atlassian email, an API token (id.atlassian.com, **Security**, **API tokens**; pick one with scopes and an expiry date). |
 | Dynatrace | Environment URL (like `https://abc12345.apps.dynatrace.com`) and a platform token (myaccount.dynatrace.com, **Platform tokens**; with an expiry date). Health checks need `storage:buckets:read`, `storage:events:read`, `storage:logs:read`, `storage:metrics:read` and `slo:slos:read`; dtctl's `docs/TOKEN_SCOPES.md` lists the rest. |
+| Google Cloud | A service account key JSON (IAM, **Service accounts**, **Keys**), or an `authorized_user` credentials JSON (what `gcloud auth application-default login` writes), with only the roles your bots need (like Viewer), and a default project ID. The key never leaves control: each turn gets a one-hour access token minted from it (below). |
 | Harness | Account ID, a default organization and project (the CLI refuses to run without them; `--org` and `--project` still choose another per command), and a personal access token or service account token with only the roles it needs. |
 
 ## What happens in a turn
 
-Control keeps the plain fields in its database and the secret ones in its `SecretStore`, and sends them only with a turn of a bot whose owner turned the connection on. For that turn the worker writes, under `/tmp/chiefbot` on the bot's computer:
+Control keeps the plain fields in its database and the secret ones in its `SecretStore`, and sends them only with a turn of a bot whose owner turned the connection on. A connection with an `exchange` gets what the exchange makes instead of its secret: for Google Cloud, control signs a JWT with the service account's key (or uses the `authorized_user` refresh token) at Google's token endpoint before each turn, and sends only the one-hour access token, as the field `token`. If Google refuses the key, control logs why and leaves the connection out of that turn. For that turn the worker writes, under `/tmp/chiefbot` on the bot's computer:
 
 - `connections/<name>/<field>`: one file per field, readable only by user `bot` (mode 600).
 - `skills/<name>/SKILL.md`: the connection's skill, which tells the agent how to use the CLI. The Copilot SDK loads skills only from this folder.
@@ -34,7 +35,7 @@ Before a shell command runs, the worker checks each command of a connection's CL
 
 Approvals here are a guardrail against mistakes, not a boundary.
 
-The credential is yours and the computer is your bot's, which acts only for you (`docs/isolation.md`). During a turn the agent can read the token file, run the CLI from a script, or call the vendor's API with the token directly, and the worker sees none of that as a command of the CLI. So a bot can do anything your token allows, as you could in your own terminal. That is why the screen asks for a scoped token that expires: an Atlassian API token with scopes, a Harness token or service account with only the roles it needs. The token is on the computer only while your turn runs.
+The credential is yours and the computer is your bot's, which acts only for you (`docs/isolation.md`). During a turn the agent can read the token file, run the CLI from a script, or call the vendor's API with the token directly, and the worker sees none of that as a command of the CLI. So a bot can do anything your token allows, as you could in your own terminal. That is why the screen asks for a scoped token that expires: an Atlassian API token with scopes, a Harness token or service account with only the roles it needs. The token is on the computer only while your turn runs. Google Cloud's is a one-hour access token: the key it comes from stays in control.
 
 Connections reach only your own bots. A project's coordinator has no shell, and task workers do not get connections.
 
@@ -50,8 +51,9 @@ A connection is a folder, `connections/<name>/`, with three files. Control reads
 | `cli` | The command the agent runs, which gets the wrapper. |
 | `fields` | What the person fills in: `<field>: { label, secret }`. A `secret` field is a password input and is kept in the `SecretStore`. |
 | `env` | Variables the wrapper sets. `{field}` is a field's value, `{dir}` the connection's folder for the turn. Point the CLI's config and login there, so they go with the turn. |
+| `exchange` | Optional. `google-access-token`: control turns the secret field `key` into the field `token`, a one-hour Google access token, before each turn; the key never reaches the computer. |
 | `readOnly` | Commands that run without asking. `*` matches any text, `?` one character, and the whole command must match. Leave out anything that may write. |
 
 `SKILL.md` starts with frontmatter whose `name` is the folder name, and says how to sign in (if the CLI needs it, from the files in `/tmp/chiefbot/connections/<name>/`), what reads and what changes things.
 
-`install.sh` runs as root when the image is built and puts the CLI on the PATH. Pin its version and check its SHA-256, as Jira's and Harness's do. Rebuild the image (`bun run computer:build`) and recreate bots to get it.
+`install.sh` runs as root when the image is built and puts the CLI on the PATH. Pin its version and check its SHA-256, as Jira's, Harness's and gcloud's do. Rebuild the image (`bun run computer:build`) and recreate bots to get it.

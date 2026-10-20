@@ -50,19 +50,20 @@ test("a person turns a connection on with their own fields; its secrets stay in 
   const rows = await list();
   expect(rows.map(({ name, on }) => [name, on])).toEqual([
     ["dynatrace", false],
+    ["gcloud", false],
     ["harness", true],
     ["jira", false],
   ]);
-  expect(rows[0]?.fields.token).toEqual({ label: expect.any(String), secret: true });
+  expect(rows.find(({ name }) => name === "harness")?.fields.token).toEqual({ label: expect.any(String), secret: true });
   expect(JSON.stringify(rows)).not.toContain(harness.token);
   expect(connectionSecrets().map(([, value]) => JSON.parse(value))).toEqual([{ token: harness.token }]);
   // Connections are a person's own.
   const other = await signIn(friend);
-  expect((await list(other.api)).map(({ on }) => on)).toEqual([false, false, false]);
+  expect((await list(other.api)).map(({ on }) => on)).toEqual([false, false, false, false]);
 
   expect((await api("DELETE", "/connections/harness")).status).toBe(204);
   expect((await api("DELETE", "/connections/harness")).status).toBe(204);
-  expect((await list()).map(({ on }) => on)).toEqual([false, false, false]);
+  expect((await list()).map(({ on }) => on)).toEqual([false, false, false, false]);
   expect(connectionSecrets()).toEqual([]);
 });
 
