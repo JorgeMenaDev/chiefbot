@@ -278,7 +278,7 @@ type Draft = {
 const suggestedNames = ["prod", "preprod", "int"];
 const idle = { busy: false, result: null, error: null };
 
-const draftOf = (saved: Environment): Draft => ({
+export const draftOf = (saved: Environment): Draft => ({
   key: saved.id,
   saved,
   name: saved.name,
@@ -304,6 +304,12 @@ const inputOf = (draft: Draft): EnvironmentInput => ({
   auth: authOf(draft),
   ...(draft.auth !== "none" && !keepsSecret(draft) && draft.secret.trim() !== "" ? { secret: draft.secret } : {}),
 });
+
+// The drafts once the Test of `tested` (the draft as it was when Test was
+// clicked) ends with `outcome`. A draft edited since gets none: the outcome
+// would describe what it no longer says.
+export const afterTest = (drafts: Draft[], tested: Draft, outcome: Draft["test"]) =>
+  drafts.map((draft) => (draft.key === tested.key && JSON.stringify(inputOf(draft)) === JSON.stringify(inputOf(tested)) ? { ...draft, test: outcome } : draft));
 
 // Whether a draft that signs still lacks its secret.
 const lacksSecret = (draft: Draft) => draft.auth !== "none" && !keepsSecret(draft) && draft.secret.trim() === "";
@@ -343,11 +349,12 @@ export function ServiceDialog({ service, onSaved, onClose }: { service: Service 
 
   async function test(draft: Draft) {
     update(draft.key, { test: { busy: true, result: null, error: null } });
+    const ended = (outcome: Draft["test"]) => setDrafts((current) => afterTest(current, draft, outcome));
     try {
       const result = ServiceResult.parse(await window.chiefbot.health.testEnvironment(EnvironmentInput.parse(inputOf(draft))));
-      update(draft.key, { test: { busy: false, result, error: null } });
+      ended({ busy: false, result, error: null });
     } catch (caught) {
-      update(draft.key, { test: { busy: false, result: null, error: caught instanceof Error ? caught.message : String(caught) } });
+      ended({ busy: false, result: null, error: caught instanceof Error ? caught.message : String(caught) });
     }
   }
 

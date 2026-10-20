@@ -2,7 +2,7 @@ import { EnvironmentId, HEALTH_KEEP_MS, ServiceId, type ConnectionHealth, type H
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { askText, HealthView, timeline } from "./Health.tsx";
-import { askServiceText, plainHttpToAnotherHost, type ServiceActions } from "./Services.tsx";
+import { afterTest, askServiceText, draftOf, plainHttpToAnotherHost, type ServiceActions } from "./Services.tsx";
 
 const now = Date.UTC(2026, 9, 20, 12);
 const minute = 60_000;
@@ -159,4 +159,16 @@ test("Ask my bot names the service, its environment, URL and result, and the dia
   expect(plainHttpToAnotherHost("http://meta.internal.example/health", "none")).toBe(false);
   expect(plainHttpToAnotherHost("http://localhost:7471/prod/auth/actuator/health", "bearer")).toBe(false);
   expect(plainHttpToAnotherHost("https://meta.example.com/health", "header")).toBe(false);
+});
+
+test("a Test's result lands only on a draft still saying what was tested", () => {
+  const [prod] = meta.environments;
+  if (!prod?.latest) throw new Error("the fixture changed");
+  const tested = draftOf(prod);
+  const outcome = { busy: false, result: prod.latest, error: null };
+
+  expect(afterTest([tested], tested, outcome)[0]?.test).toEqual(outcome);
+  // The URL or the credential changed while it ran: the result describes something else.
+  expect(afterTest([{ ...tested, url: "http://127.0.0.1:7471/int/meta/actuator/health" }], tested, outcome)[0]?.test).toEqual(tested.test);
+  expect(afterTest([{ ...tested, auth: "bearer", secret: "token" }], tested, outcome)[0]?.test).toEqual(tested.test);
 });
