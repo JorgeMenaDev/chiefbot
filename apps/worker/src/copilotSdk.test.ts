@@ -94,3 +94,15 @@ test("a worker session loads skills only from the roots its turn names, and name
   expect([withSkills.enableSkills, withSkills.skillDirectories]).toEqual([true, ["/tmp/chiefbot/skills"]]);
   expect(without.skillDirectories).toEqual([]);
 });
+
+test("a worker session gets its instructions after the SDK's own system message", () => {
+  const config = workerSessionConfig("/home/bot/workspace")({
+    sessionId: "bot_1",
+    auth: { kind: "seat", gitHubTokenProvider: async () => ({ kind: "token", accessToken: "gho_a", expiresIn: 3600 }) },
+    onPermissionRequest: async () => ({ kind: "reject" }),
+    tools: [],
+    instructions: "You have your own computer.",
+  });
+
+  expect(config.systemMessage).toEqual({ mode: "append", content: "You have your own computer." });
+});
