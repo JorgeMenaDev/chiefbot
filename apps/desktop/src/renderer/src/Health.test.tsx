@@ -53,6 +53,24 @@ test("the screen leads with the worst status, and each problem row has Ask my bo
   );
 });
 
+test("a connection not checked yet keeps the headline at Checking, never Everything is healthy", () => {
+  const [gcloud, looker] = report.connections;
+  if (!gcloud?.latest || !looker) throw new Error("the report fixture changed");
+  const healthy = { ...gcloud, latest: { ...gcloud.latest, status: "ok" as const, items: [] }, history: [check(2, "ok")] };
+
+  const html = renderToStaticMarkup(<HealthView report={{ ...report, connections: [healthy, looker] }} now={now} onConnectApps={() => {}} onAsk={null} />);
+
+  expect(html).toContain("Checking your connections");
+  expect(html).not.toContain("Everything is healthy");
+});
+
+test("screen readers hear each problem's severity and what the status bar shows", () => {
+  const html = renderToStaticMarkup(<HealthView report={report} now={now} onConnectApps={() => {}} onAsk={null} />);
+
+  expect(html).toContain('<span class="sr-only">Degraded: </span>Multiple services are experiencing issues.');
+  expect(html).toMatch(/aria-label="Last 24 hours, 50% healthy: healthy [^"]+ to [^"]+, degraded [^"]+ to [^"]+"/);
+});
+
 test("with no connection to check, the screen names what it can check and opens Connect apps", () => {
   const html = renderToStaticMarkup(<HealthView report={{ ...report, connections: [] }} now={now} onConnectApps={() => {}} onAsk={null} />);
 

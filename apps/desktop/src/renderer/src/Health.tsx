@@ -144,15 +144,17 @@ function StatusIcon({ status, className }: { status: HealthStatus; className?: s
   return <Icon aria-hidden className={cn("shrink-0", color, className)} />;
 }
 
-// The worst latest status of all, big, with how many are in each status.
+// The worst latest status of all, big, with how many are in each status. While
+// a connection is not checked yet, nothing better than "Checking" shows.
 function Overall({ connections, now }: { connections: ConnectionHealth[]; now: number }) {
   const latest = connections.flatMap(({ latest }) => (latest ? [latest] : []));
-  const status = latest.length > 0 ? worstStatus(latest.map(({ status }) => status)) : null;
+  const waiting = connections.length - latest.length;
+  const worst = latest.length > 0 ? worstStatus(latest.map(({ status }) => status)) : null;
+  const status = waiting > 0 && (worst === null || worst === "ok") ? null : worst;
   const counts = (["down", "degraded", "unknown", "ok"] as const)
     .map((each) => [each, latest.filter(({ status }) => status === each).length] as const)
     .filter(([, count]) => count > 0)
     .map(([each, count]) => `${count} ${statusLabel[each].toLowerCase()}`);
-  const waiting = connections.length - latest.length;
   const last = Math.max(...latest.map(({ at }) => at));
   const notes = [...counts, ...(waiting > 0 ? [`${waiting} not checked yet`] : []), ...(latest.length > 0 ? [`checked ${ago(last, now)}`] : [])];
   return (
@@ -195,7 +197,10 @@ function ProblemRow({ item, onAsk }: { item: HealthItem; onAsk: (() => void) | n
     <li className="flex items-start gap-3 border-b py-2.5 last:border-b-0 last:pb-0">
       <StatusIcon status={item.status} className="mt-0.5 size-4" />
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="text-foreground text-sm leading-snug">{item.title}</span>
+        <span className="text-foreground text-sm leading-snug">
+          <span className="sr-only">{statusLabel[item.status]}: </span>
+          {item.title}
+        </span>
         {(item.detail || item.url) && (
           <span className="text-muted-foreground text-xs leading-relaxed">
             {item.detail}
@@ -225,7 +230,11 @@ export const askText = (connection: string, { title, detail }: HealthItem) =>
 function StatusBar({ history, now }: { history: ConnectionHealth["history"]; now: number }) {
   const segments = timeline(history, now);
   const healthy = history.length > 0 ? `${Math.round((history.filter(({ status }) => status === "ok").length / history.length) * 100)}% healthy` : "";
-  const label = history.length > 0 ? `Last 24 hours: ${history.length} checks, ${healthy}` : "No checks in the last 24 hours";
+  // What the colours say, for screen readers: each segment's status and times.
+  const label =
+    segments.length > 0
+      ? `Last 24 hours, ${healthy}: ${segments.map(({ status, from, to }) => `${statusLabel[status].toLowerCase()} ${clock(from)} to ${clock(to)}`).join(", ")}`
+      : "No checks in the last 24 hours";
   return (
     <div className="flex flex-col gap-1.5">
       <div role="img" aria-label={label} className="relative h-2.5 overflow-hidden rounded-full bg-muted">
