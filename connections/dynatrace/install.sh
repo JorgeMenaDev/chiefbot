@@ -1,7 +1,8 @@
 #!/bin/sh
 # Installs dtctl, Dynatrace's CLI (github.com/dynatrace-oss/dtctl), at image build
 # (run as root). Pinned: the binary from its GitHub release, checked against the
-# SHA-256 in that release's checksums.txt.
+# SHA-256 in that release's checksums.txt. The real binary goes in
+# /usr/local/lib/dtctl, behind guard.sh as /usr/local/bin/dtctl.
 # Also writes the config the wrapper points DTCTL_CONFIG at (connection.yaml):
 # one context whose URL and token dtctl reads from the environment when it loads
 # the file. It holds no secret, and the bot cannot change it.
@@ -16,7 +17,9 @@ esac
 archive="/tmp/dtctl_${version}_linux_${arch}.tar.gz"
 curl -fsSLo "$archive" "https://github.com/dynatrace-oss/dtctl/releases/download/v${version}/$(basename "$archive")"
 echo "$sha256  $archive" | sha256sum -c -
-tar -xzf "$archive" -C /usr/local/bin dtctl
+mkdir -p /usr/local/lib/dtctl
+tar -xzf "$archive" -C /usr/local/lib/dtctl dtctl
+install -m 755 "$(dirname "$0")/guard.sh" /usr/local/bin/dtctl
 rm "$archive"
 mkdir -p /etc/dtctl
 cat > /etc/dtctl/config.yaml <<'CONFIG'

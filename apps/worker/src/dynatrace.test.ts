@@ -42,6 +42,20 @@ test("dtctl's health reads run without asking; anything that changes Dynatrace o
   }
 });
 
+test("the guard in front of dtctl refuses --config and --spill-to, however they are written, and passes the rest on", () => {
+  const run = (...args: string[]) => {
+    const result = Bun.spawnSync(["sh", join(folder, "guard.sh"), ...args]);
+    return [result.exitCode, result.stderr.toString().trim()];
+  };
+
+  expect(run("get", "slos", "--config", "./repo-config.yaml")).toEqual([2, "dtctl: --config is turned off on this computer"]);
+  expect(run("--config=./repo-config.yaml", "get", "slos")).toEqual([2, "dtctl: --config is turned off on this computer"]);
+  expect(run("query", "fetch logs, from:now()-1h", "--spill-to", "/home/bot/result.jsonl")).toEqual([2, "dtctl: --spill-to is turned off on this computer"]);
+  expect(run("inspect", "x.jsonl", "--spill-to=/home/bot/x.jsonl")).toEqual([2, "dtctl: --spill-to is turned off on this computer"]);
+  // Anything else goes on to the real dtctl, which only the computer image has.
+  expect(run("query", "fetch logs, from:now()-1h", "--spill=always")[1]).toContain("/usr/local/lib/dtctl/dtctl");
+});
+
 test("the config install.sh writes is the one the wrapper names, and reads the URL and token from the wrapper's variables", () => {
   const install = readFileSync(join(folder, "install.sh"), "utf8");
 

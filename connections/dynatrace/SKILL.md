@@ -9,7 +9,7 @@ The `dtctl` command is signed in as the user for this turn: their environment an
 
 If a command fails to connect or authenticate, run `dtctl doctor` and tell the user what it says.
 
-Reading runs without asking: `get`, `describe`, `query`, `verify`, `logs`, `history`, `inspect`, `doctor`, `commands` and `auth status`. `dtctl commands` lists every verb and resource. Add `--agent` for a JSON answer (`{ok, result, context}`); a large query result is saved to a file, and `dtctl inspect <path> --head 20` reads it without querying again. Always bound DQL with `from:`, since log queries bill by bytes scanned.
+Reading runs without asking: `get`, `describe`, `query`, `verify`, `logs`, `history`, `inspect`, `doctor`, `commands` and `auth status`. `dtctl commands` lists every verb and resource. Add `--agent` for a JSON answer (`{ok, result, context}`); a large query result is saved to a file, and `dtctl inspect <path> --head 20` reads it without querying again. `--config` and `--spill-to` are turned off. Always bound DQL with `from:`, since log queries bill by bytes scanned.
 
 ## Health checks
 
@@ -36,7 +36,7 @@ dtctl query 'timeseries { requests = sum(dt.service.request.count, scalar: true)
 
 For one service, add `| filter dt.service.name == "checkout"` after `timeseries …`.
 
-SLOs: `dtctl get slos -o wide` shows each one's target and status; `dtctl describe slo <id>` shows its error budget.
+SLOs: `dtctl get slos` lists them with their IDs. `dtctl exec slo <id>` evaluates one now and gives its status, value and error budget. It is an `exec`, so it waits for the user's approval: say which SLO you are checking.
 
 ## Changes
 

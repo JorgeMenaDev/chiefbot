@@ -5,6 +5,9 @@
 # named by DTCTL_CONFIG. The file is root's, so the agent cannot repoint it.
 # DTCTL_TOKEN_STORAGE=file keeps dtctl off any OS keyring, and HOME in the turn's
 # folder takes its query spills and usage ledger with the turn.
+# guard.sh, installed in front of dtctl, refuses --config (another config could
+# send the token elsewhere) and --spill-to (a write outside the turn's folder),
+# which the read-only globs below cannot tell apart.
 title: Dynatrace
 description: Dynatrace problems, logs, services and SLOs through dtctl, as you.
 cli: dtctl
