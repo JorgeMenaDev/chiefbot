@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { CreateBotRequest } from "./bots.ts";
+import { ControlToWorker, CreateBotRequest } from "./bots.ts";
 
 test("a bot asked for without a face gets the chief in blue", () => {
   expect(CreateBotRequest.parse({ name: "Ada" }).avatar).toEqual({ shape: "chief", color: "blue" });
@@ -9,4 +9,16 @@ test("a bot asked for without a face gets the chief in blue", () => {
 test("a face or colour outside the set is refused", () => {
   expect(CreateBotRequest.safeParse({ name: "Ada", avatar: { shape: "dragon", color: "blue" } }).success).toBe(false);
   expect(CreateBotRequest.safeParse({ name: "Ada", avatar: { shape: "chief", color: "#ff0000" } }).success).toBe(false);
+});
+
+const runTurn = { type: "run-turn", turnId: "turn_1", turnKey: "key_1", text: "hi", model: "claude-sonnet-4.6" };
+
+test("a run-turn carries the bot's reasoning effort and access mode; one from an older control runs at the default effort on Auto", () => {
+  expect(ControlToWorker.parse({ ...runTurn, effort: "high", access: "supervised" })).toMatchObject({ effort: "high", access: "supervised" });
+  expect(ControlToWorker.parse(runTurn)).toMatchObject({ effort: null, access: "auto", connections: [] });
+});
+
+test("a run-turn with an effort or access mode outside the set is refused", () => {
+  expect(ControlToWorker.safeParse({ ...runTurn, effort: "extreme" }).success).toBe(false);
+  expect(ControlToWorker.safeParse({ ...runTurn, access: "yolo" }).success).toBe(false);
 });

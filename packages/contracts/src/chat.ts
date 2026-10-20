@@ -6,9 +6,12 @@ import { CopilotPayer } from "./workspaces.ts";
 //   push          a git push, which control holds in its git proxy until the answer
 //   pull-request  opening a pull request with the bot's create_pull_request tool (control opens it)
 //   tool          a GitHub tool that writes
-//   connector     a call to a connector's tool its MCP server does not mark read-only, held in control's proxy
-//   command       a risky shell command: only in chats from before control held repo access
-export const ApprovalKind = z.enum(["push", "pull-request", "tool", "connector", "command"]);
+//   connector     a call to a connector's tool its MCP server does not mark read-only, held in control's proxy,
+//                 or a run of a connection's CLI that may write
+//   command       a shell command, when the bot's access mode asks before it (bots.ts AccessMode); in
+//                 chats from before control held repo access, a risky one
+//   file-change   a file the agent writes, when the bot's access mode is supervised
+export const ApprovalKind = z.enum(["push", "pull-request", "tool", "connector", "command", "file-change"]);
 export type ApprovalKind = z.infer<typeof ApprovalKind>;
 
 // What happens during one turn, as the worker reports it. The worker turns
@@ -130,9 +133,14 @@ export type ChatView = z.infer<typeof ChatView>;
 //   hello       the turn it is still running, if any. Sent on every (re)connect,
 //               after it has resent every event of its latest turn. Control stores
 //               each index once, so resends are harmless, then ends every other
-//               unfinished turn: the runtime lost it.
+//               unfinished turn: the runtime lost it. `capabilities` name what the
+//               runtime does beyond the first protocol (ACCESS_MODES); an older one sends none.
 export const TurnEventMessage = z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent });
-export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable() });
+export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable(), capabilities: z.array(z.string()).default([]) });
+
+// A bot's worker that asks as the turn's access mode says. One without it drops
+// the mode and asks as Auto does, so control sends it only Auto turns.
+export const ACCESS_MODES = "access-modes";
 
 // Control → an agent's runtime, after a hello naming a turn that still runs whose
 // key control no longer has (control restarted, which revokes every key): the

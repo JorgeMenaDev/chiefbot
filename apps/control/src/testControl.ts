@@ -239,7 +239,7 @@ export async function fakeCoordinator({ url, computers }: TestControl, projectId
   return {
     token,
     nth,
-    hello: (activeTurnId: TurnId | null) => send({ type: "hello", activeTurnId }),
+    hello: (activeTurnId: TurnId | null) => send({ type: "hello", activeTurnId, capabilities: [] }),
     // The turn's next event; the first one of a turn is number 0.
     event: (turnId: TurnId, event: TurnEvent, from?: number) => send({ type: "turn-event", turnId, index: from ?? index++, event }),
     newTurn: () => void (index = 0),

@@ -14,10 +14,13 @@ import { z } from "zod";
 //                         the body or query failed its schema (400)
 //   invalid_schedule      a routine's or schedule subscription's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
+//   effort_unavailable    the model does not support that reasoning effort (400)
+//   invalid_access        the body of PUT /bots/:id/access failed its schema (400)
 //   github_rejected_token GitHub refused the sign-in's access token (401)
 //   computer_failed       the bot's (or project's) computer could not be made or started; `message` says why (502)
-//   bot_offline, bot_stopping, turn_running, human_has_screen  a turn was refused (409, TurnRefusal;
-//                         turn_running also when a member's last message to a coordinator is unanswered);
+//   bot_offline, bot_stopping, turn_running, human_has_screen, computer_outdated  a turn was refused (409,
+//                         TurnRefusal; turn_running also when a member's last message to a coordinator is
+//                         unanswered; computer_outdated when the bot's worker cannot run its access mode);
 //                         bot_stopping also refuses a screen viewer: the computer is stopping
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
 //   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
@@ -67,12 +70,15 @@ export const ApiErrorCode = z.enum([
   "invalid_copilot_mode",
   "invalid_schedule",
   "model_unavailable",
+  "effort_unavailable",
+  "invalid_access",
   "github_rejected_token",
   "computer_failed",
   "bot_offline",
   "bot_stopping",
   "turn_running",
   "human_has_screen",
+  "computer_outdated",
   "not_pending",
   "repo_not_found",
   "repo_read_only",
@@ -103,7 +109,7 @@ export const ApiError = z.object({ error: ApiErrorCode, message: z.string().opti
 export type ApiError = z.infer<typeof ApiError>;
 
 // Why control refused to start a turn: a user's message or a routine's prompt.
-export const TurnRefusal = ApiErrorCode.extract(["bot_offline", "bot_stopping", "turn_running", "human_has_screen"]);
+export const TurnRefusal = ApiErrorCode.extract(["bot_offline", "bot_stopping", "turn_running", "human_has_screen", "computer_outdated"]);
 export type TurnRefusal = z.infer<typeof TurnRefusal>;
 
 // The broker's 403 when control holds no usable GitHub sign-in for the bot's

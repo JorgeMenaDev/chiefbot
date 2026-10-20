@@ -13,6 +13,7 @@ import {
   RoutineInput,
   SendMessageRequest,
   SessionToken,
+  SetBotAccessRequest,
   SetBotModelRequest,
   WorkerToControl,
   type Bot,
@@ -36,7 +37,7 @@ import { chiefHost } from "./handoffs.ts";
 import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
-import { modelOptions } from "./models.ts";
+import { modelOptions, pickModel } from "./models.ts";
 import { repoAccess, type RepoAgent } from "./repos.ts";
 import { startScheduler } from "./routines.ts";
 import { screenTunnel } from "./screens.ts";
@@ -55,7 +56,7 @@ import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
 import { botTurn, heldTurn, type BotTurn } from "./turnKeys.ts";
-import { chatTurns } from "./turns.ts";
+import { chatTurns, computerOutdated } from "./turns.ts";
 import { workspaceRoutes } from "./workspaces.ts";
 
 export type ControlOptions = {
@@ -137,10 +138,14 @@ type SocketData =
 //   POST   /bots/:id/hand-back bearer session   → Bot (the agent drives the screen again)
 //   WS     /bots/:id/screen   bearer session    ↔ the screen's RFB bytes (noVNC speaks it); 409 while offline or stopping
 //   DELETE /bots/:id          bearer session, ?deleteData=true also deletes its disk → 204
-//   PUT    /bots/:id/model    bearer session, body SetBotModelRequest → Bot; the bot's next turn runs on it
-//                             (400 model_unavailable when the user's plan does not offer it or it is locked)
+//   PUT    /bots/:id/model    bearer session, body SetBotModelRequest → Bot; the bot's next turn runs on it,
+//                             at its effort (400 model_unavailable when the user's plan does not offer it or it
+//                             is locked, effort_unavailable when the model does not support the effort)
+//   PUT    /bots/:id/access   bearer session, body SetBotAccessRequest → Bot; the bot's next turn asks as it says
+//                             (400 invalid_access)
 //   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
-//                             (409 when the bot is not online, is stopping, is still on a turn or the human has its screen)
+//                             (409 when the bot is not online, is stopping, is still on a turn or the human has its
+//                             screen; computer_outdated when its worker cannot run its access mode)
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   POST   /bots/:id/approvals/:approvalId  bearer session, body AnswerApprovalRequest → 204
 //                             (409 when it is not pending: answered, unknown, or its turn ended)
@@ -331,12 +336,14 @@ export function startControl({
   const subscriptions = subscriptionHost({ store, clock, connectors, projects });
 
   const botsOf = (userId: UserId): Bot[] =>
-    store.botsFor(userId).map(({ id, name, avatar, running, model }) => ({
+    store.botsFor(userId).map(({ id, name, avatar, running, model, effort, access }) => ({
       id,
       name,
       avatar,
       status: !running ? "stopped" : stopping.has(id) ? "stopping" : workers.has(id) ? "online" : "starting",
       model,
+      effort,
+      access,
       screenControl: screens.controlOf(id),
     }));
   const botOf = (userId: UserId, botId: BotId) => botsOf(userId).find((bot) => bot.id === botId);
@@ -552,9 +559,19 @@ export function startControl({
       "/bots/:id/model": {
         PUT: ownBot(async (user, botId, req) => {
           const body = SetBotModelRequest.safeParse(await req.json().catch(() => null));
-          const offered = modelOptionsOf(user).some(({ id, lockedReason }) => id === body.data?.model && lockedReason === null);
-          if (!body.success || !offered) return apiError(400, "model_unavailable");
-          store.setBotModel(botId, body.data.model);
+          if (!body.success) return apiError(400, "model_unavailable");
+          const picked = pickModel(modelOptionsOf(user), body.data, store.botFor(user.id, botId)?.effort ?? null);
+          if ("error" in picked) return apiError(400, picked.error);
+          store.setBotModel(botId, picked.model, picked.effort);
+          publish(user.id);
+          return Response.json(botOf(user.id, botId));
+        }),
+      },
+      "/bots/:id/access": {
+        PUT: ownBot(async (user, botId, req) => {
+          const body = SetBotAccessRequest.safeParse(await req.json().catch(() => null));
+          if (!body.success) return apiError(400, "invalid_access");
+          store.setBotAccess(botId, body.data.access);
           publish(user.id);
           return Response.json(botOf(user.id, botId));
         }),
@@ -564,7 +581,7 @@ export function startControl({
           const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return apiError(400, "invalid_message");
           const sent = turns.sendTurn(user.id, botId, body.data.text);
-          if ("error" in sent) return apiError(409, sent.error);
+          if ("error" in sent) return apiError(409, sent.error, sent.error === "computer_outdated" ? computerOutdated : undefined);
           return Response.json(sent satisfies SendMessageResponse, { status: 202 });
         }),
       },

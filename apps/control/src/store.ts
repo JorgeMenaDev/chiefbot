@@ -1,13 +1,16 @@
 import { Database } from "bun:sqlite";
 import {
+  AccessMode,
   BotAvatar,
   BotId,
   AUTO_MODEL,
+  DEFAULT_ACCESS,
   DEFAULT_AVATAR,
   CopilotPlan,
   Routine,
   RoutineId,
   ModelReport,
+  ReasoningEffort,
   TurnId,
   UserId,
   type ApprovalId,
@@ -108,8 +111,11 @@ export function openStore(path: string) {
   )`);
 
   // Columns added after the tables first shipped.
-  // The bot's Copilot model id.
+  // The bot's Copilot model id, and its reasoning effort (NULL: the model's default).
   addColumn(db, "bots", "model", `TEXT NOT NULL DEFAULT '${AUTO_MODEL}'`);
+  addColumn(db, "bots", "effort", "TEXT");
+  // The bot's access mode (contracts AccessMode). Bots from before access modes run on the default.
+  addColumn(db, "bots", "access", `TEXT NOT NULL DEFAULT '${DEFAULT_ACCESS}'`);
   // The bot's face (contracts BotAvatar). Bots from before faces wear the default.
   addColumn(db, "bots", "avatar_shape", `TEXT NOT NULL DEFAULT '${DEFAULT_AVATAR.shape}'`);
   addColumn(db, "bots", "avatar_color", `TEXT NOT NULL DEFAULT '${DEFAULT_AVATAR.color}'`);
@@ -146,14 +152,25 @@ export function openStore(path: string) {
     PRIMARY KEY (routine_id, due_at)
   )`);
 
-  type BotRow = { id: string; name: string; running: number; model: string; avatar_shape: string; avatar_color: string };
-  const botColumns = "id, name, running, model, avatar_shape, avatar_color";
+  type BotRow = {
+    id: string;
+    name: string;
+    running: number;
+    model: string;
+    effort: string | null;
+    access: string;
+    avatar_shape: string;
+    avatar_color: string;
+  };
+  const botColumns = "id, name, running, model, effort, access, avatar_shape, avatar_color";
   const toBotRecord = (row: BotRow) => ({
     id: BotId.parse(row.id),
     name: row.name,
     avatar: BotAvatar.parse({ shape: row.avatar_shape, color: row.avatar_color }),
     running: row.running === 1,
     model: row.model,
+    effort: ReasoningEffort.nullable().parse(row.effort),
+    access: AccessMode.parse(row.access),
   });
 
   type UserRow = { id: string; login: string; copilot_plan: string | null; needs_sign_in: number };
@@ -358,8 +375,12 @@ export function openStore(path: string) {
       db.query("UPDATE bots SET running = ?2 WHERE id = ?1").run(botId, running ? 1 : 0);
     },
 
-    setBotModel(botId: BotId, model: string) {
-      db.query("UPDATE bots SET model = ?2 WHERE id = ?1").run(botId, model);
+    setBotModel(botId: BotId, model: string, effort: ReasoningEffort | null) {
+      db.query("UPDATE bots SET model = ?2, effort = ?3 WHERE id = ?1").run(botId, model, effort);
+    },
+
+    setBotAccess(botId: BotId, access: AccessMode) {
+      db.query("UPDATE bots SET access = ?2 WHERE id = ?1").run(botId, access);
     },
 
     setModelReport(userId: UserId, report: ModelReport) {

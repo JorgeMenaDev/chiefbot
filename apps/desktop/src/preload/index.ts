@@ -1,4 +1,4 @@
-import type { BotAvatar, ConnectorInput, RoutineInput, SubscriptionInput, Theme } from "@chiefbot/contracts";
+import type { AccessMode, BotAvatar, ConnectorInput, RoutineInput, SetBotModelRequest, SubscriptionInput, Theme } from "@chiefbot/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 // Subscribes to one main → renderer channel; returns the unsubscribe.
@@ -25,7 +25,9 @@ const api = {
     stop: (id: string): Promise<void> => ipcRenderer.invoke("bots:stop", id),
     remove: (id: string): Promise<void> => ipcRenderer.invoke("bots:delete", id),
     models: (): Promise<unknown> => ipcRenderer.invoke("bots:models"),
-    setModel: (id: string, model: string): Promise<unknown> => ipcRenderer.invoke("bots:set-model", id, model),
+    // The model, and its reasoning effort (left out: kept where the model supports it).
+    setModel: (id: string, request: SetBotModelRequest): Promise<unknown> => ipcRenderer.invoke("bots:set-model", id, request),
+    setAccess: (id: string, access: AccessMode): Promise<unknown> => ipcRenderer.invoke("bots:set-access", id, access),
     takeOver: (id: string): Promise<void> => ipcRenderer.invoke("bots:take-over", id),
     handBack: (id: string): Promise<void> => ipcRenderer.invoke("bots:hand-back", id),
     // The bot's screen WebSocket on control, for noVNC. Main adds the session to it.

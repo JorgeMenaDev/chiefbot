@@ -3,7 +3,7 @@ import { ApiError, Bot, ModelOption, type BotId } from "@chiefbot/contracts";
 import { defaultFakeUser } from "@chiefbot/fake-github";
 import { fakeCopilot, type FakeModels } from "@chiefbot/worker/fake-copilot";
 import { z } from "zod";
-import { cleanUp, startTestControl } from "./testControl.ts";
+import { cleanUp, eventually, startTestControl } from "./testControl.ts";
 
 afterEach(cleanUp);
 
@@ -47,34 +47,107 @@ test("on Copilot Free only Auto is selectable; the plan's other models show lock
   });
   await onlineBot("Ada");
 
+  const locked = { lockedReason: "Needs a paid Copilot plan", efforts: [], defaultEffort: null };
   expect(await models()).toEqual([
-    { id: "auto", name: "Auto", lockedReason: null },
-    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", lockedReason: "Needs a paid Copilot plan" },
-    { id: "gpt-6-luna", name: "GPT-6 Luna", lockedReason: "Needs a paid Copilot plan" },
+    { id: "auto", name: "Auto", lockedReason: null, efforts: [], defaultEffort: null },
+    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", ...locked },
+    { id: "gpt-6-luna", name: "GPT-6 Luna", ...locked },
   ]);
 });
 
-// A paid plan's SDK listing: Auto, two models, one turned off by an organisation's policy.
+// A paid plan's SDK listing: Auto, three models, one turned off by an organisation's
+// policy. Two take a reasoning effort, from different levels; one lists a level
+// Chiefbot does not offer ("none").
+const reasoning = { supports: { vision: true, reasoningEffort: true } };
+const claudeSonnet = {
+  id: "claude-sonnet-4.6",
+  name: "Claude Sonnet 4.6",
+  policy: { state: "enabled", terms: "" },
+  capabilities: reasoning,
+  supportedReasoningEfforts: ["low", "medium", "high"],
+  defaultReasoningEffort: "medium",
+};
 const paidModels: FakeModels = {
   list: [
     { id: "auto", name: "Auto" },
-    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", policy: { state: "enabled", terms: "" } },
-    { id: "gpt-6.1-sol", name: "GPT-6.1 Sol" },
+    claudeSonnet,
+    {
+      id: "gpt-6.1-sol",
+      name: "GPT-6.1 Sol",
+      capabilities: reasoning,
+      supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh"],
+      defaultReasoningEffort: "high",
+    },
+    { id: "gpt-5-mini", name: "GPT-5 mini", capabilities: { supports: { vision: false, reasoningEffort: false } } },
     { id: "o9-preview", name: "o9 (Preview)", policy: { state: "disabled", terms: "" } },
   ],
-  modelPriceCategories: [{ id: "claude-sonnet-4.6" }, { id: "gpt-6.1-sol" }, { id: "o9-preview" }],
+  modelPriceCategories: [{ id: "claude-sonnet-4.6" }, { id: "gpt-6.1-sol" }, { id: "gpt-5-mini" }, { id: "o9-preview" }],
 };
 
-test("on a paid plan the plan's models are selectable, and policy-disabled ones show locked", async () => {
+test("on a paid plan the plan's models are selectable with their reasoning efforts, and policy-disabled ones show locked", async () => {
   const { onlineBot, models } = await setup({ sku: "monthly_subscriber", sdkModels: paidModels });
   await onlineBot("Ada");
 
+  const noEffort = { efforts: [], defaultEffort: null };
   expect(await models()).toEqual([
-    { id: "auto", name: "Auto", lockedReason: null },
-    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", lockedReason: null },
-    { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", lockedReason: null },
-    { id: "o9-preview", name: "o9 (Preview)", lockedReason: "Turned off by your Copilot policy" },
+    { id: "auto", name: "Auto", lockedReason: null, ...noEffort },
+    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", lockedReason: null, efforts: ["low", "medium", "high"], defaultEffort: "medium" },
+    { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", lockedReason: null, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high" },
+    { id: "gpt-5-mini", name: "GPT-5 mini", lockedReason: null, ...noEffort },
+    { id: "o9-preview", name: "o9 (Preview)", lockedReason: "Turned off by your Copilot policy", ...noEffort },
   ]);
+});
+
+test("a bot runs at the effort picked for its model; an effort the model lacks is refused, and a switch keeps it only where supported", async () => {
+  const { copilot, api, onlineBot, models, turn } = await setup({ sku: "monthly_subscriber", sdkModels: paidModels });
+  const ada = await onlineBot("Ada");
+  await models();
+  // What the bot runs on after asking for `body`, or control's refusal.
+  const pick = async (body: { model: string; effort?: string | null }) => {
+    const res = await api("PUT", `/bots/${ada.id}/model`, body);
+    if (!res.ok) return `${res.status} ${ApiError.parse(await res.json()).error}`;
+    const { model, effort } = Bot.parse(await res.json());
+    return `${model} at ${effort ?? "default"}`;
+  };
+
+  const unsupported = await pick({ model: "claude-sonnet-4.6", effort: "xhigh" });
+  const onAuto = await pick({ model: "auto", effort: "low" });
+  const high = await pick({ model: "claude-sonnet-4.6", effort: "high" });
+  await turn(ada.id, "think hard");
+  // GPT-6.1 Sol supports high too, so the bot keeps it; GPT-5 mini takes no effort.
+  const kept = await pick({ model: "gpt-6.1-sol" });
+  await turn(ada.id, "again");
+  const dropped = await pick({ model: "gpt-5-mini" });
+  const backToDefault = await pick({ model: "gpt-6.1-sol", effort: null });
+
+  expect([unsupported, onAuto, high, kept, dropped, backToDefault]).toEqual([
+    "400 effort_unavailable",
+    "400 effort_unavailable",
+    "claude-sonnet-4.6 at high",
+    "gpt-6.1-sol at high",
+    "gpt-5-mini at default",
+    "gpt-6.1-sol at default",
+  ]);
+  expect(copilot.sends.map(({ prompt, model, effort }) => [prompt, model, effort])).toEqual([
+    ["think hard", "claude-sonnet-4.6", "high"],
+    ["again", "gpt-6.1-sol", "high"],
+  ]);
+});
+
+test("a turn runs at the model's default once the plan's models no longer offer the bot's saved effort", async () => {
+  const sdkModels: FakeModels = { ...paidModels, list: [...paidModels.list] };
+  const { copilot, api, onlineBot, models, turn } = await setup({ sku: "monthly_subscriber", sdkModels });
+  const ada = await onlineBot("Ada");
+  await models();
+  await api("PUT", `/bots/${ada.id}/model`, { model: "claude-sonnet-4.6", effort: "high" });
+  // The plan drops Claude's high effort, as the next worker to bind reports.
+  sdkModels.list = sdkModels.list.map((model) => (model === claudeSonnet ? { ...claudeSonnet, supportedReasoningEfforts: ["low", "medium"] } : model));
+  await onlineBot("Grace");
+  await eventually(async () => !(await models()).some(({ id, efforts }) => id === "claude-sonnet-4.6" && efforts.includes("high")));
+
+  await turn(ada.id, "think hard");
+
+  expect(copilot.sends.map(({ model, effort }) => [model, effort])).toEqual([["claude-sonnet-4.6", null]]);
 });
 
 test("each bot keeps its own model, and switching mid-conversation runs the next turn on it", async () => {
