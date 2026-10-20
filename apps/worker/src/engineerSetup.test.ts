@@ -42,9 +42,62 @@ async function setUp(command: string, secrets: Record<string, string>, repo: Rep
     shell: cloning(repo),
     signal: new AbortController().signal,
     report: (step) => steps.push(step),
+    now: () => 1_000,
   });
   return { ready, steps };
 }
+
+test("each step is reported as it starts, with no exit code yet, and again as it ends, with when it started and ended", async () => {
+  let time = 1_000;
+  const steps: SetupStep[] = [];
+  const shell: SetupShell = async (command, { onOutput }) => {
+    const clone = command.startsWith("git clone ");
+    time += clone ? 2_000 : 30_000;
+    onOutput(clone ? "Cloning into 'shop'...\n" : "3 packages installed\n");
+    return 0;
+  };
+
+  await setUpEngineer({
+    setup: EngineerSetup.parse({ repo: "octo-org/shop", command: "bun install", instructions: [], skills: [], mcp: {}, secrets: {} }),
+    workspace: tempDir(),
+    shell,
+    signal: new AbortController().signal,
+    report: (step) => steps.push(step),
+    now: () => time,
+  });
+
+  const clone = { step: "clone", command: "git clone https://github.com/octo-org/shop.git shop" } as const;
+  const install = { step: "setup", command: "bun install" } as const;
+  expect(steps).toEqual([
+    { ...clone, exitCode: null, log: "", startedAt: 1_000, endedAt: null },
+    { ...clone, exitCode: 0, log: "Cloning into 'shop'...\n", startedAt: 1_000, endedAt: 3_000 },
+    { ...install, exitCode: null, log: "", startedAt: 3_000, endedAt: null },
+    { ...install, exitCode: 0, log: "3 packages installed\n", startedAt: 3_000, endedAt: 33_000 },
+  ]);
+});
+
+test("a step whose shell throws still ends, failed with exit -1 and why in its log, before the error ends the setup", async () => {
+  const steps: SetupStep[] = [];
+  const shell: SetupShell = async (command) => {
+    if (command === "bun install") throw new Error("ENOENT: no such file or directory, posix_spawn 'sh'");
+    return 0;
+  };
+
+  const setUp = setUpEngineer({
+    setup: EngineerSetup.parse({ repo: "octo-org/shop", command: "bun install", instructions: [], skills: [], mcp: {}, secrets: {} }),
+    workspace: tempDir(),
+    shell,
+    signal: new AbortController().signal,
+    report: (step) => steps.push(step),
+    now: () => 1_000,
+  });
+
+  await expect(setUp).rejects.toThrow("posix_spawn 'sh'");
+  expect(steps.slice(2)).toEqual([
+    { step: "setup", command: "bun install", exitCode: null, log: "", startedAt: 1_000, endedAt: null },
+    { step: "setup", command: "bun install", exitCode: -1, log: "ENOENT: no such file or directory, posix_spawn 'sh'\n", startedAt: 1_000, endedAt: 1_000 },
+  ]);
+});
 
 test("a setup log hides each secret before it is cut to its last 16 KB, also one printed ten times and in base64", async () => {
   const secret = Buffer.from(crypto.getRandomValues(new Uint8Array(5000))).toString("hex");
@@ -52,7 +105,7 @@ test("a setup log hides each secret before it is cut to its last 16 KB, also one
 
   const { steps } = await setUp(print, { API_KEY: secret });
 
-  expect(steps.at(-1)).toEqual({ step: "setup", command: print, exitCode: 0, log: "***\n".repeat(11) });
+  expect(steps.at(-1)).toEqual({ step: "setup", command: print, exitCode: 0, log: "***\n".repeat(11), startedAt: 1_000, endedAt: 1_000 });
 });
 
 test("an engineer reads no instruction file and loads no skill folder that leads outside its clone, while links inside it work", async () => {

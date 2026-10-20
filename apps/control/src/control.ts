@@ -351,7 +351,7 @@ export function startControl({
     ask: { coordinator: (...args) => projects.ask(...args), taskWorker: (...args) => taskWorkers.ask(...args) },
     turnSignal: approvals.turnSignal,
   });
-  // The handoffs watcher: tells chiefs when their task needs input or is done.
+  // The handoffs watcher: tells chiefs where their task stands (handoffStore.ts watch).
   // Without a project, it looks at every one.
   const watchHandoffs = (projectId?: ProjectId) => {
     for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
@@ -378,7 +378,11 @@ export function startControl({
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     onLedgerChange: watchHandoffs,
-    onStateChange: (projectId) => projectStateChanged(projectId),
+    // A worker's change may move a card too: the stage of the stack it sets up.
+    onStateChange: (projectId) => {
+      watchHandoffs(projectId);
+      projectStateChanged(projectId);
+    },
     onTurnQueued: (projectId, userId, event) => projects.queued(projectId, userId, event),
     upgrade: (req, data) => upgrade(server, req, data),
   });

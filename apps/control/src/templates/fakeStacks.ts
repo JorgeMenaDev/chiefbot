@@ -10,7 +10,7 @@ export function fakeStacks() {
   const started: Array<{ id: TaskWorkerId; plan: StackPlan }> = [];
   const stopped: TaskWorkerId[] = [];
   const running = new Set<TaskWorkerId>();
-  // The stage that fails next, with its log.
+  // The stage that fails next, by its label, with its log.
   let failure: { label: string; log: string } | null = null;
   let stopsFail = false;
   // What the next start throws, made from its plan.
@@ -23,15 +23,15 @@ export function fakeStacks() {
       const error = thrown?.(plan);
       thrown = null;
       if (error) throw error;
-      for (const label of [BUILD_STAGE, ...stackStages(plan.template, plan.own).map(({ label }) => label)]) {
-        onStage({ label, state: "running", log: "" });
+      for (const { id, label } of [BUILD_STAGE, ...stackStages(plan.template, plan.own)]) {
+        onStage({ id, label, state: "running", log: "" });
         if (failure?.label === label) {
           const tokens = Object.values(plan.repos).flatMap(({ token }) => (token === null ? [] : [token]));
-          onStage({ label, state: "failed", log: secretRedactor([...plan.secrets, ...tokens]).redact(failure.log) });
+          onStage({ id, label, state: "failed", log: secretRedactor([...plan.secrets, ...tokens]).redact(failure.log) });
           failure = null;
           return "failed";
         }
-        onStage({ label, state: "passed", log: `${label} is up\n` });
+        onStage({ id, label, state: "passed", log: `${label} is up\n` });
       }
       return "ready";
     },

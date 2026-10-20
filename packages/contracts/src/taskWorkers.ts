@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApprovalKind, ChatItem, SetupStep } from "./chat.ts";
+import { ApprovalKind, ChatItem, SetupStep, StackRow } from "./chat.ts";
 import { ConnectorName } from "./connectors.ts";
 import { ApprovalId, ProjectId, TaskWorkerId } from "./ids.ts";
 import { ProjectMcpServer, RepoPath, SecretName } from "./projects.ts";
@@ -18,11 +18,11 @@ export type TaskWorkerKind = z.infer<typeof TaskWorkerKind>;
 // A worker's life. The UI and the agents' prompts call a task worker an engineer.
 //   queued      the project already runs as many as its workers.max: it launches once one of them ends
 //   launching   control wrote its launch record and is making its computer, or the worker has not connected yet
-//   setting_up  its computer sets up (EngineerSetup) before its agent starts; `setup` lists each step that ran
+//   setting_up  its stack starts (`stack`), then its computer sets up (EngineerSetup), before its agent starts; `setup` lists each step that ran
 //   working     its agent works on the task
 //   finished    the task's turn ended; `result` is the worker's last message: what its pull
 //               request does, or its report when it opened none
-//   blocked     its setup failed, so its agent never started; `result` says why, `setup` has the log
+//   blocked     its stack or its setup failed, so its agent never started; `result` says why, `stack` or `setup` has the log
 //   failed      the turn ended with an error, or the computer could not start; `result` says why
 //   stopped     the coordinator stopped it, or the task was closed while it worked
 export const TaskWorkerState = z.enum(["queued", "launching", "setting_up", "working", "finished", "blocked", "failed", "stopped"]);
@@ -45,6 +45,9 @@ export const TaskWorker = z.object({
   state: TaskWorkerState,
   // Each step of its setup that ran, in order.
   setup: z.array(SetupStep),
+  // Each stage of its template stack, in order, from before the first starts:
+  // none when its project has no template.
+  stack: z.array(StackRow).default([]),
   result: z.string().nullable(),
   // The pull request an engineer opened, or the one a verifier checks.
   pullRequest: z.url().nullable(),
