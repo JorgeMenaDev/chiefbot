@@ -21,7 +21,7 @@ function connectionsDir(folders: Record<string, Record<string, string>>) {
 }
 
 const skill = (name: string) => `---\nname: ${name}\ndescription: Use the tool.\n---\nRun it.\n`;
-const definition = "title: Tool\ndescription: A tool.\ncli: tool\nfields:\n  token: { label: Token, secret: true }\nenv:\n  TOOL_TOKEN: \"{token}\"\n";
+const definition = "title: Tool\ndescription: A tool.\ncli: tool\nsetup: [One., Two., Three.]\nwithoutAsking: Reads.\nasksFirst: Changes.\nfields:\n  token: { label: Token, secret: true }\nenv:\n  TOOL_TOKEN: \"{token}\"\n";
 
 test("every connection the repo ships loads, in folder order, with its skill", () => {
   const catalog = loadConnections(repoConnections);

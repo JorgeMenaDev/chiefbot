@@ -8,9 +8,24 @@
 title: Google Cloud
 description: Cloud Run, GKE, Monitoring and Logging health through the gcloud CLI, with a one-hour token.
 cli: gcloud
+setup:
+  - "In the Google Cloud console, open [Service accounts](https://console.cloud.google.com/iam-admin/serviceaccounts) in your project and click Create service account."
+  - "Grant it the Viewer role (roles/viewer). For less access, grant only roles/run.viewer, roles/container.viewer, roles/monitoring.viewer, roles/logging.viewer, roles/compute.viewer and roles/browser."
+  - "Open the new service account, then Keys, Add key, Create new key, JSON, Create. The key file downloads."
+  - "Open the file in a text editor, copy all of it and paste it below. Delete the file afterwards."
+  - "If your organization blocks key downloads, paste the authorized_user JSON that gcloud auth application-default login writes instead. It acts as you, with all your access."
+withoutAsking: "List and describe Cloud Run services, GKE clusters, Monitoring alerts, policies and uptime checks, regions and zones, and read logs."
+asksFirst: "Deploy, update, create, delete, ssh and everything else, and any command with a flag before its command group."
 fields:
-  key: { label: "Service account key or authorized_user JSON, with only the roles it needs", secret: true }
-  project: { label: "Default project ID" }
+  key:
+    label: "Service account key JSON"
+    placeholder: '{"type": "service_account", "project_id": "my-project", ...}'
+    secret: true
+    help: "The whole key file from step 3, or an authorized_user JSON (step 5). It stays in Chiefbot's control server: each turn gets only a one-hour token made from it."
+  project:
+    label: "Default project ID"
+    placeholder: "my-project-123456"
+    help: "The project ID, not its name: the console's project picker shows both. The bot can name another per command."
 exchange: google-access-token
 env:
   CLOUDSDK_AUTH_ACCESS_TOKEN_FILE: "{dir}/token"

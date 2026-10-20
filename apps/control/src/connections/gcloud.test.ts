@@ -149,15 +149,16 @@ test("a key Google refuses leaves gcloud out of the turn, and the log names Goog
 });
 
 test("google-access-token needs a secret key field, and makes the field token that env may name", () => {
+  const help = { setup: ["One.", "Two.", "Three."], withoutAsking: "Reads.", asksFirst: "Changes." };
   const definition = (fields: Record<string, { label: string; secret?: boolean }>) =>
-    ConnectionDefinition.safeParse({ title: "G", description: "G.", cli: "gcloud", fields, exchange: "google-access-token", env: { TOKEN_FILE: "{dir}/token", T: "{token}" } });
+    ConnectionDefinition.safeParse({ title: "G", description: "G.", cli: "gcloud", ...help, fields, exchange: "google-access-token", env: { TOKEN_FILE: "{dir}/token", T: "{token}" } });
   const issues = (fields: Record<string, { label: string; secret?: boolean }>) => definition(fields).error?.issues.map(({ path, message }) => [path.join("."), message]);
 
   expect(definition({ key: { label: "Key", secret: true } }).success).toBe(true);
   expect(issues({ key: { label: "Key" } })).toEqual([["exchange", "google-access-token needs a secret field named key"]]);
   expect(issues({ key: { label: "Key", secret: true }, token: { label: "Token" } })).toEqual([["fields.token", "google-access-token makes the field token itself"]]);
   // Without the exchange, {token} names no field.
-  expect(ConnectionDefinition.safeParse({ title: "G", description: "G.", cli: "gcloud", fields: { key: { label: "Key", secret: true } }, env: { T: "{token}" } }).success).toBe(false);
+  expect(ConnectionDefinition.safeParse({ title: "G", description: "G.", cli: "gcloud", ...help, fields: { key: { label: "Key", secret: true } }, env: { T: "{token}" } }).success).toBe(false);
 });
 
 test("a turn stopped while its token is being minted never reaches the worker", async () => {

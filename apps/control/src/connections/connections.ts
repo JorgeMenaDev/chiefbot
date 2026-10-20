@@ -46,7 +46,16 @@ export function connectionHost({
 
   const rows = (userId: UserId): Connection[] => {
     const on = store.connections.on(userId);
-    return catalog.map(({ name, title, description, fields }) => ({ name, title, description, fields, on: on.has(name) }));
+    return catalog.map(({ name, title, description, setup, withoutAsking, asksFirst, fields }) => ({
+      name,
+      title,
+      description,
+      setup,
+      withoutAsking,
+      asksFirst,
+      fields,
+      on: on.has(name),
+    }));
   };
 
   // Runs a person route for the signed-in user; 401 otherwise.

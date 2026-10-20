@@ -13,11 +13,28 @@ import { TurnId } from "./ids.ts";
 export const ConnectionName = ConnectorName;
 export type ConnectionName = z.infer<typeof ConnectionName>;
 
+// A link in setup text, written [text](https://…). Connect apps shows it as a link
+// that opens in the system browser.
+export const SetupLink = /\[([^[\]]+)\]\((https:\/\/[^\s()]+)\)/;
+
+// A line of setup help in Connect apps: plain words, with at most one SetupLink.
+export const SetupText = z
+  .string()
+  .trim()
+  .min(1)
+  .max(400)
+  .refine((text) => (text.match(/\]\(/g) ?? []).length <= 1, "at most one link")
+  .refine((text) => !text.replace(SetupLink, "").includes("]("), "a link is [text](https://…)");
+
 // One value the person pastes. A secret one is a password field, kept in control's
-// SecretStore and never sent back to the desktop.
+// SecretStore and never sent back to the desktop. Connect apps shows `help` under
+// it (what it is, where to get it, the access it needs) and `placeholder`, an
+// example value, inside it.
 export const ConnectionField = z.strictObject({
   label: z.string().trim().min(1).max(80),
   secret: z.boolean().default(false),
+  help: SetupText.optional(),
+  placeholder: z.string().trim().min(1).max(120).optional(),
 });
 export type ConnectionField = z.infer<typeof ConnectionField>;
 
@@ -39,10 +56,16 @@ const placeholders = (template: string) => [...template.matchAll(/\{([^{}]*)\}/g
 //   readOnly  shell globs over one command (`*` is any text): a command of `cli` that
 //             matches one runs without asking; any other waits for the person's approval
 //   exchange  a ConnectionExchange control runs before each turn; env may then name its output field
+//   setup     the numbered steps Connect apps shows above the fields: how to get them
+//   withoutAsking, asksFirst  one line each: what the bot then does without asking
+//             (readOnly, in words) and what waits for the person's approval
 export const ConnectionDefinition = z
   .strictObject({
     title: z.string().trim().min(1).max(60),
     description: z.string().trim().min(1).max(200),
+    setup: z.array(SetupText).min(3).max(6),
+    withoutAsking: z.string().trim().min(1).max(200),
+    asksFirst: z.string().trim().min(1).max(200),
     cli: z.string().regex(/^[a-z0-9][a-z0-9.-]*$/, "expected a command name, like acli"),
     fields: z.record(z.string().regex(/^[a-z][a-z0-9]*$/, "expected lower-case letters and digits, like token"), ConnectionField),
     env: z.record(z.string().regex(/^[A-Z_][A-Z0-9_]*$/, "expected an environment variable name"), z.string()).default({}),
@@ -69,6 +92,9 @@ export const Connection = z.object({
   name: ConnectionName,
   title: z.string(),
   description: z.string(),
+  setup: z.array(z.string()),
+  withoutAsking: z.string(),
+  asksFirst: z.string(),
   fields: z.record(z.string(), ConnectionField),
   on: z.boolean(),
 });
