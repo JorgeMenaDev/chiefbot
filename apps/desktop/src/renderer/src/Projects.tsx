@@ -6,7 +6,6 @@ import {
   ProjectWorkers,
   Task,
   TaskWorker,
-  type ChatItem,
   type CopilotPayer,
   type ProjectId,
   type TaskStatus,
@@ -17,7 +16,8 @@ import { FolderGit2Icon, ListChecksIcon, PlugIcon, RadioIcon, Trash2Icon } from 
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
-import { AssistantMessage, ChatEmpty, ErrorMessage, Timeline, ToolRow, UserMessage, Working } from "./Chat.tsx";
+import { AssistantMessage, ChatTimeline, ErrorMessage, UserMessage } from "./Chat.tsx";
+import type { LaneItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
 import { Column, ErrorText, PaneHeader, SidePanel } from "./Pane.tsx";
@@ -188,15 +188,13 @@ function CoordinatorChat({ project }: { project: Project }) {
 
   return (
     <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <Timeline follow={view}>
-        {view.items.length === 0 && (
-          <ChatEmpty>Ask the coordinator to plan work on {project.name}. It tracks it as tasks every member sees.</ChatEmpty>
-        )}
-        {view.items.map((item) => (
-          <ChatRow key={item.id} project={project} item={item} />
-        ))}
-        {working && <Working>{view.working || "Waiting for the coordinator"}</Working>}
-      </Timeline>
+      <ChatTimeline
+        chatKey={project.id}
+        items={view.items}
+        status={working ? view.working || "Waiting for the coordinator" : null}
+        empty={`Ask the coordinator to plan work on ${project.name}. It tracks it as tasks every member sees.`}
+        renderItem={(item, streaming) => <ChatRow project={project} item={item} streaming={streaming} />}
+      />
       <Composer
         placeholder="Message the coordinator"
         draft={draft}
@@ -212,14 +210,12 @@ function CoordinatorChat({ project }: { project: Project }) {
 // The coordinator gets no handoff notices, so those never show. Its approvals
 // are control's, for connector calls that may write. Each turn starts with who
 // pays for its Copilot.
-function ChatRow({ project, item }: { project: Project; item: ChatItem }) {
+function ChatRow({ project, item, streaming }: { project: Project; item: LaneItem; streaming: boolean }) {
   switch (item.kind) {
     case "user":
       return <UserMessage text={item.text} />;
     case "assistant":
-      return <AssistantMessage text={item.text} />;
-    case "tool":
-      return <ToolRow name={item.name} status={item.status} />;
+      return <AssistantMessage text={item.text} streaming={streaming} />;
     case "error":
       return <ErrorMessage message={item.message} />;
     case "payer":
