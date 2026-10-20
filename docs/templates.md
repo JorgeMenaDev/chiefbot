@@ -28,8 +28,8 @@ services:                                        # where each other service runs
 ```
 
 - `service` is the service the project's own repo is. It never runs as a container: each engineer will run it from its own clone, through `commands.setup` and `commands.dev`, so its edits show live. `services` cannot name it.
-- Each entry of `services` is `{ repo, ref }` or `stand-in`. A repo's image builds from the service's `context` in that repo, at `ref`, a branch or tag. Both keys are required, and no other key is allowed. A service that `services` leaves out runs its stand-in.
-- The settings override the file key by key, as for the other keys. `template`, `service` and `services` are each taken whole, so the settings' `services` replaces the file's.
+- Each entry of `services` is `{ repo, ref }` or `stand-in`. A repo's image builds from the service's `context` in that repo, at `ref`, a branch or tag. `ref` follows git's ref-name rules (`git check-ref-format`) and cannot start with `-`. Both keys are required, and no other key is allowed. A service that `services` leaves out runs its stand-in.
+- The settings override the file key by key, as for the other keys. `template`, `service` and `services` are each taken whole, so the settings' `services` replaces the file's. Settings without `template` take the file's. `template: null` in the settings turns templates off, and the file's `service` and `services` with them.
 
 Control checks the keys against the catalog when it reads the file, as the project is made, and when settings are saved. It refuses:
 
@@ -39,9 +39,11 @@ Control checks the keys against the catalog when it reads the file, as the proje
 - a template without `service`, or `service` or `services` without a template;
 - a repo the member cannot read, checked as for the project's own repo: through the repo app, or as a public repo where the app is not installed. A save checks the repos its settings name, as the member who saves.
 
-A file that breaks one of these rules is invalid: the project uses its settings alone, and **Settings** shows the error. Settings that break one are not saved (`invalid_settings`), and the error names the key.
+A file that breaks one of these rules is invalid: the project uses its settings alone, and **Settings** shows the error. Settings that break one are not saved (`invalid_settings`), and the error names the key. If GitHub fails while control checks a repo (a 5xx, a lost connection), control makes no project and saves nothing, and answers `github_failed` (502): try again.
 
-In the app, open the project's gear. **Template and services** has a picker with the catalog. Under it you pick the service this repo is, and for each other service **Stand-in** or **A repo**, with its repo and branch or tag. The project's own service is marked **This repo** and has no repo to pick. **Save** writes the three keys into the settings and keeps their other keys and comments. **Config** then shows each key with its source.
+When engineers get stacks, a stack checks each service's repo against the member who starts the engineer or verifier, every time, cached builds included. The member who saved the settings being able to read it is not enough.
+
+In the app, open the project's gear. **Template and services** has a picker with the catalog. Under it you pick the service this repo is, and for each other service **Stand-in** or **A repo**, with its repo and branch or tag. The project's own service is marked **This repo** and has no repo to pick. **None** writes `template: null`, and says **(overrides the project file)** when the file sets a template. **Save** writes the keys into the settings and keeps their other keys and comments, those on `services` and its entries included. **Config** then shows each key with its source. While the YAML under **Settings** has unsaved edits, the picker cannot save, because its save would drop them: save or undo them first.
 
 ## Add one
 
