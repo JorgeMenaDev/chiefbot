@@ -58,6 +58,15 @@ export function connectionHost({
     }));
   };
 
+  // Every saved field of the person's connection `name`, secret ones too, or
+  // null when it is off. Only control reads the secret ones.
+  async function savedFields(userId: UserId, name: string): Promise<Record<string, string> | null> {
+    const plain = store.connections.on(userId).get(name);
+    if (!plain) return null;
+    const secret = SecretFields.safeParse(JSON.parse((await secrets.get(secretName(userId, name))) ?? "null"));
+    return secret.success ? { ...plain, ...secret.data } : null;
+  }
+
   // Runs a person route for the signed-in user; 401 otherwise.
   const signedIn =
     <Req extends Request>(handle: (userId: UserId, req: Req) => Response | Promise<Response>) =>
@@ -114,6 +123,7 @@ export function connectionHost({
 
   return {
     routes,
+    savedFields,
 
     // A bot's worker's calls of its turn `turnId`, sent just before the turn's
     // done: logged only while that turn is one of the bot's unfinished ones, and
@@ -130,14 +140,10 @@ export function connectionHost({
     // saved secret (google-access-token: a one-hour `token` for the `key`, which
     // stays here); one whose exchange fails is left out of the turn.
     async forTurn(userId: UserId): Promise<AgentConnection[]> {
-      const on = store.connections.on(userId);
       const connections = await Promise.all(
         catalog.map(async ({ name, title, cli, skill, env, readOnly, exchange }): Promise<AgentConnection | null> => {
-          const plain = on.get(name);
-          if (!plain) return null;
-          const secret = SecretFields.safeParse(JSON.parse((await secrets.get(secretName(userId, name))) ?? "null"));
-          if (!secret.success) return null;
-          const saved = { ...plain, ...secret.data };
+          const saved = await savedFields(userId, name);
+          if (!saved) return null;
           try {
             if (exchange !== "google-access-token") return { name, title, cli, skill, env, readOnly, fields: saved };
             const { key = "", ...rest } = saved;
