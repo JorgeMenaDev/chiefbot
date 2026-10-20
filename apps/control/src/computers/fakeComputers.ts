@@ -29,7 +29,7 @@ export function fakeComputers({
   gitSocket,
   clock,
   connectionsRoot = mkdtempSync(join(tmpdir(), "chiefbot-connections-")),
-  setupShell = async () => ({ exitCode: 0, output: "" }),
+  setupShell = async () => 0,
 }: { copilot?: FakeCopilot; gitSocket?: string; clock?: Clock; connectionsRoot?: string; setupShell?: SetupShell } = {}) {
   type FakeComputer = {
     spec: ComputerSpec;

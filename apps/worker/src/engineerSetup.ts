@@ -1,31 +1,28 @@
 import { SETUP_LOG_MAX, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
-
-// How one setup command ended: its exit code and the end of its output, stdout
-// and stderr together.
-export type SetupResult = { exitCode: number; output: string };
+import { secretRedactor } from "./secretRedactor.ts";
 
 // Runs one setup command of an engineer: `sh -c command` in `cwd`, with `env`
 // added to the computer's environment (whose own variables win), killed when
-// `signal` aborts. setupShell (here) in a computer; a fake in tests.
-export type SetupShell = (command: string, options: { cwd: string; env: Record<string, string>; signal: AbortSignal }) => Promise<SetupResult>;
-
-// How much of a command's output a setup shell keeps: enough that masking the
-// secrets, then keeping SETUP_LOG_MAX, never leaves a piece of one (a secret is
-// at most 16 KB, contracts SetProjectSecretRequest).
-const keptOutput = 4 * SETUP_LOG_MAX;
+// `signal` aborts. Its output, stdout and stderr together, goes to `onOutput` as
+// it comes; it resolves with the exit code. setupShell (here) in a computer; a
+// fake in tests.
+export type SetupShell = (
+  command: string,
+  options: { cwd: string; env: Record<string, string>; signal: AbortSignal; onOutput: (text: string) => void },
+) => Promise<number>;
 
 // The real setup shell: `sh` with `baseEnv`, the environment the agent's shell
 // gets (no GitHub token; git sent to control's proxy: copilotSdk.ts). It reads
 // nothing from stdin.
 export function setupShell(baseEnv: Record<string, string | undefined>): SetupShell {
-  return async (command, { cwd, env, signal }) => {
+  return async (command, { cwd, env, signal, onOutput }) => {
     const proc = Bun.spawn(["sh", "-c", `exec 2>&1\n${command}`], { cwd, env: { ...env, ...baseEnv }, stdin: "ignore", stdout: "pipe", stderr: "ignore", signal });
     const decoder = new TextDecoder();
-    let output = "";
-    for await (const chunk of proc.stdout) output = (output + decoder.decode(chunk, { stream: true })).slice(-keptOutput);
-    return { exitCode: await proc.exited, output };
+    for await (const chunk of proc.stdout) onOutput(decoder.decode(chunk, { stream: true }));
+    onOutput(decoder.decode());
+    return proc.exited;
   };
 }
 
@@ -46,8 +43,9 @@ const instructionMax = 64 * 1024;
 
 // Sets an engineer's computer up for `setup`, before its agent starts: clones
 // the repo into <workspace>/<repo name> and runs the setup command there with
-// the project's secrets, each step reported as it ends, its log without any
-// secret value. Then reads the repo's instruction files and finds its skill
+// the project's secrets, each step reported as it ends. Its log is the end of its
+// output with every secret hidden (secretRedactor.ts) as it streams, before it
+// is cut to SETUP_LOG_MAX, so no cut leaves a piece of one. Then reads the repo's instruction files and finds its skill
 // folders; a configured one the repo lacks is left out. A step that fails stops
 // the setup: `failed` is that step, reported last.
 export async function setUpEngineer({
@@ -65,10 +63,13 @@ export async function setUpEngineer({
 }): Promise<EngineerReady | { failed: SetupStep }> {
   const name = setup.repo.split("/")[1] ?? setup.repo;
   const clone = join(workspace, name);
-  const secrets = Object.values(setup.secrets);
+  const secrets = secretRedactor(Object.values(setup.secrets));
   const run = async (step: SetupStep["step"], command: string, cwd: string, env: Record<string, string>) => {
-    const { exitCode, output } = await shell(command, { cwd, env, signal });
-    const log = secrets.reduce((text, value) => text.replaceAll(value, "***"), output).slice(-SETUP_LOG_MAX);
+    const output = secrets.stream();
+    let log = "";
+    const keep = (text: string) => (log = (log + text).slice(-SETUP_LOG_MAX));
+    const exitCode = await shell(command, { cwd, env, signal, onOutput: (text) => keep(output.push(text)) });
+    keep(output.end());
     const done: SetupStep = { step, command, exitCode, log };
     report(done);
     return done;

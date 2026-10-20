@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
-import { setupShell, type SetupResult, type SetupShell } from "@chiefbot/worker/engineer-setup";
+import { setupShell, type SetupShell } from "@chiefbot/worker/engineer-setup";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
@@ -132,13 +132,18 @@ const connectorOf = (copilot: FakeCopilot, name: string) => {
   return server?.type === "http" ? { url: server.url, headers: server.headers ?? {} } : { url: "", headers: {} };
 };
 
+// How a fake setup command ends: its exit code and its output, in the chunks it comes in.
+type SetupAnswer = { exitCode: number; output: string | string[] };
+
 // An engineer's setup shell that runs nothing: each command answers as `answer`
 // says (exit 0 and no output by default), and every run is recorded.
-function fakeSetup(answer: (command: string) => SetupResult | Promise<SetupResult> = () => ({ exitCode: 0, output: "" })) {
+function fakeSetup(answer: (command: string) => SetupAnswer | Promise<SetupAnswer> = () => ({ exitCode: 0, output: "" })) {
   const runs: Array<{ command: string; cwd: string; env: Record<string, string> }> = [];
-  const run: SetupShell = async (command, { cwd, env }) => {
+  const run: SetupShell = async (command, { cwd, env, onOutput }) => {
     runs.push({ command, cwd, env });
-    return answer(command);
+    const { exitCode, output } = await answer(command);
+    for (const chunk of [output].flat()) onOutput(chunk);
+    return exitCode;
   };
   return { runs, run };
 }
@@ -282,6 +287,90 @@ test("an engineer gets the project's secrets for its task only: in its setup and
   expect(elsewhere).not.toContain("dev-key-1");
   // Its turn is over: its session closed, and the runtime that held the secret with it.
   await eventually(() => copilot.closed.includes(id));
+});
+
+test("an engineer's messages, errors and result hide the project's secrets, one split across deltas too, and a pull request that holds one is refused before anyone is asked", async () => {
+  const secret = "sk-live-4f9a2b7c1d8e";
+  const control = await teamProject({}, "commands:\n  test: bun test\nsecrets: [API_KEY]\n");
+  const { owner, project, github } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: secret });
+  let refusal = "";
+  const { tool } = await heldTurn(control, async function* (_prompt, runtime) {
+    yield sdk.delta("msg-1", `The key is ${secret.slice(0, 7)}`);
+    yield sdk.delta("msg-1", `${secret.slice(7)}.`);
+    const pr = { repository: "octo-org/shop", head: "fix-typo", base: "main", title: "Fix the typo" };
+    refusal = await runtime.tool("create_pull_request", { ...pr, body: `Tested with ${btoa(secret)}` }).then(
+      () => "opened",
+      (error: Error) => error.message,
+    );
+    yield sdk.error(`curl failed: 401 for ${encodeURIComponent(secret)}`);
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const failed = await workerWhen(owner, project, id, ({ state }) => state === "failed");
+
+  expect(failed.result).toBe("curl failed: 401 for ***");
+  expect(refusal).toBe("The pull request's branch, title or body holds one of the project's secrets. Take it out, then open it again.");
+  expect(github.pullRequests).toEqual([]);
+  const { lines } = WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body);
+  expect(lines.slice(2)).toEqual(["worker: The key is ***.", "error: curl failed: 401 for ***"]);
+  expect(JSON.stringify([lines, await workersOf(owner, project)])).not.toContain(secret.slice(0, 12));
+});
+
+test("an engineer whose turn ends while control reads its secrets never gets them or its task, on any connection", async () => {
+  // Control's secret store, whose reads wait while `hold` is set.
+  const values = new Map<string, string>();
+  let hold = false;
+  let reads = 0;
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const secrets = {
+    get: async (name: string) => {
+      if (hold) {
+        reads += 1;
+        await released;
+      }
+      return values.get(name) ?? null;
+    },
+    put: async (name: string, value: string) => void values.set(name, value),
+    delete: async (name: string) => void values.delete(name),
+  };
+  const tokens = new Map<string, string>();
+  const setup = fakeSetup();
+  const control = await teamProject(
+    {
+      secrets,
+      setupShell: setup.run,
+      provider: (fake) => ({
+        ...fake,
+        async create(spec) {
+          tokens.set(spec.id, spec.env.CHIEFBOT_TASK_WORKER_TOKEN ?? "");
+          await fake.create(spec);
+        },
+      }),
+    },
+    "commands:\n  setup: bun install\nsecrets: [API_KEY]\n",
+  );
+  const { owner, project, url } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "dev-key-1" });
+  hold = true;
+  const { tool } = await heldTurn(control);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await eventually(() => reads > 0);
+
+  // The worker reconnects, saying it runs no turn: control ends it. Its new connection stays open.
+  const received: string[] = [];
+  const socket = new WebSocket(`${url.replace(/^http/, "ws")}/task-worker/${id}`, { headers: { authorization: `Bearer ${tokens.get(id)}` } });
+  socket.onmessage = (message) => received.push(String(message.data));
+  await new Promise((resolve) => (socket.onopen = resolve));
+  atCleanUp(() => socket.close());
+  socket.send(JSON.stringify({ type: "hello", activeTurnId: null, capabilities: [] }));
+  await workerWhen(owner, project, id, ({ state }) => state === "failed");
+  release();
+  await Bun.sleep(100);
+
+  expect(received.join("\n")).not.toContain("run-task");
+  expect(setup.runs).toEqual([]);
 });
 
 test("a resent dispatch with the same creation id starts one worker, even while the first is still getting its computer", async () => {

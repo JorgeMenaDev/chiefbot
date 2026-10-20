@@ -70,6 +70,9 @@ export function controlLink<Message>({
   let stopped = false;
   // Every event of the latest turn, numbered by position.
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
+  // What the latest turn's events go through before they are numbered and sent
+  // (an engineer's: its secrets hidden, secretRedactor.ts), when it has one.
+  let redaction: { turnId: TurnId; redact: (event: TurnEvent) => TurnEvent[] } | null = null;
   // The turn running now, its forwarder secret, and what it has streamed so far:
   // where session events go, and the only turn the connector forwarder serves.
   // The secret (32 random bytes) is the turn's alone and is forgotten with it.
@@ -92,11 +95,13 @@ export function controlLink<Message>({
   }
 
   function emit(turnId: TurnId, event: TurnEvent) {
-    if (event.type === "done") onTurnEnd?.(turnId);
-    if (latest?.turnId !== turnId) latest = { turnId, events: [] };
-    latest.events.push(event);
-    send({ type: "turn-event", turnId, index: latest.events.length - 1, event });
-    if (event.type === "done" && active?.turn.turnId === turnId) activate(null);
+    for (const sent of redaction?.turnId === turnId ? redaction.redact(event) : [event]) {
+      if (sent.type === "done") onTurnEnd?.(turnId);
+      if (latest?.turnId !== turnId) latest = { turnId, events: [] };
+      latest.events.push(sent);
+      send({ type: "turn-event", turnId, index: latest.events.length - 1, event: sent });
+      if (sent.type === "done" && active?.turn.turnId === turnId) activate(null);
+    }
   }
 
   // Forwards /mcp/:name to control's proxy for that connector, for the running
@@ -159,8 +164,9 @@ export function controlLink<Message>({
     fromControl,
 
     // The runtime starts `turnId`: the turn whatever acts in it holds. Its
-    // session's events stream into it from now on.
-    begin(turnId: TurnId, key: TurnKey): Turn {
+    // session's events stream into it from now on, each through `redact` when given.
+    begin(turnId: TurnId, key: TurnKey, redact?: (event: TurnEvent) => TurnEvent[]): Turn {
+      redaction = redact ? { turnId, redact } : null;
       const end = new AbortController();
       const turn = { turnId, key, ended: end.signal };
       activate({ turn, secret: randomBytes(32).toString("base64url"), end, ...newTurnStream() });

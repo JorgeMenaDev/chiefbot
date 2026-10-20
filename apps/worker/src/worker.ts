@@ -31,6 +31,7 @@ import { agentEnv } from "./copilotSdk.ts";
 import { setUpEngineer, setupShell as shellOf, type EngineerReady, type SetupShell } from "./engineerSetup.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
+import { secretRedactor, turnEventRedactor } from "./secretRedactor.ts";
 import { elicitationResult, questionForm } from "./questions.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
 
@@ -301,7 +302,7 @@ export function startWorker({
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
     const tools = [
-      pullRequestTool({ base, turnKey }),
+      pullRequestTool({ base, turnKey, ...(task ? { holdsSecret: secretRedactor(Object.values(task.message.setup.secrets)).holds } : {}) }),
       computerTool({
         run: screenCommands,
         agentHasScreen: () => screenControl === "agent",
@@ -393,7 +394,8 @@ export function startWorker({
       attachments?: SentAttachment[];
     } = {},
   ) {
-    const turn = link.begin(turnId, turnKey);
+    // An engineer's events hide its project's secrets before they leave the computer.
+    const turn = link.begin(turnId, turnKey, task ? turnEventRedactor(secretRedactor(Object.values(task.setup.secrets))) : undefined);
     git?.reload({ fetch: gitCredential(turn) });
     try {
       staged = { ...stageConnections(connectionsRoot, connections), turnId };

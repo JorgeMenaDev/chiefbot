@@ -374,6 +374,8 @@ export function taskWorkerHost({
   // organization's Copilot the worker renews its one-hour token mid-task
   // (installationSession.ts). Secrets control cannot read block it: its setup cannot run.
   async function startTask(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId) {
+    // The connection whose hello started it: the task goes there or nowhere.
+    const socket = sockets.get(workerId);
     const run = payerOf({ kind: "project", projectId, askerId: userId });
     const started = run && workers.startTurn(workerId, run.payer);
     if (!run || !started) return;
@@ -391,7 +393,11 @@ export function taskWorkerHost({
       publish(projectId);
       return;
     }
-    send(workerId, { type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors, setup });
+    // The turn may have ended, its member left or its worker reconnected while
+    // control read the secrets: then they, and the task, go nowhere.
+    const live = socket && sockets.get(workerId) === socket && store.turnKeys.holder(turnKey) && store.projects.member(projectId, { userId });
+    if (!live) return;
+    socket.send(JSON.stringify({ type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors, setup } satisfies ControlToWorker));
   }
 
   // The worker whose credential the request carries, if it is :workerId's; 401 or 403 otherwise.

@@ -9,16 +9,22 @@ export const pullRequestToolName = "create_pull_request";
 // answer, so the request has no idle timeout.
 // `base` is the computer's control routes (/worker/:id or /task-worker/:id);
 // `turnKey` gives the key of the turn its session was opened for (it throws for none).
-export function pullRequestTool({ base, turnKey }: { base: string; turnKey: () => string }) {
+// An engineer's (`holdsSecret`, secretRedactor.ts) refuses a branch, title or body
+// that holds one of its project's secrets, before control or anyone sees it.
+export function pullRequestTool({ base, turnKey, holdsSecret }: { base: string; turnKey: () => string; holdsSecret?: (text: string) => boolean }) {
   return {
     name: pullRequestToolName,
     description: "Open a pull request on GitHub from a branch you already pushed. The user approves it first.",
     parameters: PullRequestArgs,
     async handler(raw) {
+      const args = PullRequestArgs.parse(raw);
+      if (holdsSecret && [args.head, args.title, args.body].some(holdsSecret)) {
+        throw new Error("The pull request's branch, title or body holds one of the project's secrets. Take it out, then open it again.");
+      }
       const res = await fetch(`${base}/pull-requests`, {
         method: "POST",
         headers: { authorization: `Bearer ${turnKey()}`, "content-type": "application/json" },
-        body: JSON.stringify(PullRequestArgs.parse(raw)),
+        body: JSON.stringify(args),
         timeout: false,
       });
       if (!res.ok) {
