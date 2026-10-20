@@ -228,16 +228,24 @@ function ControlPill({ bot }: { bot: Bot }) {
   const { takeOver, handBack } = window.chiefbot.bots;
   const human = bot.screenControl === "human";
   const [error, setError] = useState<{ text: string; reason: string } | null>(null);
-  // A switch made since (in the other pill, or by control) makes an old refusal stale.
+  // A switch made since (in the other pill, or by control) makes an old refusal stale:
+  // one already shown goes, and one that comes back later is dropped (`switches`).
   const [control, setControl] = useState(bot.screenControl);
   if (control !== bot.screenControl) {
     setControl(bot.screenControl);
     setError(null);
   }
+  const switches = useRef(0);
+  useEffect(() => {
+    switches.current += 1;
+  }, [bot.screenControl]);
   const toggle = () => {
     setError(null);
     const text = human ? "Couldn't hand the screen back." : "Couldn't take control.";
-    (human ? handBack : takeOver)(bot.id).catch((caught: unknown) => setError({ text, reason: caught instanceof Error ? caught.message : String(caught) }));
+    const at = switches.current;
+    (human ? handBack : takeOver)(bot.id).catch((caught: unknown) => {
+      if (switches.current === at) setError({ text, reason: caught instanceof Error ? caught.message : String(caught) });
+    });
   };
   return (
     <div className="relative">
