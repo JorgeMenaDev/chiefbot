@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
-import type { SetupResult, SetupShell } from "@chiefbot/worker/engineer-setup";
+import { setupShell, type SetupResult, type SetupShell } from "@chiefbot/worker/engineer-setup";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
@@ -22,8 +22,8 @@ const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan
 
 // Control with a workspace owned by the signed-in user, octo-friend as its
 // member (both may write to the repo), and a project for octo-org/shop whose
-// coordinator is online. `projectFile` is the repo's chiefbot.project.yaml.
-async function teamProject(options: TestControlOptions = {}, projectFile = "commands:\n  test: bun test\n") {
+// coordinator is online. `projectFile` is the repo's chiefbot.project.yaml, and `files` its other files.
+async function teamProject(options: TestControlOptions = {}, projectFile = "commands:\n  test: bun test\n", files: Record<string, string> = {}) {
   const control = await startTestControl(options);
   const owner = control.user;
   const workspace = Workspace.parse(await (await owner.api("POST", "/workspaces", { name: "Platform team" })).json());
@@ -33,7 +33,7 @@ async function teamProject(options: TestControlOptions = {}, projectFile = "comm
   await guest.api("POST", `/invites/${invite?.id}/accept`);
   control.github.createRepo(
     "octo-org/shop",
-    { "chiefbot.project.yaml": projectFile, "README.md": "# Shop\nTeh shop.\n" },
+    { "chiefbot.project.yaml": projectFile, "README.md": "# Shop\nTeh shop.\n", ...files },
     { access: { "octo-user": "write", "octo-friend": "write" } },
   );
   const project = Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo: "octo-org/shop" })).json());
@@ -202,6 +202,46 @@ test("a setup command that fails blocks the engineer: its agent never starts, it
   ]);
 });
 
+test("an engineer's setup clones the repo through control's git proxy, and its agent works in that clone with the repo's instructions and skills", async () => {
+  const socket = `/tmp/chiefbot-t61-${crypto.randomUUID().slice(0, 8)}.sock`;
+  const home = mkdtempSync(join(tmpdir(), "chiefbot-home-"));
+  atCleanUp(() => rmSync(home, { recursive: true, force: true }));
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", CHIEFBOT_GIT_SOCKET: socket };
+  const control = await teamProject(
+    { setupShell: setupShell(env), gitSocket: socket },
+    "commands:\n  setup: grep -c Teh README.md\ninstructions: [docs/agents.md]\nskills: [.agents/skills, tools/skills]\n",
+    { "AGENTS.md": "Run bun test before you push.\n", "docs/agents.md": "Prices are in cents.\n", ".agents/skills/release/SKILL.md": "---\nname: release\n---\n" },
+  );
+  // What the worker gives its shells (index.ts): github.com goes to control's proxy, which reads the fake GitHub.
+  const helper = join(import.meta.dir, "../../worker/src/gitCredential.ts");
+  Object.assign(env, gitProxyConfig({ controlUrl: control.url, helper: `"${process.execPath}" ${helper}` }));
+  const { owner, project, copilot } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Read the code.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+
+  expect(finished.setup.map(({ step, exitCode, log }) => [step, exitCode, log.trim()])).toEqual([
+    ["clone", 0, "Cloning into 'shop'..."],
+    ["setup", 0, "1"],
+  ]);
+  const at = copilot.sessionIds.indexOf(id);
+  const clone = copilot.workingDirectories[at] ?? "";
+  expect(clone.endsWith(`/${id}/shop`)).toBe(true);
+  expect(await Bun.file(join(clone, "README.md")).text()).toBe("# Shop\nTeh shop.\n");
+  const told = copilot.instructions[at] ?? "";
+  expect(told).toContain('<file path="AGENTS.md">\nRun bun test before you push.\n\n</file>');
+  expect(told).toContain('<file path="docs/agents.md">\nPrices are in cents.\n\n</file>');
+  // A skill folder the repo lacks is left out.
+  expect(copilot.skillDirectories[at]).toEqual([join(clone, ".agents/skills")]);
+  expect(((await tool({ tool: "worker_transcript", worker: id })).body as { lines: string[] }).lines[2]).toBe(
+    "setup done; instructions AGENTS.md, docs/agents.md; skills .agents/skills",
+  );
+});
+
 test("an engineer gets the project's secrets for its task only: in its setup and its agent's runtime, never on the project's computer, and gone once its turn ends", async () => {
   const setup = fakeSetup((command) => ({ exitCode: 0, output: command === "bun install" ? "using API_KEY=dev-key-1\n" : "" }));
   const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install\nsecrets: [API_KEY, UNSET_KEY]\n");
@@ -304,6 +344,30 @@ async function gitTeamProject() {
   Object.assign(env, gitProxyConfig({ controlUrl: control.url, helper: `"${process.execPath}" ${helper}`, githubUrl: control.github.url }));
   return control;
 }
+
+test("a dispatch beyond the project's workers.max is queued, with no computer, and launches when a running engineer ends", async () => {
+  let finishFirst = () => {};
+  const firstFinishes = new Promise<void>((resolve) => (finishFirst = resolve));
+  const control = await teamProject({}, "commands:\n  test: bun test\nworkers:\n  max: 1\n");
+  const { owner, project, computers } = control;
+  const { tool } = await heldTurn(control, async function* (prompt) {
+    if (prompt.includes("Task #1:")) await firstFinishes;
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  await tool({ tool: "create_task", title: "Add dark mode" });
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, first.id, ({ state }) => state === "working");
+
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-2" })).body);
+
+  expect(second.state).toBe("queued");
+  expect(computers.computers.has(second.id)).toBe(false);
+  expect(TaskWorker.parse((await tool({ tool: "worker_status", worker: second.id })).body).state).toBe("queued");
+  finishFirst();
+  expect(await workerWhen(owner, project, second.id, ({ state }) => state === "finished")).toMatchObject({ result: "Done." });
+  expect(computers.computers.has(second.id)).toBe(true);
+});
 
 test("the worker pushes and opens its draft pull request through control, each approved by the member who asked, and the task links it", async () => {
   const { owner, guest, project, copilot, github } = await gitTeamProject();

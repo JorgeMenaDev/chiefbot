@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -16,12 +16,15 @@ export function git(cwd: string, args: string[]) {
   return result.stdout.toString().trim();
 }
 
-// Makes <root>/<fullName>.git with one commit on main holding `files`.
+// Makes <root>/<fullName>.git with one commit on main holding `files`, by path (folders made as needed).
 export function createBareRepo(root: string, fullName: string, files: Record<string, string>) {
   const work = mkdtempSync(join(tmpdir(), "fake-github-seed-"));
   try {
     git(work, ["init", "-q", "-b", "main"]);
-    for (const [path, content] of Object.entries(files)) writeFileSync(join(work, path), content);
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(work, path)), { recursive: true });
+      writeFileSync(join(work, path), content);
+    }
     git(work, ["add", "."]);
     git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Initial commit"]);
     const bare = join(root, `${fullName}.git`);
