@@ -219,6 +219,42 @@ test("the coordinator is told the repo's instructions and gets its skill folders
   expect(await Bun.file(`${skills?.[0]}/release/SKILL.md`).text()).toContain("Tag it.");
 });
 
+test("the coordinator can start an explore helper that may use only the repo's read tools", async () => {
+  const copilot = fakeCopilot();
+  const control = await projectOf(shop, { copilot });
+
+  await ask(control, "How is checkout built?");
+
+  expect(copilot.agents.at(-1)?.map(({ name, tools }) => ({ name, tools }))).toEqual([{ name: "explore", tools: ["repo_read", "repo_search"] }]);
+  expect(copilot.instructions.at(-1)).toContain("start the explore helper with the task tool");
+});
+
+test("the explore helper shows in the project chat as one row, named for its job, without the calls it makes", async () => {
+  const copilot = fakeCopilot({
+    // The runtime's task tool starts the helper; the helper's own events carry its agentId.
+    script: async function* (_prompt, runtime) {
+      yield sdk.toolStart("task-1", "task", undefined, { agent_type: "explore", description: "Find the checkout button", prompt: "Where is CheckoutButton rendered?", mode: "sync" });
+      const { result } = await runtime.tool("repo_search", { pattern: "<CheckoutButton" });
+      yield { ...sdk.toolStart("search-1", "repo_search"), agentId: "explore-1" };
+      yield { ...sdk.toolComplete("search-1", true), agentId: "explore-1" };
+      yield sdk.toolComplete("task-1", true);
+      yield sdk.message("msg-1", String(result));
+      yield sdk.idle();
+    },
+  });
+  const control = await projectOf(shop, { copilot });
+
+  const events = await ask(control, "Where is the checkout button rendered?");
+
+  const rows = events.flatMap(({ event }) => (event.type === "tool-call" && event.toolCallId !== "repo-copy" ? [[event.name, event.status]] : []));
+  expect(rows).toEqual([
+    ["explore: Find the checkout button", "running"],
+    ["explore: Find the checkout button", "succeeded"],
+  ]);
+  expect(replies(events)).toEqual(["src/checkout/Cart.tsx:3:export const Cart = () => <CheckoutButton />;"]);
+  expect([...control.computers.computers.keys()]).toEqual([control.project.id]);
+});
+
 test("when the copy cannot be fetched, the coordinator is told why, and gets no skills", async () => {
   const copilot = fakeCopilot();
   const control = await projectOf({ ...shop, "chiefbot.project.yaml": "skills: [.agents/skills]\n", ".agents/skills/release/SKILL.md": "Tag it.\n" }, { copilot });

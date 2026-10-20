@@ -1,5 +1,6 @@
 import type { ReasoningEffort } from "@chiefbot/contracts";
 import type {
+  CustomAgentConfig,
   ElicitationContext,
   ElicitationResult,
   GitHubTokenProvider,
@@ -38,6 +39,9 @@ export type Copilot = {
   // runs before each of their tool calls (the SDK's onPreMcpToolCall hook).
   // `skillDirectories` are the roots of the skills it may load (a bot's turn's
   // connections); every session names them, so none carry over from an earlier one.
+  // `agents` are helpers the model may start in the session with the runtime's
+  // task tool (the SDK's custom agents), each limited to the tools it names. Only
+  // a coordinator's sessions take them (coordinatorSdk); a bot's has the runtime's own.
   // `questions` answers the agent's ask_user forms (the SDK's elicitation); a
   // session without it has no ask_user tool, so the agent asks in plain text.
   openSession(options: {
@@ -49,6 +53,7 @@ export type Copilot = {
     mcpServers?: Record<string, MCPServerConfig>;
     onMcpCall?: (serverName: string, toolName: string) => Promise<void>;
     skillDirectories?: string[];
+    agents?: CustomAgentConfig[];
     questions?: Questions;
   }): Promise<BotSession>;
 };

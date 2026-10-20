@@ -1,7 +1,7 @@
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, sep } from "node:path";
 import { RepoReadArgs, RepoSearchArgs } from "@chiefbot/contracts";
-import type { Tool } from "@github/copilot-sdk";
+import type { CustomAgentConfig, Tool } from "@github/copilot-sdk";
 import type { z } from "zod";
 
 // The project's repo as its coordinator reads it: a copy of the default branch
@@ -273,7 +273,9 @@ export async function repoSetup(copy: RepoCopy, config: { instructions: string[]
   const instructions = [
     `You can read the repo: a copy of its default branch at commit ${copy.commit}, fetched at the start of this turn. ` +
       "repo_read reads a file or lists a folder, and repo_search searches the text of its files. Answer questions about the code from it, " +
-      "naming the files you found, rather than dispatching an engineer. You cannot change files or run commands: that is the job of the engineers you dispatch.",
+      "naming the files you found, rather than dispatching an engineer. You cannot change files or run commands: that is the job of the engineers you dispatch. " +
+      `For a question that takes many reads, start the ${exploreAgent.name} helper with the task tool (agent_type "${exploreAgent.name}", mode "sync"): ` +
+      "it reads and searches the repo in a context of its own and answers with the files it found.",
     ...(files.length > 0 ? ["The repo's instructions follow. They are written for the agents that change its code: use them to plan the work and to brief engineers.", ...files] : []),
     ...(skipped.length > 0 ? [["These configured paths were skipped:", ...skipped.map((line) => `- ${line}`)].join("\n")] : []),
   ].join("\n\n");
@@ -299,3 +301,16 @@ export function repoTools(copy: RepoCopy) {
     tool("repo_search", "Search the text of the repo's files (its default branch) for a regular expression. Answers path:line:text.", RepoSearchArgs, search),
   ];
 }
+
+// The coordinator's explore helper: a custom agent of its session that the model
+// starts with the runtime's task tool. It reads in a context window of its own,
+// with the repo tools and no other tool, and answers the coordinator.
+export const exploreAgent = {
+  name: "explore",
+  displayName: "Explore",
+  description: "Reads and searches the repo (its default branch) to answer a question about the code that takes many reads. Read-only.",
+  tools: ["repo_read", "repo_search"],
+  prompt:
+    "You answer one question about a repo's code by reading it. repo_search searches the text of its files, and repo_read reads a file or lists a folder. " +
+    "Answer briefly, naming the files and lines your answer rests on. You can only read: you cannot change files or run commands.",
+} satisfies CustomAgentConfig;

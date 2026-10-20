@@ -1,6 +1,7 @@
 import {
   CopilotClient,
   type CopilotClientOptions,
+  type CopilotSession,
   type ElicitationContext,
   type ElicitationHandler,
   type ElicitationResult,
@@ -65,16 +66,22 @@ export function agentEnv(env: Record<string, string | undefined>) {
 
 // The real Copilot SDK in empty mode, for a project's coordinator: no shell, no
 // file tools, no ambient config or skills. Each session can use only the custom
-// tools it is opened with, and skills from the skill folders it names. Session history
-// lives under `baseDirectory`.
+// tools it is opened with, skills from the skill folders it names, and the helpers
+// it names. Session history lives under `baseDirectory`.
 export function coordinatorSdk({ baseDirectory }: { baseDirectory: string }): Copilot {
-  return sdkCopilot({ mode: "empty", baseDirectory, useLoggedInUser: false, env: agentEnv(process.env) }, coordinatorSessionConfig);
+  return sdkCopilot({ mode: "empty", baseDirectory, useLoggedInUser: false, env: agentEnv(process.env) }, coordinatorSessionConfig, onlyOwnHelpers);
 }
 
+// The task tool starts only the session's own helpers, none of the runtime's
+// built-in agents (task, research, rubber-duck and more), which would get every
+// tool of the session. The SDK takes this only as an update of an open session's options.
+const onlyOwnHelpers = (session: CopilotSession) => session.rpc.options.update({ includedBuiltinAgents: [] });
+
 // A coordinator session's config: its tools and its MCP servers' tools are the
-// only ones it may use, plus the runtime's skill tool when it has skill folders
-// (the repo's, in the coordinator's copy: BuiltInTools.Isolated lists the tool as
-// safe in empty mode). Its instructions follow the SDK's own system message.
+// only ones it may use, plus two of the runtime's own, which BuiltInTools.Isolated
+// lists as safe in empty mode: the skill tool when it has skill folders (the
+// repo's, in the coordinator's copy), and the task tool when it has helpers
+// (`agents`), which starts them. Its instructions follow the SDK's own system message.
 export function coordinatorSessionConfig({
   onPermissionRequest,
   tools,
@@ -82,6 +89,7 @@ export function coordinatorSessionConfig({
   mcpServers = {},
   onMcpCall,
   skillDirectories = [],
+  agents = [],
 }: Parameters<Copilot["openSession"]>[0]) {
   const hasMcp = Object.keys(mcpServers).length > 0;
   const hasSkills = skillDirectories.length > 0;
@@ -89,9 +97,15 @@ export function coordinatorSessionConfig({
     onPermissionRequest,
     tools,
     streaming: true,
-    availableTools: [...tools.map(({ name }) => `custom:${name}`), ...(hasMcp ? ["mcp:*"] : []), ...(hasSkills ? ["builtin:skill"] : [])],
+    availableTools: [
+      ...tools.map(({ name }) => `custom:${name}`),
+      ...(hasMcp ? ["mcp:*"] : []),
+      ...(hasSkills ? ["builtin:skill"] : []),
+      ...(agents.length > 0 ? ["builtin:task"] : []),
+    ],
     enableSkills: hasSkills,
     skillDirectories,
+    customAgents: agents,
     ...connectorConfig(mcpServers, onMcpCall),
     ...appended(instructions),
   };
@@ -140,10 +154,12 @@ export function askUser({ ask, ended }: Questions) {
 // and get their tokens from gitHubTokenProvider. An installation session gets a
 // runtime of its own, started with its token in COPILOT_GITHUB_TOKEN, which
 // stops when the session disconnects. Either resumes the session's history
-// when it exists on disk. A session opened with `questions` gets the ask_user tool (askUser).
+// when it exists on disk, then gets `opened` run on it. A session opened with
+// `questions` gets the ask_user tool (askUser).
 function sdkCopilot(
   clientOptions: CopilotClientOptions & { env: Record<string, string | undefined> },
   sessionConfig: (options: Parameters<Copilot["openSession"]>[0]) => ResumeSessionConfig,
+  opened: (session: CopilotSession) => Promise<unknown> = async () => {},
 ): Copilot {
   const shared = new CopilotClient(clientOptions);
   return {
@@ -151,7 +167,7 @@ function sdkCopilot(
       const asks = options.questions && askUser(options.questions);
       const config = { ...sessionConfig(options), ...asks?.config };
       if (options.auth.kind === "seat") {
-        const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
+        const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider }, opened);
         const disconnect = () => {
           asks?.close();
           return session.disconnect();
@@ -159,7 +175,7 @@ function sdkCopilot(
         return { ...bound(session), disconnect };
       }
       const own = new CopilotClient({ ...clientOptions, env: { ...clientOptions.env, COPILOT_GITHUB_TOKEN: options.auth.token } });
-      const session = await openOn(own, options.sessionId, config);
+      const session = await openOn(own, options.sessionId, config, opened);
       const disconnect = async () => {
         asks?.close();
         await own.stop();
@@ -169,11 +185,19 @@ function sdkCopilot(
   };
 }
 
-// Starts the client and resumes the session, or creates it the first time.
-async function openOn(client: CopilotClient, sessionId: string, config: ResumeSessionConfig) {
+// Starts the client and resumes the session, or creates it the first time, then
+// runs `opened` on it. A session `opened` fails on is disconnected.
+async function openOn(client: CopilotClient, sessionId: string, config: ResumeSessionConfig, opened: (session: CopilotSession) => Promise<unknown>) {
   await client.start();
   const existing = await client.getSessionMetadata(sessionId);
-  return existing ? client.resumeSession(sessionId, config) : client.createSession({ ...config, sessionId });
+  const session = existing ? await client.resumeSession(sessionId, config) : await client.createSession({ ...config, sessionId });
+  try {
+    await opened(session);
+  } catch (error) {
+    await session.disconnect().catch(() => {});
+    throw error;
+  }
+  return session;
 }
 
 // The session's methods a BotSession uses, bound to it.

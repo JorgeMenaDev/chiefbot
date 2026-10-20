@@ -13,7 +13,7 @@ import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
 import { modelReport } from "./models.ts";
-import { readable, refreshCopy, repoSetup, repoTools, type RepoCopy } from "./repoCopy.ts";
+import { exploreAgent, readable, refreshCopy, repoSetup, repoTools, type RepoCopy } from "./repoCopy.ts";
 
 export type CoordinatorOptions = {
   // Control's base URL as seen from the computer.
@@ -45,7 +45,8 @@ export type CoordinatorOptions = {
 // control, plus the project's connectors that control sends with each turn,
 // which act as the member whoever pays for Copilot. It reads the repo too: a
 // copy of its default branch that each turn fetches (repoCopy.ts), with its
-// instructions and skills. No shell, and it writes no files. Every call a member's
+// instructions and skills, and through an explore helper in its session.
+// No shell, and it writes no files. Every call a member's
 // session makes to control carries the key of the turn it was opened for. A
 // member who leaves the workspace has their turn dropped and their session stopped.
 export function startCoordinator({ controlUrl, projectId, projectToken, copilot, repoRoot, retryMs = 2000, onBound }: CoordinatorOptions) {
@@ -115,6 +116,7 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       tools,
       instructions: [instructions(project, member), setup.instructions].join("\n\n"),
       skillDirectories: setup.skillDirectories,
+      agents: [exploreAgent],
       mcpServers: connectorServers(connectors, (name) => link.connector(turn, name)),
       onMcpCall: link.reportCalls(connectors, bearer),
     };

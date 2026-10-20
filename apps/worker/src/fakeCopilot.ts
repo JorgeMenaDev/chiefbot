@@ -1,5 +1,5 @@
 import type { ReasoningEffort } from "@chiefbot/contracts";
-import type { ElicitationResult, ElicitationSchema, JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
+import type { CustomAgentConfig, ElicitationResult, ElicitationSchema, JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
 import type { BotSession, Copilot, FileAttachment, SdkModelList } from "./copilot.ts";
 
 // A fake Copilot SDK for tests. Each send() plays a script of real-shaped SDK
@@ -64,6 +64,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const skillDirectories: string[][] = [];
   // Each opened session's instructions, in the order sessions opened.
   const instructions: Array<string | undefined> = [];
+  // Each opened session's custom agents (none: []), in the order sessions opened.
+  const agents: CustomAgentConfig[][] = [];
   // Every turn started, with the model its session was on ("default" before any setModel),
   // that model's reasoning effort (null: its default) and the files attached.
   const sends: Array<{ sessionId: string; prompt: string; model: string; effort: ReasoningEffort | null; files: FileAttachment[] }> = [];
@@ -78,6 +80,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       mcpServers: servers = {},
       onMcpCall,
       skillDirectories: skills = [],
+      agents: helpers = [],
       questions,
     }) {
       if (auth.kind === "installation") tokens.push(auth.token);
@@ -89,6 +92,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       mcpServers.push(servers);
       skillDirectories.push(skills);
       instructions.push(told);
+      agents.push(helpers);
       const handlers = new Set<(event: SessionEvent) => void>();
       const allowed = async (request: PermissionRequest) =>
         (await onPermissionRequest(request, { sessionId })).kind === "approve-once";
@@ -196,7 +200,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
     },
   };
 
-  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, instructions, sends, script, shell };
+  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, instructions, agents, sends, script, shell };
   return fake;
 }
 

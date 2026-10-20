@@ -59,6 +59,20 @@ test("a coordinator session with the repo's skill folders loads skills from them
   expect([config.enableSkills, config.skillDirectories]).toEqual([true, ["/home/bot/repo/.agents/skills"]]);
 });
 
+test("a coordinator session with helpers gets them as custom agents, and the runtime's task tool that starts them", () => {
+  const explore = { name: "explore", tools: ["repo_read", "repo_search"], prompt: "Read the repo." };
+  const config = coordinatorSessionConfig({
+    sessionId: "project_1-user_1",
+    auth: { kind: "seat", gitHubTokenProvider: async () => ({ kind: "token", accessToken: "gho_a", expiresIn: 3600 }) },
+    onPermissionRequest: async () => ({ kind: "reject" }),
+    tools: coordinatorTools(async () => "[]"),
+    agents: [explore],
+  });
+
+  expect(config.availableTools.filter((tool) => !tool.startsWith("custom:"))).toEqual(["builtin:task"]);
+  expect(config.customAgents).toEqual([explore]);
+});
+
 test("a coordinator session with connectors also gets their MCP servers' tools, and reports each call", async () => {
   const reported: string[] = [];
   const config = coordinatorSessionConfig({
