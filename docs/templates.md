@@ -41,7 +41,7 @@ Control checks the keys against the catalog when it reads the file, as the proje
 
 A file that breaks one of these rules is invalid: the project uses its settings alone, and **Settings** shows the error. Settings that break one are not saved (`invalid_settings`), and the error names the key.
 
-In the app, open the project's gear. **Template** has a picker with the catalog. Under it you pick the service this repo is, and for each other service **Stand-in** or **A repo**, with its repo and branch or tag. The project's own service is marked **This repo** and has no repo to pick. **Save** writes the three keys into the settings and keeps their other keys and comments. **Config** then shows each key with its source.
+In the app, open the project's gear. **Template and services** has a picker with the catalog. Under it you pick the service this repo is, and for each other service **Stand-in** or **A repo**, with its repo and branch or tag. The project's own service is marked **This repo** and has no repo to pick. **Save** writes the three keys into the settings and keeps their other keys and comments. **Config** then shows each key with its source.
 
 ## Add one
 

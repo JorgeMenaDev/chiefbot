@@ -70,7 +70,8 @@ test("the picker shows the config's template with its source, and one row per se
   expect(text(html)).toContain("A web app behind a gateway, with its API and database. file None Shop stack");
   expect(select(html, "This repo&#x27;s service")).toContain('<option value="web" selected="">web</option>');
   // The project's own service: no repo to point it at.
-  expect(text(html)).toContain("web This repo Runs from octo-org/shop, in each engineer's own clone.");
+  expect(text(html)).toContain("This repo Which of the template's services octo-org/shop is.");
+  expect(text(html)).toContain("web This repo Runs from octo-org/shop in each engineer's own clone, so edits show live.");
   expect(html).not.toContain('aria-label="Repo of web"');
   expect(html).toContain('aria-label="Repo of api"');
   expect(html).toContain('value="octo-org/api"');

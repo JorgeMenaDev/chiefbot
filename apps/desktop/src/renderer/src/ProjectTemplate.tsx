@@ -51,7 +51,7 @@ export function ProjectTemplate({ project, onSaved }: { project: Project; onSave
   }, []);
   if (catalog === null) {
     return (
-      <Section title="Template">
+      <Section title="Template and services">
         {!error && <Muted>Loading…</Muted>}
         <ErrorText message={error} />
       </Section>
@@ -99,7 +99,7 @@ export function TemplateForm({ project, catalog, onSaved }: { project: Project; 
   const unchanged = JSON.stringify(choice) === JSON.stringify({ template, service, services });
   return (
     <Section
-      title="Template"
+      title="Template and services"
       description="A stack of services each engineer gets beside its code, such as an API, a gateway and a database. Saving writes template, service and services into the settings, over the file's."
     >
       <form className="flex flex-col py-2" onSubmit={(event) => void save(event)}>
@@ -123,7 +123,7 @@ export function TemplateForm({ project, catalog, onSaved }: { project: Project; 
         {picked && (
           <Row
             title="This repo"
-            meta={`The service ${project.repo} is. It runs from each engineer's own clone, so its edits show live.`}
+            meta={`Which of the template's services ${project.repo} is.`}
             actions={
               <Select
                 aria-label="This repo's service"
@@ -155,7 +155,7 @@ export function TemplateForm({ project, catalog, onSaved }: { project: Project; 
                     <Badge variant="info">This repo</Badge>
                   </span>
                 }
-                meta={`Runs from ${project.repo}, in each engineer's own clone.`}
+                meta={`Runs from ${project.repo} in each engineer's own clone, so edits show live.`}
               />
             ) : (
               <ServiceRow
