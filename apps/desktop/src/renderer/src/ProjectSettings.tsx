@@ -2,6 +2,7 @@ import { ConfigKey, ProjectSecret, projectFileName, type Project, type ProjectCo
 import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { z } from "zod";
 import { ErrorText, Muted, PaneBody, Row, Section } from "./Pane.tsx";
+import { ProjectTemplate } from "./ProjectTemplate.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input, Textarea } from "./components/ui/input.tsx";
@@ -9,14 +10,16 @@ import { Input, Textarea } from "./components/ui/input.tsx";
 const SecretList = z.array(ProjectSecret);
 
 // A project's settings view: the settings members keep in the app (the project
-// file's keys, as YAML), the project's secrets, and the config its agents get with
-// where each key comes from. Any member edits them. `onSaved` runs once new
-// settings are saved, so the caller fetches the project again. `children` (the
-// owner's Delete) come last.
+// file's keys, as YAML), a picker for the template keys of those settings, the
+// project's secrets, and the config its agents get with where each key comes from.
+// Any member edits them. `onSaved` runs once new settings are saved, so the caller
+// fetches the project again. `children` (the owner's Delete) come last.
 export function ProjectSettings({ project, onSaved, children }: { project: Project; onSaved: () => void; children?: ReactNode }) {
   return (
     <PaneBody>
-      <SettingsEditor project={project} onSaved={onSaved} />
+      {/* A new editor once settings are saved, from either editor, so it shows them. */}
+      <SettingsEditor key={project.settings} project={project} onSaved={onSaved} />
+      <ProjectTemplate project={project} onSaved={onSaved} />
       <Secrets project={project} />
       <EffectiveConfig project={project} />
       {children}
@@ -52,6 +55,9 @@ const shown: Record<ConfigKey, (config: ProjectConfig) => string> = {
   mcp: ({ mcp }) => list(Object.entries(mcp).map(([name, { command, args }]) => `${name}: ${[command, ...args].join(" ")}`)),
   secrets: ({ secrets }) => list(secrets),
   "workers.max": ({ workers }) => String(workers.max),
+  template: ({ template }) => template ?? notSet,
+  service: ({ service }) => service ?? notSet,
+  services: ({ services }) => list(Object.entries(services).map(([name, source]) => `${name}: ${source === "stand-in" ? source : `${source.repo} at ${source.ref}`}`)),
 };
 
 // Every key, its value and where it comes from: file, settings or its default.
