@@ -46,11 +46,40 @@ test("the picker writes the template, the project's own service and every other 
   expect(ProjectFile.parse(Bun.YAML.parse(written))).toMatchObject({ template: "shop-stack", service: "web", services: { api: { repo: "octo-org/api", ref: "main" }, gateway: "stand-in" } });
 });
 
-test("no template takes the template keys out of the settings, and text that is not YAML is refused", () => {
+test("the picker edits the services already in the settings in place, so their comments stay", () => {
+  const settings = `# Our stack
+template: shop-stack # picked by the team
+service: web
+# where the others run
+services:
+  # the API team's repo
+  api: { repo: octo-org/api, ref: main } # until v2 ships
+  gateway: stand-in # no repo yet
+  web: stand-in
+`;
+
+  const text = withTemplate(settings, {
+    template: "shop-stack",
+    service: "web",
+    services: { api: { repo: "octo-org/api", ref: "v2" }, gateway: { repo: "octo-org/gateway", ref: "main" } },
+  });
+
+  expect(text).toBe(`# Our stack
+template: shop-stack # picked by the team
+service: web
+# where the others run
+services:
+  # the API team's repo
+  api: { repo: octo-org/api, ref: v2 } # until v2 ships
+  gateway: { repo: octo-org/gateway, ref: main }
+`);
+});
+
+test("no template writes template: null, which turns a file's template off, and text that is not YAML is refused", () => {
   const settings = "template: shop-stack\nservice: web\nservices: { gateway: stand-in }\nworkers: { max: 3 }\n";
 
-  expect(withTemplate(settings, { template: undefined, service: undefined, services: {} })).toBe("workers: { max: 3 }\n");
-  expect(withTemplate("", { template: undefined, service: undefined, services: {} })).toBe("");
+  expect(withTemplate(settings, { template: undefined, service: undefined, services: {} })).toBe("template: null\nworkers: { max: 3 }\n");
+  expect(withTemplate("", { template: undefined, service: undefined, services: {} })).toBe("template: null\n");
   expect(withTemplate("commands: [unclosed", { template: "shop-stack", service: "web", services: {} })).toEqual({
     error: "Fix the YAML under Settings first, then pick a template.",
   });
@@ -64,10 +93,11 @@ const select = (html: string, label: string) => html.match(new RegExp(`<select[^
 test("the picker shows the config's template with its source, and one row per service: the project's own marked, each other on a repo or its stand-in", () => {
   const file = ProjectFile.parse({ template: "shop-stack", service: "web", services: { api: { repo: "octo-org/api", ref: "v2" } } });
 
-  const html = renderToStaticMarkup(<TemplateForm project={project(file)} catalog={[template]} onSaved={() => {}} />);
+  const html = renderToStaticMarkup(<TemplateForm project={project(file)} catalog={[template]} blocked={false} onSaved={() => {}} />);
 
   expect(select(html, "Template")).toContain('<option value="shop-stack" selected="">Shop stack</option>');
-  expect(text(html)).toContain("A web app behind a gateway, with its API and database. file None Shop stack");
+  expect(select(html, "Template")).toContain('<option value="">None (overrides the project file)</option>');
+  expect(text(html)).toContain("A web app behind a gateway, with its API and database. file None (overrides the project file) Shop stack");
   expect(select(html, "This repo&#x27;s service")).toContain('<option value="web" selected="">web</option>');
   // The project's own service: no repo to point it at.
   expect(text(html)).toContain("This repo Which of the template's services octo-org/shop is.");
@@ -83,9 +113,16 @@ test("the picker shows the config's template with its source, and one row per se
 });
 
 test("with no template the picker offers the catalog and shows no service rows", () => {
-  const html = renderToStaticMarkup(<TemplateForm project={project(null)} catalog={[template]} onSaved={() => {}} />);
+  const html = renderToStaticMarkup(<TemplateForm project={project(null)} catalog={[template]} blocked={false} onSaved={() => {}} />);
 
   expect(select(html, "Template")).toContain('<option value="" selected="">None</option>');
   expect(html).toContain('<option value="shop-stack">Shop stack</option>');
   expect(html).not.toContain("This repo");
+});
+
+test("while the YAML under Settings has unsaved edits, the picker cannot save, and says why", () => {
+  const html = renderToStaticMarkup(<TemplateForm project={project(null)} catalog={[template]} blocked onSaved={() => {}} />);
+
+  expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Save<\/button>/);
+  expect(text(html)).toContain("Save or undo your edits under Settings first.");
 });

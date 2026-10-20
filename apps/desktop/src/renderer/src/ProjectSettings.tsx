@@ -15,11 +15,15 @@ const SecretList = z.array(ProjectSecret);
 // Any member edits them. `onSaved` runs once new settings are saved, so the caller
 // fetches the project again. `children` (the owner's Delete) come last.
 export function ProjectSettings({ project, onSaved, children }: { project: Project; onSaved: () => void; children?: ReactNode }) {
+  // The YAML editor's text, with the saved settings it started from: once a save
+  // from either editor changes them, it starts again from the new ones.
+  const [draft, setDraft] = useState({ from: project.settings, text: project.settings });
+  const text = draft.from === project.settings ? draft.text : project.settings;
   return (
     <PaneBody>
-      {/* A new editor once settings are saved, from either editor, so it shows them. */}
-      <SettingsEditor key={project.settings} project={project} onSaved={onSaved} />
-      <ProjectTemplate project={project} onSaved={onSaved} />
+      <SettingsEditor project={project} text={text} onText={(next) => setDraft({ from: project.settings, text: next })} onSaved={onSaved} />
+      {/* Its save writes over the saved settings, so it waits for the YAML editor's edits. */}
+      <ProjectTemplate project={project} blocked={text !== project.settings} onSaved={onSaved} />
       <Secrets project={project} />
       <EffectiveConfig project={project} />
       {children}
@@ -55,7 +59,7 @@ const shown: Record<ConfigKey, (config: ProjectConfig) => string> = {
   mcp: ({ mcp }) => list(Object.entries(mcp).map(([name, { command, args }]) => `${name}: ${[command, ...args].join(" ")}`)),
   secrets: ({ secrets }) => list(secrets),
   "workers.max": ({ workers }) => String(workers.max),
-  template: ({ template }) => template ?? notSet,
+  template: ({ template }) => template ?? "None",
   service: ({ service }) => service ?? notSet,
   services: ({ services }) => list(Object.entries(services).map(([name, source]) => `${name}: ${source === "stand-in" ? source : `${source.repo} at ${source.ref}`}`)),
 };
@@ -85,8 +89,8 @@ const example = `commands:
   test: bun test
 secrets: [API_KEY]`;
 
-function SettingsEditor({ project, onSaved }: { project: Project; onSaved: () => void }) {
-  const [text, setText] = useState(project.settings);
+// The settings as YAML: `text` is its draft, which `onText` changes.
+function SettingsEditor({ project, text, onText, onSaved }: { project: Project; text: string; onText: (text: string) => void; onSaved: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -122,7 +126,7 @@ function SettingsEditor({ project, onSaved }: { project: Project; onSaved: () =>
           placeholder={example}
           value={text}
           disabled={busy}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => onText(event.target.value)}
         />
         <div className="flex items-center gap-3">
           <Button size="sm" type="submit" disabled={busy || text === project.settings}>
