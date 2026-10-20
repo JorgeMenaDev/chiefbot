@@ -100,13 +100,16 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
   // Each ended worker's continuation (continueTask): the coordinator turn control
   // queued for it, or NULL when it queued none. One row per worker, so one ending
   // continues its task once, across restarts. Workers that had ended when the
-  // table was made count as continued: an upgrade starts no burst of turns.
-  const continuationsExisted = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_continuations'").get() !== null;
-  db.run(`CREATE TABLE IF NOT EXISTS task_continuations (
-    worker_id TEXT PRIMARY KEY REFERENCES task_workers(id) ON DELETE CASCADE,
-    turn_id TEXT
-  )`);
-  if (!continuationsExisted) db.run(`INSERT INTO task_continuations (worker_id) SELECT id FROM task_workers WHERE state IN (${ended})`);
+  // table was made count as continued: an upgrade starts no burst of turns. One
+  // transaction, so a crash cannot leave the table made but not filled.
+  db.transaction(() => {
+    if (db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_continuations'").get()) return;
+    db.run(`CREATE TABLE task_continuations (
+      worker_id TEXT PRIMARY KEY REFERENCES task_workers(id) ON DELETE CASCADE,
+      turn_id TEXT
+    )`);
+    db.run(`INSERT INTO task_continuations (worker_id) SELECT id FROM task_workers WHERE state IN (${ended})`);
+  })();
   // Approvals wait only while the worker works: a pending one of an ended turn can never be answered.
   const approvals = approvalRecords(db, {
     table: "task_worker_approvals",
@@ -514,7 +517,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
         projects.updateTask(projectId, { number: row.task_number, status: "needs_input", question: STEPS_USED_UP });
         return "used_up";
       }
-      const event = projects.queueSystemTurn(projectId, member.userId, text);
+      const event = projects.queueSystemTurn(projectId, member.userId, text, row.task_number);
       db.query("UPDATE task_continuations SET turn_id = ?2 WHERE worker_id = ?1").run(workerId, event.turnId);
       return { userId: member.userId, event };
     }),

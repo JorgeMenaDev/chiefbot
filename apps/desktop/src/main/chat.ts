@@ -158,8 +158,9 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
   switch (event.type) {
     case "user-message":
       return { ...view, working: "", items: [...view.items, { kind: "user", id: turnId, text: event.text, attachments: event.attachments }] };
+    // A turn control queued itself: the member's composer stays free while it waits.
     case "system-message":
-      return { ...view, working: "", items: [...view.items, { kind: "notice", id: turnId, text: event.text }] };
+      return { ...view, items: [...view.items, { kind: "notice", id: turnId, text: event.text }] };
     case "payer":
       return { ...view, items: [...view.items, { kind: "payer", id: `${turnId}:payer`, payer: event.payer, fallback: event.fallback }] };
     case "text-delta": {
