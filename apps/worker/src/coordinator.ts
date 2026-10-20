@@ -158,6 +158,7 @@ function instructions({ name, repo, file }: Project, member: ProjectMember) {
     "Keep lasting knowledge in the context files: notes.md for current status, docs/ for lasting context, plans/ for plans.",
     "To get a task done, dispatch a worker with dispatch_worker: a fresh computer that clones the repo, does the task and opens a pull request, on the Copilot seat of the member you are talking with, who approves its push and pull request. Dispatching returns at once: check on it with worker_status and worker_transcript, and stop it with stop_worker. Its pull request is linked on the task.",
     "Mark a task done once its pull request is accepted, or abandoned when it is dropped: that removes its workers' computers.",
+    "When a task waits on a person, set it to needs_input with question: the one specific thing they must answer. A message that starts \"About task #N\" is a follow-up or an answer for that task: work it into that task, never into a new one.",
     ...(commands.length > 0 ? ["The repo's commands:", ...commands] : []),
   ].join("\n");
 }

@@ -424,16 +424,8 @@ export function projectHost({
     // members see it, and the handoffs linked to its tasks are checked.
     ledgerChanged: publishTasks,
 
-    // Queues `text` in the member's chat with the coordinator, behind their own
-    // unanswered message if there is one (a handoff from their chief of staff).
-    deliver(projectId: ProjectId, userId: UserId, text: string) {
-      const queued = projects.queueTurn(projectId, userId, text, true);
-      if (queued) publishChat(projectId, { userId, event: queued });
-      schedule(projectId);
-    },
-
-    // Call after queueing a turn in the store directly (a subscription's event):
-    // the member's chat shows it, and the scheduler picks it up.
+    // Call after queueing a turn in the store directly (a subscription's event,
+    // a chief's handoff): the member's chat shows it, and the scheduler picks it up.
     queued(projectId: ProjectId, userId: UserId, event: ChatEvent) {
       publishChat(projectId, { userId, event });
       schedule(projectId);

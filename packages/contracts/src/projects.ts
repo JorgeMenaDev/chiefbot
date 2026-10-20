@@ -60,13 +60,15 @@ export type TaskLink = z.infer<typeof TaskLink>;
 // One task of a project's ledger in control: the only record of its state.
 // `number` counts from 1 per project. `owner` is the GitHub login of the member
 // who owns it, or null. `requestedBy` is the login of the member whose chat
-// created it. Times are epoch milliseconds.
+// created it. `question` is what it waits on while it needs input, else null.
+// Times are epoch milliseconds.
 export const Task = z.object({
   projectId: ProjectId,
   number: z.number().int().min(1),
   title: z.string(),
   detail: z.string(),
   status: TaskStatus,
+  question: z.string().nullable(),
   owner: z.string().nullable(),
   requestedBy: z.string(),
   links: z.array(TaskLink),
@@ -91,6 +93,13 @@ export const UpdateTaskArgs = z.object({
   title: z.string().trim().min(1).max(200).optional(),
   detail: z.string().max(20_000).optional(),
   status: TaskStatus.optional(),
+  question: z
+    .string()
+    .trim()
+    .min(1)
+    .max(2_000)
+    .optional()
+    .describe("With status needs_input: the one specific question a person must answer for the work to go on"),
   owner: z.string().nullable().optional().describe("GitHub login of the member who owns it, or null"),
   links: z.array(TaskLink).optional().describe("Links to add to the task"),
 });

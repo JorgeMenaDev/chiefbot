@@ -38,7 +38,12 @@ export function coordinatorTools(call: (toolCall: CoordinatorToolCall) => Promis
       "Add a task to the project's ledger. Call list_tasks first: when a task already covers the request, update that one instead.",
       CreateTaskArgs,
     ),
-    tool("update_task", "Change a task's title, detail, status or owner, or add links (a pull request, a context file, a page).", UpdateTaskArgs),
+    tool(
+      "update_task",
+      "Change a task's title, detail, status or owner, or add links (a pull request, a context file, a page). " +
+        "Setting status needs_input, put the one thing you need answered in question: whoever asked sees it.",
+      UpdateTaskArgs,
+    ),
     tool("list_tasks", "List the project's tasks, everyone's, newest last.", ListTasksArgs),
     tool("read_context", "Read one of the project's shared context files, or list them all.", ReadContextArgs),
     tool("write_context", "Write one of the project's shared context files (Markdown), replacing its content.", WriteContextArgs),

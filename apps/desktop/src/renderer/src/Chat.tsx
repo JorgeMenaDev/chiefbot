@@ -7,6 +7,7 @@ import { BotComposerControls, useModels } from "./BotComposerControls.tsx";
 import { chatRows, type LaneItem, type ToolItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { chipFor, isImage, uploads, type DraftAttachment } from "./composerAttachments.ts";
+import { HandoffCard, type HandoffItem } from "./HandoffCard.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
@@ -32,8 +33,17 @@ function useChat(botId: BotId) {
 // replies as markdown, tool calls as one-line rows), the bot's status, and the
 // composer at the bottom. Enter sends, Shift+Enter adds a line. Files go with a
 // message; one with only files says their chips. `initialDraft` starts the
-// composer with a message to send (Health's Ask my bot).
-export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: string | undefined }) {
+// composer with a message to send (Health's Ask my bot). `onOpenProject` opens
+// the project of a handoff's card.
+export function Chat({
+  bot,
+  initialDraft = "",
+  onOpenProject,
+}: {
+  bot: Bot;
+  initialDraft?: string | undefined;
+  onOpenProject: (handoff: HandoffItem) => void;
+}) {
   const view = useChat(bot.id);
   const models = useModels();
   const [draft, setDraft] = useState(initialDraft);
@@ -80,7 +90,9 @@ export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: stri
         items={view.items}
         status={working ? view.working || "Working" : null}
         empty={`Send ${bot.name} a message to start.`}
-        renderItem={(item, streaming) => <Message botId={bot.id} item={item} streaming={streaming} readImage={readImage} />}
+        renderItem={(item, streaming) => (
+          <Message botId={bot.id} item={item} streaming={streaming} readImage={readImage} onOpenProject={onOpenProject} />
+        )}
       />
       <Composer
         placeholder={
@@ -110,11 +122,13 @@ function Message({
   item,
   streaming,
   readImage,
+  onOpenProject,
 }: {
   botId: BotId;
   item: LaneItem;
   streaming: boolean;
   readImage: (id: AttachmentId) => Promise<unknown>;
+  onOpenProject: (handoff: HandoffItem) => void;
 }) {
   switch (item.kind) {
     case "user":
@@ -123,8 +137,16 @@ function Message({
       return <AssistantMessage text={item.text} streaming={streaming} />;
     case "error":
       return <ErrorMessage message={item.message} />;
+    case "handoff":
+      return (
+        <HandoffCard
+          item={item}
+          onReply={(reply) => window.chiefbot.chat.replyToHandoff(botId, item.handoffId, reply)}
+          onOpen={() => onOpenProject(item)}
+        />
+      );
     case "notice":
-      // Control's note about a handoff to a project: needs input, or done.
+      // Control's note about a handoff to a project, from before cards: needs input, or done.
       return (
         <Alert variant="info">
           <InfoIcon />
