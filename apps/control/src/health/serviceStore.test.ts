@@ -1,4 +1,8 @@
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EnvironmentId, ServiceId, type ServiceCheck } from "@chiefbot/contracts";
 import { openStore } from "../store.ts";
 import type { SavedEnvironment } from "./serviceStore.ts";
@@ -13,8 +17,8 @@ const prod: SavedEnvironment = {
 };
 const down: ServiceCheck = { at: 1000, status: "down", code: 503, bodyStatus: "DOWN", latencyMs: 40, problem: "Answered 503 and reports DOWN" };
 
-function setup() {
-  const store = openStore(":memory:");
+function setup(path = ":memory:") {
+  const store = openStore(path);
   const userId = store.upsertUser({ githubId: 1, login: "octo", copilotPlan: null });
   const latest = () => store.services.recent(prod.id, 0).map(({ at }) => at);
   return { store, services: store.services, userId, latest };
@@ -54,11 +58,20 @@ test("saving and removing hand back the secret names no environment holds any mo
   expect(services.list(userId)).toEqual([]);
 });
 
-test("a stored check that is no longer a valid result is left out of the report, not thrown", () => {
-  const { store, services, userId } = setup();
-  services.save(userId, service, [prod], 0);
-  services.record(prod, down);
-  services.record(prod, { ...down, at: 2000, problem: "x".repeat(301) });
+test("a stored check that is no longer a valid result, or not JSON, is left out of the report, not thrown", () => {
+  const dir = mkdtempSync(join(tmpdir(), "chiefbot-services-"));
+  try {
+    const path = join(dir, "control.sqlite");
+    const { services, userId } = setup(path);
+    services.save(userId, service, [prod], 0);
+    services.record(prod, down);
+    services.record(prod, { ...down, at: 2000, problem: "x".repeat(301) });
+    const raw = new Database(path);
+    raw.run("INSERT INTO service_checks (environment_id, at, result) VALUES (?1, 3000, '{not json')", [prod.id]);
+    raw.close();
 
-  expect(store.services.recent(prod.id, 0)).toEqual([down]);
+    expect(services.recent(prod.id, 0)).toEqual([down]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

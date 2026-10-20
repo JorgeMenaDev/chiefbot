@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { Environment, RECENT_SERVICE_CHECKS, Service, ServiceAuth, ServiceCheck, ServiceId, type EnvironmentId, type UserId } from "@chiefbot/contracts";
+import { Environment, RECENT_SERVICE_CHECKS, Service, ServiceAuth, ServiceResult, type EnvironmentId, type ServiceCheck, type ServiceId, type UserId } from "@chiefbot/contracts";
 
 // An environment as control checks it: as saved, with the SecretStore name of
 // its secret (null when it does not sign). Each secret written gets a new name,
@@ -152,8 +152,8 @@ export function serviceStore(db: Database) {
         .all(id, since, RECENT_SERVICE_CHECKS)
         .reverse()
         .flatMap(({ at, result }) => {
-          const check = ServiceCheck.safeParse({ ...JSON.parse(result), at });
-          return check.success ? [check.data] : [];
+          const check = ServiceResult.safeParse(parsedJson(result));
+          return check.success ? [{ ...check.data, at }] : [];
         });
     },
 
@@ -162,4 +162,13 @@ export function serviceStore(db: Database) {
       db.query("DELETE FROM service_checks WHERE at < ?1").run(before);
     },
   };
+}
+
+// `text` as JSON, or null when it is not JSON.
+function parsedJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }

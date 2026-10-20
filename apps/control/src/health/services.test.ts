@@ -33,10 +33,11 @@ function fakeNet(answer: (sent: Sent) => Response | Promise<Response>) {
 }
 
 // A SecretStore in memory; `failing` makes it refuse to read services' secrets,
-// and `refusing` to write that value.
+// `refusing` to write that value, and `hold(value)` waits to write it.
 function memorySecrets() {
   const saved = new Map<string, string>();
   const state: { failing: boolean; refusing: string | null } = { failing: false, refusing: null };
+  const held = new Map<string, { reached: () => void; open: Promise<void> }>();
   const store: SecretStore = {
     get: async (name) => {
       if (state.failing && name.startsWith("service-")) throw new Error("PERMISSION_DENIED on the secret");
@@ -44,12 +45,24 @@ function memorySecrets() {
     },
     put: async (name, value) => {
       if (value === state.refusing) throw new Error("PERMISSION_DENIED on the secret");
+      const hold = held.get(value);
+      if (hold) {
+        hold.reached();
+        await hold.open;
+      }
       saved.set(name, value);
     },
     delete: async (name) => void saved.delete(name),
   };
   const services = () => [...saved].filter(([name]) => name.startsWith("service-"));
-  return { store, services, state };
+  // Holds the write of `value` until release(); `reached` settles once it waits.
+  const hold = (value: string) => {
+    const reached = Promise.withResolvers<void>();
+    const open = Promise.withResolvers<void>();
+    held.set(value, { reached: reached.resolve, open: open.promise });
+    return { reached: reached.promise, release: open.resolve };
+  };
+  return { store, services, state, hold };
 }
 
 async function setup(answer: (sent: Sent) => Response | Promise<Response> = up, secrets?: SecretStore) {
@@ -169,6 +182,54 @@ test("a save that cannot write every new secret changes nothing, and leaves none
     ["meta-preprod.example.com", "preprod-key-0123"],
     ["meta.example.com", `Bearer ${token}`],
   ]);
+});
+
+test("a person's saves of one service run one after another, so neither signs with a secret the other replaced", async () => {
+  const secrets = memorySecrets();
+  const { user, sent } = await setup(up, secrets.store);
+  const service = await add(user);
+  const [prod, preprod, int] = asSaved(service).environments;
+  if (!prod || !preprod || !int) throw new Error("expected three environments");
+  const edit = (environments: object[]) => user.api("PUT", `/health/services/${service.id}`, { ...asSaved(service), environments });
+
+  // The first save waits on its new preprod key while the second replaces prod's token.
+  const held = secrets.hold("new-preprod-key");
+  const first = edit([prod, { ...preprod, secret: "new-preprod-key" }, int]);
+  await held.reached;
+  const second = edit([{ ...prod, secret: "new-prod-token" }, preprod, int]);
+  await Bun.sleep(20);
+  held.release();
+
+  expect([(await first).status, (await second).status]).toEqual([200, 200]);
+  expect(secrets.services().map(([, value]) => value).sort()).toEqual(["new-preprod-key", "new-prod-token"]);
+  await checkAll(user);
+  expect(sent.map(({ host, headers }) => [host, headers.authorization ?? headers["X-API-Key"] ?? null]).sort()).toEqual([
+    ["meta-int.example.com", null],
+    ["meta-preprod.example.com", "new-preprod-key"],
+    ["meta.example.com", "Bearer new-prod-token"],
+  ]);
+});
+
+test("a Remove waits for a save of the service before it, and an edit after it finds the service gone", async () => {
+  const secrets = memorySecrets();
+  const { user } = await setup(up, secrets.store);
+  const service = await add(user);
+  const saved = asSaved(service);
+  const [prod, ...rest] = saved.environments;
+  if (!prod) throw new Error("expected prod");
+
+  const held = secrets.hold("new-prod-token");
+  const first = user.api("PUT", `/health/services/${service.id}`, { ...saved, environments: [{ ...prod, secret: "new-prod-token" }, ...rest] });
+  await held.reached;
+  const removed = user.api("DELETE", `/health/services/${service.id}`);
+  await Bun.sleep(20);
+  const late = user.api("PUT", `/health/services/${service.id}`, saved);
+  await Bun.sleep(20);
+  held.release();
+
+  expect([(await first).status, (await removed).status, (await late).status]).toEqual([200, 204, 404]);
+  expect((await report(user)).services).toEqual([]);
+  expect(secrets.services()).toEqual([]);
 });
 
 test("a Test waiting for its turn never signs with a secret saved after it was asked: that one is for another URL", async () => {

@@ -59,6 +59,8 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
   const running = new Map<EnvironmentId, { job: Promise<void>; abort: AbortController }>();
   const tests = new Set<AbortController>();
   const inTurn = slots(SERVICE_CONCURRENCY);
+  // A person's saves and removes run one at a time, each on what the last one left.
+  const inOrder = queue();
 
   // The saved secret `name`, or null when the store refuses, has none (it was
   // replaced or removed), or gives none within SERVICE_TIMEOUT_MS.
@@ -134,16 +136,24 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
     }));
   }
 
-  // Saves the person's service from the body: new when `existing` is null, else
+  // Saves the person's service `id` from the body, or a new one when `id` is
+  // null, once their saves and removes before it are done (404 when it went).
+  async function save(userId: UserId, req: Request, id: ServiceId | null) {
+    const input = ServiceInput.safeParse((await jsonWithin(req, BODY_LIMIT))?.json ?? null);
+    if (!input.success) return apiError(400, "invalid_service", z.prettifyError(input.error));
+    return inOrder(userId, async () => {
+      const existing = id === null ? null : store.services.get(userId, id);
+      return id !== null && !existing ? apiError(404, "not_found") : commit(userId, input.data, existing);
+    });
+  }
+
+  // Saves `input` as the person's service: new when `existing` is null, else
   // replacing it. An environment's secret is needed when its authentication
   // signs, unless the saved one is kept. New secrets are written first, each
   // under a new name; then the service and the names its environments use are
   // saved at once; then the secrets no environment names any more go. When a
   // step fails, what it wrote goes and the service stays as it was.
-  async function save(userId: UserId, req: Request, existing: Service | null) {
-    const input = ServiceInput.safeParse((await jsonWithin(req, BODY_LIMIT))?.json ?? null);
-    if (!input.success) return apiError(400, "invalid_service", z.prettifyError(input.error));
-    const { name, icon, environments } = input.data;
+  async function commit(userId: UserId, { name, icon, environments }: ServiceInput, existing: Service | null) {
     const before = new Map(existing ? store.services.saved(userId, existing.id).map((environment) => [environment.id, environment]) : []);
     for (const environment of environments) {
       if (environment.id && !before.has(environment.id)) return apiError(400, "invalid_service", `${environment.name} is not an environment of this service`);
@@ -216,12 +226,6 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
       const user = store.userForSession(bearer(req));
       return user ? handle(user.id, req) : unauthorized();
     };
-  // Runs a route of one of the person's services; 404 when it is not theirs.
-  const ofService = (handle: (userId: UserId, service: Service, req: Request) => Response | Promise<Response>) =>
-    signedIn((userId, req: Bun.BunRequest<"/health/services/:id">) => {
-      const service = store.services.get(userId, ServiceId.parse(req.params.id));
-      return service ? handle(userId, service, req) : apiError(404, "not_found");
-    });
 
   const routes = {
     "/health/services": {
@@ -237,12 +241,16 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
       POST: signedIn(test),
     },
     "/health/services/:id": {
-      PUT: ofService((userId, service, req) => save(userId, req, service)),
-      DELETE: ofService(async (userId, service) => {
-        changed(service);
-        await forget(store.services.remove(userId, service.id));
-        return new Response(null, { status: 204 });
-      }),
+      PUT: signedIn((userId, req: Bun.BunRequest<"/health/services/:id">) => save(userId, req, ServiceId.parse(req.params.id))),
+      DELETE: signedIn((userId, req: Bun.BunRequest<"/health/services/:id">) =>
+        inOrder(userId, async () => {
+          const service = store.services.get(userId, ServiceId.parse(req.params.id));
+          if (!service) return apiError(404, "not_found");
+          changed(service);
+          await forget(store.services.remove(userId, service.id));
+          return new Response(null, { status: 204 });
+        }),
+      ),
     },
     "/health/services/:id/check": {
       POST: signedIn(async (userId, req: Bun.BunRequest<"/health/services/:id/check">) => {
@@ -282,5 +290,23 @@ function slots(max: number) {
       if (next) next();
       else if (--person.active === 0) people.delete(userId);
     }
+  };
+}
+
+// Runs each person's jobs one after another, in the order they came; another
+// person's do not wait. A job that fails does not stop the next.
+function queue() {
+  const last = new Map<UserId, Promise<void>>();
+  return <T>(userId: UserId, job: () => Promise<T>): Promise<T> => {
+    const run = (last.get(userId) ?? Promise.resolve()).then(job);
+    const settled = run.then(
+      () => {},
+      () => {},
+    );
+    last.set(userId, settled);
+    void settled.then(() => {
+      if (last.get(userId) === settled) last.delete(userId);
+    });
+    return run;
   };
 }
