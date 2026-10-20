@@ -1,6 +1,6 @@
 import { SETUP_LOG_MAX, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
-import { closeSync, openSync, readSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { closeSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { join, sep } from "node:path";
 import { secretRedactor } from "./secretRedactor.ts";
 
 // Runs one setup command of an engineer: `sh -c command` in `cwd`, with `env`
@@ -45,9 +45,11 @@ const instructionMax = 64 * 1024;
 // the repo into <workspace>/<repo name> and runs the setup command there with
 // the project's secrets, each step reported as it ends. Its log is the end of its
 // output with every secret hidden (secretRedactor.ts) as it streams, before it
-// is cut to SETUP_LOG_MAX, so no cut leaves a piece of one. Then reads the repo's instruction files and finds its skill
-// folders; a configured one the repo lacks is left out. A step that fails stops
-// the setup: `failed` is that step, reported last.
+// is cut to SETUP_LOG_MAX, so no cut leaves a piece of one. Then reads the
+// repo's instruction files and finds its skill folders; a configured one the
+// repo lacks is left out, and so is any that leads outside the clone or holds a
+// link that does. A step that fails stops the setup: `failed` is that step,
+// reported last.
 export async function setUpEngineer({
   setup,
   workspace,
@@ -82,11 +84,18 @@ export async function setUpEngineer({
     if (ran.exitCode !== 0) return { failed: ran };
   }
 
+  // Where the clone really is: a file or folder counts only when it resolves
+  // inside it, so no link (or a clone that is one) leads the agent elsewhere.
+  const root = join(realpathSync(workspace), name);
   const files = [...new Set([...defaultInstructions, ...setup.instructions])].flatMap((path) => {
-    const text = readFileStart(join(clone, path), instructionMax);
+    const real = within(root, join(clone, path));
+    const text = real === null ? null : readFileStart(real, instructionMax);
     return text === null ? [] : [{ path, text }];
   });
-  const skills = setup.skills.filter((path) => isDirectory(join(clone, path)));
+  const skills = setup.skills.filter((path) => {
+    const real = within(root, join(clone, path));
+    return real !== null && isDirectory(real) && linksStayIn(root, real);
+  });
   return {
     clone,
     instructions: engineerInstructions(setup, clone, files),
@@ -121,3 +130,19 @@ function readFileStart(path: string, max: number): string | null {
 }
 
 const isDirectory = (path: string) => statSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
+
+// The real path of `path`, links followed, when it is `root` or inside it; null
+// when it is outside, or leads nowhere.
+function within(root: string, path: string): string | null {
+  let real: string;
+  try {
+    real = realpathSync(path);
+  } catch {
+    return null;
+  }
+  return real === root || real.startsWith(root + sep) ? real : null;
+}
+
+// Whether every link anywhere in the folder `dir` leads inside `root`.
+const linksStayIn = (root: string, dir: string) =>
+  readdirSync(dir, { recursive: true, withFileTypes: true }).every((entry) => !entry.isSymbolicLink() || within(root, join(entry.parentPath, entry.name)) !== null);
