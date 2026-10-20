@@ -50,12 +50,14 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const mcpServers: Array<Record<string, MCPServerConfig>> = [];
   // Each opened session's skill roots, in the order sessions opened.
   const skillDirectories: string[][] = [];
+  // Each opened session's instructions, in the order sessions opened.
+  const instructions: Array<string | undefined> = [];
   // Every turn started, with the model its session was on ("default" before any setModel),
   // that model's reasoning effort (null: its default) and the files attached.
   const sends: Array<{ sessionId: string; prompt: string; model: string; effort: ReasoningEffort | null; files: FileAttachment[] }> = [];
 
   const copilot: Copilot = {
-    async openSession({ sessionId, auth, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall, skillDirectories: skills = [] }) {
+    async openSession({ sessionId, auth, onPermissionRequest, tools, instructions: told, mcpServers: servers = {}, onMcpCall, skillDirectories: skills = [] }) {
       if (auth.kind === "installation") tokens.push(auth.token);
       else {
         const token = await auth.gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
@@ -64,6 +66,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       sessionIds.push(sessionId);
       mcpServers.push(servers);
       skillDirectories.push(skills);
+      instructions.push(told);
       const handlers = new Set<(event: SessionEvent) => void>();
       const allowed = async (request: PermissionRequest) =>
         (await onPermissionRequest(request, { sessionId })).kind === "approve-once";
@@ -152,7 +155,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
     },
   };
 
-  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, sends, script, shell };
+  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, instructions, sends, script, shell };
   return fake;
 }
 
@@ -186,10 +189,10 @@ export const sdk = {
     type: "assistant.message",
     data: { messageId, content },
   }),
-  toolStart: (toolCallId: string, toolName: string, toolTitle?: string): SessionEvent => ({
+  toolStart: (toolCallId: string, toolName: string, toolTitle?: string, args?: JsonValue): SessionEvent => ({
     ...envelope(),
     type: "tool.execution_start",
-    data: { toolCallId, toolName, ...(toolTitle === undefined ? {} : { toolTitle }) },
+    data: { toolCallId, toolName, ...(toolTitle === undefined ? {} : { toolTitle }), ...(args === undefined ? {} : { arguments: args }) },
   }),
   toolComplete: (toolCallId: string, success: boolean): SessionEvent => ({
     ...envelope(),

@@ -1,5 +1,6 @@
 import type { SessionEvent } from "@github/copilot-sdk";
 import type { TurnEvent } from "@chiefbot/contracts";
+import { computerRow, computerToolName } from "./computerUse.ts";
 
 // What one running turn has streamed so far: the messages that came in chunks
 // and each tool call's name, so a completion can say which tool finished.
@@ -21,8 +22,10 @@ export function toTurnEvents(event: SessionEvent, { deltaMessageIds, toolNames }
     case "assistant.message":
       if (deltaMessageIds.has(event.data.messageId) || !event.data.content) return [];
       return [{ type: "text-delta", messageId: event.data.messageId, text: event.data.content }];
+    // A computer call's row also names its actions.
     case "tool.execution_start": {
-      const name = event.data.toolTitle ?? event.data.toolName;
+      const { toolName, toolTitle, arguments: args } = event.data;
+      const name = toolName === computerToolName ? computerRow(args) : (toolTitle ?? toolName);
       toolNames.set(event.data.toolCallId, name);
       return [{ type: "tool-call", toolCallId: event.data.toolCallId, name, status: "running" }];
     }

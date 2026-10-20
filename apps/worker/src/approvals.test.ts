@@ -38,6 +38,7 @@ const cases: Array<[string, PermissionRequest, [Asks, Asks, Asks, Asks]]> = [
   ["create_pull_request, which control asks for", fakeRequest.tool("create_pull_request", {}), ["runs", "runs", "runs", "runs"]],
   ["a chief tool that reads", fakeRequest.tool("list_projects", {}), ["runs", "runs", "runs", "runs"]],
   ["a chief tool that hands work off", fakeRequest.tool("send_to_project", { brief: "Fix the login" }), ["tool", "tool", "runs", "runs"]],
+  ["the computer tool, on the bot's own screen", fakeRequest.tool("computer", { actions: [{ kind: "screenshot" }] }), ["tool", "tool", "runs", "runs"]],
   ["a tool the worker does not know", fakeRequest.tool("deploy", {}), ["tool", "tool", "runs", "runs"]],
   ["a memory", { kind: "memory", action: "store", fact: "The owner prefers short replies" }, ["tool", "tool", "runs", "runs"]],
   ["a hook", { kind: "hook", toolName: "bash", hookMessage: "Confirm this command" }, ["tool", "tool", "runs", "runs"]],
@@ -58,4 +59,13 @@ test.each(cases)("%s: what each access mode asks", (_name, request, expected) =>
 test("a supervised command or file change shows the user exactly what runs", () => {
   expect(approvalFor(fakeRequest.readOnlyShell("cat notes.txt"), [], "supervised")).toEqual({ kind: "command", detail: "cat notes.txt" });
   expect(approvalFor(fakeRequest.write("/home/bot/workspace/a.ts"), [], "supervised")).toEqual({ kind: "file-change", detail: "/home/bot/workspace/a.ts" });
+});
+
+test("a supervised computer call shows the user its action list", () => {
+  const actions = [{ kind: "click", at: { x: 10, y: 20 } }, { kind: "type", text: "hello" }];
+
+  expect(approvalFor(fakeRequest.tool("computer", { actions }), [], "supervised")).toEqual({
+    kind: "tool",
+    detail: 'computer {"actions":[{"kind":"click","at":{"x":10,"y":20}},{"kind":"type","text":"hello"}]}',
+  });
 });

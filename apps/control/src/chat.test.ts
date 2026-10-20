@@ -249,6 +249,37 @@ test("taking over pauses a running turn: its next tool call waits until hand-bac
   expect(ran).toEqual(["clicked\n"]);
 });
 
+test("the bot operates its own screen, told so in its instructions; taking over mid-batch stops it before the next action", async () => {
+  const { api, computers, onlineBot, send, watchChat } = await setup();
+  const bot = await onlineBot("Ada");
+  let release = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  computers.display.hold = async (command) => {
+    if (command[1] === "mousemove") await held;
+  };
+  const results: unknown[] = [];
+  computers.copilot.script = async function* (_prompt, runtime) {
+    const actions = [{ kind: "click", at: { x: 10, y: 20 } }, { kind: "type", text: "not now" }];
+    results.push((await runtime.tool("computer", { actions })).result);
+    yield sdk.idle();
+  };
+  const chat = watchChat(bot.id);
+  await send(bot.id, "click the search box and type");
+  await eventually(() => computers.display.commands.length > 0);
+
+  await api("POST", `/bots/${bot.id}/take-over`);
+  for (let i = 0; computers.computers.get(bot.id)?.worker?.screenControl() !== "human"; i++) {
+    if (i > 100) throw new Error("the worker never heard of the take-over");
+    await Bun.sleep(10);
+  }
+  release();
+  await chat.until(doneCount(1));
+
+  expect(computers.copilot.instructions.at(-1)).toContain("`computer` tool");
+  expect(computers.display.commands.some((command) => command[1] === "type")).toBe(false);
+  expect(results).toMatchObject([{ textResultForLlm: JSON.stringify({ ran: 1, cursor: computers.display.cursor, error: "the person has the screen" }) }]);
+});
+
 test("an approval answered while the human has the screen runs its tool call only after hand-back", async () => {
   const { api, computers, onlineBot, send, watchChat } = await setup();
   const bot = await onlineBot("Ada");

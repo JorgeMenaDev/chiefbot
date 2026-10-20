@@ -18,6 +18,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
+import { computerInstructions, computerTool, displayCommands, type CommandRunner } from "./computerUse.ts";
 import { connectionsRoot as defaultConnectionsRoot, stageConnections } from "./connections.ts";
 import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
@@ -41,6 +42,9 @@ export type WorkerOptions = {
   copilot: Copilot;
   // The computer's VNC server. Default: x11vnc on 127.0.0.1:5900.
   screen?: ScreenAddress;
+  // Runs the computer tool's xdotool and scrot commands on the screen. Default:
+  // on display :1 (computerUse.ts); a fake display in tests.
+  screenCommands?: CommandRunner;
   // Unix socket where git's credential helper (gitCredential.ts) asks for the
   // bot's credential for control's git proxy. No socket when unset.
   gitSocket?: string;
@@ -65,7 +69,10 @@ export type WorkerOptions = {
 // streams their events back. After each bind it reports the models the owner's
 // Copilot plan offers.
 // On `screen-open` it pipes the screen to a viewer through control (screen.ts).
-// While the human has the screen (take-over), every tool call waits for hand-back.
+// The agent sees and operates that screen with its `computer` tool, which its
+// instructions name (computerUse.ts).
+// While the human has the screen (take-over), every tool call waits for hand-back,
+// and a computer call already running stops before its next action.
 // Risky tool calls (approvals.ts) wait for the user's answer, which control relays.
 // Pushes and pull requests go through control, which asks the user itself.
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
@@ -84,6 +91,7 @@ export function startWorker({
   copilot,
   gitSocket,
   screen = { hostname: "127.0.0.1", port: 5900 },
+  screenCommands = displayCommands,
   retryMs = 2000,
   onBound,
   onModelsError,
@@ -212,8 +220,12 @@ export function startWorker({
     await (await previous?.session.catch(() => null))?.disconnect();
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
-    const tools = [pullRequestTool({ base, turnKey }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : [])];
-    const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, skillDirectories };
+    const tools = [
+      pullRequestTool({ base, turnKey }),
+      computerTool({ run: screenCommands, agentHasScreen: () => screenControl === "agent" }),
+      ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : []),
+    ];
+    const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, instructions: computerInstructions, skillDirectories };
     // A chief always runs on its owner's own Copilot seat.
     const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
       if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));

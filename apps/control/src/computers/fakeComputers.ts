@@ -6,6 +6,7 @@ import { startWorker } from "@chiefbot/worker";
 import { startCoordinator } from "@chiefbot/worker/coordinator";
 import type { Clock } from "@chiefbot/worker/clock";
 import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
+import { fakeDisplay } from "@chiefbot/worker/fake-display";
 import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 
 // An in-memory ComputerProvider for tests. A running computer is the real worker
@@ -18,7 +19,8 @@ import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 // time: they share the path). Workers renew organizations' tokens on `clock`.
 // Bots' workers stage their turns' connections under `connectionsRoot` (a new
 // temporary folder by default), never the real computer's /tmp/chiefbot, and save
-// the files sent with messages in another new temporary folder.
+// the files sent with messages in another new temporary folder. Their computer
+// tools all drive one fake `display`.
 export function fakeComputers({
   copilot = fakeCopilot(),
   gitSocket,
@@ -34,6 +36,7 @@ export function fakeComputers({
   };
   const computers = new Map<ComputerId, FakeComputer>();
   const attachmentsRoot = mkdtempSync(join(tmpdir(), "chiefbot-attachments-"));
+  const display = fakeDisplay();
   // Every destroy call, so tests can check whether data was kept.
   const destroyed: Array<{ id: ComputerId; deleteData: boolean }> = [];
   // What each bot's screen received from viewers, decoded as text.
@@ -102,6 +105,7 @@ export function fakeComputers({
         ...agent,
         copilot: copilot.copilot,
         screen: { hostname: "127.0.0.1", port: computer.screen.port },
+        screenCommands: display.run,
         ...(gitSocket === undefined ? {} : { gitSocket }),
         ...(clock === undefined ? {} : { clock }),
         connectionsRoot,
@@ -131,6 +135,7 @@ export function fakeComputers({
     computers,
     destroyed,
     screenInput,
+    display,
     stopAll: () => {
       for (const computer of computers.values()) halt(computer);
     },

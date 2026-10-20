@@ -3,7 +3,8 @@
 # root: `docker build -f infra/computer/Dockerfile .`. The first stage bundles
 # the worker into dist/worker.js and pins the Copilot SDK in dist/package.json
 # (infra/computer/build.ts). start.sh brings up the screen (Xvfb, Openbox,
-# Chromium, x11vnc on loopback) and then runs the worker. The image carries every
+# Chromium, x11vnc on loopback) and then runs the worker, whose `computer` tool
+# drives that screen with xdotool and sees it with scrot (apps/worker/src/computerUse.ts). The image carries every
 # connection's CLI (connections/), never a connection's fields.
 FROM oven/bun:1-slim AS dist
 WORKDIR /src
@@ -14,7 +15,7 @@ FROM oven/bun:1-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates \
-     xvfb openbox x11vnc chromium fonts-liberation \
+     xvfb openbox x11vnc chromium fonts-liberation xdotool scrot \
   && rm -rf /var/lib/apt/lists/*
 
 # Every connection's CLI, from its connections/<name>/install.sh (run as root,
