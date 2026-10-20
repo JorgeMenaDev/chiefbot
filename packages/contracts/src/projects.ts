@@ -4,6 +4,7 @@ import { AgentConnector, ConnectorName } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
 import { RepoFullName } from "./repos.ts";
+import { TemplateName, TemplateServiceName } from "./templates.ts";
 import type { TaskWorker, TaskWorkerState } from "./taskWorkers.ts";
 import { VerdictLine, VerdictResult } from "./verification.ts";
 import { CopilotPayer } from "./workspaces.ts";
@@ -35,11 +36,27 @@ export type ProjectCommands = z.infer<typeof ProjectCommands>;
 
 // A stdio MCP server that runs inside the project's workers only.
 export const ProjectMcpServer = z.strictObject({ command: z.string().trim().min(1).max(500), args: z.array(z.string().max(2000)).max(50).default([]) });
-// The stdio servers by name. A record drops a "__proto__" key without a word,
-// so one is refused before it gets there.
-const ProjectMcpServers = z
-  .custom<object>((servers) => typeof servers !== "object" || servers === null || !Object.hasOwn(servers, "__proto__"), "__proto__ cannot name a server")
-  .pipe(z.record(ConnectorName, ProjectMcpServer));
+// A record by name. A record drops a "__proto__" key without a word, so one is
+// refused before it gets there.
+const NamedRecord = <K extends z.ZodType<string>, V extends z.ZodType>(name: K, value: V, what: string) =>
+  z
+    .custom<object>((record) => typeof record !== "object" || record === null || !Object.hasOwn(record, "__proto__"), `__proto__ cannot name a ${what}`)
+    .pipe(z.record(name, value));
+
+// The stdio servers by name.
+const ProjectMcpServers = NamedRecord(ConnectorName, ProjectMcpServer, "server");
+
+// A branch or tag of a repo: no space, no "..", and no "-" first.
+const GitRef = z
+  .string()
+  .max(200)
+  .regex(/^\w[\w./-]*$/, "expected a branch or tag, like main or v1.2")
+  .refine((ref) => !ref.includes(".."), "expected a branch or tag, like main or v1.2");
+
+// What a template service of the project runs from: a repo at a branch or tag (its
+// image builds from the service's context in that repo), or the template's stand-in.
+export const ServiceSource = z.union([z.literal("stand-in"), z.strictObject({ repo: RepoFullName, ref: GitRef })]);
+export type ServiceSource = z.infer<typeof ServiceSource>;
 
 // The repo's chiefbot.project.yaml, at its root on the default branch, and the
 // project's settings in the app: the same keys, every one optional. Unknown keys
@@ -52,6 +69,9 @@ const ProjectMcpServers = z
 //   mcp           stdio MCP servers, by name, that run inside workers only
 //   secrets       the names of the project's secrets; members set their values in the app
 //   workers.max   how many worker computers the project runs at once
+//   template      the catalog's template (templates/<name>) whose services engineers get (docs/templates.md)
+//   service       the template service this repo is: it runs from the engineer's own clone
+//   services      the template's other services, by name: { repo, ref } or stand-in (the default)
 export const ProjectFile = z.strictObject({
   instructions: z.array(RepoPath).max(50).optional(),
   commands: ProjectCommands.optional(),
@@ -61,6 +81,9 @@ export const ProjectFile = z.strictObject({
   mcp: ProjectMcpServers.optional(),
   secrets: z.array(SecretName).max(50).optional(),
   workers: z.strictObject({ max: z.int().min(1).max(10).optional() }).optional(),
+  template: TemplateName.optional(),
+  service: TemplateServiceName.optional(),
+  services: NamedRecord(TemplateServiceName, ServiceSource, "service").optional(),
 });
 export type ProjectFile = z.infer<typeof ProjectFile>;
 
@@ -88,6 +111,9 @@ export const ProjectConfig = z.object({
   mcp: z.record(ConnectorName, ProjectMcpServer).default({}),
   secrets: z.array(SecretName).default([]),
   workers: z.object({ max: z.int().default(DEFAULT_WORKERS_MAX) }).default({ max: DEFAULT_WORKERS_MAX }),
+  template: TemplateName.optional(),
+  service: TemplateServiceName.optional(),
+  services: z.record(TemplateServiceName, ServiceSource).default({}),
 });
 export type ProjectConfig = z.infer<typeof ProjectConfig>;
 
@@ -112,6 +138,9 @@ export const ConfigKey = z.enum([
   "mcp",
   "secrets",
   "workers.max",
+  "template",
+  "service",
+  "services",
 ]);
 export type ConfigKey = z.infer<typeof ConfigKey>;
 export const ConfigSources = z.partialRecord(ConfigKey, z.enum(["file", "settings"]));
@@ -141,6 +170,9 @@ export function effectiveConfig(file: ProjectFile | null, settings: ProjectFile)
     mcp: pick("mcp", settings.mcp, file?.mcp),
     secrets: pick("secrets", settings.secrets, file?.secrets),
     workers: { max: pick("workers.max", settings.workers?.max, file?.workers?.max) },
+    template: pick("template", settings.template, file?.template),
+    service: pick("service", settings.service, file?.service),
+    services: pick("services", settings.services, file?.services),
   });
   return { config, sources };
 }
