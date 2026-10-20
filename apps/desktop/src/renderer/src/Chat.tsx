@@ -39,6 +39,8 @@ export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: stri
   const [draft, setDraft] = useState(initialDraft);
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // A message is on its way: the composer keeps it as sent until control answers.
+  const [sending, setSending] = useState(false);
   // The chat's sent images, read as they come into view; the last few kept.
   const [readImage] = useState(() => recentReads((id: AttachmentId) => window.chiefbot.chat.attachment(bot.id, id), 8));
   const working = view.working !== null;
@@ -46,7 +48,8 @@ export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: stri
   const humanHasScreen = bot.screenControl === "human";
   // Null while a file is still being read: the message waits for it.
   const files = uploads(attachments);
-  const canSend = bot.status === "online" && !humanHasScreen && !working && files !== null && (draft.trim() !== "" || attachments.length > 0);
+  const canSend =
+    bot.status === "online" && !humanHasScreen && !working && !sending && files !== null && (draft.trim() !== "" || attachments.length > 0);
   // Images reach only a model that sees them; another finds them on disk.
   const model = models.models.find(({ id }) => id === bot.model);
   const notice =
@@ -57,6 +60,7 @@ export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: stri
   async function submit() {
     if (!canSend || !files) return;
     setError(null);
+    setSending(true);
     try {
       const text = draft.trim() === "" ? files.map(({ name }) => chipFor(name)).join(" ") : draft;
       await window.chiefbot.chat.send(bot.id, text, files);
@@ -64,6 +68,8 @@ export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: stri
       setAttachments([]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setSending(false);
     }
   }
 
@@ -88,6 +94,7 @@ export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: stri
         onDraft={setDraft}
         onSend={() => void submit()}
         canSend={canSend}
+        locked={sending}
         error={error}
         notice={notice}
         attachments={{ items: attachments, onChange: setAttachments }}

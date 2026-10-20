@@ -1,6 +1,7 @@
 import { MAX_ATTACHMENT_BYTES } from "@chiefbot/contracts";
 import { expect, test } from "bun:test";
-import { admit, reserve, typeOf, uniqueName, uploads, type DraftAttachment } from "./composerAttachments.ts";
+import type { SetStateAction } from "react";
+import { admit, readInto, reserve, typeOf, uniqueName, uploads, type DraftAttachment } from "./composerAttachments.ts";
 
 const file = (name: string, bytes = 1) => new File([new Uint8Array(bytes)], name);
 
@@ -43,4 +44,43 @@ test("a message sends its files only once every one is read", () => {
   expect(uploads([draft("aGk="), draft(null)])).toBeNull();
   expect(uploads([draft("aGk=")])).toEqual([{ name: "a.txt", mimeType: "text/plain", data: "aGk=" }]);
   expect(uploads([])).toEqual([]);
+});
+
+test("a read that ends after its file was removed changes nothing, even with a new file of its name", async () => {
+  // Reads the test ends by hand, by file name.
+  const reads = new Map<string, { resolve: (data: string) => void; reject: () => void }>();
+  const read = (file: File) => new Promise<string>((resolve, reject) => reads.set(file.name, { resolve, reject: () => reject(new Error("unreadable")) }));
+  let files: DraftAttachment[] = [];
+  const setFiles = (next: SetStateAction<DraftAttachment[]>) => void (files = typeof next === "function" ? next(files) : next);
+  const failed: string[] = [];
+  const attach = (picked: File[]) => {
+    const { reserved } = reserve(picked, files);
+    files = [...files, ...reserved.map(({ attachment }) => attachment)];
+    readInto(reserved, { files: () => files, setFiles, onFailed: ({ id }) => failed.push(id), read });
+    return reserved.map(({ attachment }) => attachment.id);
+  };
+
+  const [removed = ""] = attach([file("notes.txt")]);
+  const removedRead = reads.get("notes.txt");
+  files = [];
+  const [kept = ""] = attach([file("notes.txt")]);
+  const keptRead = reads.get("notes.txt");
+  removedRead?.reject();
+  keptRead?.resolve("bmV3");
+  await Bun.sleep(0);
+
+  expect([removed === kept, failed]).toEqual([false, []]);
+  expect(files.map(({ id, name, data }) => [id, name, data])).toEqual([[kept, "notes.txt", "bmV3"]]);
+});
+
+test("a file that cannot be read is reported while it is still in the composer", async () => {
+  let files: DraftAttachment[] = [];
+  const { reserved } = reserve([file("notes.txt")], files);
+  files = reserved.map(({ attachment }) => attachment);
+  const failed: string[] = [];
+
+  readInto(reserved, { files: () => files, setFiles: () => {}, onFailed: ({ name }) => failed.push(name), read: () => Promise.reject(new Error("unreadable")) });
+  await Bun.sleep(0);
+
+  expect(failed).toEqual(["notes.txt"]);
 });

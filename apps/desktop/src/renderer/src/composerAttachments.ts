@@ -1,6 +1,7 @@
 // Adapted from T3 Code (https://github.com/pingdotgg/t3code, MIT), apps/web/src/components/chat/composerAttachmentFiles.ts
 // and ChatComposer.tsx's addComposerAttachments: which files the composer takes, their types, and its messages.
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MimeType, type AttachmentUpload } from "@chiefbot/contracts";
+import type { Dispatch, SetStateAction } from "react";
 
 // A file in the composer, waiting to be sent. `data` is its bytes in base64, or
 // null while the composer still reads it.
@@ -62,6 +63,32 @@ export function reserve(picked: File[], attached: readonly DraftAttachment[]) {
   return { reserved, error };
 }
 
+// Reads each `reserved` file into its place among the composer's files (`setFiles`,
+// React's setter) when its read ends. `files` gives them as they are then: a read
+// whose file is gone from them (removed or sent meanwhile, maybe for a new file of
+// its name) changes nothing. A failed read of a file still there goes to `onFailed`.
+export function readInto(
+  reserved: ReturnType<typeof reserve>["reserved"],
+  {
+    files,
+    setFiles,
+    onFailed,
+    read = base64Of,
+  }: {
+    files: () => readonly DraftAttachment[];
+    setFiles: Dispatch<SetStateAction<DraftAttachment[]>>;
+    onFailed: (attachment: DraftAttachment) => void;
+    read?: (file: File) => Promise<string>;
+  },
+) {
+  for (const { file, attachment } of reserved) {
+    read(file).then(
+      (data) => setFiles((items) => items.map((item) => (item.id === attachment.id ? { ...item, data } : item))),
+      () => files().some(({ id }) => id === attachment.id) && onFailed(attachment),
+    );
+  }
+}
+
 // The composer's files as its message sends them, or null while one is still being read.
 export function uploads(attachments: readonly DraftAttachment[]): AttachmentUpload[] | null {
   const read = attachments.flatMap(({ name, mimeType, data }) => (data === null ? [] : [{ name, mimeType, data }]));
@@ -69,7 +96,7 @@ export function uploads(attachments: readonly DraftAttachment[]): AttachmentUplo
 }
 
 // The browser's own base64 encoder: the part of a data: URL after its comma.
-export function base64Of(file: Blob) {
+function base64Of(file: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");

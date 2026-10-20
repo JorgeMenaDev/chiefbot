@@ -4,7 +4,7 @@
 import { PaperclipIcon } from "lucide-react";
 import { useLayoutEffect, useRef, useState, type ClipboardEvent, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { AttachmentTray, ChipText } from "./Attachments.tsx";
-import { base64Of, chipFor, isImage, reserve, typeOf, type DraftAttachment } from "./composerAttachments.ts";
+import { chipFor, isImage, readInto, reserve, typeOf, type DraftAttachment } from "./composerAttachments.ts";
 import { Button } from "./components/ui/button.tsx";
 import { cn } from "./lib/utils.ts";
 
@@ -25,12 +25,14 @@ const promptBox = "block max-h-52 min-h-12 w-full text-sm leading-relaxed";
 // already has text. The prompt draws each chip as a chip. A file is in the
 // composer (counted, named, chipped) as soon as it is picked, and read after;
 // the owner keeps send off until every one is read (composerAttachments uploads).
+// `locked` (while a message is being sent) keeps the prompt and its files as they are.
 export function Composer({
   placeholder,
   draft,
   onDraft,
   onSend,
   canSend,
+  locked = false,
   error,
   notice = null,
   attachments,
@@ -41,6 +43,7 @@ export function Composer({
   onDraft: Dispatch<SetStateAction<string>>;
   onSend: () => void;
   canSend: boolean;
+  locked?: boolean;
   error: string | null;
   notice?: string | null;
   attachments?: { items: DraftAttachment[]; onChange: Dispatch<SetStateAction<DraftAttachment[]>> };
@@ -69,25 +72,23 @@ export function Composer({
     onSend();
   }
 
-  // Adds the files that fit at once, then reads each into its place. A read that
-  // ends after its file was removed (or sent) finds no place and is dropped.
+  // Adds the files that fit at once, then reads each into its place (readInto).
   function attach(picked: File[]) {
-    if (!attachments || picked.length === 0) return;
+    if (!attachments || locked || picked.length === 0) return;
     const { reserved, error } = reserve(picked, latest.current);
     setAttachError(error);
     if (reserved.length === 0) return;
     const added = reserved.map(({ attachment }) => attachment);
     latest.current = [...latest.current, ...added];
     attachments.onChange((items) => [...items, ...added]);
-    for (const { file, attachment } of reserved) {
-      base64Of(file).then(
-        (data) => attachments.onChange((items) => items.map((item) => (item.id === attachment.id ? { ...item, data } : item))),
-        () => {
-          setAttachError(`'${attachment.name}' is empty or could not be read.`);
-          remove(attachment);
-        },
-      );
-    }
+    readInto(reserved, {
+      files: () => latest.current,
+      setFiles: attachments.onChange,
+      onFailed: (attachment) => {
+        setAttachError(`'${attachment.name}' is empty or could not be read.`);
+        remove(attachment);
+      },
+    });
     const element = prompt.current;
     if (!element) return;
     const { value, selectionStart, selectionEnd } = element;
@@ -103,7 +104,7 @@ export function Composer({
     });
   }
 
-  // Removing a file takes its chip out of the prompt too.
+  // Removing a file takes its chip out of the prompt too: its name is its own among the files.
   function remove(file: DraftAttachment) {
     attachments?.onChange((items) => items.filter((item) => item.id !== file.id));
     const chip = chipFor(file.name);
@@ -150,6 +151,7 @@ export function Composer({
           <AttachmentTray
             attachments={files}
             onRemove={(file) => {
+              if (locked) return;
               setAttachError(null);
               remove(file);
             }}
@@ -176,6 +178,7 @@ export function Composer({
               )}
               placeholder={placeholder}
               value={draft}
+              readOnly={locked}
               onChange={(event) => onDraft(event.target.value)}
               onKeyDown={onKeyDown}
               onPaste={onPaste}
@@ -209,7 +212,7 @@ export function Composer({
                     attach(picked);
                   }}
                 />
-                <Button variant="ghost" size="icon-sm" aria-label="Attach files" title="Attach files" onClick={() => picker.current?.click()}>
+                <Button variant="ghost" size="icon-sm" aria-label="Attach files" title="Attach files" disabled={locked} onClick={() => picker.current?.click()}>
                   <PaperclipIcon />
                 </Button>
               </>
