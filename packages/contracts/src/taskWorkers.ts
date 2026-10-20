@@ -73,6 +73,8 @@ export type TaskWorker = z.infer<typeof TaskWorker>;
 // its `skills` folders and its `mcp` servers, working in the clone. `secrets` are
 // the values of the project's secrets that are set, by name: they are in the
 // environment of the setup command and of the agent's runtime, for this task only.
+// `hidden` are more values the worker hides as it hides the secrets', which are in
+// no environment it sets: the company proxy's credentials (docs/deploy.md).
 // A verifier's `sha` is the commit it checks out after the clone, before the setup command.
 export const EngineerSetup = z.object({
   repo: RepoFullName,
@@ -82,6 +84,7 @@ export const EngineerSetup = z.object({
   skills: z.array(RepoPath),
   mcp: z.record(ConnectorName, ProjectMcpServer),
   secrets: z.record(SecretName, z.string()),
+  hidden: z.array(z.string()).default([]),
 });
 export type EngineerSetup = z.infer<typeof EngineerSetup>;
 

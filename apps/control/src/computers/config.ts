@@ -30,10 +30,11 @@ export const noCompanyNetwork: CompanyNetwork = { imagePrefix: null, proxy: { ht
 // The proxy's env for a computer and its stack: each variable in the upper- and
 // lower-case forms tools read. NO_PROXY keeps localhost, where the stack's
 // services reach each other, and control's own host (`controlUrl`), which the
-// computer dials for its WebSocket and git's proxy. Empty with no proxy set.
+// computer dials for its WebSocket and git's proxy: an IPv6 one without its URL's
+// brackets, as curl and git read it. Empty with no proxy set.
 export function proxyEnv({ proxy }: CompanyNetwork, controlUrl: string): Record<string, string> {
   if (proxy.http === null && proxy.https === null) return {};
-  const bypass = [...(proxy.noProxy?.split(",") ?? []), "localhost", "127.0.0.1", "::1", new URL(controlUrl).hostname];
+  const bypass = [...(proxy.noProxy?.split(",") ?? []), "localhost", "127.0.0.1", "::1", new URL(controlUrl).hostname.replace(/^\[(.*)\]$/, "$1")];
   const noProxy = [...new Set(bypass.map((host) => host.trim()).filter((host) => host !== ""))].join(",");
   return {
     ...(proxy.http === null ? {} : { HTTP_PROXY: proxy.http, http_proxy: proxy.http }),
@@ -41,6 +42,31 @@ export function proxyEnv({ proxy }: CompanyNetwork, controlUrl: string): Record<
     NO_PROXY: noProxy,
     no_proxy: noProxy,
   };
+}
+
+// The proxy's values no log or transcript may show (the stack runner's and the
+// engineer's redactors hide them): each proxy URL that has credentials, its
+// user:password as written in the URL and decoded (a Proxy-Authorization
+// header's base64 is of the decoded pair), and its password.
+export function proxySecrets({ proxy }: CompanyNetwork): string[] {
+  const decoded = (part: string) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  };
+  return [
+    ...new Set(
+      [proxy.http, proxy.https].flatMap((value) => {
+        const url = value === null ? null : URL.parse(value.includes("://") ? value : `http://${value}`);
+        if (value === null || url === null || url.username === "") return [];
+        const written = url.password === "" ? url.username : `${url.username}:${url.password}`;
+        const pair = url.password === "" ? decoded(url.username) : `${decoded(url.username)}:${decoded(url.password)}`;
+        return [value, written, pair, ...(url.password === "" ? [] : [decoded(url.password)])];
+      }),
+    ),
+  ];
 }
 
 // An env setting: unset and empty are the same.

@@ -31,7 +31,7 @@ import type { Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot, FileAttachment, QuestionRequest, Questions } from "./copilot.ts";
 import { agentEnv } from "./copilotSdk.ts";
-import { setUpEngineer, setupShell as shellOf, type EngineerReady, type SetupShell } from "./engineerSetup.ts";
+import { hiddenValues, setUpEngineer, setupShell as shellOf, type EngineerReady, type SetupShell } from "./engineerSetup.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { verdictTool } from "./verdict.ts";
@@ -305,7 +305,7 @@ export function startWorker({
     await (await previous?.session.catch(() => null))?.disconnect();
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
-    const secrets = secretRedactor(task ? Object.values(task.message.setup.secrets) : []);
+    const secrets = secretRedactor(task ? hiddenValues(task.message.setup) : []);
     const tools = [
       // A verifier ends with its verdict and opens no pull request.
       task?.message.kind === "verifier"
@@ -402,8 +402,8 @@ export function startWorker({
       attachments?: SentAttachment[];
     } = {},
   ) {
-    // An engineer's events hide its project's secrets before they leave the computer.
-    const turn = link.begin(turnId, turnKey, task ? turnEventRedactor(secretRedactor(Object.values(task.setup.secrets))) : undefined);
+    // An engineer's events hide its project's secrets, and the proxy's credentials, before they leave the computer.
+    const turn = link.begin(turnId, turnKey, task ? turnEventRedactor(secretRedactor(hiddenValues(task.setup))) : undefined);
     git?.reload({ fetch: gitCredential(turn) });
     try {
       staged = { ...stageConnections(connectionsRoot, connections), turnId };

@@ -75,6 +75,7 @@ The computer's ports, each with its protocol, are one list: `computerPorts` in `
 
 Behind a company proxy, the deployer gives Chiefbot a proxy, a CA certificate and a registry mirror (`docs/deploy.md`, **Behind a company proxy**). Each build of a stack gets the proxy variables as build args, which reach every `RUN` step with no `ARG` line, and the CA as the build secret `chiefbot-ca`. The mirror reaches a build only if its Dockerfile uses it. So write a stand-in's Dockerfile to build both with these settings and without them:
 
+- **The proxy:** nothing to write. Do not declare `HTTP_PROXY`, `HTTPS_PROXY` or `NO_PROXY` with an `ARG` of your own, or copy them into `ENV`. Docker leaves its own proxy build args out of the image's history, but an `ARG` or `ENV` of yours keeps them in the image, with any password in the proxy URL.
 - **Base images:** declare `ARG CHIEFBOT_IMAGE_PREFIX=` before the first `FROM`, and write `FROM ${CHIEFBOT_IMAGE_PREFIX}node:24-alpine`. Set, it is the mirror with a trailing slash. Unset, it is empty, and the image comes from Docker Hub.
 - **The CA:** mount the secret in each `RUN` step that reaches the network: `RUN --mount=type=secret,id=chiefbot-ca …`. It is at `/run/secrets/chiefbot-ca` only when set. Then add it to the trust of the tool the step runs:
   - Node: `if [ -f /run/secrets/chiefbot-ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/chiefbot-ca; fi && npm ci`;

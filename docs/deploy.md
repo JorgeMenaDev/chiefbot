@@ -85,7 +85,7 @@ On a company network, traffic out often goes through a proxy, and the proxy may 
 
 | Variable | Example | What it does |
 | --- | --- | --- |
-| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | `http://proxy.example.com:3128`, `.corp.example.com` | The proxy, and the hosts reached without it. The lower-case forms work too. |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | `http://proxy.example.com:3128`, `.corp.example.com` | The proxy, and the hosts reached without it. The lower-case forms work too: an upper-case one that is set wins. A proxy URL may hold a user and password (`http://user:password@proxy…`). |
 | `CHIEFBOT_CA_FILE` | `/etc/ssl/company-ca.pem` | A PEM file with the proxy's CA certificate (more than one is fine). Control refuses to start when it cannot read the file or finds no `-----BEGIN CERTIFICATE-----` in it, and the error names the variable and the path. |
 | `CHIEFBOT_IMAGE_PREFIX` | `registry.example.com/hub` | A registry that mirrors Docker Hub, for the base images of template stacks. |
 
@@ -100,12 +100,14 @@ An unset or empty variable passes nothing on. These are deployer settings: a pro
 
 Chiefbot adds `localhost`, `127.0.0.1`, `::1` and control's own host (from `CHIEFBOT_WORKER_CONTROL_URL`) to `NO_PROXY`. A stack's services reach each other on `localhost`, and a computer reaches control's WebSocket and git proxy, without the proxy.
 
+A proxy's user and password reach computers and containers in their env, where the tools need them. Engineers' and verifiers' logs and transcripts hide them, as they hide a project's secrets: the proxy URL, its `user:password` and its password, as written and decoded. So do the stack's logs, and an engineer's pull request that holds one is refused.
+
 **What trusts the CA.** Chiefbot adds the CA to the default trust. It never replaces the default, which would break public sites.
 
 | Where | Node and Bun | git, curl and OpenSSL | Java |
 | --- | --- | --- | --- |
 | Engineer computer | Yes (`NODE_EXTRA_CA_CERTS`) | Yes: a bundle of the image's own roots and the CA (`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`), made by `infra/computer/start.sh` | No Java in the image |
-| Stack container | Yes, from `/etc/chiefbot/ca.pem` | Yes, from `/etc/chiefbot/ca-bundle.pem`: the public roots Bun ships (Mozilla's) and the CA | No |
+| Stack container | Yes, from `/etc/chiefbot/ca.pem` | Yes, from `/etc/chiefbot/ca-bundle.pem`: the public roots Bun ships (Mozilla's) and the CA. These tools read it in place of the image's own bundle, so roots an image added to its own are not kept | No |
 | Stack build | Where the Dockerfile mounts the secret | Where the Dockerfile mounts the secret | Where the Dockerfile imports it with `keytool` |
 
 Chromium in the computer does not trust the CA: it keeps its own certificate store.
@@ -114,7 +116,7 @@ Chromium in the computer does not trust the CA: it keeps its own certificate sto
 
 - **Docker pulls images itself**, with its own proxy and trust settings: Docker Desktop's **Settings > Resources > Proxies**, or `proxies` in `/etc/docker/daemon.json` on Linux, and `/etc/docker/certs.d/<registry>/ca.crt` for a registry signed by the CA. A mirror in `CHIEFBOT_IMAGE_PREFIX` that Docker reaches directly needs neither.
 - **Java reads no proxy variables.** Gradle and Maven need their own proxy settings (`systemProp.https.proxyHost` and `systemProp.https.proxyPort` in `gradle.properties`, or Maven's `settings.xml`). The Gradle builds of `java-react-enterprise` trust the CA. So they build behind a proxy that catches traffic without being named (a transparent proxy), but not behind one that tools must be pointed at.
-- **A real service repo's own Dockerfile** uses the prefix and the CA only if it is written for them. Its own base images often trust the CA already.
+- **A real service repo's own Dockerfile** uses the prefix and the CA only if it is written for them. Its own base images often trust the CA already. It must not declare the proxy variables as its own `ARG` or copy them into `ENV`: that keeps them, a password included, in the image (`docs/templates.md`, **Company networks**).
 - **Control's own calls** (GitHub, Copilot tokens, connectors) go through Bun's `fetch`, which reads the proxy variables from control's env. For the CA, also set `NODE_EXTRA_CA_CERTS` to the same file when you start control on the host. `compose.yaml` sets it for you.
 
 **With compose**, put the CA file in `~/.chiefbot`, which compose mounts at `/chiefbot`, and add the settings to `.env`. `compose.yaml` passes them to control:

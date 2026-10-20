@@ -3,7 +3,7 @@ import { secretRedactor, type SecretRedactor } from "@chiefbot/worker/secret-red
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { rootCertificates } from "node:tls";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { z } from "zod";
 import { dockerEngine } from "../computers/docker.ts";
 
@@ -18,7 +18,8 @@ import { dockerEngine } from "../computers/docker.ts";
 //   own       the project's own service: it runs in the computer, from the engineer's clone, never as a container
 //   repos     the services that run from a repo, by name: its repo and ref (a branch or tag) and a
 //             token that may read it (null: a public repo). Every other service runs its stand-in.
-//   secrets   values no log of the stack may show: the project's secrets. The repos' tokens are hidden too.
+//   secrets   values no log of the stack may show: the project's secrets and the proxy's credentials.
+//             The repos' tokens are hidden too.
 //   network   behind a company network (docs/deploy.md): the prefix of base images, the proxy's
 //             env (proxyEnv; empty with none) and the CA certificate's PEM text. Null when unset.
 export type StackPlan = {
@@ -59,7 +60,8 @@ export type DockerStacksOptions = {
   socketPath: string;
   // github.com, which repos are cloned from; the fake in tests.
   githubUrl: string;
-  // The template catalog's folder: templates/<name>.
+  // The template catalog's folder: templates/<name>. A relative one is taken from
+  // control's folder when the runner is made, since its commands run in each stack's own.
   templatesDir: string;
   // Starts every name a stack gets, and the name of its computer's container:
   // chiefbot-, as the DockerProvider names a computer chiefbot-<id>.
@@ -84,6 +86,7 @@ export type DockerStacksOptions = {
 // its compose label, over the Engine API.
 export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "chiefbot-" }: DockerStacksOptions): StackRunner {
   const engine = dockerEngine(socketPath);
+  const templates = resolve(templatesDir);
   const projectOf = (id: TaskWorkerId) => `${prefix}${id}-stack`.toLowerCase();
   // The docker CLI gets this environment alone, so none of control's own reaches
   // a template through compose's variables.
@@ -127,7 +130,7 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
     try {
       onStage({ label, state: "running", log: "" });
       const build = AbortSignal.any([signal, AbortSignal.timeout(buildMs)]);
-      const templateFile = join(templatesDir, template.name, template.compose);
+      const templateFile = join(templates, template.name, template.compose);
       await step(["docker", "compose", "-p", project, "-f", templateFile, "config", "--format", "json", "--output", file], build);
       const model = ComposeModel.parse(JSON.parse(readFileSync(file, "utf8")));
       const image = (service: string, version: string) => `${prefix}stack-${template.name}:${service}-${version}`;

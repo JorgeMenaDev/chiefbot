@@ -39,7 +39,7 @@ import {
 import type { controlApprovals } from "./approvals.ts";
 import type { Clock } from "@chiefbot/worker/clock";
 import type { ComputerProvider } from "./computers/computer.ts";
-import { proxyEnv, type CompanyNetwork } from "./computers/config.ts";
+import { proxyEnv, proxySecrets, type CompanyNetwork } from "./computers/config.ts";
 import type { ContextStore } from "./contextStore.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
@@ -627,7 +627,16 @@ export function taskWorkerHost({
     const project = projects.project(projectId);
     if (!project) return null;
     const { repo, config } = project;
-    return { repo, sha, command: config.commands.setup ?? null, instructions: config.instructions, skills: config.skills, mcp: config.mcp, secrets: await secretsFor(projectId) };
+    return {
+      repo,
+      sha,
+      command: config.commands.setup ?? null,
+      instructions: config.instructions,
+      skills: config.skills,
+      mcp: config.mcp,
+      secrets: await secretsFor(projectId),
+      hidden: proxySecrets(network),
+    };
   }
 
   // Starts the worker's own copy of its project's template stack, when the
@@ -659,9 +668,11 @@ export function taskWorkerHost({
     }
     if (workers.worker(workerId)?.state !== "setting_up") return null;
     let last = "";
+    // What its logs hide: the project's secrets and the proxy's credentials.
+    const hidden = [...Object.values(secrets), ...proxySecrets(network)];
     const stackNetwork = { imagePrefix: network.imagePrefix, proxy: proxyEnv(network, controlUrlForComputers()), ca: network.ca };
     const outcome = await stacks
-      .start(workerId, { template, own: config.service, repos, secrets: Object.values(secrets), network: stackNetwork }, (stage) => {
+      .start(workerId, { template, own: config.service, repos, secrets: hidden, network: stackNetwork }, (stage) => {
         last = stage.label;
         const event = workers.stackStage(workerId, { ...stage, at: clock.now() });
         if (event) publish(projectId);
@@ -674,7 +685,7 @@ export function taskWorkerHost({
     // The runner's own failure, not a stage's: its message may hold what the runner was given.
     if (outcome instanceof Error) {
       const tokens = Object.values(repos).flatMap(({ token }) => (token === null ? [] : [token]));
-      return `Its stack did not start: ${secretRedactor([...Object.values(secrets), ...tokens]).redact(outcome.message)}`;
+      return `Its stack did not start: ${secretRedactor([...hidden, ...tokens]).redact(outcome.message)}`;
     }
     return outcome === "ready" ? null : `Its stack did not start: its ${last} stage failed.`;
   }

@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { SETUP_LOG_MAX, TaskWorkerId } from "@chiefbot/contracts";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { z } from "zod";
 import { loadTemplates, repoTemplates } from "./catalog.ts";
 import { dockerStacks, stackModel, type StackReport } from "./stacks.ts";
@@ -90,6 +90,36 @@ esac
     expect(readFileSync(join(bin, "work", basename(built.secrets["chiefbot-ca"].file)), "utf8")).toBe(ca);
     // The build runs in the stack's folder, beside the CA: compose builds with buildx bake, which reads no file outside the folder it runs in.
     expect(readFileSync(join(bin, "build-cwd"), "utf8")).toBe(readFileSync(join(bin, "build-folder"), "utf8"));
+  } finally {
+    process.env.PATH = path;
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("a templates folder given as a relative path still works, though compose runs in the stack's own folder: the template's compose file is read by its absolute path", async () => {
+  // A docker CLI that keeps the compose file it is asked to read, and whether it found it from where it runs, then fails.
+  const bin = mkdtempSync(join(tmpdir(), "acme-stacks-test-"));
+  writeFileSync(
+    join(bin, "docker"),
+    `#!/bin/sh
+for arg in "$@"; do [ "$last" = -f ] && printf '%s %s' "$arg" "$([ -f "$arg" ] && echo found || echo missing)" > "${join(bin, "read")}" && exit 1; last=$arg; done
+exit 1
+`,
+  );
+  chmodSync(join(bin, "docker"), 0o755);
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}:${path}`;
+  const template = loadTemplates(repoTemplates).find(({ name }) => name === "java-react-enterprise");
+  if (!template) throw new Error("no java-react-enterprise template");
+
+  try {
+    const templatesDir = relative(process.cwd(), repoTemplates);
+    expect(isAbsolute(templatesDir)).toBe(false);
+    const stacks = dockerStacks({ socketPath: join(bin, "no.sock"), githubUrl: "http://127.0.0.1:9", templatesDir, prefix: "acme-stacktest-" });
+    const plan = { template, own: "ui", repos: {}, secrets: [], network: { imagePrefix: null, proxy: {}, ca: null } };
+
+    expect(await stacks.start(TaskWorkerId.parse("worker_a"), plan, () => {})).toBe("failed");
+    expect(readFileSync(join(bin, "read"), "utf8")).toBe(`${join(repoTemplates, "java-react-enterprise", "compose.yaml")} found`);
   } finally {
     process.env.PATH = path;
     rmSync(bin, { recursive: true, force: true });

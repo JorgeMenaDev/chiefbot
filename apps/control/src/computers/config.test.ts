@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { computersConfig, proxyEnv } from "./config.ts";
+import { computersConfig, proxyEnv, proxySecrets } from "./config.ts";
 
 const home = "/Users/ada";
 const noNetwork = { imagePrefix: null, proxy: { http: null, https: null, noProxy: null }, ca: null };
@@ -106,5 +106,16 @@ test("the proxy's env leaves the deployer's NO_PROXY, localhost and control's ow
     NO_PROXY: ".corp.example.com,localhost,127.0.0.1,::1,chiefbot.example.com",
     no_proxy: ".corp.example.com,localhost,127.0.0.1,::1,chiefbot.example.com",
   });
+  // An IPv6 control host goes in without its URL's brackets, as curl and git read NO_PROXY.
+  expect(proxyEnv({ ...noNetwork, proxy }, "http://[fd00::1234]:7410").NO_PROXY).toBe(".corp.example.com,localhost,127.0.0.1,::1,fd00::1234");
   expect(proxyEnv({ ...noNetwork, proxy: { ...proxy, https: null } }, "http://host.docker.internal:7410")).toEqual({});
+});
+
+test("a proxy's credentials are what no log may show: each proxy URL that has them, its user:password as written and decoded, and its password; a proxy without them has none", () => {
+  const proxy = { http: "http://acme:p%40ss-word1@proxy.example.com:3128", https: "proxy.example.com:3128", noProxy: null };
+
+  expect(proxySecrets({ ...noNetwork, proxy })).toEqual(["http://acme:p%40ss-word1@proxy.example.com:3128", "acme:p%40ss-word1", "acme:p@ss-word1", "p@ss-word1"]);
+  // A proxy that takes a token as its user name, written without a scheme.
+  expect(proxySecrets({ ...noNetwork, proxy: { ...proxy, http: null, https: "tok-0123456789@proxy.example.com:3128" } })).toEqual(["tok-0123456789@proxy.example.com:3128", "tok-0123456789"]);
+  expect(proxySecrets(noNetwork)).toEqual([]);
 });

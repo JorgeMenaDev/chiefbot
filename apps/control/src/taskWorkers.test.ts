@@ -2197,3 +2197,41 @@ test("with no company network set, an engineer's computer and its stack get no p
   expect(Object.keys(computers.computers.get(id)?.spec.env ?? {}).sort()).toEqual(["CHIEFBOT_CONTROL_URL", "CHIEFBOT_TASK_WORKER_ID", "CHIEFBOT_TASK_WORKER_TOKEN"]);
   expect(stacks.started[0]?.plan.network).toEqual({ imagePrefix: null, proxy: {}, ca: null });
 });
+
+// A company proxy that takes a user name and password.
+const proxyWithCredentials = { ...companyNetwork, proxy: { http: null, https: "http://acme:hunter2-proxy@proxy.example.com:3128", noProxy: null } };
+
+test("a proxy's credentials never show in an engineer's stack logs", async () => {
+  const control = await templateProject({ network: proxyWithCredentials });
+  const { owner, project, stacks } = control;
+  const { tool } = await heldTurn(control);
+  stacks.failAt("Build", "fetch via http://acme:hunter2-proxy@proxy.example.com:3128 failed: 407 for acme:hunter2-proxy\n");
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  const transcript = await owner.watchWorkerTranscript(project.id, id).settled();
+  expect(transcript.flatMap(({ event }) => (event.type === "stack-stage" && event.stage.state === "failed" ? [event.stage.log] : []))).toEqual(["fetch via *** failed: 407 for ***\n"]);
+});
+
+test("a proxy's credentials never show in what an engineer's computer sends: its setup's log, its messages, or a pull request, which is refused", async () => {
+  const setup = fakeSetup((command) => ({ exitCode: 0, output: command === "bun install" ? "fetching through http://acme:hunter2-proxy@proxy.example.com:3128\n" : "" }));
+  const control = await teamProject({ setupShell: setup.run, network: proxyWithCredentials }, "commands:\n  setup: bun install\n");
+  const { owner, project, github } = control;
+  const refusals: string[] = [];
+  const { tool } = await heldTurn(control, async function* (_prompt, runtime) {
+    yield sdk.message("msg-1", "The proxy wants hunter2-proxy.");
+    const pr = { repository: "octo-org/shop", head: "fix-typo", base: "main", title: "Fix the typo", body: `Tested as ${btoa("acme:hunter2-proxy")}` };
+    refusals.push(await runtime.tool("create_pull_request", pr).then(() => "opened", (error: Error) => error.message));
+    yield sdk.idle();
+  });
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  expect(finished.setup[1]?.log).toBe("fetching through ***\n");
+  expect(finished.result).toBe("The proxy wants ***.");
+  expect(refusals).toEqual(["The pull request holds one of the project's secrets in its repository, branches, title or body. Take it out, then open it again."]);
+  expect(github.pullRequests).toEqual([]);
+  expect(JSON.stringify(WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body))).not.toContain("hunter2-proxy");
+});

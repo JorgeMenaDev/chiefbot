@@ -39,11 +39,15 @@ export type EngineerReady = {
 // The most of one instruction file the agent is given.
 const instructionMax = 64 * 1024;
 
+// Every value an engineer's worker hides in all it sends (secretRedactor.ts):
+// its project's secrets, and the values control has it hide besides (`hidden`).
+export const hiddenValues = (setup: EngineerSetup) => [...Object.values(setup.secrets), ...setup.hidden];
+
 // Sets an engineer's computer up for `setup`, before its agent starts: clones
 // the repo into <workspace>/<repo name> (a verifier's then checks out the commit
 // it checks, `setup.sha`, detached) and runs the setup command there with
 // the project's secrets, each step reported as it ends. Its log is the end of its
-// output with every secret hidden (secretRedactor.ts) as it streams, before it
+// output with every secret hidden (hiddenValues) as it streams, before it
 // is cut to SETUP_LOG_MAX, so no cut leaves a piece of one. Then reads the
 // repo's instruction files and finds its skill folders; a configured one the
 // repo lacks is left out, and so is any that leads outside the clone or holds a
@@ -64,7 +68,7 @@ export async function setUpEngineer({
 }): Promise<EngineerReady | { failed: SetupStep }> {
   const name = setup.repo.split("/")[1] ?? setup.repo;
   const clone = join(workspace, name);
-  const secrets = secretRedactor(Object.values(setup.secrets));
+  const secrets = secretRedactor(hiddenValues(setup));
   const run = async (step: SetupStep["step"], command: string, cwd: string, env: Record<string, string>) => {
     const output = secrets.stream();
     let log = "";
