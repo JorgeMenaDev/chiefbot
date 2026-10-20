@@ -33,7 +33,22 @@ const cases: Array<[string, PermissionRequest, [Asks, Asks, Asks, Asks]]> = [
   ["a connection write", fakeRequest.shell("acli jira workitem delete --key CHIEF-1"), ["connector", "connector", "connector", "runs"]],
   ["a GitHub tool that writes", fakeRequest.mcp("github", "Merge pull request", false), ["tool", "tool", "tool", "runs"]],
   ["a GitHub tool that reads", fakeRequest.mcp("github", "Get file contents", true), ["runs", "runs", "runs", "runs"]],
-  ["one of the worker's own tools", fakeRequest.tool("create_pull_request", {}), ["runs", "runs", "runs", "runs"]],
+  ["a file read", { kind: "read", path: "/home/bot/workspace/README.md", intention: "Read a file" }, ["runs", "runs", "runs", "runs"]],
+  ["a URL fetch", { kind: "url", url: "https://example.com", intention: "Fetch a page" }, ["runs", "runs", "runs", "runs"]],
+  ["create_pull_request, which control asks for", fakeRequest.tool("create_pull_request", {}), ["runs", "runs", "runs", "runs"]],
+  ["a chief tool that reads", fakeRequest.tool("list_projects", {}), ["runs", "runs", "runs", "runs"]],
+  ["a chief tool that hands work off", fakeRequest.tool("send_to_project", { brief: "Fix the login" }), ["tool", "tool", "runs", "runs"]],
+  ["a tool the worker does not know", fakeRequest.tool("deploy", {}), ["tool", "tool", "runs", "runs"]],
+  ["a memory", { kind: "memory", action: "store", fact: "The owner prefers short replies" }, ["tool", "tool", "runs", "runs"]],
+  ["a hook", { kind: "hook", toolName: "bash", hookMessage: "Confirm this command" }, ["tool", "tool", "runs", "runs"]],
+  [
+    "a workflow",
+    { kind: "workflow", name: "review", description: "Review the branch", approvalKey: "review", canPersistApproval: false, operation: "run", phases: [] },
+    ["tool", "tool", "runs", "runs"],
+  ],
+  ["an extension install", { kind: "extension-management", operation: "install", extensionName: "lint" }, ["tool", "tool", "runs", "runs"]],
+  ["an extension's permissions", { kind: "extension-permission-access", extensionName: "lint", capabilities: ["shell"] }, ["tool", "tool", "runs", "runs"]],
+  ["an extension's environment", { kind: "extension-env-access", extensionName: "lint", environmentVariables: ["HOME"] }, ["tool", "tool", "runs", "runs"]],
 ];
 
 test.each(cases)("%s: what each access mode asks", (_name, request, expected) => {

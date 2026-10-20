@@ -9,6 +9,11 @@ export const AUTO_MODEL = "auto";
 export const ReasoningEffort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export type ReasoningEffort = z.infer<typeof ReasoningEffort>;
 
+// A bot's saved `effort` while its model's `efforts` still include it, else null (the
+// model's default): a plan's models change, and the SDK refuses an effort its model lacks.
+export const supportedEffort = (efforts: ReasoningEffort[], effort: ReasoningEffort | null) =>
+  effort !== null && efforts.includes(effort) ? effort : null;
+
 // One row of the model picker. A locked row is shown but cannot be chosen; lockedReason says why.
 // `efforts` are the reasoning efforts the model supports (none: the effort picker hides),
 // and `defaultEffort` the one it runs on when the bot has not chosen one. `vision` says whether

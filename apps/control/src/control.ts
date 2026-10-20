@@ -53,7 +53,7 @@ import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
 import { botTurn, heldTurn, type BotTurn } from "./turnKeys.ts";
-import { chatTurns } from "./turns.ts";
+import { chatTurns, computerOutdated } from "./turns.ts";
 import { workspaceRoutes } from "./workspaces.ts";
 
 export type ControlOptions = {
@@ -139,7 +139,8 @@ type SocketData =
 //                             (400 invalid_access)
 //   POST   /bots/:id/messages bearer session, body SendBotMessageRequest → 202 SendMessageResponse
 //                             (400 invalid_message, its message saying why, as when a file is over the limits;
-//                             409 when the bot is not online, is stopping, is still on a turn or the human has its screen)
+//                             409 when the bot is not online, is stopping, is still on a turn or the human has its
+//                             screen; computer_outdated when its worker cannot run its access mode)
 //   GET    /bots/:id/attachments/:attachmentId  bearer session → the bytes of a file sent with one of the
 //                             bot's messages, as its own type (404 not_found)
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
@@ -566,7 +567,7 @@ export function startControl({
           const body = SendBotMessageRequest.safeParse(await req.json().catch(() => null));
           if (!body.success) return apiError(400, "invalid_message", body.error.issues[0]?.message);
           const sent = turns.sendTurn(user.id, botId, body.data.text, body.data.attachments);
-          if ("error" in sent) return apiError(409, sent.error);
+          if ("error" in sent) return apiError(409, sent.error, sent.error === "computer_outdated" ? computerOutdated : undefined);
           return Response.json(sent satisfies SendMessageResponse, { status: 202 });
         }),
       },

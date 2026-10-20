@@ -1,4 +1,4 @@
-import { AUTO_MODEL, type CopilotPlan, type ModelOption, type ModelReport, type ReasoningEffort, type SetBotModelRequest } from "@chiefbot/contracts";
+import { AUTO_MODEL, supportedEffort, type CopilotPlan, type ModelOption, type ModelReport, type ReasoningEffort, type SetBotModelRequest } from "@chiefbot/contracts";
 
 // Copilot Free's sku. Free runs every turn on Auto: the SDK accepts a model switch
 // but the turn still runs on Auto's pick, so the picker locks every other model.
@@ -58,6 +58,12 @@ export function pickModel(
   const supported = (candidate: ReasoningEffort | null) => candidate === null || option.efforts.includes(candidate);
   if (effort === undefined) return { model, effort: supported(current) ? current : null };
   return supported(effort) ? { model, effort } : { error: "effort_unavailable" };
+}
+
+// The effort a turn on `model` runs at: the bot's saved `effort` while the plan's
+// latest `report` still lists it for the model (contracts supportedEffort).
+export function currentEffort(report: ModelReport | null, model: string, effort: ReasoningEffort | null) {
+  return supportedEffort(report?.selectable.find(({ id }) => id === model)?.efforts ?? [], effort);
 }
 
 // "claude-haiku-4.5" → "Claude Haiku 4.5", "gpt-6-luna" → "GPT-6 Luna", for catalog ids without a name.

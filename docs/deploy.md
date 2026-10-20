@@ -51,7 +51,23 @@ You need a Linux machine with Docker Engine and the compose plugin (`curl -fsSL 
 
 SQLite and the projects' context files live in the volume `chiefbot_data`, Caddy's certificates in `chiefbot_caddy-data`.
 
-**New version:** `git pull`, `docker compose build computer`, `docker compose up -d --build`. Control restarts with the new code; new computers use the new image. A bot or project keeps the container it was made with, so delete and recreate a bot to move it to the new image (its files go unless you keep them).
+**New version:** `git pull`, `docker compose build computer`, `docker compose up -d --build`. Control restarts with the new code; new computers use the new image. A bot or project keeps the container it was made with. A bot whose computer is too old for a new feature says so when you send it a message (for example "This bot's computer is out of date" when you pick an access mode other than Auto).
+
+**Update a bot's computer, keeping its files:** click **Stop** on the bot in the app, then on the server swap its container for one of the new image, with the same name, settings, network and volume:
+
+```bash
+id=bot_…   # the bot's id: docker ps -a --filter name=chiefbot-bot_ lists them
+c=chiefbot-$id
+docker rename $c $c-old
+docker create --name $c --label chiefbot.computer-id=$id --user bot \
+  --env-file <(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' $c-old | grep '^CHIEFBOT_') \
+  --mount type=volume,src=$c-home,dst=/home/bot --network $c-net --add-host host.docker.internal:host-gateway \
+  --cap-drop ALL --security-opt no-new-privileges --init --restart unless-stopped \
+  chiefbot-computer:dev
+docker rm $c-old
+```
+
+Then click **Start**. The settings are those `apps/control/src/computers/docker.ts` creates a computer with; the env keeps the bot's credential without printing it. A project's coordinator updates the same way, with its `project_…` id.
 
 **Back up:** stop control, copy the volume, start it again. Keep `~/.chiefbot` with it.
 
@@ -139,7 +155,7 @@ You need the `gcloud` CLI, Terraform, Docker with buildx, a billing account ID a
 
 7. Run the smoke check below with `https://<your domain>`. On GCP, `gcloud compute instances list` shows `chiefbot-bot-…`, `chiefbot-project-…` and `chiefbot-worker-…` VMs where the compose steps say `docker ps -a`, and TERMINATED where they say Exited.
 
-**New version:** push the images again with the same tag (step 5), then `sudo systemctl restart chiefbot-control` on the control VM. Computer VMs pull their image on every start.
+**New version:** push the images again with the same tag (step 5), then `sudo systemctl restart chiefbot-control` on the control VM. Computer VMs pull their image on every start, so **Stop** and **Start** a bot in the app to update its computer; its disk stays.
 
 **Rotate the repo app's key:** make a new key on github.com, put it in `github-app-secrets.json`, `gcloud secrets versions add chiefbot-github-app-secrets --data-file=…`, restart control, then delete the old key on github.com.
 

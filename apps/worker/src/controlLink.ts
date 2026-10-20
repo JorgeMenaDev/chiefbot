@@ -49,10 +49,13 @@ export function controlLink<Message>({
   parse,
   onMessage,
   onTurnEnd,
+  capabilities = [],
 }: {
   base: string;
   token: string;
   retryMs: number;
+  // What the runtime tells control it can do, in each hello (contracts TurnHello).
+  capabilities?: string[];
   // Times an organization's token renewals. Default: the system clock.
   clock?: Clock;
   // Reads one message from control's WebSocket.
@@ -135,7 +138,7 @@ export function controlLink<Message>({
         const { turnId, events } = latest;
         events.forEach((event, index) => send({ type: "turn-event", turnId, index, event }));
       }
-      send({ type: "hello", activeTurnId: active?.turn.turnId ?? null });
+      send({ type: "hello", activeTurnId: active?.turn.turnId ?? null, capabilities });
     };
     socket.onmessage = (event) => onMessage(parse(JSON.parse(String(event.data))));
     socket.onclose = () => {

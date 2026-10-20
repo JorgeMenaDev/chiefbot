@@ -1,6 +1,7 @@
 import type { BotId, RoutineRun, TurnId, TurnRefusal, UserId } from "@chiefbot/contracts";
 import type { Clock } from "@chiefbot/worker/clock";
 import type { openStore } from "./store.ts";
+import { computerOutdated } from "./turns.ts";
 
 // How often the scheduler looks for due routines.
 export const POLL_MS = 1000;
@@ -28,6 +29,7 @@ const refused: Record<TurnRefusal, { status: Exclude<RoutineRun["status"], "runn
   bot_stopping: { status: "skipped", error: "The bot was stopping." },
   turn_running: { status: "skipped", error: "The bot was busy with another message." },
   human_has_screen: { status: "skipped", error: "Someone had taken over the bot's screen." },
+  computer_outdated: { status: "failed", error: computerOutdated },
 };
 
 // Runs each routine at its due times, so bots work while the desktop is closed.

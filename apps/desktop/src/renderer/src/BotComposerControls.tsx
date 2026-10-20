@@ -1,7 +1,7 @@
 // Adapted from T3 Code (https://github.com/pingdotgg/t3code, MIT), apps/web/src/components/chat/: the
 // composer footer's controls in ChatComposer.tsx (model, then traits, then runtime mode), the effort
 // menu of TraitsPicker.tsx, the runtime modes of runtimeModeConfig.ts, and CompactComposerControlsMenu.tsx.
-import { AccessMode, ModelOption, type Bot, type ReasoningEffort, type SetBotModelRequest } from "@chiefbot/contracts";
+import { AccessMode, ModelOption, supportedEffort, type Bot, type ReasoningEffort, type SetBotModelRequest } from "@chiefbot/contracts";
 import { BrainIcon, EllipsisIcon, LockIcon, LockOpenIcon, PenLineIcon, SparklesIcon, type LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useId, useState } from "react";
 import { z } from "zod";
@@ -24,7 +24,7 @@ const effortLabel: Record<ReasoningEffort, string> = {
 // T3 Code's runtime modes, as a bot's access modes (contracts AccessMode, the worker's approvals.ts).
 // Control asks before every push and pull request in every mode, so Full access says so.
 const accessModes: Record<AccessMode, { label: string; description: string; icon: LucideIcon }> = {
-  supervised: { label: "Supervised", description: "Asks before every command, file change and connection call.", icon: LockIcon },
+  supervised: { label: "Supervised", description: "Asks before every command, file change, tool or anything else that may change things.", icon: LockIcon },
   "auto-accept-edits": { label: "Auto-accept edits", description: "Changes files without asking. Asks before anything else that may change things.", icon: PenLineIcon },
   auto: { label: "Auto", description: "Asks only before connection changes and GitHub writes.", icon: SparklesIcon },
   "full-access": {
@@ -59,7 +59,8 @@ export function BotComposerControls({
 }) {
   const model = models.find(({ id }) => id === bot.model);
   const efforts = model?.efforts ?? [];
-  const effort = bot.effort ?? model?.defaultEffort ?? null;
+  // A saved effort the model no longer offers runs as its default, as control sends it.
+  const effort = supportedEffort(efforts, bot.effort);
 
   async function save(change: () => Promise<unknown>) {
     onError(null);
@@ -70,7 +71,7 @@ export function BotComposerControls({
     }
   }
   const setModel = (request: SetBotModelRequest) => save(() => window.chiefbot.bots.setModel(bot.id, request));
-  const setEffort = (next: ReasoningEffort) => setModel({ model: bot.model, effort: next });
+  const setEffort = (next: ReasoningEffort | null) => setModel({ model: bot.model, effort: next });
   const setAccess = (next: AccessMode) => save(() => window.chiefbot.bots.setAccess(bot.id, next));
 
   return (
@@ -100,24 +101,29 @@ export function BotComposerControls({
   );
 }
 
+// `effort` null is the model's default, which `defaultEffort` names when the model reports one.
 type EffortProps = {
   efforts: ReasoningEffort[];
   effort: ReasoningEffort | null;
   defaultEffort: ReasoningEffort | null;
-  onChange: (effort: ReasoningEffort) => void;
+  onChange: (effort: ReasoningEffort | null) => void;
 };
 
-// The menu's effort levels, the model's default marked, after TraitsMenuContent.
+// The menu's effort choices, after TraitsMenuContent: Default (null, whatever the
+// model's default is), then each level the model supports, the default one marked.
 function EffortItems({ menu, efforts, effort, defaultEffort, onChange }: EffortProps & { menu: string }) {
   return (
     <>
       <MenuGroupLabel>Reasoning effort</MenuGroupLabel>
+      <MenuRadioItem menu={menu} checked={effort === null} onClick={() => onChange(null)}>
+        <span className="min-w-0 truncate">Default</span>
+      </MenuRadioItem>
       {efforts.map((level) => (
         <MenuRadioItem key={level} menu={menu} checked={level === effort} onClick={() => onChange(level)}>
           <span className="min-w-0 truncate">{effortLabel[level]}</span>
           {level === defaultEffort && (
             <Badge variant="outline" size="sm">
-              Default
+              Model default
             </Badge>
           )}
         </MenuRadioItem>
@@ -126,8 +132,8 @@ function EffortItems({ menu, efforts, effort, defaultEffort, onChange }: EffortP
   );
 }
 
-// The model's reasoning effort, after T3 Code's TraitsPicker: a brain, the level, a chevron.
-function EffortPicker(props: EffortProps) {
+// The model's reasoning effort, after T3 Code's TraitsPicker: a brain, the level (or Default), a chevron.
+export function EffortPicker(props: EffortProps) {
   const menu = useId();
   const [open, setOpen] = useState(false);
   const label = props.effort ? effortLabel[props.effort] : "Default";

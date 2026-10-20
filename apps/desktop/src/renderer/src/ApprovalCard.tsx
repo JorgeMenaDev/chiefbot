@@ -10,7 +10,7 @@ const approvalLabel: Record<ApprovalItem["request"], string> = {
   push: "Push approval",
   command: "Command approval",
   "pull-request": "Pull request approval",
-  tool: "GitHub tool approval",
+  tool: "Tool approval",
   connector: "Connector approval",
   "file-change": "File change approval",
 };
