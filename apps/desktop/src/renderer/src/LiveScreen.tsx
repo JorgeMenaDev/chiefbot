@@ -235,8 +235,9 @@ function ControlPill({ bot }: { bot: Bot }) {
     setControl(bot.screenControl);
     setError(null);
   }
+  // Counted as the switch commits, before any refusal can be handled against it.
   const switches = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     switches.current += 1;
   }, [bot.screenControl]);
   const toggle = () => {
