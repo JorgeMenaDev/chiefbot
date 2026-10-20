@@ -17,6 +17,7 @@ import {
 import { systemClock, type Clock } from "./clock.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { installationSession, renewWithinMs } from "./installationSession.ts";
+import type { TurnEventRedactor } from "./secretRedactor.ts";
 import { newTurnStream, toTurnEvents, type TurnStream } from "./turnEvents.ts";
 
 // One turn of the runtime as control gave it: its id and its key. Whatever acts
@@ -71,6 +72,9 @@ export function controlLink<Message>({
   let stopped = false;
   // Every event of the latest turn, numbered by position.
   let latest: { turnId: TurnId; events: TurnEvent[] } | null = null;
+  // What the latest turn's events go through before they are numbered and sent
+  // (an engineer's: its secrets hidden, secretRedactor.ts), when it has one.
+  let redaction: { turnId: TurnId; redactor: TurnEventRedactor } | null = null;
   // The turn running now, its forwarder secret, and what it has streamed so far:
   // where session events go, and the only turn the connector forwarder serves.
   // The secret (32 random bytes) is the turn's alone and is forgotten with it.
@@ -93,11 +97,17 @@ export function controlLink<Message>({
   }
 
   function emit(turnId: TurnId, event: TurnEvent) {
-    if (event.type === "done") onTurnEnd?.(turnId);
-    if (latest?.turnId !== turnId) latest = { turnId, events: [] };
-    latest.events.push(event);
-    send({ type: "turn-event", turnId, index: latest.events.length - 1, event });
-    if (event.type === "done" && active?.turn.turnId === turnId) activate(null);
+    deliver(turnId, redaction?.turnId === turnId ? redaction.redactor.event(event) : [event]);
+  }
+  // Numbers and sends events ready to go.
+  function deliver(turnId: TurnId, events: TurnEvent[]) {
+    for (const sent of events) {
+      if (sent.type === "done") onTurnEnd?.(turnId);
+      if (latest?.turnId !== turnId) latest = { turnId, events: [] };
+      latest.events.push(sent);
+      send({ type: "turn-event", turnId, index: latest.events.length - 1, event: sent });
+      if (sent.type === "done" && active?.turn.turnId === turnId) activate(null);
+    }
   }
 
   // Forwards /mcp/:name to control's proxy for that connector, for the running
@@ -160,8 +170,9 @@ export function controlLink<Message>({
     fromControl,
 
     // The runtime starts `turnId`: the turn whatever acts in it holds. Its
-    // session's events stream into it from now on.
-    begin(turnId: TurnId, key: TurnKey): Turn {
+    // session's events stream into it from now on, through `redactor` when given.
+    begin(turnId: TurnId, key: TurnKey, redactor?: TurnEventRedactor): Turn {
+      redaction = redactor ? { turnId, redactor } : null;
       const end = new AbortController();
       const turn = { turnId, key, ended: end.signal };
       activate({ turn, secret: randomBytes(32).toString("base64url"), end, ...newTurnStream() });
@@ -194,6 +205,8 @@ export function controlLink<Message>({
     sessionEvent(turn: Turn, event: SessionEvent) {
       if (active?.turn !== turn || event.agentId) return;
       for (const turnEvent of toTurnEvents(event, active)) emit(turn.turnId, turnEvent);
+      // A message is whole: what the redactor held back of it goes now, before the tool calls it asked for.
+      if (event.type === "assistant.message" && redaction?.turnId === turn.turnId) deliver(turn.turnId, redaction.redactor.messageDone(event.data.messageId));
     },
 
     // The turn failed outside the session's own events: an error, then done.

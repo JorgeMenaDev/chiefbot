@@ -1,4 +1,4 @@
-import { ProjectTasks, ProjectWorkers, Task, TaskWorker, type Project, type ProjectId, type TaskWorkerId } from "@chiefbot/contracts";
+import { engineerRuns, ProjectTasks, ProjectWorkers, Task, TaskWorker, type Project, type ProjectId, type TaskWorkerId } from "@chiefbot/contracts";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { Engineers } from "./Engineers.tsx";
@@ -47,7 +47,7 @@ export function ProjectPanel({ project, login, hidden, onClose }: { project: Pro
   const [watching, setWatching] = useState<TaskWorkerId | null>(null);
   const ids = useTabIds<PanelTab>();
   const open = tasks.filter(({ status }) => status !== "done" && status !== "abandoned").length;
-  const running = workers.filter(({ state }) => state === "launching" || state === "working").length;
+  const running = workers.filter(({ state }) => engineerRuns(state)).length;
   const tabs: Array<TabItem<PanelTab>> = [
     { key: "tasks", label: "Tasks", note: <Count value={open} />, title: `${open} open` },
     { key: "engineers", label: "Engineers", note: <Count value={running} />, title: `${running} running` },

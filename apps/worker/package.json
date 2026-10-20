@@ -6,6 +6,7 @@
     ".": "./src/worker.ts",
     "./clock": "./src/clock.ts",
     "./coordinator": "./src/coordinator.ts",
+    "./engineer-setup": "./src/engineerSetup.ts",
     "./fake-copilot": "./src/fakeCopilot.ts",
     "./fake-display": "./src/fakeDisplay.ts",
     "./git-proxy": "./src/gitProxy.ts"

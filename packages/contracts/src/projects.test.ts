@@ -98,6 +98,7 @@ test("a project's dot says what most needs a member: their answer, then work goi
     pendingApprovals: pending ? [{ approvalId: ApprovalId.parse("approval_1"), kind: "push", detail: "Push fix-typo" }] : [],
     computerRemoved: false,
     screenHolder: null,
+    setup: [],
     createdAt: 0,
     updatedAt: 0,
   });
@@ -109,6 +110,8 @@ test("a project's dot says what most needs a member: their answer, then work goi
   expect(projectState({ ...quiet, awake: false, busy: true })).toBe("working");
   expect(projectState({ ...quiet, workers: [engineer("working")] })).toBe("working");
   expect(projectState({ ...quiet, workers: [engineer("launching")] })).toBe("working");
+  expect(projectState({ ...quiet, workers: [engineer("setting_up")] })).toBe("working");
+  expect(projectState({ ...quiet, workers: [engineer("queued")] })).toBe("idle");
   expect(projectState({ ...quiet, workers: [engineer("finished")], tasks: [task("in_progress")] })).toBe("idle");
   // Only the member who asked answers: a teammate sees the work going on.
   expect(projectState({ ...quiet, busy: true, tasks: [task("needs_input")] })).toBe("needs_you");

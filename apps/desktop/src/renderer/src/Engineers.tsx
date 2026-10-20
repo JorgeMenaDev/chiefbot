@@ -1,4 +1,4 @@
-import { WorkerChatView, type Project, type Task, type TaskWorker, type TaskWorkerId, type TaskWorkerState } from "@chiefbot/contracts";
+import { engineerRuns, WorkerChatView, type Project, type Task, type TaskWorker, type TaskWorkerId, type TaskWorkerState } from "@chiefbot/contracts";
 import { ChevronLeftIcon, ChevronRightIcon, RotateCwIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
@@ -60,14 +60,20 @@ export function Engineers({
 }
 
 const stateDot: Record<TaskWorkerState, { dot: string; ping?: string }> = {
+  queued: { dot: "bg-muted-foreground" },
   launching: { dot: "bg-warning", ping: "bg-warning/60" },
+  setting_up: { dot: "bg-warning", ping: "bg-warning/60" },
   working: { dot: "bg-success", ping: "bg-success/60" },
   finished: { dot: "bg-success" },
+  blocked: { dot: "bg-warning" },
   failed: { dot: "bg-destructive" },
   stopped: { dot: "bg-muted-foreground/40" },
 };
 
-// An engineer's state as a dot, pinging while its computer starts or it works.
+// What an engineer does before its agent works, in its screen's place and as its transcript's status.
+const startingText: Partial<Record<TaskWorkerState, string>> = { launching: "Starting its computer", setting_up: "Setting up" };
+
+// An engineer's state as a dot, pinging while its computer starts, it sets up or it works.
 function StateDot({ state }: { state: TaskWorkerState }) {
   const { dot, ping } = stateDot[state];
   return (
@@ -81,7 +87,7 @@ function StateDot({ state }: { state: TaskWorkerState }) {
 // One engineer: back to the list, its task, its screen and its transcript under it.
 function EngineerDetail({ project, login, title, worker, onBack }: { project: Project; login: string; title: string; worker: TaskWorker; onBack: () => void }) {
   const view = useWorkerChat(project, worker.id);
-  const running = worker.state === "launching" || worker.state === "working";
+  const running = engineerRuns(worker.state);
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-1.5 border-b px-2 py-1.5">
@@ -100,7 +106,7 @@ function EngineerDetail({ project, login, title, worker, onBack }: { project: Pr
       <ChatTimeline
         chatKey={worker.id}
         items={view.items}
-        status={running ? (view.working ?? (worker.state === "launching" ? "Starting its computer" : "Working")) : null}
+        status={running ? (view.working ?? startingText[worker.state] ?? "Working") : null}
         empty="Its transcript shows here once it starts."
         renderItem={(item, streaming) => <TranscriptRow project={project} login={login} worker={worker} item={item} streaming={streaming} />}
       />
@@ -129,7 +135,9 @@ function useWorkerChat(project: Project, workerId: TaskWorkerId) {
 // control (any member of the project, one at a time). Before and after, a line in its place.
 function EngineerScreen({ project, login, worker }: { project: Project; login: string; worker: TaskWorker }) {
   const [failures, setFailures] = useState(0);
-  if (worker.state === "launching") return <ScreenNote><Spinner className="size-3.5" />Starting its computer…</ScreenNote>;
+  if (worker.state === "queued") return <ScreenNote>Queued: it starts when one of the project's engineers ends.</ScreenNote>;
+  const starting = startingText[worker.state];
+  if (starting) return <ScreenNote><Spinner className="size-3.5" />{starting}…</ScreenNote>;
   if (worker.state !== "working") return <ScreenNote>Its computer is gone. Its screen shows only while it works.</ScreenNote>;
   if (failures >= 3) {
     return (

@@ -49,17 +49,17 @@ export function coordinatorTools(call: (toolCall: CoordinatorToolCall) => Promis
     tool("write_context", "Write one of the project's shared context files (Markdown), replacing its content.", WriteContextArgs),
     tool(
       "dispatch_worker",
-      "Start a worker on a task: a fresh computer that clones the repo, does the task and opens a pull request. It returns at once with the worker; check on it with worker_status.",
+      "Start an engineer on a task: a fresh computer that clones the repo, runs its setup and does the task, ending in a draft pull request or a report. It returns at once with the engineer, queued when the project already runs its most; check on it with worker_status.",
       DispatchWorkerArgs,
       // The tool call's own id: control starts one worker per call, however often it arrives.
       ({ sessionId, toolCallId }) => ({ creationId: `${sessionId}/${toolCallId}` }),
     ),
     tool(
       "worker_status",
-      "One worker's state (launching, working, finished, failed or stopped) with its result and pull request, or every worker of the project.",
+      "One engineer's state (queued, launching, setting_up, working, finished, blocked, failed or stopped) with its setup steps, result and pull request, or every engineer of the project.",
       WorkerStatusArgs,
     ),
-    tool("worker_transcript", "What a worker did: its messages, tool calls, approvals and errors, oldest first.", WorkerTranscriptArgs),
-    tool("stop_worker", "Stop a worker and remove its computer.", StopWorkerArgs),
+    tool("worker_transcript", "What an engineer did: its setup steps, messages, tool calls, approvals and errors, oldest first.", WorkerTranscriptArgs),
+    tool("stop_worker", "Stop an engineer and remove its computer.", StopWorkerArgs),
   ];
 }

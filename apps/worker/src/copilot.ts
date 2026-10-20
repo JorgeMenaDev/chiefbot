@@ -40,6 +40,9 @@ export type Copilot = {
   // connections); every session names them, so none carry over from an earlier one.
   // `questions` answers the agent's ask_user forms (the SDK's elicitation); a
   // session without it has no ask_user tool, so the agent asks in plain text.
+  // An engineer's session works in its clone (`workingDirectory`) and gets the
+  // project's secrets as `env`: a runtime of its own, started with them, which
+  // stops when the session disconnects. Neither applies to a coordinator.
   openSession(options: {
     sessionId: string;
     auth: CopilotAuth;
@@ -50,6 +53,8 @@ export type Copilot = {
     onMcpCall?: (serverName: string, toolName: string) => Promise<void>;
     skillDirectories?: string[];
     questions?: Questions;
+    workingDirectory?: string;
+    env?: Record<string, string>;
   }): Promise<BotSession>;
 };
 

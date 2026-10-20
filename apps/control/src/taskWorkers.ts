@@ -1,4 +1,5 @@
 import {
+  ENGINEER_SETUP,
   AnswerApprovalRequest,
   type ApprovalId,
   PullRequestArgs,
@@ -10,6 +11,7 @@ import {
   type ControlToWorker,
   type CoordinatorToolCall,
   type CopilotPayer,
+  type EngineerSetup,
   type OpenedPullRequest,
   type Project,
   type ProjectId,
@@ -62,6 +64,8 @@ export type TaskWorkerHostOptions = {
   payerOf: ReturnType<typeof copilotIdentity>;
   // The project's connectors ready for the member who asked (connectors.ts).
   connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
+  // The values of the project's secrets that are set, by name (projects.ts). Throws when they cannot be read.
+  secretsFor: (projectId: ProjectId) => Promise<Record<string, string>>;
   computers: ComputerProvider;
   approvals: ReturnType<typeof controlApprovals>;
   // A worker that waits this long on one approval stops, keeping its disk.
@@ -82,20 +86,29 @@ export type TaskWorkerHostOptions = {
   upgrade: (req: Request, data: TaskWorkerSocketData | WorkerWatchSocketData) => Response | undefined;
 };
 
-// A project's workers: one task each, on a throwaway computer from the
-// ComputerProvider. The coordinator dispatches them (dispatch_worker): control
-// writes the launch record first, keyed by the tool call's creation id, then
-// asks for the computer, so a resent call starts no second worker. The worker
-// is a bot's worker (apps/worker) on control's /task-worker routes: it runs the
-// task as one turn for the member who asked, on the Copilot that pays for it
-// (their seat, or their organization's: copilotIdentity.ts) and with the
-// project's connectors ready for them (through connectors.ts's proxy). It clones
-// and pushes through control's git proxy and opens its pull request through
-// control, each push and pull request approved by that member. Its last message is its
-// result; its pull request is linked on the task. Its computer stops as soon as
-// its turn ends, keeping its disk, and goes once the worker is stopped or its
-// task is done or abandoned; on start, control stops every computer of an
-// ended turn and removes every one that should be gone (`recover`).
+// A project's workers, its engineers: one task each, on a throwaway computer
+// from the ComputerProvider. The coordinator dispatches them (dispatch_worker):
+// control writes the launch record first, keyed by the tool call's creation id,
+// then asks for the computer, so a resent call starts no second worker. A
+// project runs at most its workers.max at once: another dispatch is queued, and
+// launches once one of them has ended and its computer has stopped or gone (a
+// place is held until then: taskWorkerStore.ts). The worker is a bot's worker (apps/worker) on
+// control's /task-worker routes: it runs the task as one turn for the member who
+// asked, on the Copilot that pays for it (their seat, or their organization's:
+// copilotIdentity.ts) and with the project's connectors ready for them (through
+// connectors.ts's proxy). It first sets up (setting_up): it clones the repo
+// through control's git proxy and runs the project's setup command with the
+// project's secrets, which control sends with its task and nowhere else
+// (EngineerSetup), only while its turn is live on the connection that asked; a
+// step that fails blocks it. Its worker hides those secrets in all it sends
+// (secretRedactor.ts). Then its agent works on the task:
+// it pushes through the git proxy and opens a draft pull request through
+// control, each push and pull request approved by that member, or ends with a
+// report when nothing needs to change. Its last message is its result; its pull
+// request is linked on the task. Its computer stops as soon as its turn ends,
+// keeping its disk, and goes once the worker is stopped or its task is done or
+// abandoned; on start, control stops every computer of an ended turn, removes
+// every one that should be gone and launches what the queue has room for (`recover`).
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's
@@ -122,8 +135,8 @@ export type TaskWorkerHostOptions = {
 //                                its task runs on their seat (404 otherwise; 403 reauth_needed)
 //   GET  /task-worker/:workerId/installation-token  → CopilotInstallationToken, when its task runs
 //                                on the organization's Copilot (404 otherwise; 502 copilot_token_failed)
-//   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest once the
-//                                member who asked approves (errors as a bot's)
+//   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest, a draft,
+//                                once the member who asked approves (errors as a bot's)
 //   WS   /task-worker/:workerId/screen/:streamId  the worker's credential ↔ the VNC bytes for one
 //                                viewer, after screen-open (404 for a stream control did not open for it)
 // The git proxy (repos.ts) takes the turn's key through agentOf.
@@ -131,6 +144,7 @@ export function taskWorkerHost({
   store,
   payerOf,
   connectorsFor,
+  secretsFor,
   computers,
   approvals,
   approvalWaitMinutes,
@@ -148,6 +162,13 @@ export function taskWorkerHost({
   const launches = new Map<TaskWorkerId, Promise<void>>();
   // The wait limit of each approval a worker waits on: its cancel, by approval id.
   const waitLimits = new Map<ApprovalId, () => void>();
+  // Each worker computer's chore under way (settle), each that must look again
+  // when its step is over, and the next try of each whose step failed: its cancel.
+  const chores = new Map<TaskWorkerId, Promise<void>>();
+  const again = new Set<TaskWorkerId>();
+  const retries = new Map<TaskWorkerId, () => void>();
+  // Control is stopping: nothing new starts, and no answer that comes after is acted on.
+  let stopped = false;
   // The streams of members watching each worker's screen (screens.ts), and
   // each viewer's member and what of its bytes go on (rfbViewer.ts).
   const screens = screenTunnel<TaskWorkerId>({ onStreamEnd: () => {} });
@@ -235,6 +256,7 @@ export function taskWorkerHost({
         }
         return event;
       }, signal);
+      if (stopped) return outcome;
       if (asked && signal.aborted && workers.withdrawApproval(workerId, asked)) {
         stopWaitLimit(asked);
         publish(projectId);
@@ -270,45 +292,115 @@ export function taskWorkerHost({
     waitLimits.delete(approvalId);
   };
 
-  // Makes the worker's computer. A failure fails the worker and removes what was made.
-  async function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
-    try {
-      await computers.create({
-        id: workerId,
-        env: { CHIEFBOT_CONTROL_URL: controlUrlForComputers(), CHIEFBOT_TASK_WORKER_ID: workerId, CHIEFBOT_TASK_WORKER_TOKEN: token },
-      });
-      await computers.start(workerId);
-    } catch (error) {
-      workers.launchFailed(workerId, `Its computer could not start: ${error instanceof Error ? error.message : String(error)}`);
-      void reap();
-    }
-    publish(projectId);
-  }
+  // A new worker credential.
+  const newToken = () => crypto.randomUUID() + crypto.randomUUID();
 
-  // Deletes every worker computer that must go (after any launch still making
-  // it). One that fails stays marked, for the next reap.
-  async function reap() {
-    for (const workerId of workers.toReap()) {
-      await launches.get(workerId);
-      sockets.get(workerId)?.close();
-      holders.delete(workerId);
+  // Makes the worker's computer, a launch that a resent dispatch and a reap wait
+  // for. A failure fails the worker and removes what was made, which frees its place.
+  function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
+    const launched = (async () => {
+      let failure: string | null = null;
       try {
-        await computers.destroy(workerId, { deleteData: true });
-        workers.computerRemoved(workerId);
+        await computers.create({
+          id: workerId,
+          env: { CHIEFBOT_CONTROL_URL: controlUrlForComputers(), CHIEFBOT_TASK_WORKER_ID: workerId, CHIEFBOT_TASK_WORKER_TOKEN: token },
+        });
+        await computers.start(workerId);
       } catch (error) {
-        console.error(`could not remove the computer of ${workerId}:`, error);
+        failure = error instanceof Error ? error.message : String(error);
       }
-      const projectId = workers.worker(workerId)?.projectId;
-      if (projectId) publish(projectId);
+      if (stopped) return;
+      if (failure !== null) {
+        workers.launchFailed(workerId, `Its computer could not start: ${failure}`);
+        void reap();
+      }
+      publish(projectId);
+    })();
+    launches.set(workerId, launched);
+    void launched.finally(() => launches.delete(workerId));
+    return launched;
+  }
+
+  // Launches the project's queued workers, oldest first, while it runs fewer than its workers.max.
+  function promote(projectId: ProjectId) {
+    const max = projects.project(projectId)?.config.workers.max;
+    if (max === undefined || stopped) return;
+    for (let token = newToken(), next = workers.dequeue(projectId, max, token); next; token = newToken(), next = workers.dequeue(projectId, max, token)) {
+      publish(projectId);
+      void launch(projectId, next, token);
     }
   }
 
-  // The worker's turn ended: its approvals stop waiting and its computer stops,
-  // keeping its disk until the task closes. A failed stop is retried on control's next start.
+  // Removes every worker computer that must go (settle).
+  const reap = () => Promise.all(workers.toReap().map(settle));
+
+  // The worker's turn ended: its approvals stop waiting and its computer stops
+  // (settle).
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
     holders.delete(workerId);
-    computers.stop(workerId).catch((error: unknown) => console.error(`could not stop the computer of ${workerId}:`, error));
+    void settle(workerId);
+  }
+
+  // Brings the worker's computer to what its record wants: removed when it must
+  // go (after any launch still making it), else stopped, keeping its disk, once
+  // its turn ended. Only then does its place go to a queued worker. One chore
+  // runs per computer: a call while it runs makes it look again after its step.
+  // A step that fails is tried again after retryMs, the place held meanwhile.
+  function settle(workerId: TaskWorkerId): Promise<void> {
+    const running = chores.get(workerId);
+    if (running) {
+      again.add(workerId);
+      return running;
+    }
+    const chore = (async () => {
+      do {
+        again.delete(workerId);
+        await settleStep(workerId);
+      } while (again.has(workerId) && !stopped);
+      chores.delete(workerId);
+    })();
+    chores.set(workerId, chore);
+    return chore;
+  }
+
+  // One step of settle: the provider call the computer needs, if any.
+  async function settleStep(workerId: TaskWorkerId) {
+    const goes = workers.mustGo(workerId);
+    if (!goes && !workers.stopPending(workerId)) return;
+    if (goes) {
+      await launches.get(workerId);
+      if (stopped) return;
+      sockets.get(workerId)?.close();
+    }
+    holders.delete(workerId);
+    try {
+      await (goes ? computers.destroy(workerId, { deleteData: true }) : computers.stop(workerId));
+    } catch (error) {
+      console.error(`could not ${goes ? "remove" : "stop"} the computer of ${workerId}:`, error);
+      if (!stopped) retryLater(workerId);
+      return;
+    }
+    if (stopped) return;
+    if (goes) workers.computerRemoved(workerId);
+    else workers.computerStopped(workerId);
+    const projectId = workers.worker(workerId)?.projectId;
+    if (projectId) {
+      publish(projectId);
+      promote(projectId);
+    }
+  }
+
+  // Settles the worker's computer again after retryMs, instead of any try already waiting.
+  function retryLater(workerId: TaskWorkerId) {
+    retries.get(workerId)?.();
+    retries.set(
+      workerId,
+      clock.setTimeout(() => {
+        retries.delete(workerId);
+        void settle(workerId);
+      }, retryMs),
+    );
   }
 
   // Ends the worker's turn (if it runs) and marks its computer to go.
@@ -318,21 +410,32 @@ export function taskWorkerHost({
     if (turnId) approvals.turnEnded(turnId);
   }
 
-  // The worker's first message: the task, the project and how to hand back the work.
+  // The engineer's brief, its first message: the task, the project and how to
+  // hand back the work. Its instructions say where its setup cloned the repo.
   function taskPrompt({ name, repo, config }: Project, task: Task, instructions: string) {
     const commands = Object.entries(config.commands).map(([command, line]) => `- ${command}: ${line}`);
     return [
-      `You are a worker of the project ${name} (GitHub repo ${repo}). You have this computer to yourself for one task.`,
+      `You are an engineer of the project ${name} (GitHub repo ${repo}). You have this computer to yourself for one task. Chiefbot cloned the repo and set it up for you.`,
       "",
       `Task #${task.number}: ${task.title}`,
       ...(task.detail ? [task.detail] : []),
-      ...(instructions ? ["", "From the project's coordinator:", instructions] : []),
+      ...(instructions ? ["", "From the project agent:", instructions] : []),
       "",
-      `Clone https://github.com/${repo} and work on a new branch.`,
-      ...(commands.length > 0 ? ["The repo's commands:", ...commands] : []),
-      "Push the branch and open a pull request with create_pull_request. The member who asked for this approves each push and the pull request.",
-      "End with a short summary of what you changed and the pull request's link.",
+      ...(commands.length > 0 ? ["The repo's commands:", ...commands, ""] : []),
+      "First reproduce the problem, or see how the code behaves now, on the base branch as cloned, before you change anything.",
+      "If nothing needs to change (it is already fixed, or the task only asks a question), push nothing: end with a report of what you checked and what you found.",
+      "Otherwise work on a new branch, push it and open a draft pull request with create_pull_request. The member who asked for this approves each push and the pull request.",
+      "End with a short summary: the pull request's link and what it changes, or your report.",
     ].join("\n");
+  }
+
+  // What the engineer sets up: the project's config as it is now, and the values
+  // of its secrets. Null when the project is gone.
+  async function setupOf(projectId: ProjectId): Promise<EngineerSetup | null> {
+    const project = projects.project(projectId);
+    if (!project) return null;
+    const { repo, config } = project;
+    return { repo, command: config.commands.setup ?? null, instructions: config.instructions, skills: config.skills, mcp: config.mcp, secrets: await secretsFor(projectId) };
   }
 
   const routes = {
@@ -413,7 +516,7 @@ export function taskWorkerHost({
       GET: (req: Bun.BunRequest<"/task-worker/:workerId/installation-token">) => turnToken(req, "org"),
     },
     // The worker's create_pull_request tool. Waits, however long, for the requester's
-    // answer; once opened, the pull request is linked on the worker and its task.
+    // answer; once opened, as a draft, the pull request is linked on the worker and its task.
     "/task-worker/:workerId/pull-requests": {
       POST: async (req: Bun.BunRequest<"/task-worker/:workerId/pull-requests">, server: Bun.Server<unknown>) => {
         const turn = heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId));
@@ -421,7 +524,7 @@ export function taskWorkerHost({
         const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
         if (!args.success) return apiError(400, "invalid_pull_request");
         server.timeout(req, 0);
-        const opened = await pullRequest(agentOf(turn), args.data, req.signal);
+        const opened = await pullRequest(agentOf(turn), args.data, req.signal, { draft: true });
         if ("error" in opened) return apiError(opened.status, opened.error, opened.message);
         const worker = workers.worker(turn.workerId);
         if (worker) {
@@ -450,16 +553,35 @@ export function taskWorkerHost({
   }
 
   // Starts the worker's task, once: on the Copilot of whoever pays for the
-  // member who asked, with the connectors ready for them. On the organization's
-  // Copilot the worker renews its one-hour token mid-task (installationSession.ts).
+  // member who asked, with the connectors ready for them and its setup. On the
+  // organization's Copilot the worker renews its one-hour token mid-task
+  // (installationSession.ts). Secrets control cannot read block it: its setup cannot run.
   async function startTask(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId) {
+    // The connection whose hello started it: the task goes there or nowhere.
+    const socket = sockets.get(workerId);
     const run = payerOf({ kind: "project", projectId, askerId: userId });
     const started = run && workers.startTurn(workerId, run.payer);
     if (!run || !started) return;
     const turnKey = store.turnKeys.issue({ agent: "task-worker", workerId, projectId, userId, turnId: started.turnId });
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
-    send(workerId, { type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors });
+    const setup = await setupOf(projectId).catch((error: unknown) => {
+      console.error(`could not read the secrets of ${projectId} for ${workerId}: ${error instanceof Error ? error.name : "unknown error"}`);
+      return null;
+    });
+    if (stopped) return;
+    if (!setup) {
+      if (workers.end(workerId, "blocked", "Chiefbot could not read the project's secrets, so its setup did not run. Dispatch the task again.").length > 0) {
+        turnOver(workerId, started.turnId);
+      }
+      publish(projectId);
+      return;
+    }
+    // The turn may have ended, its member left or its worker reconnected while
+    // control read the secrets: then they, and the task, go nowhere.
+    const live = socket && sockets.get(workerId) === socket && store.turnKeys.holder(turnKey) && store.projects.member(projectId, { userId });
+    if (!live) return;
+    socket.send(JSON.stringify({ type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors, setup } satisfies ControlToWorker));
   }
 
   // The signed-in member and the project's worker :workerId; 401 or 404 otherwise.
@@ -515,7 +637,7 @@ export function taskWorkerHost({
         const task = projects.tasks(project.id).find(({ number }) => number === call.task);
         if (!task) return refused(`No task #${call.task} in this project`, 404);
         if (task.status === "done" || task.status === "abandoned") return refused(`Task #${task.number} is ${task.status}`);
-        const token = crypto.randomUUID() + crypto.randomUUID();
+        const token = newToken();
         const record = workers.launch({
           projectId: project.id,
           taskNumber: task.number,
@@ -523,19 +645,14 @@ export function taskWorkerHost({
           userId: asker.userId,
           prompt: taskPrompt(project, task, call.instructions),
           token,
+          max: project.config.workers.max,
         });
         if ("busy" in record) return refused(`Worker ${record.busy.id} still works on task #${task.number}: stop it first, or wait for it`, 409);
         const { id } = record.worker;
-        if (record.launched) {
-          publish(project.id);
-          const launched = launch(project.id, id, token);
-          launches.set(id, launched);
-          await launched;
-          launches.delete(id);
-        } else {
-          // A resent call: the first one's launch, once it is done.
-          await launches.get(id);
-        }
+        if (record.launched) publish(project.id);
+        // A new worker launches now, unless it is queued. A resent call waits for the first one's launch.
+        if (record.launched && record.worker.state === "launching") await launch(project.id, id, token);
+        else await launches.get(id);
         return Response.json(workers.worker(id) satisfies TaskWorker | null);
       }
       if (call.tool === "worker_status" && call.worker === undefined) return Response.json(workers.workersOf(project.id) satisfies TaskWorker[]);
@@ -592,22 +709,32 @@ export function taskWorkerHost({
     // On control's start: every approval a worker waits on gets its wait limit
     // again. A worker still launching whose computer is not running lost its
     // launch to the restart, so it fails. A computer whose turn ended but still
-    // runs stops. Then every worker computer that should be gone is removed.
+    // runs stops. Then every worker computer that should be gone is removed, and
+    // queued workers launch where there is room.
     async recover() {
       for (const { workerId, approvalId, requestedAt } of workers.waitingApprovals()) limitWait(workerId, approvalId, requestedAt);
       for (const workerId of workers.launching()) {
-        if ((await computers.status(workerId)) !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
+        const status = await computers.status(workerId);
+        if (stopped) return;
+        if (status !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
       }
       for (const workerId of workers.ended()) {
-        if ((await computers.status(workerId)) === "running") await computers.stop(workerId);
+        const status = await computers.status(workerId);
+        if (stopped) return;
+        if (status === "running") await settle(workerId);
+        else workers.computerStopped(workerId);
       }
       await reap();
+      for (const projectId of workers.queuedProjects()) promote(projectId);
     },
 
-    // Control is stopping: no wait limit fires any more.
+    // Control is stopping: no wait limit or computer retry fires any more, and
+    // nothing new starts.
     stop() {
-      for (const cancel of waitLimits.values()) cancel();
+      stopped = true;
+      for (const cancel of [...waitLimits.values(), ...retries.values()]) cancel();
       waitLimits.clear();
+      retries.clear();
     },
 
     open(ws: Socket, { workerId }: TaskWorkerSocketData) {
@@ -634,21 +761,26 @@ export function taskWorkerHost({
         if (message.event.type === "approval-request") limitWait(workerId, message.event.approvalId, now);
         if (message.event.type === "approval-withdrawn") stopWaitLimit(message.event.approvalId);
         if (message.event.type === "done") turnOver(workerId, message.turnId);
-        if (["done", "approval-request", "approval-withdrawn"].includes(message.event.type)) publish(worker.projectId);
+        if (["done", "approval-request", "approval-withdrawn", "setup-step", "setup-done"].includes(message.event.type)) publish(worker.projectId);
         return;
       }
       // The models report is for a bot's model picker, and connection calls for a
       // bot's turn: a task worker sends neither.
       if (message.type === "models" || message.type === "connection-calls") return;
-      // Hello. The first one starts the task; after that, the worker lost the
-      // task unless it says it still runs it, and may have missed answers.
-      if (worker.state === "launching") {
+      // Hello. The first one starts the task, if the worker can set up; after
+      // that, the worker lost the task unless it says it still runs it, and may
+      // have missed answers.
+      const started = worker.state === "setting_up" || worker.state === "working";
+      if (worker.state === "launching" && !message.capabilities.includes(ENGINEER_SETUP)) {
+        if (workers.end(workerId, "blocked", outdatedImage).length > 0) turnOver(workerId, turnId);
+        publish(worker.projectId);
+      } else if (worker.state === "launching") {
         void startTask(workerId, worker.projectId, userId);
-      } else if (worker.state === "working" && message.activeTurnId !== turnId) {
+      } else if (started && message.activeTurnId !== turnId) {
         workers.end(workerId, "failed", "The worker's computer restarted before it finished the task.");
         turnOver(workerId, turnId);
         publish(worker.projectId);
-      } else if (worker.state === "working") {
+      } else if (started) {
         for (const answer of workers.answeredApprovals(workerId, turnId)) send(workerId, { type: "approval-answer", ...answer });
         // Control restarted since the turn started: it gets a new key.
         if (store.turnKeys.missing(turnId)) {
@@ -704,8 +836,16 @@ export function taskWorkerHost({
   };
 }
 
-// A worker's turn as transcript lines for the coordinator: each message whole,
-// each tool call with its latest status, approvals, answers and errors.
+// Why an engineer whose worker cannot set up (no ENGINEER_SETUP in its hello) is blocked.
+const outdatedImage =
+  "Its computer runs an older Chiefbot image, which cannot set up an engineer. Rebuild the computer image (`bun run computer:build`), then dispatch the task again.";
+
+// How long control waits to try again to stop or remove a worker's computer.
+const retryMs = 30_000;
+
+// A worker's turn as transcript lines for the coordinator: each setup step with
+// its exit code (and its log when it failed), each message whole, each tool call
+// with its latest status, approvals, answers and errors.
 function transcriptLines(events: ChatEvent[]): string[] {
   const lines: string[] = [];
   // Where each message and tool call is, to grow or update its line.
@@ -734,6 +874,16 @@ function transcriptLines(events: ChatEvent[]): string[] {
         break;
       case "error":
         lines.push(`error: ${event.message}`);
+        break;
+      case "setup-step": {
+        const { step, command, exitCode, log } = event.step;
+        lines.push(`${step}: ${command} (exit ${exitCode})${exitCode === 0 ? "" : `\n${log}`}`);
+        break;
+      }
+      case "setup-done":
+        lines.push(
+          ["setup done", ...(event.instructions.length > 0 ? [`instructions ${event.instructions.join(", ")}`] : []), ...(event.skills.length > 0 ? [`skills ${event.skills.join(", ")}`] : [])].join("; "),
+        );
         break;
     }
   }

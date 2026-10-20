@@ -16,7 +16,7 @@ export function git(cwd: string, args: string[]) {
   return result.stdout.toString().trim();
 }
 
-// Makes <root>/<fullName>.git with one commit on main holding `files`.
+// Makes <root>/<fullName>.git with one commit on main holding `files`, by path (folders made as needed).
 export function createBareRepo(root: string, fullName: string, files: Record<string, string>) {
   const work = mkdtempSync(join(tmpdir(), "fake-github-seed-"));
   try {

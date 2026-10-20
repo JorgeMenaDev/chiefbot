@@ -4,11 +4,11 @@ import { AgentConnector, ConnectorName } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
 import { RepoFullName } from "./repos.ts";
-import type { TaskWorker } from "./taskWorkers.ts";
+import type { TaskWorker, TaskWorkerState } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // A file or folder inside the repo, relative to its root: no leading slash and no "." or ".." part.
-const RepoPath = z
+export const RepoPath = z
   .string()
   .trim()
   .min(1)
@@ -43,7 +43,7 @@ const ProjectMcpServers = z
 // The repo's chiefbot.project.yaml, at its root on the default branch, and the
 // project's settings in the app: the same keys, every one optional. Unknown keys
 // are errors, so a typo is caught instead of ignored.
-//   instructions  files the agents read besides AGENTS.md
+//   instructions  files the agents read besides AGENTS.md and .github/copilot-instructions.md (instructionPaths)
 //   commands      the repo's commands (ProjectCommands)
 //   skills        folders of skills the agents load
 //   verify        the skill a verifier follows
@@ -89,6 +89,12 @@ export const ProjectConfig = z.object({
   workers: z.object({ max: z.int().default(DEFAULT_WORKERS_MAX) }).default({ max: DEFAULT_WORKERS_MAX }),
 });
 export type ProjectConfig = z.infer<typeof ProjectConfig>;
+
+// The repo's instruction files an agent reads, in order: AGENTS.md and
+// .github/copilot-instructions.md when the repo has them, then the project's
+// `instructions`. Each agent reads them its own way: the coordinator from git
+// objects at the commit it fetched (repoCopy.ts), an engineer from its clone on disk (engineerSetup.ts).
+export const instructionPaths = (instructions: string[]) => [...new Set(["AGENTS.md", ".github/copilot-instructions.md", ...instructions])];
 
 // Each key the settings and the file set, and where the config takes it from. A
 // key neither sets is absent: its default applies.
@@ -253,13 +259,16 @@ export type ProjectStateChange = z.infer<typeof ProjectStateChange>;
 export const ProjectStates = z.partialRecord(ProjectId, ProjectState);
 export type ProjectStates = z.infer<typeof ProjectStates>;
 
+// Whether an engineer in `state` is at work on its task: its computer starts, it sets up or it works.
+export const engineerRuns = (state: TaskWorkerState) => state === "launching" || state === "setting_up" || state === "working";
+
 // The member `login`'s state of a project: `awake` while its computer runs the
 // project agent, `busy` while the agent has a message of any member to answer.
 export function projectState({ login, awake, busy, tasks, workers }: { login: string; awake: boolean; busy: boolean; tasks: Task[]; workers: TaskWorker[] }): ProjectState {
   const asked = tasks.some(({ status, requestedBy }) => status === "needs_input" && requestedBy === login);
   const approve = workers.some(({ pendingApprovals, requestedBy }) => pendingApprovals.length > 0 && requestedBy === login);
   if (asked || approve) return "needs_you";
-  if (busy || workers.some(({ state }) => state === "launching" || state === "working")) return "working";
+  if (busy || workers.some(({ state }) => engineerRuns(state))) return "working";
   return awake ? "idle" : "sleeping";
 }
 

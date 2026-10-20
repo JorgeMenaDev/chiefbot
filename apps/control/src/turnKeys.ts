@@ -21,7 +21,7 @@ export type TaskWorkerTurn = Extract<TurnHolder, { agent: "task-worker" }>;
 // its member removed, its agent deleted), revokes its key in the same write.
 const liveTurns = `SELECT id FROM turns WHERE done = 0
   UNION ALL SELECT id FROM coordinator_turns WHERE state = 'running'
-  UNION ALL SELECT turn_id FROM task_workers WHERE state = 'working'`;
+  UNION ALL SELECT turn_id FROM task_workers WHERE state IN ('setting_up', 'working')`;
 
 // Turn keys (contracts ids.ts TurnKey) in control's SQLite, stored as a SHA-256.
 // openStore (store.ts) calls this once every agent's turns table exists, as

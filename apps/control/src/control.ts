@@ -345,6 +345,7 @@ export function startControl({
     store,
     payerOf,
     connectorsFor: connectors.agentConnectors,
+    secretsFor: (projectId) => projects.secretValues(projectId),
     computers,
     approvals,
     approvalWaitMinutes,
