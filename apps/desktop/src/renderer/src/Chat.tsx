@@ -1,9 +1,11 @@
-import { ChatView, type Bot, type BotId, type ChatItem } from "@chiefbot/contracts";
+import { ChatView, type Bot, type BotId, type ChatItem, type SentAttachment } from "@chiefbot/contracts";
 import { CheckIcon, CircleAlertIcon, InfoIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
-import { BotComposerControls } from "./BotComposerControls.tsx";
+import { ChipText, SentAttachments } from "./Attachments.tsx";
+import { BotComposerControls, useModels } from "./BotComposerControls.tsx";
 import { Composer } from "./Composer.tsx";
+import { chipFor, isImage, type DraftAttachment } from "./composerAttachments.ts";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
@@ -24,22 +26,33 @@ function useChat(botId: BotId) {
 
 // T3 Code's chat shape: a centred lane of messages (user on the right, the bot's
 // replies as plain text, tool calls as one-line rows), the bot's status, and the
-// composer at the bottom. Enter sends, Shift+Enter adds a line.
+// composer at the bottom. Enter sends, Shift+Enter adds a line. Files go with a
+// message; one with only files says their chips.
 export function Chat({ bot }: { bot: Bot }) {
   const view = useChat(bot.id);
+  const models = useModels();
   const [draft, setDraft] = useState("");
+  const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
   const working = view.working !== null;
   // The agent waits while the user has its screen.
   const humanHasScreen = bot.screenControl === "human";
-  const canSend = bot.status === "online" && !humanHasScreen && !working && draft.trim() !== "";
+  const canSend = bot.status === "online" && !humanHasScreen && !working && (draft.trim() !== "" || attachments.length > 0);
+  // Images reach only a model that sees them; another finds them on disk.
+  const model = models.models.find(({ id }) => id === bot.model);
+  const notice =
+    model?.vision === false && attachments.some(({ mimeType }) => isImage(mimeType))
+      ? `${model.name} can't see images. They are saved in its workspace as files.`
+      : null;
 
   async function submit() {
     if (!canSend) return;
     setError(null);
     try {
-      await window.chiefbot.chat.send(bot.id, draft);
+      const text = draft.trim() === "" ? attachments.map(({ name }) => chipFor(name)).join(" ") : draft;
+      await window.chiefbot.chat.send(bot.id, text, attachments);
       setDraft("");
+      setAttachments([]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     }
@@ -67,8 +80,10 @@ export function Chat({ bot }: { bot: Bot }) {
         onSend={() => void submit()}
         canSend={canSend}
         error={error}
+        notice={notice}
+        attachments={{ items: attachments, onChange: setAttachments }}
       >
-        <BotComposerControls bot={bot} onError={setError} />
+        <BotComposerControls bot={bot} models={models} onError={setError} />
       </Composer>
     </section>
   );
@@ -77,7 +92,7 @@ export function Chat({ bot }: { bot: Bot }) {
 function Message({ botId, item }: { botId: BotId; item: ChatItem }) {
   switch (item.kind) {
     case "user":
-      return <UserMessage text={item.text} />;
+      return <UserMessage text={item.text} attachments={item.attachments} read={(id) => window.chiefbot.chat.attachment(botId, id)} />;
     case "assistant":
       return <AssistantMessage text={item.text} />;
     case "tool":
@@ -128,10 +143,20 @@ export function ChatEmpty({ children }: { children: ReactNode }) {
   );
 }
 
-export function UserMessage({ text }: { text: string }) {
+// The user's message, after the files sent with it (`read` gives an image's data: URL), its chips drawn.
+export function UserMessage({
+  text,
+  attachments = [],
+  read,
+}: {
+  text: string;
+  attachments?: SentAttachment[] | undefined;
+  read?: (id: SentAttachment["id"]) => Promise<unknown>;
+}) {
   return (
     <div className="max-w-[80%] self-end whitespace-pre-wrap rounded-2xl bg-message p-3 text-message-foreground text-sm leading-relaxed">
-      {text}
+      {read && <SentAttachments text={text} attachments={attachments} read={read} />}
+      <ChipText text={text} attachments={attachments} />
     </div>
   );
 }

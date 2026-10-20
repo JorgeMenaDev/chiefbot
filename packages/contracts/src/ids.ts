@@ -50,3 +50,7 @@ export type HandoffId = z.infer<typeof HandoffId>;
 // Something a project listens to: CI runs, an issue query or a schedule.
 export const SubscriptionId = z.string().min(1).brand<"SubscriptionId">();
 export type SubscriptionId = z.infer<typeof SubscriptionId>;
+
+// A file a user sent with a message to their bot.
+export const AttachmentId = z.string().min(1).brand<"AttachmentId">();
+export type AttachmentId = z.infer<typeof AttachmentId>;

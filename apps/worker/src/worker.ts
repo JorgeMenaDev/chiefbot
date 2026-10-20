@@ -8,17 +8,19 @@ import {
   type ApprovalKind,
   type ReasoningEffort,
   type ScreenControl,
+  type SentAttachment,
   type TurnId,
   type TurnKey,
 } from "@chiefbot/contracts";
 import { rmSync } from "node:fs";
+import { join } from "node:path";
 import { approvalFor } from "./approvals.ts";
 import { chiefTools } from "./chiefTools.ts";
 import { connectionsRoot as defaultConnectionsRoot, stageConnections } from "./connections.ts";
 import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
-import type { BotSession, Copilot } from "./copilot.ts";
+import type { BotSession, Copilot, FileAttachment } from "./copilot.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
@@ -49,6 +51,9 @@ export type WorkerOptions = {
   onModelsError?: (error: unknown) => void;
   // Where a bot's turns stage its owner's connections. Default: /tmp/chiefbot (connections.ts).
   connectionsRoot?: string;
+  // Where a turn saves the files sent with its message, in a folder per turn.
+  // Default: attachments/ in the bot's workspace, so the agent can open them later too.
+  attachmentsRoot?: string;
 };
 
 // Dials out to control's /worker/:id WebSocket with the bot's credential (or a task
@@ -64,7 +69,8 @@ export type WorkerOptions = {
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
 // A bot's turn brings its owner's connections: staged for that turn only, their
 // skills given to its session, their CLIs' commands that may write asked first and
-// every run of them sent to control with the turn's end (connections.ts).
+// every run of them sent to control with the turn's end (connections.ts). The files
+// sent with its message are saved in the workspace and attached to its prompt.
 // Every call to control in a turn (git's, tools', a task's tokens and connectors)
 // carries that turn's key; none is made outside a turn. Only a bot's own Copilot
 // seat token is asked for with the bot's credential: its model listing runs between turns.
@@ -81,6 +87,7 @@ export function startWorker({
   onModelsError,
   clock,
   connectionsRoot = defaultConnectionsRoot,
+  attachmentsRoot = "/home/bot/workspace/attachments",
 }: WorkerOptions) {
   // Every control route of this computer starts here.
   const base = `${controlUrl}/${route}/${id}`;
@@ -228,13 +235,28 @@ export function startWorker({
     }
   }
 
+  // Saves the files sent with `turn`'s message in <attachmentsRoot>/<turn id>/,
+  // each read from control with the turn's key, as the session's attachments.
+  async function saveAttachments(turn: Turn, attachments: SentAttachment[]): Promise<FileAttachment[]> {
+    return Promise.all(
+      attachments.map(async ({ id, name }) => {
+        const res = await fetch(`${base}/attachments/${id}`, { headers: { authorization: `Bearer ${turn.key}` } });
+        if (!res.ok) throw new Error(`Could not read ${name} from control (${res.status}).`);
+        const path = join(attachmentsRoot, turn.turnId, name);
+        await Bun.write(path, res);
+        return { type: "file" as const, path, displayName: name };
+      }),
+    );
+  }
+
   // Control sends a turn only once the previous one is done. Each turn opens its
   // session (above), with the bot's model and its reasoning `effort` set first
   // (the SDK changes both on an open session, so switching mid-conversation keeps
   // the history; a null effort clears the last one). A task worker's one turn
   // (`task`) runs on the default model, in the default access mode. Git's
   // credential helper hands git this turn's key from now on. A bot's turn stages
-  // its owner's `connections` until it ends, and asks as its `access` mode says.
+  // its owner's `connections` until it ends, asks as its `access` mode says, and
+  // sends its message with the `attachments` sent with it.
   async function runTurn(
     turnId: TurnId,
     turnKey: TurnKey,
@@ -245,7 +267,14 @@ export function startWorker({
       connections = [],
       effort = null,
       access = DEFAULT_ACCESS,
-    }: { task?: Extract<ControlToWorker, { type: "run-task" }>; connections?: AgentConnection[]; effort?: ReasoningEffort | null; access?: AccessMode } = {},
+      attachments = [],
+    }: {
+      task?: Extract<ControlToWorker, { type: "run-task" }>;
+      connections?: AgentConnection[];
+      effort?: ReasoningEffort | null;
+      access?: AccessMode;
+      attachments?: SentAttachment[];
+    } = {},
   ) {
     const turn = link.begin(turnId, turnKey);
     git?.reload({ fetch: gitCredential(turn) });
@@ -254,7 +283,7 @@ export function startWorker({
       const { skillDirectories } = staged;
       const opened = await openSession(turn, task, { connections, skillDirectories, access });
       if (model !== null) await opened.setModel(model, effort);
-      await opened.send(text);
+      await opened.send(text, await saveAttachments(turn, attachments));
     } catch (error) {
       link.fail(turnId, error);
     }
@@ -297,6 +326,7 @@ export function startWorker({
             connections: message.connections,
             effort: message.effort,
             access: message.access,
+            attachments: message.attachments,
           });
           break;
         case "run-task":

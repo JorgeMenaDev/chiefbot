@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, Bot, ControlToWorker, type BotId } from "@chiefbot/contracts";
+import { ApiError, Bot, ControlToWorker, SendMessageResponse, type BotId } from "@chiefbot/contracts";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { tmpdir } from "node:os";
 import { cleanUp, doneCount, startTestControl } from "./testControl.ts";
@@ -114,6 +114,46 @@ test("a message is refused while the bot is offline or still on a turn", async (
 
   expect([busy.status, ApiError.parse(await busy.json())]).toEqual([409, { error: "turn_running" }]);
   expect([offline.status, ApiError.parse(await offline.json())]).toEqual([409, { error: "bot_offline" }]);
+});
+
+// A file as the desktop sends it.
+const upload = (name: string, mimeType: string, bytes: Uint8Array) => ({ name, mimeType, data: Buffer.from(bytes).toString("base64") });
+
+test("files sent with a message are kept for the chat, and its turn's session gets them as files in the bot's workspace", async () => {
+  const { api, computers, onlineBot, watchChat } = await setup();
+  const bot = await onlineBot("Ada");
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
+  const notes = new TextEncoder().encode("ship on Friday");
+
+  const six = Array.from({ length: 6 }, (_, i) => upload(`notes-${i}.txt`, "text/plain", notes));
+  const tooMany = await api("POST", `/bots/${bot.id}/messages`, { text: "six", attachments: six });
+  const res = await api("POST", `/bots/${bot.id}/messages`, {
+    text: "What is in [screen.png]?",
+    attachments: [upload("screen.png", "image/png", png), upload("notes.txt", "text/plain", notes)],
+  });
+  const { turnId } = SendMessageResponse.parse(await res.json());
+  const [sent] = await watchChat(bot.id).until(doneCount(1));
+
+  expect([tooMany.status, ApiError.parse(await tooMany.json())]).toEqual([400, { error: "invalid_message", message: "A message can have at most 5 files." }]);
+  expect(sent?.event).toMatchObject({
+    type: "user-message",
+    text: "What is in [screen.png]?",
+    attachments: [
+      { name: "screen.png", mimeType: "image/png", size: 7 },
+      { name: "notes.txt", mimeType: "text/plain", size: 14 },
+    ],
+  });
+  // The worker saved each in the turn's folder and attached it to the prompt.
+  const [turn] = computers.copilot.sends;
+  expect(turn?.files.map(({ path, displayName }) => [path.split("/").slice(-2).join("/"), displayName])).toEqual([
+    [`${turnId}/screen.png`, "screen.png"],
+    [`${turnId}/notes.txt`, "notes.txt"],
+  ]);
+  expect(await Promise.all((turn?.files ?? []).map(({ path }) => Bun.file(path).bytes()))).toEqual([png, notes]);
+  // The owner reads them back, for the chat's thumbnails.
+  const [image] = sent?.event.type === "user-message" ? (sent.event.attachments ?? []) : [];
+  const read = await api("GET", `/bots/${bot.id}/attachments/${image?.id}`);
+  expect([read.headers.get("content-type"), await read.bytes()]).toEqual(["image/png", png]);
 });
 
 test("the agent waits while the human has the screen: a message is refused until hand-back", async () => {

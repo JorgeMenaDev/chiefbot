@@ -11,7 +11,7 @@ import {
   GitHubTokens,
   PullRequestArgs,
   RoutineInput,
-  SendMessageRequest,
+  SendBotMessageRequest,
   SessionToken,
   SetBotAccessRequest,
   SetBotModelRequest,
@@ -137,8 +137,11 @@ type SocketData =
 //                             is locked, effort_unavailable when the model does not support the effort)
 //   PUT    /bots/:id/access   bearer session, body SetBotAccessRequest → Bot; the bot's next turn asks as it says
 //                             (400 invalid_access)
-//   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
-//                             (409 when the bot is not online, is stopping, is still on a turn or the human has its screen)
+//   POST   /bots/:id/messages bearer session, body SendBotMessageRequest → 202 SendMessageResponse
+//                             (400 invalid_message, its message saying why, as when a file is over the limits;
+//                             409 when the bot is not online, is stopping, is still on a turn or the human has its screen)
+//   GET    /bots/:id/attachments/:attachmentId  bearer session → the bytes of a file sent with one of the
+//                             bot's messages, as its own type (404 not_found)
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   POST   /bots/:id/approvals/:approvalId  bearer session, body AnswerApprovalRequest → 204
 //                             (409 when it is not pending: answered, unknown, or its turn ended)
@@ -155,6 +158,8 @@ type SocketData =
 //                             turn key: a bot always acts for its owner, who also needs it between turns,
 //                             for the model picker.
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//   GET    /worker/:botId/attachments/:attachmentId  bearer the key of the bot's running turn → the bytes
+//                             of a file sent with that turn's message (403 invalid_turn_key, 404 not_found)
 //   POST   /worker/:botId/pull-requests  bearer the key of the bot's running turn (403 invalid_turn_key
 //                             otherwise), body PullRequestArgs → 201 OpenedPullRequest once the owner
 //                             approves in that turn (403 declined, 409 no_turn, 404 repo_not_found, 403
@@ -558,12 +563,15 @@ export function startControl({
       },
       "/bots/:id/messages": {
         POST: ownBot(async (user, botId, req) => {
-          const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
-          if (!body.success) return apiError(400, "invalid_message");
-          const sent = turns.sendTurn(user.id, botId, body.data.text);
+          const body = SendBotMessageRequest.safeParse(await req.json().catch(() => null));
+          if (!body.success) return apiError(400, "invalid_message", body.error.issues[0]?.message);
+          const sent = turns.sendTurn(user.id, botId, body.data.text, body.data.attachments);
           if ("error" in sent) return apiError(409, sent.error);
           return Response.json(sent satisfies SendMessageResponse, { status: 202 });
         }),
+      },
+      "/bots/:id/attachments/:attachmentId": {
+        GET: ownBot((_user, botId, req) => attachmentResponse(store.attachment(botId, req.params.attachmentId))),
       },
       // The answer is stored first, so it reaches the worker even if it is offline now.
       "/bots/:id/approvals/:approvalId": {
@@ -642,6 +650,14 @@ export function startControl({
           const token = await payerOf({ kind: "chief", ownerId: bot.userId })?.token();
           if (token && "kind" in token && token.kind === "seat") return Response.json(token.token);
           return apiError(403, "reauth_needed");
+        },
+      },
+      // Only a file of the turn whose key is the bearer.
+      "/worker/:botId/attachments/:attachmentId": {
+        GET: (req) => {
+          const bot = heldTurn(store.turnKeys, req, botTurn(req.params.botId));
+          if (bot instanceof Response) return bot;
+          return attachmentResponse(store.attachment(bot.botId, req.params.attachmentId, bot.turnId));
         },
       },
       // The bot's create_pull_request tool. Waits, however long, for the owner's answer.
@@ -789,4 +805,10 @@ function upgrade(server: Bun.Server<SocketData>, req: Request, data: SocketData)
 
 function randomToken() {
   return crypto.randomUUID() + crypto.randomUUID();
+}
+
+// A sent file's bytes as its own type, which the browser must not second-guess; 404 for none.
+function attachmentResponse(file: { mime_type: string; data: Uint8Array } | null) {
+  if (!file) return apiError(404, "not_found");
+  return new Response(file.data, { headers: { "content-type": file.mime_type, "x-content-type-options": "nosniff" } });
 }

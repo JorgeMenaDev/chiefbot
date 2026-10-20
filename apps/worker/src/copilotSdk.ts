@@ -121,7 +121,7 @@ async function openOn(client: CopilotClient, sessionId: string, config: ResumeSe
 function bound(session: Awaited<ReturnType<typeof openOn>>): Omit<BotSession, "disconnect"> {
   return {
     on: (handler) => session.on(handler),
-    send: (prompt) => session.send(prompt),
+    send: (prompt, files = []) => session.send(files.length > 0 ? { prompt, attachments: files } : { prompt }),
     abort: () => session.abort(),
     // The SDK's setModel without its types' limit: its switchTo takes a null effort,
     // which clears the effort an earlier turn set (setModel can only keep or replace it).

@@ -1,6 +1,6 @@
 import type { ReasoningEffort } from "@chiefbot/contracts";
 import type { JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
-import type { BotSession, Copilot, SdkModelList } from "./copilot.ts";
+import type { BotSession, Copilot, FileAttachment, SdkModelList } from "./copilot.ts";
 
 // A fake Copilot SDK for tests. Each send() plays a script of real-shaped SDK
 // session events. The default script echoes the prompt with one tool call.
@@ -50,9 +50,9 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const mcpServers: Array<Record<string, MCPServerConfig>> = [];
   // Each opened session's skill roots, in the order sessions opened.
   const skillDirectories: string[][] = [];
-  // Every turn started, with the model its session was on ("default" before any setModel)
-  // and that model's reasoning effort (null: its default).
-  const sends: Array<{ sessionId: string; prompt: string; model: string; effort: ReasoningEffort | null }> = [];
+  // Every turn started, with the model its session was on ("default" before any setModel),
+  // that model's reasoning effort (null: its default) and the files attached.
+  const sends: Array<{ sessionId: string; prompt: string; model: string; effort: ReasoningEffort | null; files: FileAttachment[] }> = [];
 
   const copilot: Copilot = {
     async openSession({ sessionId, auth, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall, skillDirectories: skills = [] }) {
@@ -122,8 +122,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           handlers.add(handler);
           return () => void handlers.delete(handler);
         },
-        async send(prompt) {
-          sends.push({ sessionId, prompt, model, effort });
+        async send(prompt, files = []) {
+          sends.push({ sessionId, prompt, model, effort, files });
           const mine = ++turn;
           // Like the SDK: send returns once the message is admitted; events follow.
           void (async () => {

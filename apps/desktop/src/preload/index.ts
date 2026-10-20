@@ -1,4 +1,13 @@
-import type { AccessMode, BotAvatar, ConnectorInput, RoutineInput, SetBotModelRequest, SubscriptionInput, Theme } from "@chiefbot/contracts";
+import type {
+  AccessMode,
+  AttachmentUpload,
+  BotAvatar,
+  ConnectorInput,
+  RoutineInput,
+  SetBotModelRequest,
+  SubscriptionInput,
+  Theme,
+} from "@chiefbot/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 // Subscribes to one main → renderer channel; returns the unsubscribe.
@@ -36,7 +45,10 @@ const api = {
   },
   chat: {
     open: (botId: string): Promise<unknown> => ipcRenderer.invoke("chat:open", botId),
-    send: (botId: string, text: string): Promise<unknown> => ipcRenderer.invoke("chat:send", botId, text),
+    send: (botId: string, text: string, attachments: AttachmentUpload[] = []): Promise<unknown> =>
+      ipcRenderer.invoke("chat:send", botId, text, attachments),
+    // A file sent with one of the bot's messages, as a data: URL.
+    attachment: (botId: string, attachmentId: string): Promise<unknown> => ipcRenderer.invoke("chat:attachment", botId, attachmentId),
     answer: (botId: string, approvalId: string, approved: boolean): Promise<void> =>
       ipcRenderer.invoke("chat:answer", botId, approvalId, approved),
     onChange: (listener: (view: unknown) => void) => subscribe("chat:state", listener),

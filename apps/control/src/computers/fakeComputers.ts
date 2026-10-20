@@ -17,7 +17,8 @@ import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 // gitSocket, the workers serve git's credential helper there (one bot at a
 // time: they share the path). Workers renew organizations' tokens on `clock`.
 // Bots' workers stage their turns' connections under `connectionsRoot` (a new
-// temporary folder by default), never the real computer's /tmp/chiefbot.
+// temporary folder by default), never the real computer's /tmp/chiefbot, and save
+// the files sent with messages in another new temporary folder.
 export function fakeComputers({
   copilot = fakeCopilot(),
   gitSocket,
@@ -32,6 +33,7 @@ export function fakeComputers({
     screen: TCPSocketListener | null;
   };
   const computers = new Map<ComputerId, FakeComputer>();
+  const attachmentsRoot = mkdtempSync(join(tmpdir(), "chiefbot-attachments-"));
   // Every destroy call, so tests can check whether data was kept.
   const destroyed: Array<{ id: ComputerId; deleteData: boolean }> = [];
   // What each bot's screen received from viewers, decoded as text.
@@ -103,6 +105,7 @@ export function fakeComputers({
         ...(gitSocket === undefined ? {} : { gitSocket }),
         ...(clock === undefined ? {} : { clock }),
         connectionsRoot,
+        attachmentsRoot,
         retryMs: 20,
       });
     },
