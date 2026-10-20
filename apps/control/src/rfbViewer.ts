@@ -7,6 +7,8 @@
 //
 // Returns the bytes to pass on, or null for bytes it cannot read: the caller
 // then ends the stream, as there is no telling input from the rest any more.
+// A clipboard over 1 MB is unreadable too, so what waits for the rest of a
+// message is at most 1 MB per viewer (every other message is smaller).
 export function viewerBytes() {
   let stage: "version" | "security" | "auth" | "init" | "messages" = "version";
   let pending = new Uint8Array(0);
@@ -65,8 +67,12 @@ function nextMessage(bytes: Uint8Array, need: (length: number, unit: Omit<Unit, 
       return need(8, { kind: "input" });
     case 5: // PointerEvent, 7 bytes when extended
       return header(2, () => ((bytes[1] ?? 0) & 0x80 ? 7 : 6), "input");
-    case 6: // ClientCutText; a negative length is extended clipboard
-      return header(8, () => 8 + Math.abs(view.getInt32(4)), "input");
+    case 6: {
+      // ClientCutText; a negative length is extended clipboard
+      if (bytes.length < 8) return "more";
+      const length = Math.abs(view.getInt32(4));
+      return length > maxClipboard ? "invalid" : need(8 + length, { kind: "input" });
+    }
     case 150: // EnableContinuousUpdates
       return need(10, { kind: "watch" });
     case 248: // ClientFence
@@ -81,6 +87,8 @@ function nextMessage(bytes: Uint8Array, need: (length: number, unit: Omit<Unit, 
       return "invalid";
   }
 }
+
+const maxClipboard = 2 ** 20;
 
 const concat = (parts: Uint8Array[]) => {
   const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));

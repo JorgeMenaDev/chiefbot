@@ -40,3 +40,11 @@ test("bytes it cannot read end the stream: another protocol version, security ty
   expect(bytes(run([[...handshake.slice(0, 12), 16]], true))).toEqual(["end"]);
   expect(bytes(run([handshake, [99, 0, 0, 0]], true)).at(-1)).toBe("end");
 });
+
+test("a clipboard longer than 1 MB ends the stream at its header, so no viewer can make control hold its bytes", () => {
+  const header = (length: number) => [6, 0, 0, 0, ...[24, 16, 8, 0].map((shift) => (length >>> shift) & 0xff)];
+
+  expect(bytes(run([handshake, header(2 ** 20 + 1)], true)).at(-1)).toBe("end");
+  expect(bytes(run([handshake, header(-(2 ** 20 + 1) >>> 0)], true)).at(-1)).toBe("end");
+  expect(bytes(run([handshake, [...header(2), 0x68, 0x69]], true))).toEqual([...handshake, ...header(2), 0x68, 0x69]);
+});
