@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { TaskWorker, type SetupStep, type StackRow } from "@chiefbot/contracts";
 import { renderToStaticMarkup } from "react-dom/server";
-import { EngineerDetails, setupDisclosure, type SetupChoice } from "./EngineerDetails.tsx";
+import type { ComponentProps } from "react";
+import { EngineerDetails, SetupRow, setupDisclosure, type SetupChoice } from "./EngineerDetails.tsx";
 
 const engineer = (fields: Partial<TaskWorker>) =>
   TaskWorker.parse({
@@ -103,6 +104,26 @@ test("a setup step that runs shows running, with how long it has run, after the 
 const upStack = ["Build", "Database", "API", "Gateway", "Seed"].map((label, index) =>
   stage(index === 0 ? "build" : index - 1, label, "passed", index * 1_000, index * 1_000 + 500, `${label} is up\n`),
 );
+
+test("a stage or setup step that started and never ended shows interrupted once its worker no longer sets up: no spinner and no time, in the task and the transcript alike", () => {
+  const startedAt = Date.now() - 5_000;
+  const step = { label: "Setup", state: "running", log: "", startedAt, endedAt: null, command: "bun install", exitCode: null } as const;
+  const api = stage(1, "API", "running", startedAt, null);
+  // A row as SetupProgress draws it, in the task and in the transcript, `live` while its worker sets up.
+  const row = (row: ComponentProps<typeof SetupRow>["row"], live: boolean) => renderToStaticMarkup(<SetupRow row={row} live={live} now={Date.now()} />);
+
+  expect(text(row(step, true))).toMatch(/Setup bun install 5\.\ds/);
+  expect(row(step, true)).toContain('role="status"');
+  for (const interrupted of [row(step, false), row(api, false)]) {
+    expect(interrupted).not.toContain('role="status"');
+    expect(text(interrupted)).toContain("interrupted");
+    expect(text(interrupted)).not.toMatch(/\d(ms|s|m|h)\b/);
+  }
+  const stopped = render(engineer({ state: "stopped", stack: upStack, setup: [clone, { ...install, exitCode: null, startedAt, endedAt: null }], result: "Stopped by the coordinator." }));
+  expect(text(stopped)).toContain("Setup did not finish");
+  expect(stopped).not.toContain('role="status"');
+});
+
 
 test("once the engineer works, its setup folds away into one line, Ready, and stays folded once it ends", () => {
   for (const state of ["working", "finished"] as const) {

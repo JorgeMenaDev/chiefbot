@@ -76,6 +76,29 @@ test("each step is reported as it starts, with no exit code yet, and again as it
   ]);
 });
 
+test("a step whose shell throws still ends, failed with exit -1 and why in its log, before the error ends the setup", async () => {
+  const steps: SetupStep[] = [];
+  const shell: SetupShell = async (command) => {
+    if (command === "bun install") throw new Error("ENOENT: no such file or directory, posix_spawn 'sh'");
+    return 0;
+  };
+
+  const setUp = setUpEngineer({
+    setup: EngineerSetup.parse({ repo: "octo-org/shop", command: "bun install", instructions: [], skills: [], mcp: {}, secrets: {} }),
+    workspace: tempDir(),
+    shell,
+    signal: new AbortController().signal,
+    report: (step) => steps.push(step),
+    now: () => 1_000,
+  });
+
+  await expect(setUp).rejects.toThrow("posix_spawn 'sh'");
+  expect(steps.slice(2)).toEqual([
+    { step: "setup", command: "bun install", exitCode: null, log: "", startedAt: 1_000, endedAt: null },
+    { step: "setup", command: "bun install", exitCode: -1, log: "ENOENT: no such file or directory, posix_spawn 'sh'\n", startedAt: 1_000, endedAt: 1_000 },
+  ]);
+});
+
 test("a setup log hides each secret before it is cut to its last 16 KB, also one printed ten times and in base64", async () => {
   const secret = Buffer.from(crypto.getRandomValues(new Uint8Array(5000))).toString("hex");
   const print = `for i in 1 2 3 4 5 6 7 8 9 10; do printf '%s\\n' "$API_KEY"; done; printf %s "$API_KEY" | base64 | tr -d '\\n'; echo`;

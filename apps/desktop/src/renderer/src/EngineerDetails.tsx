@@ -122,15 +122,18 @@ const stateIcon: Record<StackRow["state"], ReactNode> = {
 };
 
 // A row in a line of fixed height: its state, label and command, then how long
-// it took, or "not run" for a stage the setup never reached. One with a log
-// opens it, as a failed one is.
-function SetupRow({ row, live, now }: { row: Row; live: boolean; now: number }) {
+// it took (counting while it runs), "not run" for a stage the setup never
+// reached, or "interrupted" for one that started and never ended, once the
+// worker no longer sets up (`live`): it stopped, failed or lost its computer.
+// One with a log opens it, as a failed one is. Exported for its test.
+export function SetupRow({ row, live, now }: { row: Row; live: boolean; now: number }) {
   const { label, state, log, startedAt, endedAt, command, exitCode } = row;
-  const took = startedAt === null || state === "waiting" ? null : (endedAt ?? now) - startedAt;
+  const interrupted = state === "running" && !live;
+  const took = startedAt === null ? null : endedAt !== null ? endedAt - startedAt : state === "running" && live ? now - startedAt : null;
   const line = (
     <>
-      {stateIcon[state]}
-      <span className={cn("shrink-0", state === "failed" ? "text-destructive-foreground" : state === "running" ? "text-foreground" : state === "waiting" && "opacity-60")}>
+      {interrupted ? <MinusIcon className="size-3 shrink-0" aria-label="interrupted" /> : stateIcon[state]}
+      <span className={cn("shrink-0", state === "failed" ? "text-destructive-foreground" : state === "running" && live ? "text-foreground" : state === "waiting" && "opacity-60")}>
         {label}
       </span>
       {command && (
@@ -142,6 +145,7 @@ function SetupRow({ row, live, now }: { row: Row; live: boolean; now: number }) 
         {state === "failed" && exitCode !== undefined && <span className="text-destructive-foreground">exit {exitCode}</span>}
         {took !== null && <span>{duration(took)}</span>}
         {state === "waiting" && !live && <span className="opacity-60">not run</span>}
+        {interrupted && <span className="opacity-60">interrupted</span>}
         {log && <ChevronRightIcon className="size-3.5 transition-transform group-open:rotate-90" />}
       </span>
     </>

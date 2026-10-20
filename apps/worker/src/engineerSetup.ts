@@ -49,7 +49,7 @@ const instructionMax = 64 * 1024;
 // repo's instruction files and finds its skill folders; a configured one the
 // repo lacks is left out, and so is any that leads outside the clone or holds a
 // link that does. A step that fails stops the setup: `failed` is that step,
-// reported last.
+// reported last. A step the shell throws on ends with exit -1, and the error ends the setup.
 export async function setUpEngineer({
   setup,
   workspace,
@@ -74,7 +74,16 @@ export async function setUpEngineer({
     const keep = (text: string) => (log = (log + text).slice(-SETUP_LOG_MAX));
     const startedAt = now();
     report({ step, command, exitCode: null, log, startedAt, endedAt: null });
-    const exitCode = await shell(command, { cwd, env, signal, onOutput: (text) => keep(output.push(text)) });
+    let exitCode: number;
+    try {
+      exitCode = await shell(command, { cwd, env, signal, onOutput: (text) => keep(output.push(text)) });
+    } catch (error) {
+      // The shell could not run it: the step still ends, failed, with why in its log, before the error ends the setup.
+      keep(output.push(`${error instanceof Error ? error.message : String(error)}\n`));
+      keep(output.end());
+      report({ step, command, exitCode: -1, log, startedAt, endedAt: now() });
+      throw error;
+    }
     keep(output.end());
     const done = { step, command, exitCode, log, startedAt, endedAt: now() };
     report(done);
