@@ -33,6 +33,7 @@ import { agentEnv } from "./copilotSdk.ts";
 import { setUpEngineer, setupShell as shellOf, type EngineerReady, type SetupShell } from "./engineerSetup.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
+import { verdictTool } from "./verdict.ts";
 import { secretRedactor, turnEventRedactor } from "./secretRedactor.ts";
 import { elicitationResult, questionForm } from "./questions.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
@@ -303,8 +304,12 @@ export function startWorker({
     await (await previous?.session.catch(() => null))?.disconnect();
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
+    const secrets = secretRedactor(task ? Object.values(task.message.setup.secrets) : []);
     const tools = [
-      pullRequestTool({ base, turnKey, ...(task ? { holdsSecret: secretRedactor(Object.values(task.message.setup.secrets)).holds } : {}) }),
+      // A verifier ends with its verdict and opens no pull request.
+      task?.message.kind === "verifier"
+        ? verdictTool({ base, turnKey, cwd: task.ready.clone, redact: secrets.redact })
+        : pullRequestTool({ base, turnKey, ...(task ? { holdsSecret: secrets.holds } : {}) }),
       computerTool({
         run: screenCommands,
         agentHasScreen: () => screenControl === "agent",

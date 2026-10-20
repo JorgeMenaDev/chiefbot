@@ -12,6 +12,7 @@ import {
   type ChatEvent,
   type TaskWorkerState,
   type TurnEvent,
+  type VerdictResult,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { addColumn } from "./addColumn.ts";
@@ -112,13 +113,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     result: string | null;
     pull_request: string | null;
     sha: string | null;
+    branch: string | null;
     verdict: string | null;
     created_at: number;
     updated_at: number;
   };
   const workerColumns = `task_workers.id, task_workers.project_id, task_workers.kind, task_workers.task_number, users.login, task_workers.payer,
     task_workers.state, task_workers.setup, task_workers.computer, task_workers.result, task_workers.pull_request, task_workers.sha,
-    task_workers.verdict, task_workers.created_at, task_workers.updated_at
+    task_workers.branch, task_workers.verdict, task_workers.created_at, task_workers.updated_at
     FROM task_workers JOIN users ON users.id = task_workers.user_id`;
   const toWorker = (row: WorkerRow): TaskWorker =>
     TaskWorker.parse({
@@ -133,6 +135,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       result: row.result,
       pullRequest: row.pull_request,
       sha: row.sha,
+      branch: row.branch,
       verdict: row.verdict,
       pendingApprovals: approvals.pending(row.id),
       computerRemoved: row.computer === "removed",
@@ -333,6 +336,11 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       }
       return stored;
     }),
+
+    // Records a verifier's verdict, the first only: false when it has one.
+    setVerdict(workerId: TaskWorkerId, verdict: VerdictResult): boolean {
+      return db.query("UPDATE task_workers SET verdict = ?2 WHERE id = ?1 AND verdict IS NULL").run(workerId, verdict).changes > 0;
+    },
 
     // Ends the worker's turn from control's side (it was stopped, or lost the
     // turn): the events that end it, none when it was not running.

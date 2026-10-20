@@ -1,6 +1,7 @@
 import {
   AUTO_MODEL,
   AnswerApprovalRequest,
+  ContextImagePath,
   ContextPath,
   CoordinatorToControl,
   CoordinatorToolCall,
@@ -134,6 +135,7 @@ const failure = (error: unknown) => {
 //                                    as a `tasks` ClientEvent.
 //   GET    /projects/:id/context     → ContextFile[]: the shared context's files
 //   GET    /projects/:id/context/file  ?path=<ContextPath> → ContextFileText (400 invalid_path; 404 not_found)
+//   GET    /projects/:id/context/image ?path=<ContextImagePath> → the PNG's bytes (400 invalid_path; 404 not_found)
 //   POST   /projects/:id/approvals/:approvalId  body AnswerApprovalRequest → 204: the member answers
 //                                    what control asked in their running turn (409 not_pending when it
 //                                    is answered, unknown, another member's or its turn ended)
@@ -488,6 +490,15 @@ export function projectHost({
         const content = await context.read(project.id, path.data);
         if (content === null) return apiError(404, "not_found");
         return Response.json({ path: path.data, content } satisfies ContextFileText);
+      }),
+    },
+    "/projects/:id/context/image": {
+      GET: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/context/image">) => {
+        const path = ContextImagePath.safeParse(new URL(req.url).searchParams.get("path"));
+        if (!path.success) return apiError(400, "invalid_path");
+        const bytes = await context.readImage(project.id, path.data);
+        if (bytes === null) return apiError(404, "not_found");
+        return new Response(bytes, { headers: { "content-type": "image/png" } });
       }),
     },
     // The answer is stored first, then wakes the call control holds.

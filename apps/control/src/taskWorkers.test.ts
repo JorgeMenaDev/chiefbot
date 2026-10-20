@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { ACCESS_MODES, ATTACHMENTS, ApiError, ConnectorCall, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ACCESS_MODES, ATTACHMENTS, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
@@ -1175,4 +1175,58 @@ test("a verifier checks the task's pull request at the head control pinned, on a
   expect(push.exitCode).not.toBe(0);
   expect(push.output).toContain("A verifier may only fetch octo-org/shop.");
   expect(github.pushes).toEqual([]);
+});
+
+// A PNG's signature and a few bytes: a screenshot, as far as a verifier's tool can tell.
+const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+
+test("a verifier ends with its verdict on the task, its report and screenshots kept in the project's context once its computer is gone", async () => {
+  const secret = "sk-dev-9f8e7d6c5b";
+  const control = await gitProject("commands:\n  dev: bun run dev\n  devUrl: http://localhost:3000\nsecrets: [API_KEY]\n");
+  const { owner, project, copilot, computers } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: secret });
+  const said: unknown[] = [];
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) {
+      const report = (args: Record<string, string | string[]>) =>
+        runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop.", report: "", ...args }).then(
+          ({ result }) => result,
+          (error: Error) => error.message,
+        );
+      writeFileSync(join(copilot.workingDirectories.at(-1) ?? "", "home.png"), png);
+      said.push(await report({ screenshots: ["README.md"] }));
+      said.push(await report({ report: `Opened the README. The key ${secret} was not needed.`, screenshots: ["home.png"] }));
+      said.push(await report({ result: "issues" }));
+    }
+    yield sdk.message("msg-1", "Checked.");
+    yield sdk.idle();
+  });
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, engineer.id, ({ state }) => state === "finished");
+  const { url, head } = await pullRequestOnTask(control, tool);
+
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(await workerWhen(owner, project, verifier.id, ({ state }) => state === "finished")).toMatchObject({ verdict: "pass" });
+  const [task] = Task.array().parse((await tool({ tool: "list_tasks" })).body);
+  expect(task?.verification).toMatchObject({ result: "pass", sha: head, stale: false, summary: "The README reads The shop.", pullRequest: url, branch: "fix-typo", worker: verifier.id });
+  const evidence = task?.verification?.evidence ?? "";
+  expect(evidence).toStartWith(`verify/task-1-${head.slice(0, 7)}-`);
+  expect(said).toEqual([
+    "README.md is not a PNG image: report_verdict takes PNG screenshots only.",
+    `Recorded your verdict, pass. Your report is in the project's context at ${evidence}.`,
+    "A verifier reports one verdict, and yours is recorded.",
+  ]);
+
+  // The task is done: the verifier's computer goes, its evidence stays.
+  await tool({ tool: "update_task", number: 1, status: "done" });
+  await eventually(() => computers.destroyed.some(({ id }) => id === verifier.id));
+  const file = ContextFileText.parse(await (await owner.api("GET", `/projects/${project.id}/context/file?path=${evidence}`)).json());
+  expect(file.content).toContain(`${url} at ${head}`);
+  expect(file.content).toContain("The README reads The shop.");
+  expect(file.content).toContain("Opened the README. The key *** was not needed.");
+  const screenshot = /!\[Screenshot 1\]\(([^)]+\.png)\)/.exec(file.content)?.[1] ?? "";
+  const image = await owner.api("GET", `/projects/${project.id}/context/image?path=verify/${screenshot}`);
+  expect(image.headers.get("content-type")).toBe("image/png");
+  expect(new Uint8Array(await image.arrayBuffer())).toEqual(png);
 });

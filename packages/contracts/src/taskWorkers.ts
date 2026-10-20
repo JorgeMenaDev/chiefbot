@@ -48,9 +48,10 @@ export const TaskWorker = z.object({
   result: z.string().nullable(),
   // The pull request an engineer opened, or the one a verifier checks.
   pullRequest: z.url().nullable(),
-  // A verifier's: the commit it checks, the pull request's head when it was
-  // dispatched, and the result of its verdict once it gave one.
+  // A verifier's: the commit it checks and its branch, the pull request's head
+  // when it was dispatched, and the result of its verdict once it gave one.
   sha: CommitSha.nullable().default(null),
+  branch: z.string().nullable().default(null),
   verdict: VerdictResult.nullable().default(null),
   // What it waits on the requester to approve: a push, a pull request or a GitHub tool.
   pendingApprovals: z.array(z.object({ approvalId: ApprovalId, kind: ApprovalKind, detail: z.string() })),

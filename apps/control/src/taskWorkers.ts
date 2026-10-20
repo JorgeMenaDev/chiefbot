@@ -3,7 +3,12 @@ import {
   VERIFIER,
   AnswerApprovalRequest,
   type ApprovalId,
+  ContextImagePath,
+  ContextPath,
+  isPng,
   PullRequestArgs,
+  SCREENSHOT_BYTES_MAX,
+  VerdictReport,
   WorkerToControl,
   type AgentConnector,
   type ApprovalKind,
@@ -15,6 +20,7 @@ import {
   type EngineerSetup,
   type OpenedPullRequest,
   type Project,
+  type RecordedVerdict,
   type ProjectId,
   type ProjectMember,
   type ScreenControl,
@@ -29,6 +35,7 @@ import {
 import type { controlApprovals } from "./approvals.ts";
 import type { Clock } from "@chiefbot/worker/clock";
 import type { ComputerProvider } from "./computers/computer.ts";
+import type { ContextStore } from "./contextStore.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import type { PullRequestHead } from "./github.ts";
@@ -37,6 +44,8 @@ import { viewerBytes } from "./rfbViewer.ts";
 import { screenTunnel } from "./screens.ts";
 import type { openStore } from "./store.ts";
 import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
+import { queue } from "./queue.ts";
+import { z } from "zod";
 
 // A task worker's WebSocket: the worker of exactly one task worker, the turn it
 // runs and the member who asked for it.
@@ -74,6 +83,8 @@ export type TaskWorkerHostOptions = {
   approvalWaitMinutes: number;
   // Times those waits. A fake in tests.
   clock: Clock;
+  // Where a verifier's report and screenshots go: the project's shared context.
+  context: ContextStore;
   // Opens a pull request after the requester approves it, and reads one's head (repos.ts).
   pullRequest: ReturnType<typeof repoAccess>["pullRequest"];
   pullRequestHead: ReturnType<typeof repoAccess>["pullRequestHead"];
@@ -139,7 +150,11 @@ export type TaskWorkerHostOptions = {
 //   GET  /task-worker/:workerId/installation-token  → CopilotInstallationToken, when its task runs
 //                                on the organization's Copilot (404 otherwise; 502 copilot_token_failed)
 //   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest, a draft,
-//                                once the member who asked approves (errors as a bot's)
+//                                once the member who asked approves (errors as a bot's; 403
+//                                verifier_read_only for a verifier)
+//   POST /task-worker/:workerId/verdict  body VerdictReport → RecordedVerdict: a verifier's verdict, kept
+//                                with its report and screenshots in the project's context (403
+//                                not_a_verifier; 400 invalid_verdict; 409 verdict_recorded: one per verifier)
 //   WS   /task-worker/:workerId/screen/:streamId  the worker's credential ↔ the VNC bytes for one
 //                                viewer, after screen-open (404 for a stream control did not open for it)
 // The git proxy (repos.ts) takes the turn's key through agentOf.
@@ -152,6 +167,7 @@ export function taskWorkerHost({
   approvals,
   approvalWaitMinutes,
   clock,
+  context,
   pullRequest,
   pullRequestHead,
   controlUrlForComputers,
@@ -579,7 +595,62 @@ export function taskWorkerHost({
         return Response.json(opened satisfies OpenedPullRequest, { status: 201 });
       },
     },
+    "/task-worker/:workerId/verdict": {
+      POST: async (req: Bun.BunRequest<"/task-worker/:workerId/verdict">) => {
+        const turn = heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId));
+        if (turn instanceof Response) return turn;
+        if (workers.worker(turn.workerId)?.kind !== "verifier") return apiError(403, "not_a_verifier", "Only a verifier reports a verdict.");
+        const body = VerdictReport.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_verdict", z.prettifyError(body.error));
+        const screenshots = body.data.screenshots.map((base64) => Buffer.from(base64, "base64"));
+        if (!screenshots.every((bytes) => isPng(bytes) && bytes.byteLength <= SCREENSHOT_BYTES_MAX)) {
+          return apiError(400, "invalid_verdict", "Each screenshot must be a PNG of at most 2 MB.");
+        }
+        const evidence = await recordVerdict(turn.workerId, body.data, screenshots);
+        if (evidence === null) return apiError(409, "verdict_recorded", "A verifier reports one verdict, and yours is recorded.");
+        return Response.json({ evidence } satisfies RecordedVerdict);
+      },
+    },
   };
+
+  // Records a verifier's verdict, its first only, one at a time per verifier.
+  // Its report and screenshots go into the project's context first, so they
+  // outlive its computer: verify/task-<n>-<commit>-<verifier>.md, with its
+  // screenshots beside it as -1.png, -2.png… Then the verdict goes on the worker,
+  // and on its task as the task's verification. Null when it has a verdict.
+  const recording = queue<TaskWorkerId>();
+  function recordVerdict(workerId: TaskWorkerId, verdict: Omit<VerdictReport, "screenshots">, screenshots: Uint8Array[]) {
+    return recording(workerId, async (): Promise<ContextPath | null> => {
+      const worker = workers.worker(workerId);
+      if (worker?.verdict !== null || worker.sha === null || worker.branch === null || worker.pullRequest === null) return null;
+      const { projectId, taskNumber, sha, branch, pullRequest } = worker;
+      const name = `task-${taskNumber}-${sha.slice(0, 7)}-${workerId.replace(/^worker_/, "").slice(0, 8)}`;
+      const images = screenshots.map((_, at) => `${name}-${at + 1}.png`);
+      await Promise.all(screenshots.map((bytes, at) => context.writeImage(projectId, ContextImagePath.parse(`verify/${images[at]}`), bytes)));
+      const evidence = ContextPath.parse(`verify/${name}.md`);
+      const title = projects.tasks(projectId).find(({ number }) => number === taskNumber)?.title ?? "";
+      const at = Date.now();
+      await context.write(
+        projectId,
+        evidence,
+        [
+          `# Verification of task #${taskNumber}: ${title}`,
+          "",
+          `**${verdict.result.toUpperCase()}** for ${pullRequest} at ${sha} (branch ${branch}), by verifier ${workerId}, ${new Date(at).toISOString()}.`,
+          "",
+          verdict.summary,
+          ...(verdict.report ? ["", "## Report", "", verdict.report] : []),
+          ...(images.length > 0 ? ["", "## Screenshots", "", ...images.map((image, index) => `![Screenshot ${index + 1}](${image})`)] : []),
+          "",
+        ].join("\n"),
+      );
+      if (!workers.setVerdict(workerId, verdict.result)) return null;
+      projects.setVerification(projectId, taskNumber, { result: verdict.result, sha, stale: false, summary: verdict.summary, pullRequest, branch, evidence, worker: workerId, at });
+      publishTasks(projectId);
+      publish(projectId);
+      return evidence;
+    });
+  }
 
   // The token for the turn the request's key holds, if who pays for it is of `kind`; 404 otherwise.
   async function turnToken(req: Request & { params: { workerId: string } }, kind: CopilotPayer["kind"]) {

@@ -21,6 +21,7 @@ import {
   type TaskStatus,
   type TurnEvent,
   type UpdateTaskArgs,
+  type Verification,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { z } from "zod";
@@ -79,6 +80,8 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   )`);
   // What the task waits on while it needs input; NULL otherwise.
   addColumn(db, "project_tasks", "question", "TEXT");
+  // Its latest verdict from a verifier, a Verification as JSON; NULL before any.
+  addColumn(db, "project_tasks", "verification", "TEXT");
   // Each member's chat with the coordinator: turns and their events, as for a
   // bot's chat. A turn waits `queued` until the project's scheduler gives it
   // the coordinator; at most one turn per project is `running`.
@@ -165,6 +168,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     owner: string | null;
     requested_by: string;
     links: string;
+    verification: string | null;
     created_at: number;
     updated_at: number;
   };
@@ -179,6 +183,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       owner: row.owner,
       requestedBy: row.requested_by,
       links: JSON.parse(row.links),
+      verification: row.verification === null ? null : JSON.parse(row.verification),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
@@ -397,6 +402,17 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       ).run(projectId, number, next.title, next.detail, next.status, next.question, next.owner, JSON.stringify(next.links), Date.now());
       return task(projectId, number);
     }),
+
+    // Sets the task's latest verdict. Null when the project has no such task.
+    setVerification(projectId: ProjectId, number: number, verification: Verification): Task | null {
+      db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify(verification),
+        Date.now(),
+      );
+      return task(projectId, number);
+    },
 
     // Queues a member's message for the coordinator. Null, storing nothing, while
     // their previous message is still queued or running, unless `whileBusy`: a

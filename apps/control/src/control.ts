@@ -350,6 +350,7 @@ export function startControl({
     approvals,
     approvalWaitMinutes,
     clock,
+    context,
     pullRequest: repos.pullRequest,
     pullRequestHead: repos.pullRequestHead,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,

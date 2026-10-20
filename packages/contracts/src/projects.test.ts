@@ -83,6 +83,7 @@ test("a project's dot says what most needs a member: their answer, then work goi
     owner: null,
     requestedBy,
     links: [],
+    verification: null,
     createdAt: 0,
     updatedAt: 0,
   });
@@ -90,6 +91,7 @@ test("a project's dot says what most needs a member: their answer, then work goi
     id: TaskWorkerId.parse("worker_00000001-0000-4000-8000-000000000000"),
     projectId: ProjectId.parse("project_00000001-0000-4000-8000-000000000000"),
     kind: "engineer",
+    branch: null,
     taskNumber: 1,
     requestedBy,
     payer: null,

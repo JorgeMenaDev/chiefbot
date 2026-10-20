@@ -5,6 +5,7 @@ import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from ".
 import { ModelReport, ReasoningEffort } from "./models.ts";
 import { RepoFullName } from "./repos.ts";
 import type { TaskWorker, TaskWorkerState } from "./taskWorkers.ts";
+import { VerdictLine } from "./verification.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // A file or folder inside the repo, relative to its root: no leading slash and no "." or ".." part.
@@ -191,6 +192,16 @@ export const ContextPath = z
   .brand<"ContextPath">();
 export type ContextPath = z.infer<typeof ContextPath>;
 
+// A PNG file in the project's context, beside the Markdown that shows it (a
+// verifier's screenshots beside its report). Not a ContextPath: agents read and
+// write Markdown only, and the context's list holds only that.
+export const ContextImagePath = z
+  .string()
+  .max(200)
+  .regex(/^(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.png$/, "expected a relative PNG path like verify/shot.png")
+  .brand<"ContextImagePath">();
+export type ContextImagePath = z.infer<typeof ContextImagePath>;
+
 // One shared context file. updatedAt is epoch milliseconds.
 export const ContextFile = z.object({ path: ContextPath, size: z.number().int(), updatedAt: z.number() });
 export type ContextFile = z.infer<typeof ContextFile>;
@@ -215,10 +226,23 @@ export const TaskLink = z.discriminatedUnion("kind", [
 ]);
 export type TaskLink = z.infer<typeof TaskLink>;
 
+// A task's latest verdict from a verifier (VerdictLine), on the pull request
+// and branch it checked: its report in the project's context (`evidence`), the
+// verifier that gave it, and when. `stale` once the pull request's head moves.
+export const Verification = VerdictLine.extend({
+  pullRequest: z.url(),
+  branch: z.string(),
+  evidence: ContextPath,
+  worker: TaskWorkerId,
+  at: z.number(),
+});
+export type Verification = z.infer<typeof Verification>;
+
 // One task of a project's ledger in control: the only record of its state.
 // `number` counts from 1 per project. `owner` is the GitHub login of the member
 // who owns it, or null. `requestedBy` is the login of the member whose chat
 // created it. `question` is what it waits on while it needs input, else null.
+// `verification` is its latest verdict, or null before any.
 // Times are epoch milliseconds.
 export const Task = z.object({
   projectId: ProjectId,
@@ -230,10 +254,15 @@ export const Task = z.object({
   owner: z.string().nullable(),
   requestedBy: z.string(),
   links: z.array(TaskLink),
+  verification: Verification.nullable().default(null),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
 export type Task = z.infer<typeof Task>;
+
+// What control answers a verifier's verdict: where its report is in the project's context.
+export const RecordedVerdict = z.object({ evidence: ContextPath });
+export type RecordedVerdict = z.infer<typeof RecordedVerdict>;
 
 // A project's whole task ledger: what /events sends on every change (a `tasks`
 // ClientEvent), and what Electron main hands the renderer.
