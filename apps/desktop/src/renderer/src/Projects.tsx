@@ -17,7 +17,8 @@ import { FolderGit2Icon, ListChecksIcon, PlugIcon, RadioIcon, Trash2Icon } from 
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
-import { AssistantMessage, ChatEmpty, Composer, ErrorMessage, Timeline, ToolRow, UserMessage, Working } from "./Chat.tsx";
+import { AssistantMessage, ChatEmpty, ErrorMessage, Timeline, ToolRow, UserMessage, Working } from "./Chat.tsx";
+import { Composer } from "./Composer.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
 import { Column, ErrorText, PaneHeader, SidePanel } from "./Pane.tsx";
 import { ListeningTo } from "./Subscriptions.tsx";

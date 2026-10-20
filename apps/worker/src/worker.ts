@@ -2,8 +2,11 @@ import type { PermissionHandler, PermissionRequestResult, SessionEvent } from "@
 import {
   ApprovalId,
   ControlToWorker,
+  DEFAULT_ACCESS,
+  type AccessMode,
   type AgentConnection,
   type ApprovalKind,
+  type ReasoningEffort,
   type ScreenControl,
   type TurnId,
   type TurnKey,
@@ -92,8 +95,6 @@ export function startWorker({
   // The open Copilot session and the turn it was opened for: null for a bot's
   // session opened only to list models.
   let open: { turn: Turn | null; session: Promise<BotSession> } | null = null;
-  // The model set on the open session, or null before a turn sets one.
-  let sessionModel: string | null = null;
   // Approvals the session waits on, each resolved by the user's answer, or with
   // null when its turn ends first.
   const waiting = new Map<ApprovalId, { turnId: TurnId; answer: (approved: boolean | null) => void }>();
@@ -112,19 +113,20 @@ export function startWorker({
     return answered;
   }
 
-  // The permission handler of `turn`'s session, with the turn's `connections`.
-  // It runs safe tool calls once the agent has the screen. A risky one becomes an
-  // approval-request in that turn, and the session waits until the user answers.
-  // The human may take over while it waits, so an approved call waits for
-  // hand-back too. Whatever it waited on, nothing is granted once its turn is over.
+  // The permission handler of `turn`'s session, with the turn's `connections` and
+  // the bot's `access` mode. It runs the tool calls that mode lets run once the
+  // agent has the screen. Any other becomes an approval-request in that turn, and
+  // the session waits until the user answers. The human may take over while it
+  // waits, so an approved call waits for hand-back too. Whatever it waited on, and
+  // whatever the mode, nothing is granted once its turn is over.
   const permissionFor =
-    (turn: Turn | null, connections: AgentConnection[] = []): PermissionHandler =>
+    (turn: Turn | null, connections: AgentConnection[] = [], access: AccessMode = DEFAULT_ACCESS): PermissionHandler =>
     async (request) => {
       const over: PermissionRequestResult = { kind: "reject", feedback: "Nobody is here to approve this outside its turn." };
       const ended = () => turn !== null && !link.running(turn);
       await agentHasScreen();
       if (ended()) return over;
-      const ask = approvalFor(request, connections);
+      const ask = approvalFor(request, connections, access);
       if (!ask) return { kind: "approve-once" };
       const approved = await askUser(turn, ask);
       if (approved === null || ended()) return over;
@@ -185,20 +187,24 @@ export function startWorker({
   // callback in it holds that turn, so a late one acts in no other. A bot's
   // session for no turn lists its models when the worker binds; a task worker's
   // is opened by its task (`task`). A bot's turn's session gets its staged
-  // connections (`connections`, and the skill roots they are under).
+  // connections (`connections`, and the skill roots they are under) and asks as
+  // its `access` mode says.
   async function openSession(
     turn: Turn | null,
     task?: Extract<ControlToWorker, { type: "run-task" }>,
-    { connections, skillDirectories }: { connections: AgentConnection[]; skillDirectories: string[] } = { connections: [], skillDirectories: [] },
+    {
+      connections,
+      skillDirectories,
+      access,
+    }: { connections: AgentConnection[]; skillDirectories: string[]; access: AccessMode } = { connections: [], skillDirectories: [], access: DEFAULT_ACCESS },
   ) {
     const previous = open;
     open = null;
-    sessionModel = null;
     await (await previous?.session.catch(() => null))?.disconnect();
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
     const tools = [pullRequestTool({ base, turnKey }), ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : [])];
-    const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections), tools, skillDirectories };
+    const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, skillDirectories };
     // A chief always runs on its owner's own Copilot seat.
     const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", options, () => token)).then((opened) => {
       if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
@@ -223,27 +229,31 @@ export function startWorker({
   }
 
   // Control sends a turn only once the previous one is done. Each turn opens its
-  // session (above), with the bot's model set first, so switching
-  // mid-conversation keeps the history. A task worker's one turn (`task`) runs on
-  // the default model. Git's credential helper hands git this turn's key from
-  // now on. A bot's turn stages its owner's `connections` until it ends.
+  // session (above), with the bot's model and its reasoning `effort` set first
+  // (the SDK changes both on an open session, so switching mid-conversation keeps
+  // the history; a null effort clears the last one). A task worker's one turn
+  // (`task`) runs on the default model, in the default access mode. Git's
+  // credential helper hands git this turn's key from now on. A bot's turn stages
+  // its owner's `connections` until it ends, and asks as its `access` mode says.
   async function runTurn(
     turnId: TurnId,
     turnKey: TurnKey,
     text: string,
     model: string | null,
-    { task, connections = [] }: { task?: Extract<ControlToWorker, { type: "run-task" }>; connections?: AgentConnection[] } = {},
+    {
+      task,
+      connections = [],
+      effort = null,
+      access = DEFAULT_ACCESS,
+    }: { task?: Extract<ControlToWorker, { type: "run-task" }>; connections?: AgentConnection[]; effort?: ReasoningEffort | null; access?: AccessMode } = {},
   ) {
     const turn = link.begin(turnId, turnKey);
     git?.reload({ fetch: gitCredential(turn) });
     try {
       staged = { ...stageConnections(connectionsRoot, connections), turnId };
       const { skillDirectories } = staged;
-      const opened = await openSession(turn, task, { connections, skillDirectories });
-      if (model !== null && sessionModel !== model) {
-        await opened.setModel(model);
-        sessionModel = model;
-      }
+      const opened = await openSession(turn, task, { connections, skillDirectories, access });
+      if (model !== null) await opened.setModel(model, effort);
       await opened.send(text);
     } catch (error) {
       link.fail(turnId, error);
@@ -283,7 +293,11 @@ export function startWorker({
           if (route === "worker") void reportModels();
           break;
         case "run-turn":
-          void runTurn(message.turnId, message.turnKey, message.text, message.model, { connections: message.connections });
+          void runTurn(message.turnId, message.turnKey, message.text, message.model, {
+            connections: message.connections,
+            effort: message.effort,
+            access: message.access,
+          });
           break;
         case "run-task":
           void runTurn(message.turnId, message.turnKey, message.text, null, { task: message });

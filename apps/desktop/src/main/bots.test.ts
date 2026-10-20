@@ -121,7 +121,7 @@ test("a lost GitHub sign-in reaches the desktop live", async () => {
   expect(await changed).toMatchObject({ login: "octo-user", needsGitHubSignIn: true });
 });
 
-test("the model picker reads the plan's models from control, and a refused pick fails with control's reason", async () => {
+test("the model picker reads the plan's models from control, a refused pick fails with control's reason, and an access mode is saved", async () => {
   const github = startFakeGitHub();
   const computers = fakeComputers({ copilot: fakeCopilot({ models: { list: [], modelPriceCategories: [{ id: "gpt-6-luna" }] } }) });
   const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
@@ -151,6 +151,7 @@ test("the model picker reads the plan's models from control, and a refused pick 
     ["auto", null],
     ["gpt-6-luna", "Needs a paid Copilot plan"],
   ]);
-  await expect(bots.setModel(bot.id, "gpt-6-luna")).rejects.toThrow("model_unavailable");
-  expect((await bots.setModel(bot.id, "auto")).model).toBe("auto");
+  await expect(bots.setModel(bot.id, { model: "gpt-6-luna" })).rejects.toThrow("model_unavailable");
+  expect((await bots.setModel(bot.id, { model: "auto" })).model).toBe("auto");
+  expect((await bots.setAccess(bot.id, "full-access")).access).toBe("full-access");
 });

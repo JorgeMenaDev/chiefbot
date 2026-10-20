@@ -1,4 +1,16 @@
-import { Bot, ClientEvent, ModelOption, type BotId, type CreateBotRequest, type ProjectId, type Task, type TaskWorker, type User } from "@chiefbot/contracts";
+import {
+  Bot,
+  ClientEvent,
+  ModelOption,
+  type AccessMode,
+  type BotId,
+  type CreateBotRequest,
+  type ProjectId,
+  type SetBotModelRequest,
+  type Task,
+  type TaskWorker,
+  type User,
+} from "@chiefbot/contracts";
 import { z } from "zod";
 import { controlCaller } from "./controlApi.ts";
 
@@ -81,8 +93,11 @@ export function createBots({ controlUrl, session, onChange, onUser, onTasks, onW
 
     // The model picker's rows for the user's Copilot plan.
     models: async () => z.array(ModelOption).parse(await (await call("GET", "/models")).json()),
-    // The bot's next turn runs on `model`.
-    setModel: async (botId: BotId, model: string) =>
-      Bot.parse(await (await call("PUT", `/bots/${botId}/model`, { model })).json()),
+    // The bot's next turn runs on the request's model and effort.
+    setModel: async (botId: BotId, request: SetBotModelRequest) =>
+      Bot.parse(await (await call("PUT", `/bots/${botId}/model`, request)).json()),
+    // The bot's next turn asks as `access` says.
+    setAccess: async (botId: BotId, access: AccessMode) =>
+      Bot.parse(await (await call("PUT", `/bots/${botId}/access`, { access })).json()),
   };
 }

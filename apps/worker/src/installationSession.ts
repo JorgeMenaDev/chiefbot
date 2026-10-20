@@ -1,4 +1,4 @@
-import type { CopilotInstallationToken } from "@chiefbot/contracts";
+import type { CopilotInstallationToken, ReasoningEffort } from "@chiefbot/contracts";
 import { systemClock, type Clock } from "./clock.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 
@@ -14,7 +14,7 @@ const continuePrompt = "continue";
 // Each token needs a runtime of its own (copilot.ts), so renewing means a new
 // runtime: fetch a token, close the session (which stops its runtime) and
 // resume it on a new one, with the same session id, so the conversation is
-// kept, and the model set again. That happens before a turn (or a model
+// kept, and the model (and its effort) set again. That happens before a turn (or a model
 // listing) on a token with under 20 minutes left, and in the middle of a turn
 // that would outlive its token: five minutes before it expires, the turn is cut
 // short and continues on the new runtime with "continue". The agent sees one
@@ -39,7 +39,7 @@ export async function installationSession({
   const publish: Parameters<BotSession["on"]>[0] = (event) => {
     for (const handler of handlers) handler(event);
   };
-  let model: string | null = null;
+  let model: { id: string; effort: ReasoningEffort | null } | null = null;
   let expiresAt = 0;
   let current: { session: BotSession; unsubscribe: () => void } | null = null;
   // Cancels the running turn's continue timer.
@@ -57,7 +57,7 @@ export async function installationSession({
     });
     current = { session, unsubscribe };
     expiresAt = fresh.expiresAt;
-    if (model !== null) await session.setModel(model);
+    if (model !== null) await session.setModel(model.id, model.effort);
     return session;
   }
 
@@ -124,9 +124,9 @@ export async function installationSession({
       cancelContinue = null;
       await current?.session.abort();
     },
-    async setModel(next) {
-      await (await live()).setModel(next);
-      model = next;
+    async setModel(id, effort) {
+      await (await live()).setModel(id, effort);
+      model = { id, effort };
     },
     rpc: { model: { list: async () => (await live()).rpc.model.list() } },
     disconnect: () => serial(close),

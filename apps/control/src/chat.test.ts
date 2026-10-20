@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, ControlToWorker, type BotId } from "@chiefbot/contracts";
+import { ApiError, Bot, ControlToWorker, type BotId } from "@chiefbot/contracts";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { tmpdir } from "node:os";
 import { cleanUp, doneCount, startTestControl } from "./testControl.ts";
@@ -188,6 +188,65 @@ test("an approval answered while the human has the screen runs its tool call onl
   await api("POST", `/bots/${bot.id}/hand-back`);
   await chat.until(doneCount(1));
   expect(ran).toEqual(["merged"]);
+});
+
+test("a bot's access mode reaches its worker: supervised asks before a command", async () => {
+  const { api, computers, onlineBot, send, watchChat } = await setup();
+  const bot = await onlineBot("Ada");
+  const ran: string[] = [];
+  computers.copilot.script = async function* (_prompt, runtime) {
+    ran.push((await runtime.shell("echo checked")).output);
+    yield sdk.idle();
+  };
+
+  const invalid = await api("PUT", `/bots/${bot.id}/access`, { access: "yolo" });
+  const supervised = Bot.parse(await (await api("PUT", `/bots/${bot.id}/access`, { access: "supervised" })).json());
+  const chat = watchChat(bot.id);
+  await send(bot.id, "check");
+  const request = (await chat.until((events) => events.some((e) => e.event.type === "approval-request"))).find(
+    (e) => e.event.type === "approval-request",
+  );
+  await api("POST", `/bots/${bot.id}/approvals/${request?.event.type === "approval-request" ? request.event.approvalId : ""}`, {
+    approved: true,
+  });
+  await chat.until(doneCount(1));
+
+  expect([invalid.status, ApiError.parse(await invalid.json())]).toEqual([400, { error: "invalid_access" }]);
+  expect(supervised.access).toBe("supervised");
+  expect(request?.event).toMatchObject({ type: "approval-request", kind: "command", detail: "echo checked" });
+  expect(ran).toEqual(["checked\n"]);
+});
+
+test("full access runs a GitHub write without asking, but still waits while the human has the screen", async () => {
+  const { api, computers, onlineBot, send, watchChat } = await setup();
+  const bot = await onlineBot("Ada");
+  await api("PUT", `/bots/${bot.id}/access`, { access: "full-access" });
+  let release = () => {};
+  const paused = new Promise<void>((resolve) => (release = resolve));
+  const ran: string[] = [];
+  computers.copilot.script = async function* (_prompt, runtime) {
+    yield sdk.delta("msg-1", "Merging");
+    await paused;
+    if (await runtime.mcp("github", "Merge pull request", false)) ran.push("merged");
+    yield sdk.idle();
+  };
+  const chat = watchChat(bot.id);
+  await send(bot.id, "merge it");
+  await chat.until((events) => events.some((e) => e.event.type === "text-delta"));
+
+  await api("POST", `/bots/${bot.id}/take-over`);
+  for (let i = 0; computers.computers.get(bot.id)?.worker?.screenControl() !== "human"; i++) {
+    if (i > 100) throw new Error("the worker never heard of the take-over");
+    await Bun.sleep(10);
+  }
+  release();
+  await Bun.sleep(100);
+  expect(ran).toEqual([]);
+
+  await api("POST", `/bots/${bot.id}/hand-back`);
+  await chat.until(doneCount(1));
+  expect(ran).toEqual(["merged"]);
+  expect(chat.events.some((e) => e.event.type === "approval-request")).toBe(false);
 });
 
 test("the token broker gives a bot's worker its owner's access token only, and nobody else anything", async () => {

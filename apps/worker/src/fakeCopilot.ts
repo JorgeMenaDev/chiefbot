@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from "@chiefbot/contracts";
 import type { JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
 import type { BotSession, Copilot, SdkModelList } from "./copilot.ts";
 
@@ -49,8 +50,9 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const mcpServers: Array<Record<string, MCPServerConfig>> = [];
   // Each opened session's skill roots, in the order sessions opened.
   const skillDirectories: string[][] = [];
-  // Every turn started, with the model its session was on ("default" before any setModel).
-  const sends: Array<{ sessionId: string; prompt: string; model: string }> = [];
+  // Every turn started, with the model its session was on ("default" before any setModel)
+  // and that model's reasoning effort (null: its default).
+  const sends: Array<{ sessionId: string; prompt: string; model: string; effort: ReasoningEffort | null }> = [];
 
   const copilot: Copilot = {
     async openSession({ sessionId, auth, onPermissionRequest, tools, mcpServers: servers = {}, onMcpCall, skillDirectories: skills = [] }) {
@@ -112,6 +114,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
         return { approved: true, exitCode, output: stdout + stderr };
       }
       let model = "default";
+      let effort: ReasoningEffort | null = null;
       // Bumped by abort: a script of an earlier turn publishes nothing more.
       let turn = 0;
       const session: BotSession = {
@@ -120,7 +123,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           return () => void handlers.delete(handler);
         },
         async send(prompt) {
-          sends.push({ sessionId, prompt, model });
+          sends.push({ sessionId, prompt, model, effort });
           const mine = ++turn;
           // Like the SDK: send returns once the message is admitted; events follow.
           void (async () => {
@@ -135,8 +138,9 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           turn++;
           aborted.push(sessionId);
         },
-        async setModel(next) {
+        async setModel(next, nextEffort) {
           model = next;
+          effort = nextEffort;
         },
         rpc: { model: { list: async () => models } },
         async disconnect() {
@@ -210,20 +214,26 @@ function segmentsOf(fullCommandText: string) {
   });
 }
 
+// A shell permission request whose every command the runtime parsed as `readOnly`, or not.
+const shellRequest = (fullCommandText: string, readOnly: boolean, toolCallId?: string): PermissionRequest => ({
+  kind: "shell",
+  ...(toolCallId === undefined ? {} : { toolCallId }),
+  fullCommandText,
+  intention: "Run a command",
+  commandSegments: segmentsOf(fullCommandText),
+  commands: segmentsOf(fullCommandText).map(({ identifier }) => ({ identifier, readOnly })),
+  possiblePaths: [],
+  possibleUrls: [],
+  hasWriteFileRedirection: false,
+  canOfferSessionApproval: false,
+});
+
 // Permission requests shaped like the ones the Copilot runtime sends.
 export const fakeRequest = {
-  shell: (fullCommandText: string, toolCallId?: string): PermissionRequest => ({
-    kind: "shell",
-    ...(toolCallId === undefined ? {} : { toolCallId }),
-    fullCommandText,
-    intention: "Run a command",
-    commandSegments: segmentsOf(fullCommandText),
-    commands: segmentsOf(fullCommandText).map(({ identifier }) => ({ identifier, readOnly: false })),
-    possiblePaths: [],
-    possibleUrls: [],
-    hasWriteFileRedirection: false,
-    canOfferSessionApproval: false,
-  }),
+  shell: (fullCommandText: string, toolCallId?: string) => shellRequest(fullCommandText, false, toolCallId),
+  // A command the runtime sees only reading, such as `ls`.
+  readOnlyShell: (fullCommandText: string) => shellRequest(fullCommandText, true),
+  write: (fileName: string): PermissionRequest => ({ kind: "write", fileName, intention: "Edit a file", diff: "", canOfferSessionApproval: false }),
   tool: (toolName: string, args: JsonValue): PermissionRequest => ({ kind: "custom-tool", toolName, toolDescription: toolName, args }),
   mcp: (serverName: string, toolTitle: string, readOnly: boolean): PermissionRequest => ({
     kind: "mcp",

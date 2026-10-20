@@ -19,6 +19,7 @@ import {
   RoutineInput,
   SendMessageRequest,
   SetCopilotModeRequest,
+  SetBotAccessRequest,
   SetBotModelRequest,
   SubscriptionId,
   SubscriptionInput,
@@ -139,8 +140,9 @@ ipcMain.handle("bots:create", (_event, request: unknown) => bots.create(CreateBo
 ipcMain.handle("bots:start", (_event, id: unknown) => bots.start(BotId.parse(id)));
 ipcMain.handle("bots:stop", (_event, id: unknown) => bots.stop(BotId.parse(id)));
 ipcMain.handle("bots:models", () => bots.models());
-ipcMain.handle("bots:set-model", (_event, id: unknown, model: unknown) =>
-  bots.setModel(BotId.parse(id), SetBotModelRequest.parse({ model }).model),
+ipcMain.handle("bots:set-model", (_event, id: unknown, request: unknown) => bots.setModel(BotId.parse(id), SetBotModelRequest.parse(request)));
+ipcMain.handle("bots:set-access", (_event, id: unknown, access: unknown) =>
+  bots.setAccess(BotId.parse(id), SetBotAccessRequest.parse({ access }).access),
 );
 ipcMain.handle("bots:take-over", (_event, id: unknown) => bots.takeOver(BotId.parse(id)));
 ipcMain.handle("bots:hand-back", (_event, id: unknown) => bots.handBack(BotId.parse(id)));

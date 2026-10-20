@@ -1,5 +1,6 @@
 import {
   AUTO_MODEL,
+  DEFAULT_ACCESS,
   type BotId,
   type ChatEvent,
   type AgentConnection,
@@ -59,8 +60,9 @@ export function chatTurns({
     }
   };
 
-  // Starts a chat turn with `text` on the bot's worker. The turn is recorded at
-  // once; it goes to the worker with the owner's connections once they are read.
+  // Starts a chat turn with `text` on the bot's worker, on the bot's model, effort
+  // and access mode as they are now. The turn is recorded at once; it goes to the
+  // worker with the owner's connections once they are read.
   // A worker that reconnects meanwhile has ended the turn as lost, so it goes
   // only to the connection it was started on, and a turn that ended meanwhile
   // (Stop) does not go at all. Unreadable connections leave the turn without them.
@@ -72,7 +74,10 @@ export function chatTurns({
     // The agent waits while the human drives the screen. A turn already running
     // pauses at its next tool call (the worker holds it until hand-back).
     if (humanHasScreen(botId)) return { error: "human_has_screen" };
-    const model = store.botFor(userId, botId)?.model ?? AUTO_MODEL;
+    const bot = store.botFor(userId, botId);
+    const model = bot?.model ?? AUTO_MODEL;
+    const effort = bot?.effort ?? null;
+    const access = bot?.access ?? DEFAULT_ACCESS;
     const started = store.startTurn(botId, text);
     const turnKey = store.turnKeys.issue({ agent: "bot", botId, userId, turnId: started.turnId });
     publishChat(botId, started);
@@ -80,7 +85,9 @@ export function chatTurns({
       .catch(() => [])
       .then((connections) => {
         if (workerOf(botId) !== worker || !store.unfinishedTurns(botId).includes(started.turnId)) return;
-        worker.send(JSON.stringify({ type: "run-turn", turnId: started.turnId, turnKey, text, model, connections } satisfies ControlToWorker));
+        worker.send(
+          JSON.stringify({ type: "run-turn", turnId: started.turnId, turnKey, text, model, effort, access, connections } satisfies ControlToWorker),
+        );
       });
     return { turnId: started.turnId };
   };

@@ -123,7 +123,9 @@ function bound(session: Awaited<ReturnType<typeof openOn>>): Omit<BotSession, "d
     on: (handler) => session.on(handler),
     send: (prompt) => session.send(prompt),
     abort: () => session.abort(),
-    setModel: (model) => session.setModel(model),
+    // The SDK's setModel without its types' limit: its switchTo takes a null effort,
+    // which clears the effort an earlier turn set (setModel can only keep or replace it).
+    setModel: async (modelId, reasoningEffort) => void (await session.rpc.model.switchTo({ modelId, reasoningEffort })),
     rpc: session.rpc,
   };
 }

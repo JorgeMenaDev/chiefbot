@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from "@chiefbot/contracts";
 import type { GitHubTokenProvider, MCPServerConfig, PermissionHandler, SessionConfig, SessionEvent } from "@github/copilot-sdk";
 
 // How a session's runtime signs in to Copilot, and so who pays:
@@ -43,8 +44,9 @@ export type BotSession = {
   send(prompt: string): Promise<unknown>;
   // Cuts the running turn short. The conversation is kept.
   abort(): Promise<void>;
-  // Runs the next turns on `model`. The conversation is kept.
-  setModel(model: string): Promise<void>;
+  // Runs the next turns on `model` at `effort`; null clears any effort set before, so
+  // the model's default applies. The session keeps both, and its conversation.
+  setModel(model: string, effort: ReasoningEffort | null): Promise<void>;
   // Lists models with the session's own auth, so for the bot owner's plan.
   rpc: { model: { list(): Promise<SdkModelList> } };
   // Closes the session; its history stays on disk to resume. An installation

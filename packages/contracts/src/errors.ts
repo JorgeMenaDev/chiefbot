@@ -14,6 +14,8 @@ import { z } from "zod";
 //                         the body or query failed its schema (400)
 //   invalid_schedule      a routine's or schedule subscription's cron or timezone control cannot run (400)
 //   model_unavailable     the user's plan does not offer that model, or it is locked (400)
+//   effort_unavailable    the model does not support that reasoning effort (400)
+//   invalid_access        the body of PUT /bots/:id/access failed its schema (400)
 //   github_rejected_token GitHub refused the sign-in's access token (401)
 //   computer_failed       the bot's (or project's) computer could not be made or started; `message` says why (502)
 //   bot_offline, bot_stopping, turn_running, human_has_screen  a turn was refused (409, TurnRefusal;
@@ -67,6 +69,8 @@ export const ApiErrorCode = z.enum([
   "invalid_copilot_mode",
   "invalid_schedule",
   "model_unavailable",
+  "effort_unavailable",
+  "invalid_access",
   "github_rejected_token",
   "computer_failed",
   "bot_offline",

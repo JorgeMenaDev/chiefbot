@@ -1,8 +1,9 @@
 import { ChatView, type Bot, type BotId, type ChatItem } from "@chiefbot/contracts";
 import { CheckIcon, CircleAlertIcon, InfoIcon, XIcon } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
-import { ModelPicker } from "./ModelPicker.tsx";
+import { BotComposerControls } from "./BotComposerControls.tsx";
+import { Composer } from "./Composer.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
@@ -67,7 +68,7 @@ export function Chat({ bot }: { bot: Bot }) {
         canSend={canSend}
         error={error}
       >
-        <ModelPicker bot={bot} onError={setError} />
+        <BotComposerControls bot={bot} onError={setError} />
       </Composer>
     </section>
   );
@@ -173,69 +174,5 @@ export function Working({ children }: { children: ReactNode }) {
       <Spinner className="size-3.5" />
       <span className="animate-working">{children}…</span>
     </p>
-  );
-}
-
-// T3 Code's composer: a rounded card pinned under the lane, the prompt on top,
-// controls (`children`, such as the model picker) and the round send button
-// below. Enter sends, Shift+Enter adds a line. `error` shows beside the controls.
-export function Composer({
-  placeholder,
-  draft,
-  onDraft,
-  onSend,
-  canSend,
-  error,
-  children,
-}: {
-  placeholder: string;
-  draft: string;
-  onDraft: (draft: string) => void;
-  onSend: () => void;
-  canSend: boolean;
-  error: string | null;
-  children?: ReactNode;
-}) {
-  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
-    event.preventDefault();
-    onSend();
-  }
-
-  return (
-    <div className="shrink-0 px-5 pb-4">
-      <form
-        className="mx-auto w-full max-w-3xl rounded-[22px] border bg-card shadow-[0_12px_28px_-18px_rgb(0_0_0/40%)] transition-colors focus-within:border-input"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onSend();
-        }}
-      >
-        <textarea
-          rows={3}
-          className="block w-full resize-none bg-transparent px-4 pt-3.5 pb-1 text-sm leading-relaxed outline-none placeholder:text-muted-foreground/72"
-          placeholder={placeholder}
-          value={draft}
-          onChange={(event) => onDraft(event.target.value)}
-          onKeyDown={onKeyDown}
-        />
-        <div className="flex items-center gap-2 px-2.5 pb-2.5">
-          {children}
-          <span className="min-w-0 flex-1 truncate text-destructive-foreground text-xs" title={error ?? undefined}>
-            {error}
-          </span>
-          <button
-            type="submit"
-            disabled={!canSend}
-            aria-label="Send"
-            className="flex size-8 shrink-0 items-center justify-center rounded-full bg-message-action text-message-action-foreground shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:inset-shadow-[0_1px_--theme(--color-white/16%)] hover:scale-105 hover:bg-message-action-hover disabled:pointer-events-none disabled:opacity-30 disabled:shadow-none"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-              <path d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-        </div>
-      </form>
-    </div>
   );
 }

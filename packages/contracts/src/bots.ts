@@ -4,7 +4,7 @@ import { TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
 import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, TurnId, TurnKey } from "./ids.ts";
-import { ModelReport } from "./models.ts";
+import { ModelReport, ReasoningEffort } from "./models.ts";
 import { ProjectTasks } from "./projects.ts";
 import { ProjectWorkers } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
@@ -38,7 +38,20 @@ export type BotAvatar = z.infer<typeof BotAvatar>;
 // Chiefbot's own chief, in blue: the face of a bot created without one.
 export const DEFAULT_AVATAR: BotAvatar = { shape: "chief", color: "blue" };
 
-// `model` is the Copilot model id the bot's turns run on (AUTO_MODEL until the user picks one).
+// How freely a bot's agent acts in its computer before asking its owner (the worker's
+// approvals.ts maps each to its permission requests). After T3 Code's runtime modes:
+//   supervised         asks before every shell command, file change and connection call
+//   auto-accept-edits  changes files freely; asks before anything else that may write
+//   auto               asks only before connection CLI writes and GitHub tools that write
+//   full-access        asks before nothing (Copilot's "allow all")
+// In every mode control still asks before each push and pull request, and the agent
+// waits while the owner has its screen.
+export const AccessMode = z.enum(["supervised", "auto-accept-edits", "auto", "full-access"]);
+export type AccessMode = z.infer<typeof AccessMode>;
+export const DEFAULT_ACCESS: AccessMode = "auto";
+
+// `model` is the Copilot model id the bot's turns run on (AUTO_MODEL until the user picks one),
+// `effort` its reasoning effort (null: the model's default), `access` its access mode.
 export const Bot = z.object({
   id: BotId,
   name: z.string(),
@@ -46,8 +59,14 @@ export const Bot = z.object({
   status: BotStatus,
   screenControl: ScreenControl,
   model: z.string(),
+  effort: ReasoningEffort.nullable(),
+  access: AccessMode,
 });
 export type Bot = z.infer<typeof Bot>;
+
+// Body of PUT /bots/:id/access.
+export const SetBotAccessRequest = z.object({ access: AccessMode });
+export type SetBotAccessRequest = z.infer<typeof SetBotAccessRequest>;
 
 // Body of POST /bots.
 export const CreateBotRequest = z.object({ name: z.string().trim().min(1).max(60), avatar: BotAvatar.default(DEFAULT_AVATAR) });
@@ -69,7 +88,8 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 // Control → worker on the /worker WebSocket.
 //   bound           control accepted the credential; sent right after. The connection belongs to
 //                   that one bot (or, on /task-worker, that one task worker).
-//   run-turn        run one turn on the bot's Copilot session, on `model`; control sends one at a time.
+//   run-turn        run one turn on the bot's Copilot session, on `model` at `effort` (null: the model's
+//                   default), asking as its `access` mode says; control sends one at a time.
 //                   `turnKey` is the turn's key (ids.ts TurnKey): the bearer of every call to control in it.
 //                   `connections` are the owner's connections that are on (connections.ts), for this turn only
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
@@ -89,6 +109,8 @@ export const ControlToWorker = z.discriminatedUnion("type", [
     turnKey: TurnKey,
     text: z.string(),
     model: z.string(),
+    effort: ReasoningEffort.nullable().default(null),
+    access: AccessMode.default(DEFAULT_ACCESS),
     connections: z.array(AgentConnection).default([]),
   }),
   z.object({

@@ -1,87 +1,79 @@
-import { AUTO_MODEL, ModelOption, type Bot } from "@chiefbot/contracts";
-import { CheckIcon, ChevronDownIcon, LockIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
-import { z } from "zod";
+import { AUTO_MODEL, type Bot, type ModelOption } from "@chiefbot/contracts";
+import { CheckIcon, LockIcon } from "lucide-react";
+import { useId, useRef, useState } from "react";
+import { ComposerControl, ComposerControlChevron } from "./ComposerControl.tsx";
 import { cn } from "./lib/utils.ts";
 
-const ModelList = z.array(ModelOption);
-
 // The bot's model, after T3 Code's ProviderModelPicker and ModelListRow (via
-// Chartpilot's port): a trigger with the Copilot mark and the model's name, opening
-// a searchable list of the plan's models above the composer. Locked rows show why
-// in place of the provider line and cannot be picked. The pick is saved on the bot.
-export function ModelPicker({ bot, onError }: { bot: Bot; onError: (message: string | null) => void }) {
+// Chartpilot's port): a composer control with the Copilot mark and the model's
+// name, opening a searchable list of the plan's `models` above the composer. Locked
+// rows show why in place of the provider line and cannot be picked. The list sits in
+// the top layer (a popover), so nothing clips it; a click outside or Escape closes
+// it. `onOpen` runs each time it opens (to read the plan's models again), `onPick`
+// with the model picked.
+export function ModelPicker({
+  bot,
+  models,
+  onOpen,
+  onPick,
+}: {
+  bot: Bot;
+  models: ModelOption[];
+  onOpen: () => void;
+  onPick: (model: ModelOption) => void;
+}) {
+  const id = useId();
+  const popup = useRef<HTMLDivElement>(null);
+  const search = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
-  const [models, setModels] = useState<ModelOption[]>([]);
   const [query, setQuery] = useState("");
-  const root = useRef<HTMLDivElement>(null);
   const name = models.find((model) => model.id === bot.model)?.name ?? (bot.model === AUTO_MODEL ? "Auto" : bot.model);
   const q = query.trim().toLowerCase();
   const visible = q ? models.filter((model) => `${model.name} ${model.id}`.toLowerCase().includes(q)) : models;
 
-  // Reads the plan's models on mount and on every open, so a new report shows.
-  useEffect(() => {
-    void window.chiefbot.bots.models().then((next) => setModels(ModelList.parse(next)));
-  }, [open]);
-
-  // A click outside or Escape closes the list.
-  useEffect(() => {
-    if (!open) return;
-    const onClick = (event: MouseEvent) => {
-      if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
-    };
-    const onKey = (event: globalThis.KeyboardEvent) => event.key === "Escape" && setOpen(false);
-    document.addEventListener("mousedown", onClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onClick);
-      document.removeEventListener("keydown", onKey);
-      setQuery("");
-    };
-  }, [open]);
-
-  async function choose(model: ModelOption) {
+  function choose(model: ModelOption) {
     if (model.lockedReason !== null) return;
-    setOpen(false);
-    onError(null);
-    try {
-      await window.chiefbot.bots.setModel(bot.id, model.id);
-    } catch (caught) {
-      onError(caught instanceof Error ? caught.message : String(caught));
-    }
+    popup.current?.hidePopover();
+    onPick(model);
   }
 
   return (
-    <div className="relative min-w-0" ref={root}>
-      <button
-        type="button"
-        aria-label={`Model: ${name}`}
-        className="inline-flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 font-medium text-muted-foreground text-xs transition-colors hover:bg-accent hover:text-foreground aria-expanded:bg-accent aria-expanded:text-foreground"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-      >
-        <CopilotIcon className="size-3.5" />
+    <>
+      <ComposerControl popoverTarget={id} aria-label={`Model: ${name}`} aria-expanded={open} className="-ms-1 min-w-0 max-w-56 justify-between">
+        <CopilotIcon className="size-4 text-muted-foreground" />
         <span className="min-w-0 truncate">{name}</span>
-        <ChevronDownIcon className="size-3.5 shrink-0 opacity-60" />
-      </button>
-      {open && (
-        <div className="absolute bottom-full left-0 z-20 mb-1.5 flex max-h-[346px] w-[360px] flex-col overflow-hidden rounded-lg border bg-popover/94 text-popover-foreground shadow-lg/10 backdrop-blur-xl">
-          <input
-            autoFocus
-            className="mx-3 mt-2.5 border-b bg-transparent pb-1.5 text-sm outline-none placeholder:text-muted-foreground/72 focus:border-ring"
-            placeholder="Search models..."
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-          />
-          <div role="listbox" className="flex min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5">
-            {visible.map((model) => (
-              <ModelRow key={model.id} model={model} selected={model.id === bot.model} onSelect={() => void choose(model)} />
-            ))}
-            {visible.length === 0 && <p className="px-2 py-3 text-center text-muted-foreground text-xs">No models found</p>}
-          </div>
+        <ComposerControlChevron />
+      </ComposerControl>
+      <div
+        ref={popup}
+        id={id}
+        popover="auto"
+        role="dialog"
+        aria-label="Models"
+        className="m-0 mb-1.5 max-h-[346px] w-[360px] flex-col overflow-hidden rounded-lg border bg-popover/94 text-popover-foreground shadow-lg/10 backdrop-blur-xl [position-area:top_span-right] [position-try-fallbacks:flip-block] open:flex"
+        onToggle={(event) => {
+          const opened = event.newState === "open";
+          setOpen(opened);
+          if (!opened) return setQuery("");
+          onOpen();
+          search.current?.focus();
+        }}
+      >
+        <input
+          ref={search}
+          className="mx-3 mt-2.5 border-b bg-transparent pb-1.5 text-sm outline-none placeholder:text-muted-foreground/72 focus:border-ring"
+          placeholder="Search models..."
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        <div role="listbox" className="flex min-h-0 flex-col gap-0.5 overflow-y-auto p-1.5">
+          {visible.map((model) => (
+            <ModelRow key={model.id} model={model} selected={model.id === bot.model} onSelect={() => choose(model)} />
+          ))}
+          {visible.length === 0 && <p className="px-2 py-3 text-center text-muted-foreground text-xs">No models found</p>}
         </div>
-      )}
-    </div>
+      </div>
+    </>
   );
 }
 
