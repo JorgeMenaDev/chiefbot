@@ -1,5 +1,6 @@
 import { startCoordinator } from "./coordinator.ts";
-import { coordinatorSdk, copilotSdk } from "./copilotSdk.ts";
+import { agentEnv, coordinatorSdk, copilotSdk } from "./copilotSdk.ts";
+import { setupShell } from "./engineerSetup.ts";
 import { defaultGitSocket, gitProxyConfig } from "./gitProxy.ts";
 import { startWorker } from "./worker.ts";
 
@@ -45,12 +46,14 @@ if (controlUrl && projectId && projectToken) {
   if (!controlUrl || !agent) {
     throw new Error("CHIEFBOT_CONTROL_URL and CHIEFBOT_BOT_ID with CHIEFBOT_BOT_TOKEN (or the task worker's) must be set");
   }
+  // Git in the agent's shell, and in an engineer's setup, reaches github.com only through control's git proxy.
+  const gitConfig = gitProxyConfig({ controlUrl });
   const worker = startWorker({
     controlUrl,
     ...agent,
-    // The bot's workspace on its own disk (the image's WORKDIR). Git in the agent's
-    // shell reaches github.com only through control's git proxy.
-    copilot: copilotSdk({ workingDirectory: "/home/bot/workspace", gitConfig: gitProxyConfig({ controlUrl }) }),
+    // The bot's workspace on its own disk (the image's WORKDIR).
+    copilot: copilotSdk({ workingDirectory: "/home/bot/workspace", gitConfig }),
+    setupShell: setupShell({ ...agentEnv(process.env), ...gitConfig }),
     gitSocket: defaultGitSocket,
     onBound: () => console.log(`worker connected to ${controlUrl} as ${agent.id}`),
     onModelsError: (error) => console.error("could not list Copilot models:", error),

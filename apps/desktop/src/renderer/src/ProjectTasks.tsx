@@ -1,6 +1,7 @@
 import type { CopilotPayer, Project, Task, TaskStatus, TaskWorker, TaskWorkerId, TaskWorkerState } from "@chiefbot/contracts";
 import { MonitorIcon } from "lucide-react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
+import { EngineerDetails } from "./EngineerDetails.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
 
@@ -51,8 +52,9 @@ export function payerText(payer: CopilotPayer) {
   return payer.kind === "seat" ? `On ${payer.login}'s Copilot seat` : `Billed to ${payer.account}'s Copilot (organization)`;
 }
 
-// One engineer of a task: its state, who pays for it, its pull request and what it waits on. Only
-// the member who asked for it answers its approvals; the others see who must.
+// One engineer of a task: its state, who pays for it, its pull request, its setup and how it ended
+// (EngineerDetails), and what it waits on. Only the member who asked for it answers its approvals;
+// the others see who must.
 function WorkerRow({ project, worker, login, onWatch }: { project: Project; worker: TaskWorker; login: string; onWatch: () => void }) {
   return (
     <div className="flex flex-col gap-2 border-l-2 ps-3">
@@ -74,6 +76,7 @@ function WorkerRow({ project, worker, login, onWatch }: { project: Project; work
           Open
         </Button>
       </div>
+      <EngineerDetails worker={worker} max={project.config.workers.max} />
       {worker.pendingApprovals.map(({ approvalId, kind, detail }) =>
         worker.requestedBy === login ? (
           <ApprovalCard
@@ -92,9 +95,12 @@ function WorkerRow({ project, worker, login, onWatch }: { project: Project; work
 }
 
 export const workerStateText: Record<TaskWorkerState, string> = {
+  queued: "queued",
   launching: "starting its computer",
+  setting_up: "setting up",
   working: "working",
   finished: "finished",
+  blocked: "blocked",
   failed: "failed",
   stopped: "stopped",
 };

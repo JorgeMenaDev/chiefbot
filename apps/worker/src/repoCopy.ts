@@ -1,6 +1,6 @@
 import { mkdir, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, posix, relative, sep } from "node:path";
-import { RepoReadArgs, RepoSearchArgs } from "@chiefbot/contracts";
+import { instructionPaths, RepoReadArgs, RepoSearchArgs } from "@chiefbot/contracts";
 import type { CustomAgentConfig, Tool } from "@github/copilot-sdk";
 import type { z } from "zod";
 
@@ -231,8 +231,6 @@ async function search(copy: FetchedCopy, { pattern, path, ignoreCase }: z.infer<
   return [...shown, ...more].join("\n");
 }
 
-// The repo's instructions every agent reads, before the project's own `instructions`.
-const standardInstructions = ["AGENTS.md", ".github/copilot-instructions.md"];
 // How much of one instruction file the coordinator is told; it reads on with repo_read.
 const INSTRUCTION_BYTES = 20_000;
 
@@ -254,7 +252,7 @@ export async function repoSetup(copy: RepoCopy, config: { instructions: string[]
       : `${what} path ${path} is a ${found.entry.kind} in the repo at ${at}, not a ${what === "skills" ? "folder" : "file"}`;
   const files: string[] = [];
   const skipped: string[] = [];
-  for (const path of new Set([...standardInstructions, ...config.instructions])) {
+  for (const path of instructionPaths(config.instructions)) {
     const found = await find(copy, path);
     if ("at" in found && found.entry.kind === "file") {
       const { out, cut } = await git(copy.root, ["cat-file", "blob", found.entry.object], { limit: INSTRUCTION_BYTES });

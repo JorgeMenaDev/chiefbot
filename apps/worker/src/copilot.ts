@@ -44,6 +44,9 @@ export type Copilot = {
   // a coordinator's sessions take them (coordinatorSdk); a bot's has the runtime's own.
   // `questions` answers the agent's ask_user forms (the SDK's elicitation); a
   // session without it has no ask_user tool, so the agent asks in plain text.
+  // An engineer's session works in its clone (`workingDirectory`) and gets the
+  // project's secrets as `env`: a runtime of its own, started with them, which
+  // stops when the session disconnects. Neither applies to a coordinator.
   openSession(options: {
     sessionId: string;
     auth: CopilotAuth;
@@ -55,6 +58,8 @@ export type Copilot = {
     skillDirectories?: string[];
     agents?: CustomAgentConfig[];
     questions?: Questions;
+    workingDirectory?: string;
+    env?: Record<string, string>;
   }): Promise<BotSession>;
 };
 

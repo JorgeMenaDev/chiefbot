@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApiError, ConnectorCall, Project, Task, TaskWorker, User, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ACCESS_MODES, ATTACHMENTS, ApiError, ConnectorCall, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
+import { setupShell, type SetupShell } from "@chiefbot/worker/engineer-setup";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
@@ -21,8 +22,8 @@ const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan
 
 // Control with a workspace owned by the signed-in user, octo-friend as its
 // member (both may write to the repo), and a project for octo-org/shop whose
-// coordinator is online. `projectFile` is the repo's chiefbot.project.yaml.
-async function teamProject(options: TestControlOptions = {}, projectFile = "commands:\n  test: bun test\n") {
+// coordinator is online. `projectFile` is the repo's chiefbot.project.yaml, and `files` its other files.
+async function teamProject(options: TestControlOptions = {}, projectFile = "commands:\n  test: bun test\n", files: Record<string, string> = {}) {
   const control = await startTestControl(options);
   const owner = control.user;
   const workspace = Workspace.parse(await (await owner.api("POST", "/workspaces", { name: "Platform team" })).json());
@@ -32,7 +33,7 @@ async function teamProject(options: TestControlOptions = {}, projectFile = "comm
   await guest.api("POST", `/invites/${invite?.id}/accept`);
   control.github.createRepo(
     "octo-org/shop",
-    { "chiefbot.project.yaml": projectFile, "README.md": "# Shop\nTeh shop.\n" },
+    { "chiefbot.project.yaml": projectFile, "README.md": "# Shop\nTeh shop.\n", ...files },
     { access: { "octo-user": "write", "octo-friend": "write" } },
   );
   const project = Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo: "octo-org/shop" })).json());
@@ -131,6 +132,301 @@ const connectorOf = (copilot: FakeCopilot, name: string) => {
   return server?.type === "http" ? { url: server.url, headers: server.headers ?? {} } : { url: "", headers: {} };
 };
 
+// Connects to control as the worker `workerId` (with its credential `token`) and
+// says hello, as a worker that can do `capabilities`. Every message control sends
+// it is kept in `received`.
+async function connectAsWorker(url: string, workerId: string, token: string, capabilities: string[]) {
+  const received: string[] = [];
+  const socket = new WebSocket(`${url.replace(/^http/, "ws")}/task-worker/${workerId}`, { headers: { authorization: `Bearer ${token}` } });
+  socket.onmessage = (message) => received.push(String(message.data));
+  await new Promise((resolve) => (socket.onopen = resolve));
+  atCleanUp(() => socket.close());
+  socket.send(JSON.stringify({ type: "hello", activeTurnId: null, capabilities }));
+  return { received };
+}
+
+// How a fake setup command ends: its exit code and its output, in the chunks it comes in.
+type SetupAnswer = { exitCode: number; output: string | string[] };
+
+// An engineer's setup shell that runs nothing: each command answers as `answer`
+// says (exit 0 and no output by default), and every run is recorded.
+function fakeSetup(answer: (command: string) => SetupAnswer | Promise<SetupAnswer> = () => ({ exitCode: 0, output: "" })) {
+  const runs: Array<{ command: string; cwd: string; env: Record<string, string> }> = [];
+  const run: SetupShell = async (command, { cwd, env, onOutput }) => {
+    runs.push({ command, cwd, env });
+    const { exitCode, output } = await answer(command);
+    for (const chunk of [output].flat()) onOutput(chunk);
+    return exitCode;
+  };
+  return { runs, run };
+}
+
+test("an engineer sets up before its agent starts: it clones the repo and runs the setup command, and its transcript shows each with its exit code first", async () => {
+  let install = () => {};
+  const installed = new Promise<void>((resolve) => (install = resolve));
+  const setup = fakeSetup(async (command) => {
+    if (command !== "bun install") return { exitCode: 0, output: "" };
+    await installed;
+    return { exitCode: 0, output: "3 packages installed\n" };
+  });
+  const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install\n");
+  const { owner, project, copilot } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Added the page.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const settingUp = await workerWhen(owner, project, id, ({ setup }) => setup.length === 1);
+  expect(settingUp.state).toBe("setting_up");
+  expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
+  install();
+
+  const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  expect(finished.setup).toEqual([
+    { step: "clone", command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "" },
+    { step: "setup", command: "bun install", exitCode: 0, log: "3 packages installed\n" },
+  ]);
+  // The clone lands in the engineer's workspace, and the setup runs in it.
+  const [clone, install_] = setup.runs;
+  expect(install_?.cwd).toBe(join(clone?.cwd ?? "", "shop"));
+  expect((await tool({ tool: "worker_transcript", worker: id })).body).toEqual({
+    worker: id,
+    lines: ["clone: git clone https://github.com/octo-org/shop.git shop (exit 0)", "setup: bun install (exit 0)", "setup done", "worker: Added the page."],
+    truncated: false,
+  });
+});
+
+test("a setup command that fails blocks the engineer: its agent never starts, its computer stops, and it keeps the step's log", async () => {
+  const lockfile = "error: lockfile had changes, but lockfile is frozen\n";
+  const setup = fakeSetup((command) => (command === "bun install --frozen-lockfile" ? { exitCode: 1, output: lockfile } : { exitCode: 0, output: "" }));
+  const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install --frozen-lockfile\n");
+  const { owner, project, copilot, computers } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Never said.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+
+  expect(blocked).toMatchObject({ result: "Its setup failed: `bun install --frozen-lockfile` exited with 1.", computerRemoved: false });
+  expect(blocked.setup.at(-1)).toEqual({ step: "setup", command: "bun install --frozen-lockfile", exitCode: 1, log: lockfile });
+  expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
+  expect(WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body).lines.slice(1)).toEqual([
+    `setup: bun install --frozen-lockfile (exit 1)\n${lockfile}`,
+    "error: Its setup failed: `bun install --frozen-lockfile` exited with 1.",
+  ]);
+});
+
+test("an engineer's setup clones the repo through control's git proxy, and its agent works in that clone with the repo's instructions and skills", async () => {
+  const socket = `/tmp/chiefbot-t61-${crypto.randomUUID().slice(0, 8)}.sock`;
+  const home = mkdtempSync(join(tmpdir(), "chiefbot-home-"));
+  atCleanUp(() => rmSync(home, { recursive: true, force: true }));
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "", HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", CHIEFBOT_GIT_SOCKET: socket };
+  const control = await teamProject(
+    { setupShell: setupShell(env), gitSocket: socket },
+    "commands:\n  setup: grep -c Teh README.md\ninstructions: [docs/agents.md]\nskills: [.agents/skills, tools/skills]\n",
+    { "AGENTS.md": "Run bun test before you push.\n", "docs/agents.md": "Prices are in cents.\n", ".agents/skills/release/SKILL.md": "---\nname: release\n---\n" },
+  );
+  // What the worker gives its shells (index.ts): github.com goes to control's proxy, which reads the fake GitHub.
+  const helper = join(import.meta.dir, "../../worker/src/gitCredential.ts");
+  Object.assign(env, gitProxyConfig({ controlUrl: control.url, helper: `"${process.execPath}" ${helper}` }));
+  const { owner, project, copilot } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Read the code.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+
+  expect(finished.setup.map(({ step, exitCode, log }) => [step, exitCode, log.trim()])).toEqual([
+    ["clone", 0, "Cloning into 'shop'..."],
+    ["setup", 0, "1"],
+  ]);
+  const at = copilot.sessionIds.indexOf(id);
+  const clone = copilot.workingDirectories[at] ?? "";
+  expect(clone.endsWith(`/${id}/shop`)).toBe(true);
+  expect(await Bun.file(join(clone, "README.md")).text()).toBe("# Shop\nTeh shop.\n");
+  const told = copilot.instructions[at] ?? "";
+  expect(told).toContain('<file path="AGENTS.md">\nRun bun test before you push.\n\n</file>');
+  expect(told).toContain('<file path="docs/agents.md">\nPrices are in cents.\n\n</file>');
+  // A skill folder the repo lacks is left out.
+  expect(copilot.skillDirectories[at]).toEqual([join(clone, ".agents/skills")]);
+  expect(WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body).lines[2]).toBe(
+    "setup done; instructions AGENTS.md, docs/agents.md; skills .agents/skills",
+  );
+});
+
+test("an engineer gets the project's secrets for its task only: in its setup and its agent's runtime, never on the project's computer, and gone once its turn ends", async () => {
+  const setup = fakeSetup((command) => ({ exitCode: 0, output: command === "bun install" ? "using API_KEY=dev-key-1\n" : "" }));
+  const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install\nsecrets: [API_KEY, UNSET_KEY]\n");
+  const { owner, guest, project, copilot, computers } = control;
+  expect((await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "dev-key-1" })).status).toBe(204);
+  let dispatched: unknown = null;
+  copilot.script = async function* (prompt, runtime) {
+    if (isWorker(prompt)) {
+      yield sdk.message("msg-1", "Called the API.");
+      yield sdk.idle();
+      return;
+    }
+    await runtime.tool("create_task", { title: "Call the API" });
+    dispatched = await answer(runtime.tool("dispatch_worker", { task: 1 }));
+    yield sdk.idle();
+  };
+
+  await ask(guest, project, "Call the API");
+  const { id } = TaskWorker.parse(dispatched);
+  const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+
+  // The setup command and the engineer's runtime get the value that is set; the clone gets none.
+  expect(setup.runs.map(({ command, env }) => [command.split(" ")[0], env])).toEqual([
+    ["git", {}],
+    ["bun", { API_KEY: "dev-key-1" }],
+  ]);
+  const sessions = copilot.sessionIds.map((sessionId, at) => ({ sessionId, env: copilot.envs[at], instructions: copilot.instructions[at] ?? "" }));
+  expect(sessions.filter(({ sessionId }) => sessionId === id).map(({ env }) => env)).toEqual([{ API_KEY: "dev-key-1" }]);
+  // The engineer is told the name, never the value, and its setup's log hides it.
+  const told = sessions.find(({ sessionId }) => sessionId === id)?.instructions ?? "";
+  expect([told.includes("API_KEY"), told.includes("dev-key-1")]).toEqual([true, false]);
+  expect(finished.setup[1]?.log).toBe("using API_KEY=***\n");
+  // The project's computer and its coordinator's sessions never get it.
+  const coordinator = sessions.filter(({ sessionId }) => sessionId !== id);
+  expect(coordinator.length).toBeGreaterThan(0);
+  expect(coordinator.every(({ env }) => env === undefined)).toBe(true);
+  const elsewhere = JSON.stringify([computers.computers.get(project.id)?.spec, computers.computers.get(id)?.spec, coordinator, copilot.sends, await workersOf(owner, project)]);
+  expect(elsewhere).not.toContain("dev-key-1");
+  // Its turn is over: its session closed, and the runtime that held the secret with it.
+  await eventually(() => copilot.closed.includes(id));
+});
+
+test("an engineer's messages, errors and result hide the project's secrets, one split across deltas too, and a pull request that holds one is refused before anyone is asked", async () => {
+  const secret = "sk-live-4f9a2b7c1d8e";
+  const control = await teamProject({}, "commands:\n  test: bun test\nsecrets: [API_KEY]\n");
+  const { owner, project, github } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: secret });
+  const refusals: string[] = [];
+  const { tool } = await heldTurn(control, async function* (_prompt, runtime) {
+    yield sdk.delta("msg-1", `The key is ${secret.slice(0, 7)}`);
+    yield sdk.delta("msg-1", `${secret.slice(7)}.`);
+    const pr = { repository: "octo-org/shop", head: "fix-typo", base: "main", title: "Fix the typo" };
+    for (const args of [{ ...pr, body: `Tested with ${btoa(secret)}` }, { ...pr, base: secret }]) {
+      refusals.push(await runtime.tool("create_pull_request", args).then(() => "opened", (error: Error) => error.message));
+    }
+    yield sdk.error(`curl failed: 401 for ${encodeURIComponent(secret)}`);
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const failed = await workerWhen(owner, project, id, ({ state }) => state === "failed");
+
+  expect(failed.result).toBe("curl failed: 401 for ***");
+  expect(refusals).toEqual(Array(2).fill("The pull request holds one of the project's secrets in its repository, branches, title or body. Take it out, then open it again."));
+  expect(github.pullRequests).toEqual([]);
+  const { lines } = WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body);
+  expect(lines.slice(2)).toEqual(["worker: The key is ***.", "error: curl failed: 401 for ***"]);
+  expect(JSON.stringify([lines, await workersOf(owner, project)])).not.toContain(secret.slice(0, 12));
+});
+
+test("an engineer with secrets keeps its messages in order: each before the tool rows after it, and its last one is the result", async () => {
+  const control = await teamProject({}, "commands:\n  test: bun test\nsecrets: [API_KEY]\n");
+  const { owner, project } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "sk-live-4f9a2b7c1d8e" });
+  const report = "Nothing to change: the typo was fixed on main in #37.";
+  const { tool } = await heldTurn(control, async function* () {
+    for (const [messageId, text] of [["msg-1", "Checking."], ["msg-2", "Looking closer."], ["msg-3", report]] as const) {
+      yield sdk.delta(messageId, text);
+      // The SDK's whole message; only the first asks for a tool.
+      yield sdk.message(messageId, text);
+      if (messageId === "msg-1") yield* [sdk.toolStart("t-1", "bash", "Run bun test"), sdk.toolComplete("t-1", true)];
+    }
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  expect(await workerWhen(owner, project, id, ({ state }) => state === "finished")).toMatchObject({ result: report });
+  const { lines } = WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body);
+  expect(lines.slice(2)).toEqual(["worker: Checking.", "tool Run bun test: succeeded", "worker: Looking closer.", `worker: ${report}`]);
+});
+
+test("an engineer whose turn ends while control reads its secrets never gets them or its task, on any connection", async () => {
+  // Control's secret store, whose reads wait while `hold` is set.
+  const values = new Map<string, string>();
+  let hold = false;
+  let reads = 0;
+  let release = () => {};
+  const released = new Promise<void>((resolve) => (release = resolve));
+  const secrets = {
+    get: async (name: string) => {
+      if (hold) {
+        reads += 1;
+        await released;
+      }
+      return values.get(name) ?? null;
+    },
+    put: async (name: string, value: string) => void values.set(name, value),
+    delete: async (name: string) => void values.delete(name),
+  };
+  const tokens = new Map<string, string>();
+  const setup = fakeSetup();
+  const control = await teamProject(
+    {
+      secrets,
+      setupShell: setup.run,
+      provider: (fake) => ({
+        ...fake,
+        async create(spec) {
+          tokens.set(spec.id, spec.env.CHIEFBOT_TASK_WORKER_TOKEN ?? "");
+          await fake.create(spec);
+        },
+      }),
+    },
+    "commands:\n  setup: bun install\nsecrets: [API_KEY]\n",
+  );
+  const { owner, project, url } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "dev-key-1" });
+  hold = true;
+  const { tool } = await heldTurn(control);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await eventually(() => reads > 0);
+
+  // The worker reconnects, saying it runs no turn: control ends it. Its new connection stays open.
+  const { received } = await connectAsWorker(url, id, tokens.get(id) ?? "", []);
+  await workerWhen(owner, project, id, ({ state }) => state === "failed");
+  release();
+  await Bun.sleep(100);
+
+  expect(received.join("\n")).not.toContain("run-task");
+  expect(setup.runs).toEqual([]);
+});
+
+test("an engineer whose computer runs an image without setup is blocked at once, told to rebuild the image, and gets no task", async () => {
+  const tokens = new Map<string, string>();
+  const control = await teamProject({
+    provider: (fake) => ({
+      ...fake,
+      async create(spec) {
+        tokens.set(spec.id, spec.env.CHIEFBOT_TASK_WORKER_TOKEN ?? "");
+        await fake.create(spec);
+      },
+      // An engineer's computer starts no worker of ours: the test speaks for an older one.
+      async start(id) {
+        if (!id.startsWith("worker_")) await fake.start(id);
+      },
+    }),
+  });
+  const { owner, project, url } = control;
+  const { tool } = await heldTurn(control);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const { received } = await connectAsWorker(url, id, tokens.get(id) ?? "", [ACCESS_MODES, ATTACHMENTS]);
+
+  const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  expect(blocked.result).toBe("Its computer runs an older Chiefbot image, which cannot set up an engineer. Rebuild the computer image (`bun run computer:build`), then dispatch the task again.");
+  expect(received.join("\n")).not.toContain("run-task");
+});
+
 test("a resent dispatch with the same creation id starts one worker, even while the first is still getting its computer", async () => {
   const creates: string[] = [];
   let openGate = () => {};
@@ -192,7 +488,175 @@ async function gitTeamProject() {
   return control;
 }
 
-test("the worker pushes and opens its pull request through control, each approved by the member who asked, and the task links it", async () => {
+test("a dispatch beyond the project's workers.max is queued, with no computer, and launches when a running engineer ends", async () => {
+  let finishFirst = () => {};
+  const firstFinishes = new Promise<void>((resolve) => (finishFirst = resolve));
+  const control = await teamProject({}, "commands:\n  test: bun test\nworkers:\n  max: 1\n");
+  const { owner, project, computers } = control;
+  const { tool } = await heldTurn(control, async function* (prompt) {
+    if (prompt.includes("Task #1:")) await firstFinishes;
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  await tool({ tool: "create_task", title: "Add dark mode" });
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, first.id, ({ state }) => state === "working");
+
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-2" })).body);
+
+  expect(second.state).toBe("queued");
+  expect(computers.computers.has(second.id)).toBe(false);
+  expect(TaskWorker.parse((await tool({ tool: "worker_status", worker: second.id })).body).state).toBe("queued");
+  finishFirst();
+  expect(await workerWhen(owner, project, second.id, ({ state }) => state === "finished")).toMatchObject({ result: "Done." });
+  expect(computers.computers.has(second.id)).toBe(true);
+});
+
+test("an ended engineer keeps its place until its computer has stopped: a stop that fails is retried, and only then does a queued one launch", async () => {
+  const { clock, advance } = fakeClock(Date.now());
+  let stopFails = true;
+  const control = await teamProject(
+    {
+      clock,
+      provider: (fake) => ({
+        ...fake,
+        async stop(id) {
+          if (stopFails && id.startsWith("worker_")) throw new Error("Docker is not answering");
+          await fake.stop(id);
+        },
+      }),
+    },
+    "commands:\n  test: bun test\nworkers:\n  max: 1\n",
+  );
+  const { owner, project, computers } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  await tool({ tool: "create_task", title: "Add dark mode" });
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, first.id, ({ state }) => state === "finished");
+
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-2" })).body);
+
+  expect(second.state).toBe("queued");
+  expect(await computers.provider.status(first.id)).toBe("running");
+  stopFails = false;
+  advance(30_000);
+  await workerWhen(owner, project, second.id, ({ state }) => state === "finished");
+  expect(await computers.provider.status(first.id)).toBe("stopped");
+});
+
+test("a stopped engineer keeps its place until its computer is gone: a removal that fails is retried, and only then does a queued one launch", async () => {
+  const { clock, advance } = fakeClock(Date.now());
+  let removals = 0;
+  const control = await teamProject(
+    {
+      clock,
+      provider: (fake) => ({
+        ...fake,
+        async destroy(id, options) {
+          if (id.startsWith("worker_") && ++removals === 1) throw new Error("Docker is not answering");
+          await fake.destroy(id, options);
+        },
+      }),
+    },
+    "commands:\n  test: bun test\nworkers:\n  max: 1\n",
+  );
+  const { owner, project } = control;
+  const { tool } = await heldTurn(control);
+  await tool({ tool: "create_task", title: "Add dark mode" });
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, first.id, ({ state }) => state === "working");
+  await tool({ tool: "stop_worker", worker: first.id });
+  await eventually(async () => removals === 1);
+
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-2" })).body);
+
+  expect(second.state).toBe("queued");
+  advance(30_000);
+  await workerWhen(owner, project, second.id, ({ state }) => state === "working");
+  expect(removals).toBe(2);
+  expect((await workersOf(owner, project)).find(({ id }) => id === first.id)?.computerRemoved).toBe(true);
+});
+
+test("a worker's computer gets one provider call at a time: a task closed while its computer stops has it removed once the stop is over", async () => {
+  const calls: string[] = [];
+  const stopping = Promise.withResolvers<void>();
+  const control = await teamProject({
+    provider: (fake) => ({
+      ...fake,
+      async stop(id) {
+        if (!id.startsWith("worker_")) return fake.stop(id);
+        calls.push("stop");
+        await stopping.promise;
+        await fake.stop(id);
+        calls.push("stopped");
+      },
+      async destroy(id, options) {
+        if (id.startsWith("worker_")) calls.push("destroy");
+        await fake.destroy(id, options);
+      },
+    }),
+  });
+  const { owner, project } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  await eventually(async () => calls.length === 1);
+
+  await tool({ tool: "update_task", number: 1, status: "done" });
+  await Bun.sleep(20);
+  stopping.resolve();
+
+  await workerWhen(owner, project, id, ({ computerRemoved }) => computerRemoved);
+  expect(calls).toEqual(["stop", "stopped", "destroy"]);
+});
+
+test("control that stopped tries nothing more: a computer stop that fails after it stopped is not tried again", async () => {
+  const { clock, advance } = fakeClock(Date.now());
+  let stops = 0;
+  const answer = Promise.withResolvers<void>();
+  const control = await teamProject({
+    clock,
+    persistent: true,
+    provider: (fake) => ({
+      ...fake,
+      async stop(id) {
+        if (!id.startsWith("worker_")) return fake.stop(id);
+        stops++;
+        await answer.promise;
+        throw new Error("Docker is not answering");
+      },
+    }),
+  });
+  const { owner, project } = control;
+  const { tool, release } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  await eventually(async () => stops === 1);
+  release();
+
+  control.restart();
+  // The new control's recovery tries it too; then both tries fail.
+  await eventually(async () => stops === 2);
+  answer.resolve();
+  await Bun.sleep(20);
+  advance(30_000);
+
+  // Only the new control tries again.
+  await eventually(async () => stops === 3);
+  await Bun.sleep(50);
+  expect(stops).toBe(3);
+});
+
+test("the worker pushes and opens its draft pull request through control, each approved by the member who asked, and the task links it", async () => {
   const { owner, guest, project, copilot, github } = await gitTeamProject();
   const exitCodes: number[] = [];
   let dispatched: unknown = null;
@@ -231,9 +695,27 @@ test("the worker pushes and opens its pull request through control, each approve
   expect(exitCodes).toEqual([0, 0]);
   expect(github.git("octo-org/shop", "show", "fix-typo:README.md")).toBe("# Shop\nThe shop.");
   expect(github.pushes).toEqual([{ repository: "octo-org/shop", by: "app" }]);
-  expect(github.pullRequests).toMatchObject([{ repository: "octo-org/shop", head: "fix-typo", base: "main", by: "app" }]);
+  expect(github.pullRequests).toMatchObject([{ repository: "octo-org/shop", head: "fix-typo", base: "main", by: "app", draft: true }]);
   const [task] = Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json());
   expect(task?.links).toEqual([{ kind: "pull-request", url }]);
+});
+
+test("an engineer is told to reproduce on the base branch first, and when nothing needs to change it ends with a report and no pull request", async () => {
+  const control = await teamProject();
+  const { owner, project, copilot, github } = control;
+  const report = "Report: README.md on main already says \"The shop\", so the typo is fixed. Nothing to change.";
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", report);
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  expect(await workerWhen(owner, project, id, ({ state }) => state === "finished")).toMatchObject({ result: report, pullRequest: null });
+  expect(github.pushes).toEqual([]);
+  const brief = copilot.sends.find(({ sessionId }) => sessionId === id)?.prompt ?? "";
+  expect(brief).toContain("First reproduce the problem, or see how the code behaves now, on the base branch");
+  expect(brief).toContain("If nothing needs to change (it is already fixed, or the task only asks a question), push nothing: end with a report");
+  expect(brief).toContain("open a draft pull request with create_pull_request");
 });
 
 test("the coordinator reads a worker's transcript and stops it: its turn ends and its computer is removed", async () => {
@@ -250,7 +732,8 @@ test("the coordinator reads a worker's transcript and stops it: its turn ends an
   const read = async (lines?: number) => (await tool({ tool: "worker_transcript", worker: id, ...(lines ? { lines } : {}) })).body;
   await eventually(async () => JSON.stringify(await read()).includes("fail before my change."));
 
-  expect(await read()).toEqual({ worker: id, lines: ["tool Run the tests: failed", "worker: The tests fail before my change."], truncated: false });
+  const setUp = ["clone: git clone https://github.com/octo-org/shop.git shop (exit 0)", "setup done"];
+  expect(await read()).toEqual({ worker: id, lines: [...setUp, "tool Run the tests: failed", "worker: The tests fail before my change."], truncated: false });
   expect(await read(1)).toEqual({ worker: id, lines: ["worker: The tests fail before my change."], truncated: true });
   expect(TaskWorker.parse((await tool({ tool: "worker_status", worker: id })).body).state).toBe("working");
 
@@ -259,7 +742,7 @@ test("the coordinator reads a worker's transcript and stops it: its turn ends an
   expect(TaskWorker.parse(stopped.body)).toMatchObject({ state: "stopped", result: "The coordinator stopped this worker." });
   await workerWhen(owner, project, id, ({ computerRemoved }) => computerRemoved);
   expect(computers.destroyed).toEqual([{ id, deleteData: true }]);
-  expect((await read()) as unknown).toMatchObject({ lines: ["tool Run the tests: failed", "worker: The tests fail before my change.", "error: The coordinator stopped this worker."] });
+  expect((await read()) as unknown).toMatchObject({ lines: [...setUp, "tool Run the tests: failed", "worker: The tests fail before my change.", "error: The coordinator stopped this worker."] });
   expect(await tool({ tool: "worker_status", worker: "worker_missing" })).toEqual({
     status: 404,
     body: { error: "invalid_tool_call", message: "No worker worker_missing in this project" },

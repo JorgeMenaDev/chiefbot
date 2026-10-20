@@ -16,6 +16,7 @@ const engineer = (screenHolder: string | null) =>
     pendingApprovals: [],
     computerRemoved: false,
     screenHolder,
+    setup: [],
     createdAt: 0,
     updatedAt: 0,
   });

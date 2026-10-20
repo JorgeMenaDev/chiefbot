@@ -8,7 +8,7 @@ import { ModelReport, ReasoningEffort } from "./models.ts";
 import { ProjectStateChange, ProjectStates, ProjectTasks } from "./projects.ts";
 import { QuestionResult } from "./questions.ts";
 import { ScreenControl } from "./screens.ts";
-import { ProjectWorkers } from "./taskWorkers.ts";
+import { EngineerSetup, ProjectWorkers } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // The credential a bot's worker presents to control. Control makes one per bot,
@@ -95,8 +95,9 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //                   `connections` are the owner's connections that are on (connections.ts), for this turn only.
 //                   `attachments` are the files sent with the message: the worker reads each from control with the turn's key.
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
-//                   (control's proxy runs them as the member who asked), and its `turnKey`. Sent once,
-//                   after its first hello.
+//                   (control's proxy runs them as the member who asked), and its `turnKey`. It sets
+//                   up as `setup` says before its agent starts (taskWorkers.ts EngineerSetup). Sent
+//                   once, after its first hello.
 //   turn-key        the running turn's new key (chat.ts TurnKeyMessage)
 //   screen-control  who drives the screen; sent after bound and on every take-over and hand-back
 //   screen-open     a viewer is waiting: dial /worker/:botId/screen/:streamId and pipe the screen's VNC bytes through it
@@ -125,6 +126,7 @@ export const ControlToWorker = z.discriminatedUnion("type", [
     text: z.string(),
     payer: CopilotPayer,
     connectors: z.array(AgentConnector),
+    setup: EngineerSetup,
   }),
   z.object({ type: z.literal("screen-control"), control: ScreenControl }),
   z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),

@@ -45,7 +45,7 @@ export const defaultFakeUser: FakeGitHubUser = {
   copilot: { plan: "individual", sku: "free_limited_copilot" },
 };
 
-const PullRequestBody = z.object({ head: z.string(), base: z.string(), title: z.string(), body: z.string().default("") });
+const PullRequestBody = z.object({ head: z.string(), base: z.string(), title: z.string(), body: z.string().default(""), draft: z.boolean().default(false) });
 
 // The part of a GitHub App manifest the fake reads.
 const AppManifest = z.object({
@@ -65,6 +65,7 @@ export type FakePullRequest = {
   base: string;
   title: string;
   body: string;
+  draft: boolean;
   by: string;
 };
 
@@ -317,10 +318,10 @@ export function startFakeGitHub({
           const repository = `${req.params.owner}/${req.params.repo}`;
           const by = writer(bearerToken(req), repository);
           if (!by) return Response.json({ message: "Not Found" }, { status: 404 });
-          const { head, base, title, body } = PullRequestBody.parse(await req.json());
+          const { head, base, title, body, draft } = PullRequestBody.parse(await req.json());
           const branches = git(bareRepo(repository), ["branch", "--format=%(refname:short)"]).split("\n");
           if (!branches.includes(head)) return Response.json({ message: "Validation Failed" }, { status: 422 });
-          const pr = { repository, number: pullRequests.length + 1, head, base, title, body, by };
+          const pr = { repository, number: pullRequests.length + 1, head, base, title, body, draft, by };
           pullRequests.push(pr);
           return Response.json({ number: pr.number, html_url: `${new URL(req.url).origin}/${repository}/pull/${pr.number}` }, { status: 201 });
         },

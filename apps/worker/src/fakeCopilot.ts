@@ -66,6 +66,9 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const instructions: Array<string | undefined> = [];
   // Each opened session's custom agents (none: []), in the order sessions opened.
   const agents: CustomAgentConfig[][] = [];
+  // Each opened session's working directory and extra runtime environment (none: undefined), in the order sessions opened.
+  const workingDirectories: Array<string | undefined> = [];
+  const envs: Array<Record<string, string> | undefined> = [];
   // Every turn started, with the model its session was on ("default" before any setModel),
   // that model's reasoning effort (null: its default) and the files attached.
   const sends: Array<{ sessionId: string; prompt: string; model: string; effort: ReasoningEffort | null; files: FileAttachment[] }> = [];
@@ -82,6 +85,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       skillDirectories: skills = [],
       agents: helpers = [],
       questions,
+      workingDirectory,
+      env,
     }) {
       if (auth.kind === "installation") tokens.push(auth.token);
       else {
@@ -93,6 +98,8 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       skillDirectories.push(skills);
       instructions.push(told);
       agents.push(helpers);
+      workingDirectories.push(workingDirectory);
+      envs.push(env);
       const handlers = new Set<(event: SessionEvent) => void>();
       const allowed = async (request: PermissionRequest) =>
         (await onPermissionRequest(request, { sessionId })).kind === "approve-once";
@@ -200,7 +207,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
     },
   };
 
-  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, instructions, agents, sends, script, shell };
+  const fake = { copilot, tokens, closed, aborted, sessionIds, mcpServers, skillDirectories, instructions, agents, workingDirectories, envs, sends, script, shell };
   return fake;
 }
 

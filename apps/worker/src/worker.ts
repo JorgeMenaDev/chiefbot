@@ -1,7 +1,8 @@
-import type { ElicitationResult, PermissionHandler, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
+import type { ElicitationResult, MCPServerConfig, PermissionHandler, PermissionRequestResult, SessionEvent } from "@github/copilot-sdk";
 import {
   ACCESS_MODES,
   ATTACHMENTS,
+  ENGINEER_SETUP,
   ApprovalId,
   ControlToWorker,
   DEFAULT_ACCESS,
@@ -9,6 +10,7 @@ import {
   type AccessMode,
   type AgentConnection,
   type ApprovalKind,
+  type EngineerSetup,
   type QuestionResult,
   type ReasoningEffort,
   type ScreenControl,
@@ -26,8 +28,11 @@ import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot, FileAttachment, QuestionRequest, Questions } from "./copilot.ts";
+import { agentEnv } from "./copilotSdk.ts";
+import { setUpEngineer, setupShell as shellOf, type EngineerReady, type SetupShell } from "./engineerSetup.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
+import { secretRedactor, turnEventRedactor } from "./secretRedactor.ts";
 import { elicitationResult, questionForm } from "./questions.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
 
@@ -63,6 +68,11 @@ export type WorkerOptions = {
   // Where a turn saves the files sent with its message, in a folder per turn.
   // Default: attachments/ in the bot's workspace, so the agent can open them later too.
   attachmentsRoot?: string;
+  // Where a task worker (an engineer) clones its repo. Default: the computer's workspace.
+  workspace?: string;
+  // Runs an engineer's setup commands (engineerSetup.ts). Default: sh with the
+  // worker's environment minus its tokens; index.ts adds the git proxy's config.
+  setupShell?: SetupShell;
 };
 
 // Dials out to control's /worker/:id WebSocket with the bot's credential (or a task
@@ -81,6 +91,11 @@ export type WorkerOptions = {
 // So does a bot's question to its user (Copilot's ask_user forms, questions.ts).
 // Pushes and pull requests go through control, which asks the user itself.
 // As its owner's chief of staff, the bot hands work to team projects (chiefTools.ts).
+// A task worker is one of a project's engineers: before its agent starts it
+// sets up its computer (engineerSetup.ts), each step reported in its turn, and a
+// step that fails ends its turn. Its session works in the clone with the repo's
+// instructions, skills and MCP servers, and its runtime holds the project's
+// secrets until its turn ends, when the session closes.
 // A bot's turn brings its owner's connections: staged for that turn only, their
 // skills given to its session, their CLIs' commands that may write asked first and
 // every run of them sent to control with the turn's end (connections.ts). The files
@@ -103,6 +118,8 @@ export function startWorker({
   clock,
   connectionsRoot = defaultConnectionsRoot,
   attachmentsRoot = "/home/bot/workspace/attachments",
+  workspace = "/home/bot/workspace",
+  setupShell = shellOf(agentEnv(process.env)),
 }: WorkerOptions) {
   // Every control route of this computer starts here.
   const base = `${controlUrl}/${route}/${id}`;
@@ -210,14 +227,21 @@ export function startWorker({
   // tokens) and with the project's `connectors` for the member who asked. Control
   // logs remote connectors' calls in its proxy, and asks the member about those
   // that may write, so this does not ask again; a command connector's call is reported.
+  // It works in the engineer's clone, `ready`, with the repo's instructions and
+  // the project's secrets in its runtime's environment. The repo's own `mcp`
+  // servers start in the clone, and their calls run unasked, like its shell's:
+  // they hold no credential. A connector of the same name wins.
   function taskSession(
     options: Omit<Parameters<Copilot["openSession"]>[0], "auth">,
-    { payer, connectors }: Extract<ControlToWorker, { type: "run-task" }>,
+    { payer, connectors, setup }: Extract<ControlToWorker, { type: "run-task" }>,
     turn: Turn,
+    ready: EngineerReady,
   ) {
-    const remote = new Set(connectors.flatMap(({ kind, name }) => (kind === "remote" ? [name] : [])));
+    const connectorNames = new Set(connectors.map(({ name }) => name));
+    const repoServers = Object.entries(setup.mcp).filter(([name]) => !connectorNames.has(name));
+    const unasked = new Set([...connectors.flatMap(({ kind, name }) => (kind === "remote" ? [name] : [])), ...repoServers.map(([name]) => name)]);
     const askUnlessControlDoes: PermissionHandler = async (request, invocation) => {
-      if (request.kind !== "mcp" || !remote.has(request.serverName)) return options.onPermissionRequest(request, invocation);
+      if (request.kind !== "mcp" || !unasked.has(request.serverName)) return options.onPermissionRequest(request, invocation);
       await agentHasScreen();
       return { kind: "approve-once" };
     };
@@ -226,8 +250,16 @@ export function startWorker({
       payer.kind,
       {
         ...options,
+        instructions: `${options.instructions}\n\n${ready.instructions}`,
+        workingDirectory: ready.clone,
+        env: setup.secrets,
         onPermissionRequest: askUnlessControlDoes,
-        mcpServers: connectorServers(connectors, (name) => link.connector(turn, name)),
+        mcpServers: {
+          ...Object.fromEntries(
+            repoServers.map(([name, { command, args }]): [string, MCPServerConfig] => [name, { type: "local", command, args, workingDirectory: ready.clone, tools: ["*"] }]),
+          ),
+          ...connectorServers(connectors, (name) => link.connector(turn, name)),
+        },
         onMcpCall: link.reportCalls(connectors, () => turn.key),
         onCut: () => withdrawApprovals(turn),
       },
@@ -235,16 +267,30 @@ export function startWorker({
     );
   }
 
+  // An engineer sets its computer up for its task before its agent starts
+  // (engineerSetup.ts): each step goes to the turn as it ends, then setup-done.
+  // Null when a step failed: the turn has ended, blocked.
+  async function setUp(turn: Turn, setup: EngineerSetup) {
+    const outcome = await setUpEngineer({ setup, workspace, shell: setupShell, signal: turn.ended, report: (step) => link.emit(turn.turnId, { type: "setup-step", step }) });
+    if ("failed" in outcome) {
+      const { command, exitCode } = outcome.failed;
+      link.fail(turn.turnId, new Error(`Its setup failed: \`${command}\` exited with ${exitCode}.`));
+      return null;
+    }
+    link.emit(turn.turnId, { type: "setup-done", ...outcome.found });
+    return outcome;
+  }
+
   // Opens the computer's Copilot session for `turn` (resuming its conversation:
   // its id is the bot's, or task worker's), in place of the open one. Every
   // callback in it holds that turn, so a late one acts in no other. A bot's
   // session for no turn lists its models when the worker binds; a task worker's
-  // is opened by its task (`task`). A bot's turn's session gets its staged
-  // connections (`connections`, and the skill roots they are under) and asks as
-  // its `access` mode says.
+  // is opened by its task (`task`), once its setup is `ready`. A bot's turn's
+  // session gets its staged connections (`connections`, and the skill roots they
+  // are under) and asks as its `access` mode says.
   async function openSession(
     turn: Turn | null,
-    task?: Extract<ControlToWorker, { type: "run-task" }>,
+    task?: { message: Extract<ControlToWorker, { type: "run-task" }>; ready: EngineerReady },
     {
       connections,
       skillDirectories,
@@ -257,7 +303,7 @@ export function startWorker({
     // A task worker does one task for a project: it is no one's chief of staff.
     const turnKey = keyOf(turn);
     const tools = [
-      pullRequestTool({ base, turnKey }),
+      pullRequestTool({ base, turnKey, ...(task ? { holdsSecret: secretRedactor(Object.values(task.message.setup.secrets)).holds } : {}) }),
       computerTool({
         run: screenCommands,
         agentHasScreen: () => screenControl === "agent",
@@ -267,7 +313,13 @@ export function startWorker({
       }),
       ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : []),
     ];
-    const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, instructions: computerInstructions, skillDirectories };
+    const options = {
+      sessionId: id,
+      onPermissionRequest: permissionFor(turn, connections, access),
+      tools,
+      instructions: computerInstructions,
+      skillDirectories: [...skillDirectories, ...(task?.ready.skillDirectories ?? [])],
+    };
     // Only a bot's turn asks its user questions; a task worker's runs alone. Once
     // the SDK says a request is resolved (elicitation.completed), its card goes,
     // unless answered: `ended` hears it from before the session opens.
@@ -277,7 +329,7 @@ export function startWorker({
         : null;
     const asks = questions ? { questions } : {};
     // A chief always runs on its owner's own Copilot seat.
-    const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", { ...options, ...asks }, () => token)).then(
+    const session = (task && turn ? taskSession(options, task.message, turn, task.ready) : link.openSession(copilot, "seat", { ...options, ...asks }, () => token)).then(
       (opened) => {
         if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
         return opened;
@@ -319,10 +371,11 @@ export function startWorker({
   // session (above), with the bot's model and its reasoning `effort` set first
   // (the SDK changes both on an open session, so switching mid-conversation keeps
   // the history; a null effort clears the last one). A task worker's one turn
-  // (`task`) runs on the default model, in the default access mode. Git's
-  // credential helper hands git this turn's key from now on. A bot's turn stages
-  // its owner's `connections` until it ends, asks as its `access` mode says, and
-  // sends its message with the `attachments` sent with it.
+  // (`task`) sets up first, then runs on the default model, in the default access
+  // mode. Git's credential helper hands git this turn's key from now on (the
+  // setup's clone too). A bot's turn stages its owner's `connections` until it
+  // ends, asks as its `access` mode says, and sends its message with the
+  // `attachments` sent with it.
   async function runTurn(
     turnId: TurnId,
     turnKey: TurnKey,
@@ -342,12 +395,15 @@ export function startWorker({
       attachments?: SentAttachment[];
     } = {},
   ) {
-    const turn = link.begin(turnId, turnKey);
+    // An engineer's events hide its project's secrets before they leave the computer.
+    const turn = link.begin(turnId, turnKey, task ? turnEventRedactor(secretRedactor(Object.values(task.setup.secrets))) : undefined);
     git?.reload({ fetch: gitCredential(turn) });
     try {
       staged = { ...stageConnections(connectionsRoot, connections), turnId };
       const { skillDirectories } = staged;
-      const opened = await openSession(turn, task, { connections, skillDirectories, access });
+      const ready = task ? await setUp(turn, task.setup) : null;
+      if (task && !ready) return;
+      const opened = await openSession(turn, task && ready ? { message: task, ready } : undefined, { connections, skillDirectories, access });
       if (model !== null) await opened.setModel(model, effort);
       await opened.send(text, await saveAttachments(turn, attachments));
     } catch (error) {
@@ -359,14 +415,16 @@ export function startWorker({
     base,
     token,
     retryMs,
-    capabilities: [ACCESS_MODES, ATTACHMENTS],
+    capabilities: [ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP],
     ...(clock === undefined ? {} : { clock }),
     parse: (json) => ControlToWorker.parse(json),
     // Called synchronously just before the turn's done goes out, so nothing can
     // run in between: its approvals still waiting are refused, the runs of its
     // connections' CLIs go to control in one message ahead of the done (read
     // once, bounded, never throwing: connections.ts), and its connections go.
-    // Its questions still waiting are withdrawn, ahead of the done.
+    // Its questions still waiting are withdrawn, ahead of the done. An
+    // engineer's session closes with its one turn, and the runtime holding the
+    // project's secrets with it.
     onTurnEnd(turnId) {
       for (const [approvalId, waiter] of waiting) {
         if (waiter.turnId !== turnId) continue;
@@ -374,6 +432,11 @@ export function startWorker({
         waiter.answer(null);
       }
       withdrawQuestions((question) => question.turnId === turnId);
+      if (route === "task-worker" && open?.turn?.turnId === turnId) {
+        const closing = open.session;
+        open = null;
+        void closing.then((session) => session.disconnect()).catch(() => {});
+      }
       if (staged?.turnId !== turnId) return;
       try {
         const calls = staged.calls();
