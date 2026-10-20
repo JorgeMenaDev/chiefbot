@@ -13,9 +13,10 @@ test("a face or colour outside the set is refused", () => {
 
 const runTurn = { type: "run-turn", turnId: "turn_1", turnKey: "key_1", text: "hi", model: "claude-sonnet-4.6" };
 
-test("a run-turn carries the bot's reasoning effort and access mode; one from an older control runs at the default effort on Auto", () => {
-  expect(ControlToWorker.parse({ ...runTurn, effort: "high", access: "supervised" })).toMatchObject({ effort: "high", access: "supervised" });
-  expect(ControlToWorker.parse(runTurn)).toMatchObject({ effort: null, access: "auto", connections: [] });
+test("a run-turn carries the bot's reasoning effort, access mode and the message's files; one from an older control runs at the default effort on Auto", () => {
+  const attachments = [{ id: "attachment_1", name: "screen.png", mimeType: "image/png", size: 7 }];
+  expect(ControlToWorker.parse({ ...runTurn, effort: "high", access: "supervised", attachments })).toMatchObject({ effort: "high", access: "supervised", attachments });
+  expect(ControlToWorker.parse(runTurn)).toMatchObject({ effort: null, access: "auto", connections: [], attachments: [] });
 });
 
 test("a run-turn with an effort or access mode outside the set is refused", () => {

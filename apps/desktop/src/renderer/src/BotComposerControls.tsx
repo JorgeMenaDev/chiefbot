@@ -34,15 +34,29 @@ const accessModes: Record<AccessMode, { label: string; description: string; icon
   },
 };
 
-// The bot composer's footer controls, as T3 Code lays them out: the model, then
-// (when the model takes one) its reasoning effort, then the access mode. When the
-// composer is narrow, effort and access fold into one "…" menu. Each pick is saved
-// on the bot in control, so its next turn runs on it; control's refusal goes to `onError`.
-export function BotComposerControls({ bot, onError }: { bot: Bot; onError: (message: string | null) => void }) {
+// The model picker's rows for the user's plan, read on mount and again by
+// `refresh` (each time the model list opens), so a new report shows.
+export function useModels() {
   const [models, setModels] = useState<ModelOption[]>([]);
-  // The plan's models, read on mount and each time the model list opens, so a new report shows.
-  const readModels = useCallback(() => void window.chiefbot.bots.models().then((next) => setModels(ModelList.parse(next))), []);
-  useEffect(readModels, [readModels]);
+  const refresh = useCallback(() => void window.chiefbot.bots.models().then((next) => setModels(ModelList.parse(next))), []);
+  useEffect(refresh, [refresh]);
+  return { models, refresh };
+}
+
+// The bot composer's footer controls, as T3 Code lays them out: the model (among
+// `models`, from useModels), then (when the model takes one) its reasoning effort,
+// then the access mode. When the composer is narrow, effort and access fold into
+// one "…" menu. Each pick is saved on the bot in control, so its next turn runs on
+// it; control's refusal goes to `onError`.
+export function BotComposerControls({
+  bot,
+  models: { models, refresh },
+  onError,
+}: {
+  bot: Bot;
+  models: ReturnType<typeof useModels>;
+  onError: (message: string | null) => void;
+}) {
   const model = models.find(({ id }) => id === bot.model);
   const efforts = model?.efforts ?? [];
   // A saved effort the model no longer offers runs as its default, as control sends it.
@@ -62,7 +76,7 @@ export function BotComposerControls({ bot, onError }: { bot: Bot; onError: (mess
 
   return (
     <>
-      <ModelPicker bot={bot} models={models} onOpen={readModels} onPick={({ id }) => void setModel({ model: id })} />
+      <ModelPicker bot={bot} models={models} onOpen={refresh} onPick={({ id }) => void setModel({ model: id })} />
       <span className="contents @max-[34rem]/composer:hidden">
         {efforts.length > 0 && (
           <>

@@ -20,9 +20,11 @@ import { z } from "zod";
 //   computer_failed       the bot's (or project's) computer could not be made or started; `message` says why (502)
 //   bot_offline, bot_stopping, turn_running, human_has_screen, computer_outdated  a turn was refused (409,
 //                         TurnRefusal; turn_running also when a member's last message to a coordinator is
-//                         unanswered; computer_outdated when the bot's worker cannot run its access mode);
+//                         unanswered; computer_outdated when the bot's worker cannot run its access mode or take files);
 //                         bot_stopping also refuses a screen viewer: the computer is stopping
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
+//   message_too_large     a message's body is over what its files can make on the wire (413)
+//   uploads_busy          control is reading as many messages with files as it takes at once (503)
 //   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
 //   repo_read_only        the bot owner may not push to the repo (403)
 //   app_not_installed     the deployer's repo app is not installed on the repo (403)
@@ -80,6 +82,8 @@ export const ApiErrorCode = z.enum([
   "human_has_screen",
   "computer_outdated",
   "not_pending",
+  "message_too_large",
+  "uploads_busy",
   "repo_not_found",
   "repo_read_only",
   "app_not_installed",

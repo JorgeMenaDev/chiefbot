@@ -9,9 +9,11 @@ import {
   CreateBotRequest,
   DEFAULT_AVATAR,
   GitHubTokens,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
   PullRequestArgs,
   RoutineInput,
-  SendMessageRequest,
+  SendBotMessageRequest,
   SessionToken,
   SetBotAccessRequest,
   SetBotModelRequest,
@@ -35,7 +37,7 @@ import type { ComputerProvider } from "./computers/computer.ts";
 import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
 import { chiefHost } from "./handoffs.ts";
 import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
-import { apiError, bearer, unauthorized } from "./http.ts";
+import { apiError, bearer, jsonWithin, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions, pickModel } from "./models.ts";
 import { repoAccess, type RepoAgent } from "./repos.ts";
@@ -58,6 +60,14 @@ import { tokenBroker } from "./tokens.ts";
 import { botTurn, heldTurn, type BotTurn } from "./turnKeys.ts";
 import { chatTurns, computerOutdated } from "./turns.ts";
 import { workspaceRoutes } from "./workspaces.ts";
+
+// The most a message's body can be on the wire: its files in base64 (4 bytes for
+// each 3) and a megabyte for its text and the JSON around them. A body over a
+// megabyte carries files: control reads at most MAX_UPLOADS of those at once, so
+// it holds only so many of them in memory.
+const MAX_MESSAGE_BODY = MAX_ATTACHMENTS * Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 1024 * 1024;
+const FILES_BODY = 1024 * 1024;
+const MAX_UPLOADS = 4;
 
 export type ControlOptions = {
   port: number;
@@ -143,9 +153,14 @@ type SocketData =
 //                             is locked, effort_unavailable when the model does not support the effort)
 //   PUT    /bots/:id/access   bearer session, body SetBotAccessRequest → Bot; the bot's next turn asks as it says
 //                             (400 invalid_access)
-//   POST   /bots/:id/messages bearer session, body SendMessageRequest → 202 SendMessageResponse
-//                             (409 when the bot is not online, is stopping, is still on a turn or the human has its
-//                             screen; computer_outdated when its worker cannot run its access mode)
+//   POST   /bots/:id/messages bearer session, body SendBotMessageRequest → 202 SendMessageResponse
+//                             (400 invalid_message, its message saying why, as when a file is over the limits;
+//                             413 message_too_large past the body those limits allow; 503 uploads_busy while
+//                             control reads MAX_UPLOADS others with files;
+//                             409 when the bot is not online, is stopping, is still on a turn or the human has its
+//                             screen; computer_outdated when its worker cannot run its access mode or take files)
+//   GET    /bots/:id/attachments/:attachmentId  bearer session → the bytes of a file sent with one of the
+//                             bot's messages, as its own type (404 not_found)
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   POST   /bots/:id/approvals/:approvalId  bearer session, body AnswerApprovalRequest → 204
 //                             (409 when it is not pending: answered, unknown, or its turn ended)
@@ -162,6 +177,8 @@ type SocketData =
 //                             turn key: a bot always acts for its owner, who also needs it between turns,
 //                             for the model picker.
 //   WS     /worker/:botId/screen/:streamId  same token ↔ the VNC bytes for one viewer, after screen-open
+//   GET    /worker/:botId/attachments/:attachmentId  bearer the key of the bot's running turn → the bytes
+//                             of a file sent with that turn's message (403 invalid_turn_key, 404 not_found)
 //   POST   /worker/:botId/pull-requests  bearer the key of the bot's running turn (403 invalid_turn_key
 //                             otherwise), body PullRequestArgs → 201 OpenedPullRequest once the owner
 //                             approves in that turn (403 declined, 409 no_turn, 404 repo_not_found, 403
@@ -243,6 +260,8 @@ export function startControl({
   });
   // Control's health checks of people's connections (health/health.ts).
   const health = healthHost({ store, clock, catalog, probes, fieldsOf: connections.savedFields });
+  // Messages with files being read now (MAX_UPLOADS).
+  let uploads = 0;
   // Starting turns, the chat topics and worker hellos (turns.ts).
   const turns = chatTurns({
     store,
@@ -578,12 +597,28 @@ export function startControl({
       },
       "/bots/:id/messages": {
         POST: ownBot(async (user, botId, req) => {
-          const body = SendMessageRequest.safeParse(await req.json().catch(() => null));
-          if (!body.success) return apiError(400, "invalid_message");
-          const sent = turns.sendTurn(user.id, botId, body.data.text);
-          if ("error" in sent) return apiError(409, sent.error, sent.error === "computer_outdated" ? computerOutdated : undefined);
-          return Response.json(sent satisfies SendMessageResponse, { status: 202 });
+          // A body that does not say its length counts as one with files.
+          const declared = Number(req.headers.get("content-length") ?? MAX_MESSAGE_BODY);
+          const tooLarge = () => apiError(413, "message_too_large", `A message with its files can be at most ${MAX_ATTACHMENTS} files of 10 MB.`);
+          if (declared > MAX_MESSAGE_BODY) return tooLarge();
+          const withFiles = declared > FILES_BODY;
+          if (withFiles && uploads >= MAX_UPLOADS) return apiError(503, "uploads_busy", "Control is taking other files. Send again in a moment.");
+          if (withFiles) uploads++;
+          try {
+            const read = await jsonWithin(req, MAX_MESSAGE_BODY);
+            if (!read) return tooLarge();
+            const body = SendBotMessageRequest.safeParse(read.json);
+            if (!body.success) return apiError(400, "invalid_message", body.error.issues[0]?.message);
+            const sent = turns.sendTurn(user.id, botId, body.data.text, body.data.attachments);
+            if ("error" in sent) return apiError(409, sent.error, sent.error === "computer_outdated" ? computerOutdated : undefined);
+            return Response.json(sent satisfies SendMessageResponse, { status: 202 });
+          } finally {
+            if (withFiles) uploads--;
+          }
         }),
+      },
+      "/bots/:id/attachments/:attachmentId": {
+        GET: ownBot((_user, botId, req) => attachmentResponse(store.attachment(botId, req.params.attachmentId))),
       },
       // The answer is stored first, so it reaches the worker even if it is offline now.
       "/bots/:id/approvals/:approvalId": {
@@ -662,6 +697,14 @@ export function startControl({
           const token = await payerOf({ kind: "chief", ownerId: bot.userId })?.token();
           if (token && "kind" in token && token.kind === "seat") return Response.json(token.token);
           return apiError(403, "reauth_needed");
+        },
+      },
+      // Only a file of the turn whose key is the bearer.
+      "/worker/:botId/attachments/:attachmentId": {
+        GET: (req) => {
+          const bot = heldTurn(store.turnKeys, req, botTurn(req.params.botId));
+          if (bot instanceof Response) return bot;
+          return attachmentResponse(store.attachment(bot.botId, req.params.attachmentId, bot.turnId));
         },
       },
       // The bot's create_pull_request tool. Waits, however long, for the owner's answer.
@@ -811,4 +854,10 @@ function upgrade(server: Bun.Server<SocketData>, req: Request, data: SocketData)
 
 function randomToken() {
   return crypto.randomUUID() + crypto.randomUUID();
+}
+
+// A sent file's bytes as its own type, which the browser must not second-guess; 404 for none.
+function attachmentResponse(file: { mime_type: string; data: Uint8Array } | null) {
+  if (!file) return apiError(404, "not_found");
+  return new Response(file.data, { headers: { "content-type": file.mime_type, "x-content-type-options": "nosniff" } });
 }

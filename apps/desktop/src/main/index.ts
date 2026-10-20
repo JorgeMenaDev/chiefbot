@@ -2,6 +2,7 @@
 import {
   AnswerApprovalRequest,
   ApprovalId,
+  AttachmentId,
   BotId,
   ConnectionName,
   ConnectRequest,
@@ -17,6 +18,7 @@ import {
   ProjectId,
   RoutineId,
   RoutineInput,
+  SendBotMessageRequest,
   SendMessageRequest,
   SetCopilotModeRequest,
   SetBotAccessRequest,
@@ -155,9 +157,11 @@ ipcMain.handle("chat:open", (_event, id: unknown) => {
   chats.open(botId);
   return chats.view(botId);
 });
-ipcMain.handle("chat:send", (_event, id: unknown, text: unknown) =>
-  chats.send(BotId.parse(id), SendMessageRequest.parse({ text }).text),
-);
+ipcMain.handle("chat:send", (_event, id: unknown, text: unknown, attachments: unknown) => {
+  const request = SendBotMessageRequest.parse({ text, attachments });
+  return chats.send(BotId.parse(id), request.text, request.attachments);
+});
+ipcMain.handle("chat:attachment", (_event, id: unknown, attachmentId: unknown) => chats.attachment(BotId.parse(id), AttachmentId.parse(attachmentId)));
 ipcMain.handle("chat:answer", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   chats.answer(BotId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
 );

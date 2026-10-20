@@ -84,6 +84,21 @@ test("the chat streams a turn as it runs, and a relaunched desktop shows the sam
   expect((await relaunched.until(botId, idleWith(3))).items).toEqual(view.items);
 });
 
+test("a picture sent with a message shows with it, and reads back as an image for its thumbnail", async () => {
+  const { control, sessionToken, botId } = await setup();
+  const desktop = launch(control.url, sessionToken);
+  desktop.chats.open(botId);
+  // A PNG's first 8 bytes.
+  const png = "iVBORw0KGgo=";
+
+  await desktop.chats.send(botId, "look", [{ name: "dot.png", mimeType: "image/png", data: png }]);
+  const [sent] = (await desktop.until(botId, idleWith(3))).items;
+
+  expect(sent).toMatchObject({ kind: "user", text: "look", attachments: [{ name: "dot.png", mimeType: "image/png", size: 8 }] });
+  const id = sent?.kind === "user" ? sent.attachments?.[0]?.id : undefined;
+  expect(id && (await desktop.chats.attachment(botId, id))).toBe(`data:image/png;base64,${png}`);
+});
+
 test("after control restarts mid-reply, the desktop reconnects and the reply finishes without repeats", async () => {
   const { control, computers, sessionToken, botId, restartControl } = await setup();
   let release = () => {};

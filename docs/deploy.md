@@ -51,7 +51,7 @@ You need a Linux machine with Docker Engine and the compose plugin (`curl -fsSL 
 
 SQLite and the projects' context files live in the volume `chiefbot_data`, Caddy's certificates in `chiefbot_caddy-data`.
 
-**New version:** `git pull`, `docker compose build computer`, `docker compose up -d --build`. Control restarts with the new code; new computers use the new image. A bot or project keeps the container it was made with. A bot whose computer is too old for a new feature says so when you send it a message (for example "This bot's computer is out of date" when you pick an access mode other than Auto).
+**New version:** `git pull`, `docker compose build computer`, `docker compose up -d --build`. Control restarts with the new code; new computers use the new image. A bot or project keeps the container it was made with. A bot whose computer is too old for a new feature says so when you send it a message (for example "This bot's computer is out of date" when you pick an access mode other than Auto or attach files).
 
 **Update a bot's computer, keeping its files:** click **Stop** on the bot in the app, then on the server swap its container for one of the new image, with the same name, settings, network and volume:
 

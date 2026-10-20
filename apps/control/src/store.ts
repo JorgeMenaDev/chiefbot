@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import {
   AccessMode,
+  AttachmentId,
   BotAvatar,
   BotId,
   AUTO_MODEL,
@@ -15,6 +16,7 @@ import {
   UserId,
   type ApprovalId,
   type ApprovalKind,
+  type AttachmentUpload,
   type BotToken,
   type ChatEvent,
   type HandoffUpdate,
@@ -24,6 +26,7 @@ import {
   type RoutineRun,
   type SessionToken,
   type User,
+  type UserMessage,
 } from "@chiefbot/contracts";
 import { addColumn } from "./addColumn.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
@@ -108,6 +111,15 @@ export function openStore(path: string) {
     bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
     turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
     approved INTEGER
+  )`);
+  // The files sent with a turn's message (chat.ts SentAttachment), with their bytes.
+  db.run(`CREATE TABLE IF NOT EXISTS attachments (
+    id TEXT PRIMARY KEY,
+    bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL REFERENCES turns(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    mime_type TEXT NOT NULL,
+    data BLOB NOT NULL
   )`);
 
   // Columns added after the tables first shipped.
@@ -397,12 +409,28 @@ export function openStore(path: string) {
       db.query("DELETE FROM bots WHERE id = ?1").run(botId);
     },
 
-    // Opens a turn with the user's message.
-    startTurn: db.transaction((botId: BotId, text: string): ChatEvent => {
+    // Opens a turn with the user's message and the files sent with it.
+    startTurn: db.transaction((botId: BotId, text: string, uploads: AttachmentUpload[] = []): ChatEvent & { event: UserMessage } => {
       const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
       db.query("INSERT INTO turns (id, bot_id, done, created_at) VALUES (?1, ?2, 0, ?3)").run(turnId, botId, Date.now());
-      return append(botId, turnId, { type: "user-message", text });
+      const attachments = uploads.map(({ name, mimeType, data }) => {
+        const id = AttachmentId.parse(`attachment_${crypto.randomUUID()}`);
+        const bytes = Buffer.from(data, "base64");
+        db.query("INSERT INTO attachments (id, bot_id, turn_id, name, mime_type, data) VALUES (?1, ?2, ?3, ?4, ?5, ?6)").run(id, botId, turnId, name, mimeType, bytes);
+        return { id, name, mimeType, size: bytes.length };
+      });
+      const event: UserMessage = { type: "user-message", text, ...(attachments.length > 0 ? { attachments } : {}) };
+      return { ...append(botId, turnId, event), event };
     }),
+
+    // A file sent with one of the bot's messages, or with `turnId` only one of that turn's. Null when there is none.
+    attachment(botId: BotId, attachmentId: string, turnId: TurnId | null = null) {
+      return db
+        .query<{ mime_type: string; data: Uint8Array }, [string, string, string | null]>(
+          "SELECT mime_type, data FROM attachments WHERE id = ?1 AND bot_id = ?2 AND (?3 IS NULL OR turn_id = ?3)",
+        )
+        .get(attachmentId, botId, turnId);
+    },
 
     // Adds the worker's event number `index` to the bot's unfinished turn; `done`
     // finishes it and an approval-request records a pending approval. Null,

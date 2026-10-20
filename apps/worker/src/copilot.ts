@@ -37,11 +37,15 @@ export type Copilot = {
 // empty and only `modelPriceCategories` names the catalog.
 export type SdkModelList = { list: unknown[]; modelPriceCategories?: ReadonlyArray<{ id: string }> };
 
+// A file the runtime reads from disk and gives the model with the prompt (the SDK's
+// file attachment, which its docs use for images and documents alike).
+export type FileAttachment = { type: "file"; path: string; displayName: string };
+
 export type BotSession = {
   // Every event of the session, for as long as it is open. Returns the unsubscribe.
   on(handler: (event: SessionEvent) => void): () => void;
-  // Starts a turn. Its events follow through on(), ending with session.idle.
-  send(prompt: string): Promise<unknown>;
+  // Starts a turn on `prompt`, with `files` attached. Its events follow through on(), ending with session.idle.
+  send(prompt: string, files?: FileAttachment[]): Promise<unknown>;
   // Cuts the running turn short. The conversation is kept.
   abort(): Promise<void>;
   // Runs the next turns on `model` at `effort`; null clears any effort set before, so

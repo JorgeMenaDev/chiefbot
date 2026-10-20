@@ -47,9 +47,9 @@ test("on Copilot Free only Auto is selectable; the plan's other models show lock
   });
   await onlineBot("Ada");
 
-  const locked = { lockedReason: "Needs a paid Copilot plan", efforts: [], defaultEffort: null };
+  const locked = { lockedReason: "Needs a paid Copilot plan", efforts: [], defaultEffort: null, vision: null };
   expect(await models()).toEqual([
-    { id: "auto", name: "Auto", lockedReason: null, efforts: [], defaultEffort: null },
+    { id: "auto", name: "Auto", lockedReason: null, efforts: [], defaultEffort: null, vision: null },
     { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", ...locked },
     { id: "gpt-6-luna", name: "GPT-6 Luna", ...locked },
   ]);
@@ -57,7 +57,7 @@ test("on Copilot Free only Auto is selectable; the plan's other models show lock
 
 // A paid plan's SDK listing: Auto, three models, one turned off by an organisation's
 // policy. Two take a reasoning effort, from different levels; one lists a level
-// Chiefbot does not offer ("none").
+// Chiefbot does not offer ("none"). Those two read images; GPT-5 mini does not.
 const reasoning = { supports: { vision: true, reasoningEffort: true } };
 const claudeSonnet = {
   id: "claude-sonnet-4.6",
@@ -84,17 +84,17 @@ const paidModels: FakeModels = {
   modelPriceCategories: [{ id: "claude-sonnet-4.6" }, { id: "gpt-6.1-sol" }, { id: "gpt-5-mini" }, { id: "o9-preview" }],
 };
 
-test("on a paid plan the plan's models are selectable with their reasoning efforts, and policy-disabled ones show locked", async () => {
+test("on a paid plan the plan's models are selectable with their reasoning efforts and whether they see images, and policy-disabled ones show locked", async () => {
   const { onlineBot, models } = await setup({ sku: "monthly_subscriber", sdkModels: paidModels });
   await onlineBot("Ada");
 
   const noEffort = { efforts: [], defaultEffort: null };
   expect(await models()).toEqual([
-    { id: "auto", name: "Auto", lockedReason: null, ...noEffort },
-    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", lockedReason: null, efforts: ["low", "medium", "high"], defaultEffort: "medium" },
-    { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", lockedReason: null, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high" },
-    { id: "gpt-5-mini", name: "GPT-5 mini", lockedReason: null, ...noEffort },
-    { id: "o9-preview", name: "o9 (Preview)", lockedReason: "Turned off by your Copilot policy", ...noEffort },
+    { id: "auto", name: "Auto", lockedReason: null, ...noEffort, vision: null },
+    { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", lockedReason: null, efforts: ["low", "medium", "high"], defaultEffort: "medium", vision: true },
+    { id: "gpt-6.1-sol", name: "GPT-6.1 Sol", lockedReason: null, efforts: ["low", "medium", "high", "xhigh"], defaultEffort: "high", vision: true },
+    { id: "gpt-5-mini", name: "GPT-5 mini", lockedReason: null, ...noEffort, vision: false },
+    { id: "o9-preview", name: "o9 (Preview)", lockedReason: "Turned off by your Copilot policy", ...noEffort, vision: null },
   ]);
 });
 

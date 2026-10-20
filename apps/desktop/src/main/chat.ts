@@ -1,4 +1,13 @@
-import { ChatEvent, SendMessageResponse, type ApprovalId, type BotId, type ChatItem, type ChatView } from "@chiefbot/contracts";
+import {
+  ChatEvent,
+  SendMessageResponse,
+  type ApprovalId,
+  type AttachmentId,
+  type AttachmentUpload,
+  type BotId,
+  type ChatItem,
+  type ChatView,
+} from "@chiefbot/contracts";
 import { controlCaller } from "./controlApi.ts";
 
 export type ChatsOptions = {
@@ -81,10 +90,18 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
 
     view: (botId: BotId): ChatView => chats.get(botId)?.view ?? { botId, items: [], working: null },
 
-    // Throws with control's reason when it refuses (bot offline, still on a turn).
-    async send(botId: BotId, text: string) {
-      const res = await call("POST", `/bots/${botId}/messages`, { text });
+    // Sends `text` and the files with it. Throws with control's reason when it
+    // refuses (bot offline, still on a turn, a file over the limits).
+    async send(botId: BotId, text: string, attachments: AttachmentUpload[] = []) {
+      const res = await call("POST", `/bots/${botId}/messages`, { text, attachments });
       return SendMessageResponse.parse(await res.json()).turnId;
+    },
+
+    // A file sent with one of the bot's messages, as a data: URL the window can
+    // show (its CSP allows data: images).
+    async attachment(botId: BotId, attachmentId: AttachmentId) {
+      const res = await call("GET", `/bots/${botId}/attachments/${attachmentId}`);
+      return `data:${res.headers.get("content-type")};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
     },
 
     // Approves or declines one of the bot's pending approvals. The card updates
@@ -116,7 +133,7 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
   };
   switch (event.type) {
     case "user-message":
-      return { ...view, working: "", items: [...view.items, { kind: "user", id: turnId, text: event.text }] };
+      return { ...view, working: "", items: [...view.items, { kind: "user", id: turnId, text: event.text, attachments: event.attachments }] };
     case "payer":
       return { ...view, items: [...view.items, { kind: "payer", id: `${turnId}:payer`, payer: event.payer }] };
     case "text-delta": {

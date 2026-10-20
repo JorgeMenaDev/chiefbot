@@ -8,7 +8,7 @@ const SdkModel = z.object({
   id: z.string().min(1),
   name: z.string(),
   policy: z.object({ state: z.string() }).optional(),
-  capabilities: z.object({ supports: z.object({ reasoningEffort: z.boolean().optional() }).optional() }).optional(),
+  capabilities: z.object({ supports: z.object({ reasoningEffort: z.boolean().optional(), vision: z.boolean().optional() }).optional() }).optional(),
   supportedReasoningEfforts: z.array(z.string()).optional(),
   defaultReasoningEffort: z.string().optional(),
 });
@@ -16,6 +16,7 @@ const SdkModel = z.object({
 // Turns the SDK's model listing into the report control keeps. Entries that do not
 // look like a model are skipped, since the SDK types them as plain JSON. A model
 // supports the reasoning efforts it lists only when its capabilities say it supports any.
+// Whether it reads images is unknown (null) when its capabilities do not say.
 export function modelReport({ list, modelPriceCategories = [] }: SdkModelList): ModelReport {
   return {
     selectable: list.flatMap((entry) => {
@@ -24,7 +25,7 @@ export function modelReport({ list, modelPriceCategories = [] }: SdkModelList): 
       const { id, name, policy, capabilities, supportedReasoningEfforts = [], defaultReasoningEffort } = model.data;
       const efforts = capabilities?.supports?.reasoningEffort ? supportedReasoningEfforts.flatMap((effort) => ReasoningEffort.safeParse(effort).data ?? []) : [];
       const defaultEffort = efforts.find((effort) => effort === defaultReasoningEffort) ?? null;
-      return [{ id, name, disabled: policy?.state === "disabled", efforts, defaultEffort }];
+      return [{ id, name, disabled: policy?.state === "disabled", efforts, defaultEffort, vision: capabilities?.supports?.vision ?? null }];
     }),
     catalog: modelPriceCategories.map(({ id }) => id),
   };

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { User } from "./auth.ts";
-import { TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
+import { SentAttachment, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
 import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, TurnId, TurnKey } from "./ids.ts";
@@ -91,7 +91,8 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //   run-turn        run one turn on the bot's Copilot session, on `model` at `effort` (null: the model's
 //                   default), asking as its `access` mode says; control sends one at a time.
 //                   `turnKey` is the turn's key (ids.ts TurnKey): the bearer of every call to control in it.
-//                   `connections` are the owner's connections that are on (connections.ts), for this turn only
+//                   `connections` are the owner's connections that are on (connections.ts), for this turn only.
+//                   `attachments` are the files sent with the message: the worker reads each from control with the turn's key.
 //   run-task        a task worker's only turn, its task: on the Copilot of `payer`, with `connectors`
 //                   (control's proxy runs them as the member who asked), and its `turnKey`. Sent once,
 //                   after its first hello.
@@ -112,6 +113,7 @@ export const ControlToWorker = z.discriminatedUnion("type", [
     effort: ReasoningEffort.nullable().default(null),
     access: AccessMode.default(DEFAULT_ACCESS),
     connections: z.array(AgentConnection).default([]),
+    attachments: z.array(SentAttachment).default([]),
   }),
   z.object({
     type: z.literal("run-task"),

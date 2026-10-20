@@ -5,7 +5,7 @@ import { AUTO_MODEL, supportedEffort, type CopilotPlan, type ModelOption, type M
 const FREE_SKU = "free_limited_copilot";
 
 // Auto picks the model, so it takes no reasoning effort.
-const AUTO: ModelOption = { id: AUTO_MODEL, name: "Auto", lockedReason: null, efforts: [], defaultEffort: null };
+const AUTO: ModelOption = { id: AUTO_MODEL, name: "Auto", lockedReason: null, efforts: [], defaultEffort: null, vision: null };
 
 // Catalog ids that are internal or legacy, not models a person would pick (from Chartpilot).
 const HIDDEN = /^(trajectory-|gpt-3\.5|gpt-4(?!\.1)|.*-free-auto$|.*-\d{4}-\d{2}-\d{2}$)/;
@@ -27,17 +27,19 @@ export function modelOptions(report: ModelReport | null, plan: CopilotPlan): Mod
         lockedReason: "Needs a paid Copilot plan",
         efforts: [],
         defaultEffort: null,
+        vision: null,
       })),
     ];
   }
   return [
     AUTO,
-    ...report.selectable.map(({ id, name, disabled, efforts, defaultEffort }) => ({
+    ...report.selectable.map(({ id, name, disabled, efforts, defaultEffort, vision }) => ({
       id,
       name,
       lockedReason: disabled ? "Turned off by your Copilot policy" : null,
       efforts,
       defaultEffort,
+      vision,
     })),
   ];
 }

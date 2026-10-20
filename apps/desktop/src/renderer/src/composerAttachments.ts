@@ -1,0 +1,109 @@
+// Adapted from T3 Code (https://github.com/pingdotgg/t3code, MIT), apps/web/src/components/chat/composerAttachmentFiles.ts
+// and ChatComposer.tsx's addComposerAttachments: which files the composer takes, their types, and its messages.
+import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MimeType, type AttachmentUpload } from "@chiefbot/contracts";
+import type { Dispatch, SetStateAction } from "react";
+
+// A file in the composer, waiting to be sent. `data` is its bytes in base64, or
+// null while the composer still reads it.
+export type DraftAttachment = Omit<AttachmentUpload, "data"> & { id: string; size: number; data: string | null };
+
+// The image types the composer shows as thumbnails (T3 Code's), by extension.
+const imageTypes: Record<string, string> = { gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg", png: "image/png", webp: "image/webp" };
+
+export const isImage = (mimeType: string) => Object.values(imageTypes).includes(mimeType);
+
+// The file's type. A file dragged from another app may come without one, so an
+// image's extension names it; anything else unknown is plain bytes.
+export function typeOf({ name, type }: Pick<File, "name" | "type">) {
+  if (type !== "application/octet-stream" && MimeType.safeParse(type).success) return type;
+  return imageTypes[name.split(".").pop()?.toLowerCase() ?? ""] ?? "application/octet-stream";
+}
+
+// The chip that stands for a file in the prompt: its name in brackets, which the
+// composer and the chat draw as a chip.
+export const chipFor = (name: string) => `[${name}]`;
+
+// `name`, or with -2, -3… before its extension when a file in `taken` has it: a
+// message's files need their own names, and a pasted screenshot is always image.png.
+export function uniqueName(name: string, taken: ReadonlySet<string>) {
+  const dot = name.lastIndexOf(".");
+  const [stem, extension] = dot > 0 ? [name.slice(0, dot), name.slice(dot)] : [name, ""];
+  let candidate = name;
+  for (let n = 2; taken.has(candidate); n++) candidate = `${stem}-${n}${extension}`;
+  return candidate;
+}
+
+// Which of `files` fit beside the `attached` ones, and what was wrong with the
+// last one that did not (T3 Code's messages). Control checks the same limits.
+export function admit(files: File[], attached: number): { files: File[]; error: string | null } {
+  const admitted: File[] = [];
+  let error: string | null = null;
+  for (const file of files) {
+    if (attached + admitted.length >= MAX_ATTACHMENTS) error = `You can attach up to ${MAX_ATTACHMENTS} files per message.`;
+    else if (file.size === 0) error = `'${file.name}' is empty or could not be read.`;
+    else if (file.size > MAX_ATTACHMENT_BYTES) error = `'${file.name}' exceeds the 10 MB attachment limit.`;
+    else admitted.push(file);
+  }
+  return { files: admitted, error };
+}
+
+// Places for the `picked` files that fit beside the `attached` ones, each named
+// apart from them and with no data yet. The composer adds them at once and reads
+// them after (base64Of), so files picked meanwhile count against the same limits
+// and names. `error` as admit's.
+export function reserve(picked: File[], attached: readonly DraftAttachment[]) {
+  const { files, error } = admit(picked, attached.length);
+  const names = new Set(attached.map(({ name }) => name));
+  const reserved = files.map((file) => {
+    const name = uniqueName(file.name || "file", names);
+    names.add(name);
+    const attachment: DraftAttachment = { id: crypto.randomUUID(), name, mimeType: typeOf(file), size: file.size, data: null };
+    return { file, attachment };
+  });
+  return { reserved, error };
+}
+
+// Reads each `reserved` file into its place among the composer's files (`setFiles`,
+// React's setter) when its read ends. `files` gives them as they are then: a read
+// whose file is gone from them (removed or sent meanwhile, maybe for a new file of
+// its name) changes nothing. A failed read of a file still there goes to `onFailed`.
+export function readInto(
+  reserved: ReturnType<typeof reserve>["reserved"],
+  {
+    files,
+    setFiles,
+    onFailed,
+    read = base64Of,
+  }: {
+    files: () => readonly DraftAttachment[];
+    setFiles: Dispatch<SetStateAction<DraftAttachment[]>>;
+    onFailed: (attachment: DraftAttachment) => void;
+    read?: (file: File) => Promise<string>;
+  },
+) {
+  for (const { file, attachment } of reserved) {
+    read(file).then(
+      (data) => setFiles((items) => items.map((item) => (item.id === attachment.id ? { ...item, data } : item))),
+      () => files().some(({ id }) => id === attachment.id) && onFailed(attachment),
+    );
+  }
+}
+
+// The composer's files as its message sends them, or null while one is still being read.
+export function uploads(attachments: readonly DraftAttachment[]): AttachmentUpload[] | null {
+  const read = attachments.flatMap(({ name, mimeType, data }) => (data === null ? [] : [{ name, mimeType, data }]));
+  return read.length === attachments.length ? read : null;
+}
+
+// The browser's own base64 encoder: the part of a data: URL after its comma.
+function base64Of(file: Blob) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
+    reader.onerror = () => reject(reader.error ?? new Error("The file could not be read."));
+    reader.readAsDataURL(file);
+  });
+}
+
+// T3 Code's size label.
+export const sizeLabel = (bytes: number) => (bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.ceil(bytes / 1024))} KB`);

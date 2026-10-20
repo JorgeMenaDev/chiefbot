@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApprovalId, BotId, HandoffId, TurnId, TurnKey } from "./ids.ts";
+import { ApprovalId, AttachmentId, BotId, HandoffId, TurnId, TurnKey } from "./ids.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
@@ -42,8 +42,41 @@ export const TurnEvent = z.discriminatedUnion("type", [
 ]);
 export type TurnEvent = z.infer<typeof TurnEvent>;
 
-// The message that starts a turn.
-export const UserMessage = z.object({ type: z.literal("user-message"), text: z.string() });
+// Files a user sends with a message to their bot (POST /bots/:id/messages): at
+// most MAX_ATTACHMENTS, each at most MAX_ATTACHMENT_BYTES, with distinct names.
+// The worker saves each in the bot's workspace under its name, so a name is one
+// file name, never a path.
+export const MAX_ATTACHMENTS = 5;
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+const AttachmentName = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine((name) => !/[/\\\0]/.test(name) && name !== "." && name !== "..", "A file name, without a folder");
+
+// The size of the bytes a valid base64 string holds.
+const decodedSize = (base64: string) => (base64.length / 4) * 3 - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
+
+// A file's type, such as image/png, without parameters.
+export const MimeType = z.string().max(255).regex(/^[\w.+-]+\/[\w.+-]+$/);
+
+// One file as the desktop sends it, its bytes in base64.
+export const AttachmentUpload = z.object({
+  name: AttachmentName,
+  mimeType: MimeType,
+  data: z.base64().refine((data) => decodedSize(data) <= MAX_ATTACHMENT_BYTES, "A file can be at most 10 MB."),
+});
+export type AttachmentUpload = z.infer<typeof AttachmentUpload>;
+
+// One file of a sent message, as control keeps it. `size` is in bytes. Its
+// owner reads it at GET /bots/:id/attachments/:attachmentId, and the worker of
+// its turn at GET /worker/:botId/attachments/:attachmentId.
+export const SentAttachment = z.object({ id: AttachmentId, name: AttachmentName, mimeType: z.string(), size: z.number().int() });
+export type SentAttachment = z.infer<typeof SentAttachment>;
+
+// The message that starts a turn, with the files sent with it (none before files could be sent).
+export const UserMessage = z.object({ type: z.literal("user-message"), text: z.string(), attachments: z.array(SentAttachment).optional() });
+export type UserMessage = z.infer<typeof UserMessage>;
 
 // The user's answer to an approval-request of the same turn. Control adds it.
 export const ApprovalAnswer = z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() });
@@ -77,9 +110,18 @@ export const ChatEvent = z.object({
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
-// Body of POST /bots/:id/messages, and its 202 answer.
+// Body of POST /projects/:id/messages, and the text of a bot's message.
 export const SendMessageRequest = z.object({ text: z.string().trim().min(1).max(20_000) });
 export type SendMessageRequest = z.infer<typeof SendMessageRequest>;
+// Body of POST /bots/:id/messages: the text and its files. Its answer is a SendMessageResponse (202).
+export const SendBotMessageRequest = SendMessageRequest.extend({
+  attachments: z
+    .array(AttachmentUpload)
+    .max(MAX_ATTACHMENTS, `A message can have at most ${MAX_ATTACHMENTS} files.`)
+    .refine((files) => new Set(files.map(({ name }) => name)).size === files.length, "Each file of a message needs its own name.")
+    .default([]),
+});
+export type SendBotMessageRequest = z.infer<typeof SendBotMessageRequest>;
 export const SendMessageResponse = z.object({ turnId: TurnId });
 export type SendMessageResponse = z.infer<typeof SendMessageResponse>;
 
@@ -99,7 +141,7 @@ export type CopilotInstallationToken = z.infer<typeof CopilotInstallationToken>;
 // A bot's chat as the desktop window shows it, folded from ChatEvents.
 // Sent from Electron main to the renderer.
 export const ChatItem = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("user"), id: z.string(), text: z.string() }),
+  z.object({ kind: z.literal("user"), id: z.string(), text: z.string(), attachments: z.array(SentAttachment).optional() }),
   z.object({ kind: z.literal("assistant"), id: z.string(), text: z.string() }),
   z.object({ kind: z.literal("tool"), id: z.string(), name: z.string(), status: z.enum(["running", "succeeded", "failed"]) }),
   z.object({ kind: z.literal("error"), id: z.string(), message: z.string() }),
@@ -134,13 +176,16 @@ export type ChatView = z.infer<typeof ChatView>;
 //               after it has resent every event of its latest turn. Control stores
 //               each index once, so resends are harmless, then ends every other
 //               unfinished turn: the runtime lost it. `capabilities` name what the
-//               runtime does beyond the first protocol (ACCESS_MODES); an older one sends none.
+//               runtime does beyond the first protocol (ACCESS_MODES, ATTACHMENTS); an older one sends none.
 export const TurnEventMessage = z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent });
 export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable(), capabilities: z.array(z.string()).default([]) });
 
 // A bot's worker that asks as the turn's access mode says. One without it drops
 // the mode and asks as Auto does, so control sends it only Auto turns.
 export const ACCESS_MODES = "access-modes";
+// A bot's worker that gives a turn's files to its session. One without it drops
+// them, so control sends it only turns without files.
+export const ATTACHMENTS = "attachments";
 
 // Control → an agent's runtime, after a hello naming a turn that still runs whose
 // key control no longer has (control restarted, which revokes every key): the
