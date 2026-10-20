@@ -73,14 +73,17 @@ export type TaskWorkerHostOptions = {
 // control writes the launch record first, keyed by the tool call's creation id,
 // then asks for the computer, so a resent call starts no second worker. A
 // project runs at most its workers.max at once: another dispatch is queued, and
-// launches when one of them ends. The worker is a bot's worker (apps/worker) on
+// launches once one of them has ended and its computer has stopped or gone (a
+// place is held until then: taskWorkerStore.ts). The worker is a bot's worker (apps/worker) on
 // control's /task-worker routes: it runs the task as one turn for the member who
 // asked, on the Copilot that pays for it (their seat, or their organization's:
 // copilotIdentity.ts) and with the project's connectors ready for them (through
 // connectors.ts's proxy). It first sets up (setting_up): it clones the repo
 // through control's git proxy and runs the project's setup command with the
 // project's secrets, which control sends with its task and nowhere else
-// (EngineerSetup); a step that fails blocks it. Then its agent works on the task:
+// (EngineerSetup), only while its turn is live on the connection that asked; a
+// step that fails blocks it. Its worker hides those secrets in all it sends
+// (secretRedactor.ts). Then its agent works on the task:
 // it pushes through the git proxy and opens a draft pull request through
 // control, each push and pull request approved by that member, or ends with a
 // report when nothing needs to change. Its last message is its result; its pull
@@ -126,6 +129,8 @@ export function taskWorkerHost({
   const launches = new Map<TaskWorkerId, Promise<void>>();
   // The wait limit of each approval a worker waits on: its cancel, by approval id.
   const waitLimits = new Map<ApprovalId, () => void>();
+  // The next try of each ended worker's computer stop that failed: its cancel.
+  const stopRetries = new Map<TaskWorkerId, () => void>();
 
   const publish = (projectId: ProjectId) => {
     const event = { type: "workers", projectId, workers: workers.workersOf(projectId) } satisfies ClientEvent;
@@ -195,7 +200,7 @@ export function taskWorkerHost({
   const newToken = () => crypto.randomUUID() + crypto.randomUUID();
 
   // Makes the worker's computer, a launch that a resent dispatch and a reap wait
-  // for. A failure fails the worker, removes what was made and frees its place.
+  // for. A failure fails the worker and removes what was made, which frees its place.
   function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
     const launched = (async () => {
       try {
@@ -207,7 +212,6 @@ export function taskWorkerHost({
       } catch (error) {
         workers.launchFailed(workerId, `Its computer could not start: ${error instanceof Error ? error.message : String(error)}`);
         void reap();
-        promote(projectId);
       }
       publish(projectId);
     })();
@@ -232,23 +236,45 @@ export function taskWorkerHost({
     for (const workerId of workers.toReap()) {
       await launches.get(workerId);
       sockets.get(workerId)?.close();
+      const projectId = workers.worker(workerId)?.projectId;
       try {
         await computers.destroy(workerId, { deleteData: true });
         workers.computerRemoved(workerId);
+        if (projectId) promote(projectId);
       } catch (error) {
         console.error(`could not remove the computer of ${workerId}:`, error);
       }
-      const projectId = workers.worker(workerId)?.projectId;
       if (projectId) publish(projectId);
     }
   }
 
-  // The worker's turn ended: its approvals stop waiting and its computer stops,
-  // keeping its disk until the task closes, which frees its place for a queued
-  // worker. A failed stop is retried on control's next start.
+  // The worker's turn ended: its approvals stop waiting and its computer stops
+  // (release).
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
-    computers.stop(workerId).catch((error: unknown) => console.error(`could not stop the computer of ${workerId}:`, error));
+    void release(workerId);
+  }
+
+  // Stops the ended worker's computer, keeping its disk until the task closes.
+  // Only once it has stopped does its place go to a queued worker. A stop that
+  // fails is tried again after stopRetryMs, the place held meanwhile, unless the
+  // computer no longer needs stopping (it went with its task).
+  async function release(workerId: TaskWorkerId) {
+    if (!workers.stopPending(workerId)) return;
+    try {
+      await computers.stop(workerId);
+    } catch (error) {
+      console.error(`could not stop the computer of ${workerId}:`, error);
+      stopRetries.set(
+        workerId,
+        clock.setTimeout(() => {
+          stopRetries.delete(workerId);
+          void release(workerId);
+        }, stopRetryMs),
+      );
+      return;
+    }
+    workers.computerStopped(workerId);
     const projectId = workers.worker(workerId)?.projectId;
     if (projectId) promote(projectId);
   }
@@ -458,7 +484,6 @@ export function taskWorkerHost({
           stop(worker.id, "The coordinator stopped this worker.");
           publish(project.id);
           void reap();
-          promote(project.id);
           return Response.json(workers.worker(worker.id) satisfies TaskWorker | null);
       }
     },
@@ -468,10 +493,7 @@ export function taskWorkerHost({
     memberRemoved(workspaceId: WorkspaceId, userId: UserId) {
       const stopped = workers.runningFor(workspaceId, userId);
       for (const { workerId } of stopped) stop(workerId, "The member who asked for it left the workspace.");
-      for (const projectId of new Set(stopped.map(({ projectId }) => projectId))) {
-        publish(projectId);
-        promote(projectId);
-      }
+      for (const projectId of new Set(stopped.map(({ projectId }) => projectId))) publish(projectId);
       void reap();
     },
 
@@ -480,7 +502,6 @@ export function taskWorkerHost({
       for (const workerId of workers.running(projectId, taskNumber)) stop(workerId, "The task was closed.");
       publish(projectId);
       void reap();
-      promote(projectId);
     },
 
     // The project is being deleted: its workers stop and every computer of theirs
@@ -506,16 +527,18 @@ export function taskWorkerHost({
         if ((await computers.status(workerId)) !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
       }
       for (const workerId of workers.ended()) {
-        if ((await computers.status(workerId)) === "running") await computers.stop(workerId);
+        if ((await computers.status(workerId)) === "running") await release(workerId);
+        else workers.computerStopped(workerId);
       }
       await reap();
       for (const projectId of workers.queuedProjects()) promote(projectId);
     },
 
-    // Control is stopping: no wait limit fires any more.
+    // Control is stopping: no wait limit or stop retry fires any more.
     stop() {
-      for (const cancel of waitLimits.values()) cancel();
+      for (const cancel of [...waitLimits.values(), ...stopRetries.values()]) cancel();
       waitLimits.clear();
+      stopRetries.clear();
     },
 
     open(ws: Socket, { workerId }: TaskWorkerSocketData) {
@@ -565,6 +588,9 @@ export function taskWorkerHost({
     },
   };
 }
+
+// How long control waits to try again to stop an ended worker's computer.
+const stopRetryMs = 30_000;
 
 // A worker's turn as transcript lines for the coordinator: each setup step with
 // its exit code (and its log when it failed), each message whole, each tool call

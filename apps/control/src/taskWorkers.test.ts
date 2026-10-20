@@ -458,6 +458,41 @@ test("a dispatch beyond the project's workers.max is queued, with no computer, a
   expect(computers.computers.has(second.id)).toBe(true);
 });
 
+test("an ended engineer keeps its place until its computer has stopped: a stop that fails is retried, and only then does a queued one launch", async () => {
+  const { clock, advance } = fakeClock(Date.now());
+  let stopFails = true;
+  const control = await teamProject(
+    {
+      clock,
+      provider: (fake) => ({
+        ...fake,
+        async stop(id) {
+          if (stopFails && id.startsWith("worker_")) throw new Error("Docker is not answering");
+          await fake.stop(id);
+        },
+      }),
+    },
+    "commands:\n  test: bun test\nworkers:\n  max: 1\n",
+  );
+  const { owner, project, computers } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  await tool({ tool: "create_task", title: "Add dark mode" });
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, first.id, ({ state }) => state === "finished");
+
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-2" })).body);
+
+  expect(second.state).toBe("queued");
+  expect(await computers.provider.status(first.id)).toBe("running");
+  stopFails = false;
+  advance(30_000);
+  await workerWhen(owner, project, second.id, ({ state }) => state === "finished");
+  expect(await computers.provider.status(first.id)).toBe("stopped");
+});
+
 test("the worker pushes and opens its draft pull request through control, each approved by the member who asked, and the task links it", async () => {
   const { owner, guest, project, copilot, github } = await gitTeamProject();
   const exitCodes: number[] = [];

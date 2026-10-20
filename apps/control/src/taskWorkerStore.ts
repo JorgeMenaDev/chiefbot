@@ -26,11 +26,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   // The launch record, written before control asks for a computer (or queues
   // it). (project_id, creation_id) is unique, so a resent dispatch finds the
   // worker it started. user_id is the member who asked: their Copilot seat,
-  // their approvals. `computer`: wanted while the worker may need it; unwanted
-  // once it must go (the worker stopped, or its launch failed); removed once the
-  // provider deleted it, or a queued worker stopped before it had one. A wanted
-  // computer of a done or abandoned task must go too; one whose turn ended
-  // (finished, blocked, failed) is kept stopped until then. `payer` is who pays
+  // their approvals. `computer`: wanted while the worker may need it; kept once
+  // its turn ended (finished, blocked, failed) and the provider stopped it, its
+  // disk kept until its task closes; unwanted once it must go (the worker
+  // stopped, or its launch failed); removed once the provider deleted it, or a
+  // queued worker stopped before it had one. A wanted or kept computer of a done
+  // or abandoned task must go too. A worker that has started holds one of its
+  // project's places (workers.max) while its computer is wanted or unwanted, so
+  // a computer that is slow or fails to stop or go keeps its place until it has. `payer` is who pays
   // for its Copilot (JSON), set when its task starts. `setup` is a JSON array of
   // the SetupSteps it ran. The worker's credential is stored as a SHA-256: a
   // queued worker's is replaced as it launches.
@@ -44,7 +47,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     prompt TEXT NOT NULL,
     token_hash TEXT NOT NULL UNIQUE,
     state TEXT NOT NULL CHECK (state IN ('queued', 'launching', 'setting_up', 'working', 'finished', 'blocked', 'failed', 'stopped')),
-    computer TEXT NOT NULL CHECK (computer IN ('wanted', 'unwanted', 'removed')),
+    computer TEXT NOT NULL CHECK (computer IN ('wanted', 'kept', 'unwanted', 'removed')),
     result TEXT,
     pull_request TEXT,
     payer TEXT,
@@ -57,7 +60,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   )`;
   db.run(create);
   // A table from before engineers set up (no 'setting_up' state) is made again.
-  rebuildTable(db, "task_workers", create, "'setting_up'");
+  rebuildTable(db, "task_workers", create, "'kept'");
   // The worker's turn as control stores it: its transcript.
   db.run(`CREATE TABLE IF NOT EXISTS task_worker_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,9 +162,11 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     return [append(workerId, { type: "error", message }), append(workerId, { type: "done" })];
   };
 
-  // How many of the project's workers hold a computer slot now (workers.max counts them).
+  // How many of the project's places (workers.max) its workers hold now.
   const runningCount = (projectId: string) =>
-    db.query<{ n: number }, [string]>(`SELECT count(*) AS n FROM task_workers WHERE project_id = ?1 AND state IN (${running})`).get(projectId)?.n ?? 0;
+    db
+      .query<{ n: number }, [string]>("SELECT count(*) AS n FROM task_workers WHERE project_id = ?1 AND state != 'queued' AND computer IN ('wanted', 'unwanted')")
+      .get(projectId)?.n ?? 0;
 
   return {
     // Writes the launch record of a worker for a task, unless the call that
@@ -304,7 +309,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     stop: db.transaction((workerId: TaskWorkerId, message: string): ChatEvent[] => {
       const queued = db.query("SELECT 1 FROM task_workers WHERE id = ?1 AND state = 'queued'").get(workerId) !== null;
       const ended = end(workerId, "stopped", message);
-      db.query("UPDATE task_workers SET computer = ?3, updated_at = ?2 WHERE id = ?1 AND computer = 'wanted'").run(workerId, Date.now(), queued ? "removed" : "unwanted");
+      db.query("UPDATE task_workers SET computer = ?3, updated_at = ?2 WHERE id = ?1 AND computer IN ('wanted', 'kept')").run(workerId, Date.now(), queued ? "removed" : "unwanted");
       return ended;
     }),
 
@@ -339,23 +344,32 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     },
 
     // Workers whose turn ended (finished, blocked or failed) and whose computer
-    // is kept until their task closes: it should be stopped.
+    // has not stopped yet: it should, keeping its disk until their task closes.
     ended(): TaskWorkerId[] {
       return db
-        .query<{ id: string }, []>("SELECT id FROM task_workers WHERE state IN ('finished', 'blocked', 'failed') AND computer = 'wanted'")
+        .query<{ id: string }, []>(`SELECT id FROM task_workers WHERE state IN (${ended}) AND computer = 'wanted'`)
         .all()
         .map((row) => TaskWorkerId.parse(row.id));
     },
 
-    // Workers whose computer must go and may still exist: unwanted, or wanted by
-    // a task that is done or abandoned. With `projectId`, every computer of the project not yet removed.
+    // Whether the worker's turn ended and its computer has yet to stop.
+    stopPending: (workerId: TaskWorkerId) =>
+      db.query(`SELECT 1 FROM task_workers WHERE id = ?1 AND state IN (${ended}) AND computer = 'wanted'`).get(workerId) !== null,
+
+    // The provider stopped the ended worker's computer: it frees its place.
+    computerStopped(workerId: TaskWorkerId) {
+      db.query(`UPDATE task_workers SET computer = 'kept', updated_at = ?2 WHERE id = ?1 AND state IN (${ended}) AND computer = 'wanted'`).run(workerId, Date.now());
+    },
+
+    // Workers whose computer must go and may still exist: unwanted, or wanted or
+    // kept by a task that is done or abandoned. With `projectId`, every computer of the project not yet removed.
     toReap(projectId?: ProjectId): TaskWorkerId[] {
       return db
         .query<{ id: string }, [string | null]>(
           `SELECT task_workers.id FROM task_workers JOIN project_tasks
              ON project_tasks.project_id = task_workers.project_id AND project_tasks.number = task_workers.task_number
            WHERE CASE WHEN ?1 IS NULL
-             THEN task_workers.computer = 'unwanted' OR (task_workers.computer = 'wanted' AND project_tasks.status IN ('done', 'abandoned'))
+             THEN task_workers.computer = 'unwanted' OR (task_workers.computer IN ('wanted', 'kept') AND project_tasks.status IN ('done', 'abandoned'))
              ELSE task_workers.project_id = ?1 AND task_workers.computer != 'removed' END`,
         )
         .all(projectId ?? null)
@@ -414,9 +428,11 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   };
 }
 
-// The states of workers that hold a computer slot, and of those that have not ended yet.
+// The states of workers that run, of those that have not ended yet, and of those
+// whose turn ended by itself (a stopped worker's computer goes).
 const running = "'launching', 'setting_up', 'working'";
 const unended = `'queued', ${running}`;
+const ended = "'finished', 'blocked', 'failed'";
 
 // How a turn that ended went: failed with its last error, or finished with its
 // last assistant message as the result.
