@@ -226,7 +226,8 @@ test("the coordinator can start an explore helper that may use only the repo's r
   await ask(control, "How is checkout built?");
 
   expect(copilot.agents.at(-1)?.map(({ name, tools }) => ({ name, tools }))).toEqual([{ name: "explore", tools: ["repo_read", "repo_search"] }]);
-  expect(copilot.instructions.at(-1)).toContain("start the explore helper with the task tool");
+  // The session's config tells it of its helpers, so a session opened without them is told nothing of them.
+  expect(copilot.instructions.at(-1)).not.toContain("helper");
 });
 
 test("the explore helper shows in the project chat as one row, named for its job, without the calls it makes", async () => {
