@@ -1,6 +1,6 @@
 # Connectors and the access checklist
 
-A **connector** is an MCP server a workspace defines once. A project asks for the connectors its agents need by name, in its `chiefbot.project.yaml`:
+A **connector** is an MCP server a workspace defines once. A project asks for the connectors its agents need by name, in its config: its `chiefbot.project.yaml` or its settings in the app (README, Projects):
 
 ```yaml
 connectors: [github, github-actions, jira]
@@ -14,7 +14,7 @@ A **connection** (`docs/connections.md`) is different: a command-line tool, like
 
 | Field | Meaning |
 | --- | --- |
-| `name` | How project files name it, and the MCP server name agents see. Lower-case letters, digits and hyphens. |
+| `name` | How a project's config names it, and the MCP server name agents see. Lower-case letters, digits and hyphens. |
 | `title` | What the desktop shows. |
 | `server` | `remote`: a Streamable HTTP MCP server at `url`. `command`: a stdio MCP server the agent's computer starts (`command`, `args`, `env`). |
 | `auth` | `none`, `workspace-secret` (one service credential the workspace owner sets) or `personal-oauth` (each member's own account). A `command` connector takes only `none`: control refuses any other with `400 invalid_connector`. |
