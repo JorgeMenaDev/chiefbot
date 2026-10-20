@@ -44,9 +44,10 @@ test("the user turns Jira on with their fields and off again, and reads a bot's 
     ["gcloud", false],
     ["harness", false],
     ["jira", false],
+    ["looker", false],
   ]);
   expect(jira.on).toBe(true);
   expect(refused).toContain("invalid_connection: email is missing");
-  expect((await connections.list()).map(({ on }) => on)).toEqual([false, false, false]);
+  expect((await connections.list()).map(({ on }) => on)).toEqual([false, false, false, false]);
   expect(await connections.calls(bot.id)).toEqual([]);
 });

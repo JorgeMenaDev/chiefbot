@@ -17,6 +17,7 @@ Connections differ from connectors (`docs/connectors.md`): a connector is an MCP
 | Jira | Site (like `mysite.atlassian.net`), your Atlassian email, an API token (id.atlassian.com, **Security**, **API tokens**; pick one with scopes and an expiry date). |
 | Google Cloud | A service account key JSON (IAM, **Service accounts**, **Keys**), or an `authorized_user` credentials JSON (what `gcloud auth application-default login` writes), with only the roles your bots need (like Viewer), and a default project ID. The key never leaves control: each turn gets a one-hour access token minted from it (below). |
 | Harness | Account ID, a default organization and project (the CLI refuses to run without them; `--org` and `--project` still choose another per command), and a personal access token or service account token with only the roles it needs. |
+| Looker | Instance URL, and an API client ID and secret (Admin, **Users**, **Edit keys**; or your own **Account** page on Looker (Google Cloud core)) of a user with only the permissions it needs. Its CLI, `looker`, is a small API client the folder ships (`connections/looker/looker.ts`). |
 
 ## What happens in a turn
 
