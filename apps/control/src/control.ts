@@ -40,6 +40,7 @@ import {
 import { systemClock, type Clock } from "@chiefbot/worker/clock";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
+import { noCompanyNetwork, type CompanyNetwork } from "./computers/config.ts";
 import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
 import { chiefHost } from "./handoffs.ts";
 import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
@@ -126,6 +127,8 @@ export type ControlOptions = {
   // local Docker Engine; a fake in tests. Null (the default) where computers have
   // none, as on GCE: a task of a project with a template ends blocked.
   stacks?: StackRunner | null;
+  // What engineers' computers and stacks get behind a company network (computers/config.ts). Default: nothing.
+  network?: CompanyNetwork;
   // Where connections mint Google access tokens (connections/googleToken.ts). Default: Google's.
   googleTokenUrl?: string;
   // The health probe of each connection that has one (health/health.ts). Default: the
@@ -258,6 +261,7 @@ export function startControl({
   connections: catalog = [],
   templates = [],
   stacks = null,
+  network = noCompanyNetwork,
   googleTokenUrl,
   probes = defaultProbes({ ...googleUrls, ...(googleTokenUrl === undefined ? {} : { token: googleTokenUrl }) }),
   serviceNet = systemNet,
@@ -362,6 +366,7 @@ export function startControl({
     computers,
     templates,
     stacks,
+    network,
     repoReadable: repos.readable,
     repoReadToken: repos.readToken,
     approvals,

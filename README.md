@@ -157,7 +157,7 @@ The engineer is a bot's worker on control's `/task-worker/<id>` routes: it runs 
 
 - Projects read a private repo, push and open pull requests only through your repo app, a GitHub App on github.com. Only a public repo can be read without it. A host reached with a personal token instead (GitHub without the app, GitHub Enterprise, GitLab or Bitbucket) does not work yet.
 - Copilot sign-in takes GitHub's device flow, not a token.
-- Computers have no proxy or corporate CA (certificate authority) settings.
+- Behind a company proxy, only engineers' and verifiers' computers and their template stacks get the proxy and the CA (certificate authority) certificate (`docs/deploy.md`). Bots' and project agents' computers do not.
 
 If `bun run dev` fails with `Electron uninstall`, the Electron binary was not downloaded: run `node apps/desktop/node_modules/electron/install.js`.
 
@@ -187,6 +187,9 @@ The desktop dev script unsets `ELECTRON_RUN_AS_NODE`. Shells started by T3 Code 
 | `CHIEFBOT_APPROVAL_WAIT_MINUTES` | control | `60`: a project's engineer waiting this long on one approval fails and its computer stops, keeping its disk. The limit survives a control restart |
 | `CHIEFBOT_CONNECTIONS_DIR` | control | The repo's `connections` (`/opt/chiefbot/connections` in the control image): the connections **Connect apps** offers, read at startup |
 | `CHIEFBOT_TEMPLATES_DIR` | control | The repo's `templates` (`/opt/chiefbot/templates` in the control image): the template catalog, read at startup |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | control (docker) | None: a company proxy, passed on to engineers' computers and their template stacks (`docs/deploy.md`, **Behind a company proxy**) |
+| `CHIEFBOT_CA_FILE` | control (docker) | None: a PEM file of the company proxy's CA certificate, which engineers' computers and their template stacks trust. Control refuses to start when it cannot read it |
+| `CHIEFBOT_IMAGE_PREFIX` | control (docker) | None: a registry that mirrors Docker Hub, for template stacks' base images, such as `registry.example.com/hub` |
 | `CHIEFBOT_PUBLIC_URL` | control | `http://127.0.0.1:<port>`: control as members' browsers reach it. Connector OAuth sign-ins return to `<it>/connectors/oauth/callback` |
 | `CHIEFBOT_CONTROL_URL` | desktop | `http://127.0.0.1:7410` |
 | `CHIEFBOT_GITHUB_URL` | desktop | `https://github.com` |

@@ -23,6 +23,7 @@ import type { Clock } from "@chiefbot/worker/clock";
 import type { SetupShell } from "@chiefbot/worker/engineer-setup";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
+import type { CompanyNetwork } from "./computers/config.ts";
 import type { Probes } from "./health/probe.ts";
 import type { Net } from "./health/serviceCheck.ts";
 import { fakeComputers } from "./computers/fakeComputers.ts";
@@ -66,6 +67,8 @@ export type TestControlOptions = {
   provider?: (fake: ComputerProvider) => ComputerProvider;
   // null: no template stacks, as on the GCE provider. Default: the fake stacks control returns.
   stacks?: null;
+  // What engineers' computers and stacks get behind a company network. Default: nothing.
+  network?: CompanyNetwork;
   // The bot a new user gets at their first sign-in. Default: none.
   firstBot?: string;
   clock?: Clock;
@@ -96,6 +99,7 @@ export async function startTestControl({
   setupShell,
   provider,
   stacks: stacksOption,
+  network,
   firstBot,
   clock,
   idleStopMinutes,
@@ -128,6 +132,7 @@ export async function startTestControl({
     templates: loadTemplates(repoTemplates),
     computers: provider ? provider(computers.provider) : computers.provider,
     stacks: stacksOption === null ? null : stacks.runner,
+    ...(network === undefined ? {} : { network }),
     ...(firstBot === undefined ? {} : { firstBot }),
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),

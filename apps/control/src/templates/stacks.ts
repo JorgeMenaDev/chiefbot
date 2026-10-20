@@ -2,6 +2,7 @@ import { SETUP_LOG_MAX, type StackStage, type TaskWorkerId, type Template, type 
 import { secretRedactor, type SecretRedactor } from "@chiefbot/worker/secret-redactor";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { rootCertificates } from "node:tls";
 import { join } from "node:path";
 import { z } from "zod";
 import { dockerEngine } from "../computers/docker.ts";
@@ -18,11 +19,14 @@ import { dockerEngine } from "../computers/docker.ts";
 //   repos     the services that run from a repo, by name: its repo and ref (a branch or tag) and a
 //             token that may read it (null: a public repo). Every other service runs its stand-in.
 //   secrets   values no log of the stack may show: the project's secrets. The repos' tokens are hidden too.
+//   network   behind a company network (docs/deploy.md): the prefix of base images, the proxy's
+//             env (proxyEnv; empty with none) and the CA certificate's PEM text. Null when unset.
 export type StackPlan = {
   template: Template;
   own: string;
   repos: Record<string, { repo: string; ref: string; token: string | null }>;
   secrets: string[];
+  network: { imagePrefix: string | null; proxy: Record<string, string>; ca: string | null };
 };
 
 // A stage as a stack reports it; control adds the time.
@@ -92,17 +96,28 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
   // Each start under way, so stop can end it first.
   const starts = new Map<TaskWorkerId, { abort: AbortController; done: Promise<"ready" | "failed"> }>();
 
-  async function startStack(id: TaskWorkerId, { template, own, repos, secrets }: StackPlan, onStage: (stage: StackReport) => void, signal: AbortSignal): Promise<"ready" | "failed"> {
+  async function startStack(id: TaskWorkerId, { template, own, repos, secrets, network }: StackPlan, onStage: (stage: StackReport) => void, signal: AbortSignal): Promise<"ready" | "failed"> {
     const project = projectOf(id);
     const work = mkdtempSync(join(tmpdir(), "chiefbot-stack-"));
     const file = join(work, "compose.json");
+    // Behind a company network: the CA for the builds' secret (stackModel), and
+    // git's fetches of the repos go through the proxy, trusting the CA on top of the public roots.
+    const caFile = join(work, "ca.pem");
+    const cloneNetwork: Record<string, string> = { ...network.proxy };
+    if (network.ca !== null) {
+      writeFileSync(caFile, network.ca);
+      writeFileSync(join(work, "ca-bundle.pem"), caBundle(network.ca));
+      cloneNetwork.GIT_SSL_CAINFO = join(work, "ca-bundle.pem");
+    }
     const hide = secretRedactor([...secrets, ...Object.values(repos).flatMap(({ token }) => (token === null ? [] : [token]))]);
     let label = BUILD_STAGE;
     let log = stageLog(hide);
     // Runs one step of the current stage (killed at `deadline`), its output into
-    // the stage's log. A step that fails ends the stage.
+    // the stage's log. A step that fails ends the stage. Each runs in the stack's
+    // folder: compose builds with buildx bake, which reads a file such as the CA's
+    // only inside the folder it runs in.
     const step = async (command: string[], deadline: AbortSignal, env: Record<string, string> = dockerEnv) => {
-      const { exitCode, output } = await run(command, env, deadline, (text) => log.push(text));
+      const { exitCode, output } = await run(command, env, deadline, (text) => log.push(text), work);
       if (exitCode === 0) return output;
       if (deadline.aborted && !signal.aborted) log.push(`\nChiefbot stopped waiting after ${Math.round((label === BUILD_STAGE ? buildMs : stageMs) / 60_000)} minutes.\n`);
       throw new StepFailed();
@@ -121,7 +136,7 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
         if (service !== own && build && !repos[service]) images[service] = { image: image(service, "stand-in"), context: build.context };
       }
       for (const [service, { repo, ref, token }] of Object.entries(repos)) {
-        const gitEnv = gitEnvFor(token);
+        const gitEnv = { ...gitEnvFor(token), ...cloneNetwork };
         const url = `${githubUrl}/${repo}.git`;
         const commit = resolveRef(await step(["git", "ls-remote", url, `refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`], build, gitEnv), ref);
         if (commit === null) {
@@ -140,7 +155,7 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
         await step(["git", "-C", clone, "checkout", "-q", "FETCH_HEAD"], build, gitEnv);
         images[service] = { image: tag, context: join(clone, template.services[service]?.context ?? ".") };
       }
-      writeFileSync(file, JSON.stringify(stackModel(model, { computer: `${prefix}${id}`, own, seed: template.seed, images })));
+      writeFileSync(file, JSON.stringify(stackModel(model, { computer: `${prefix}${id}`, own, seed: template.seed, images, network, caFile })));
       const toBuild = Object.entries(images).flatMap(([service, { context }]) => (context === undefined ? [] : [service]));
       if (toBuild.length > 0) await step(compose(["build", ...toBuild]), build);
       onStage({ label, state: "passed", log: log.end() });
@@ -214,24 +229,60 @@ const ComposeModel = z.looseObject({
   services: z.record(
     z.string(),
     z.looseObject({
-      build: z.looseObject({ context: z.string() }).optional(),
+      image: z.string().optional(),
+      build: z
+        .looseObject({
+          context: z.string(),
+          args: z.record(z.string(), z.string().nullable()).optional(),
+          secrets: z.array(z.unknown()).optional(),
+        })
+        .optional(),
       // A map once `docker compose config` has read it; a list in a file as written.
       depends_on: z.union([z.array(z.string()), z.record(z.string(), z.unknown())]).optional(),
+      environment: z.record(z.string(), z.string().nullable()).optional(),
+      configs: z.array(z.unknown()).optional(),
     }),
   ),
+  secrets: z.record(z.string(), z.unknown()).optional(),
+  configs: z.record(z.string(), z.unknown()).optional(),
 });
 type ComposeModel = z.infer<typeof ComposeModel>;
 
 // The keys Docker refuses on a container that joins another's network namespace.
 const namespaceKeys = ["ports", "expose", "networks", "links", "hostname", "domainname", "dns", "dns_search", "dns_opt", "extra_hosts", "mac_address"];
 
+// Where each service of a stack finds the company network's CA certificate
+// (stackModel), and the env that points its tools there: Node adds the CA to its
+// own roots; git, curl and OpenSSL read a bundle of the public roots and the CA.
+const caFiles = { ca: "/etc/chiefbot/ca.pem", bundle: "/etc/chiefbot/ca-bundle.pem" };
+const caEnv = { NODE_EXTRA_CA_CERTS: caFiles.ca, SSL_CERT_FILE: caFiles.bundle, CURL_CA_BUNDLE: caFiles.bundle, GIT_SSL_CAINFO: caFiles.bundle };
+
+// The public roots Chiefbot trusts (Mozilla's, as Bun ships them), and the company's CA after them.
+const caBundle = (ca: string) => [...rootCertificates, ca].join("\n");
+
 // The stack's compose model (dockerStacks says what changes). `images` names the
 // image of each service that has a build, and the folder it builds from when it
-// must be built; one without a folder is reused, so it keeps no build. Exported for its test.
+// must be built; one without a folder is reused, so it keeps no build.
+// Behind a company network (`network`, docs/deploy.md), each build gets the
+// proxy's env and CHIEFBOT_IMAGE_PREFIX as build args, and the CA as the build
+// secret chiefbot-ca (`caFile`, which the runner writes) that a Dockerfile may
+// mount. Each service gets the proxy's env and the CA, in its env and as files
+// (caFiles: compose copies them into the container, so they need no path on the
+// Docker host), and each image with no build the prefix. Unset, nothing. Exported for its test.
 export function stackModel(
   { networks: _networks, services, ...model }: ComposeModel,
-  { computer, own, seed, images }: { computer: string; own: string; seed: string; images: Record<string, { image: string; context?: string }> },
+  {
+    computer,
+    own,
+    seed,
+    images,
+    network,
+    caFile,
+  }: { computer: string; own: string; seed: string; images: Record<string, { image: string; context?: string }>; network: StackPlan["network"]; caFile: string },
 ) {
+  const { imagePrefix, proxy, ca } = network;
+  const env = { ...proxy, ...(ca === null ? {} : caEnv) };
+  const args = { ...proxy, ...(imagePrefix === null ? {} : { CHIEFBOT_IMAGE_PREFIX: imagePrefix }) };
   const stack = Object.entries(services).flatMap(([name, { build, depends_on, ...service }]) => {
     if (name === own) return [];
     const kept = Object.fromEntries(Object.entries(service).filter(([key]) => !namespaceKeys.includes(key)));
@@ -239,6 +290,7 @@ export function stackModel(
     const stays = (on: string) => on !== own && on !== seed;
     const waits = depends_on && (Array.isArray(depends_on) ? depends_on.filter(stays) : Object.fromEntries(Object.entries(depends_on).filter(([on]) => stays(on))));
     const image = images[name];
+    const pulled = build === undefined && imagePrefix !== null && service.image !== undefined;
     return [
       [
         name,
@@ -246,13 +298,37 @@ export function stackModel(
           ...kept,
           network_mode: `container:${computer}`,
           ...(waits ? { depends_on: waits } : {}),
-          ...(image ? { image: image.image } : {}),
-          ...(build && image?.context !== undefined ? { build: { ...build, context: image.context } } : {}),
+          ...(image ? { image: image.image } : pulled ? { image: `${imagePrefix}${service.image}` } : {}),
+          ...(Object.keys(env).length > 0 ? { environment: { ...service.environment, ...env } } : {}),
+          ...(ca === null
+            ? {}
+            : {
+                configs: [...(service.configs ?? []), { source: "chiefbot-ca", target: caFiles.ca }, { source: "chiefbot-ca-bundle", target: caFiles.bundle }],
+              }),
+          ...(build && image?.context !== undefined
+            ? {
+                build: {
+                  ...build,
+                  context: image.context,
+                  ...(Object.keys(args).length > 0 ? { args: { ...build.args, ...args } } : {}),
+                  ...(ca === null ? {} : { secrets: [...(build.secrets ?? []), { source: "chiefbot-ca" }] }),
+                },
+              }
+            : {}),
         },
       ],
     ];
   });
-  return { ...model, services: Object.fromEntries(stack) };
+  return {
+    ...model,
+    services: Object.fromEntries(stack),
+    ...(ca === null
+      ? {}
+      : {
+          secrets: { ...model.secrets, "chiefbot-ca": { file: caFile } },
+          configs: { ...model.configs, "chiefbot-ca": { content: ca }, "chiefbot-ca-bundle": { content: caBundle(ca) } },
+        }),
+  };
 }
 
 // The commit `ref` names in git ls-remote's output: a branch first, as git clone
@@ -289,11 +365,11 @@ function stageLog(hide: SecretRedactor) {
   return { push: (chunk: string) => void keep(stream.push(chunk)), end: () => keep(stream.end()) };
 }
 
-// Runs `command` with `env` alone, killed when `signal` aborts, its output
+// Runs `command` with `env` alone (in `cwd`, if given), killed when `signal` aborts, its output
 // (stdout and stderr together) to `out` as it comes: its exit code and the end
 // of its output, for control to read, never to show.
-async function run(command: string[], env: Record<string, string>, signal: AbortSignal, out: (text: string) => void = () => {}) {
-  const proc = Bun.spawn(["sh", "-c", 'exec "$@" 2>&1', "sh", ...command], { env, stdin: "ignore", stdout: "pipe", stderr: "ignore", signal });
+async function run(command: string[], env: Record<string, string>, signal: AbortSignal, out: (text: string) => void = () => {}, cwd?: string) {
+  const proc = Bun.spawn(["sh", "-c", 'exec "$@" 2>&1', "sh", ...command], { env, stdin: "ignore", stdout: "pipe", stderr: "ignore", signal, ...(cwd === undefined ? {} : { cwd }) });
   const decoder = new TextDecoder();
   let output = "";
   for await (const chunk of proc.stdout) {
