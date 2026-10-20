@@ -2,18 +2,22 @@ import {
   HEALTH_INTERVAL_MS,
   HEALTH_KEEP_MS,
   HealthReport,
+  ServiceHealth,
   worstStatus,
   type ConnectionHealth,
   type HealthItem,
   type HealthStatus,
+  type Service,
 } from "@chiefbot/contracts";
-import { ActivityIcon, CircleCheckIcon, CircleQuestionMarkIcon, CircleXIcon, ExternalLinkIcon, MessageSquareIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
+import { ActivityIcon, ExternalLinkIcon, MessageSquareIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ErrorText, Muted, PaneBody, PaneHeader } from "./Pane.tsx";
+import { ServiceDialog, ServicesCard, type ServiceActions } from "./Services.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Card } from "./components/ui/card.tsx";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "./components/ui/empty.tsx";
+import { ago, badgeVariant, barColor, clock, StatusIcon, statusLabel } from "./healthStatus.tsx";
 import { cn, listOf } from "./lib/utils.ts";
 
 // The screen reloads control's kept checks this often while it is open.
@@ -22,12 +26,18 @@ const RELOAD_MS = 60_000;
 // Health, from its icon beside the gear at the sidebar's bottom left, after T3 Code's
 // usage page (apps/web/src/components/usage, MIT): one overall status, then a card per
 // connection control checks, each with its latest status, a 24-hour status bar and the
-// problems it found. Ask my bot opens a bot's chat with the problem written in.
-// Control runs the checks (read-only, no AI), every 5 minutes and on Refresh.
+// problems it found, then the person's own services (Services.tsx). Ask my bot opens a
+// bot's chat with the problem written in. Control runs the checks (read-only, no AI):
+// connections every 5 minutes and on Refresh; services when the screen opens, on
+// Refresh and on a service's Check now.
 export function Health({ onConnectApps, onAsk }: { onConnectApps: () => void; onAsk: ((text: string) => void) | null }) {
   const [report, setReport] = useState<HealthReport | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [refreshing, setRefreshing] = useState(false);
+  // The services being checked by their own Check now.
+  const [checking, setChecking] = useState<ReadonlySet<string>>(new Set());
+  // The Add/Edit service dialog, with the service it edits (null: a new one).
+  const [dialog, setDialog] = useState<{ service: Service | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const show = (next: unknown) => {
@@ -35,12 +45,22 @@ export function Health({ onConnectApps, onAsk }: { onConnectApps: () => void; on
     setNow(Date.now());
     setError(null);
   };
+  const showServices = (next: unknown) => {
+    const services = ServiceHealth.array().parse(next);
+    setReport((current) => current && { ...current, services });
+    setNow(Date.now());
+  };
   const failed = (caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught));
+  const load = () => window.chiefbot.health.get().then(show, failed);
 
+  // Opening the screen shows the kept checks, then checks the services.
   useEffect(() => {
-    const load = () => void window.chiefbot.health.get().then(show, failed);
-    load();
-    const timer = setInterval(load, RELOAD_MS);
+    setRefreshing(true);
+    void load()
+      .then(() => window.chiefbot.health.checkServices())
+      .then(showServices, failed)
+      .finally(() => setRefreshing(false));
+    const timer = setInterval(() => void load(), RELOAD_MS);
     return () => clearInterval(timer);
   }, []);
 
@@ -52,10 +72,36 @@ export function Health({ onConnectApps, onAsk }: { onConnectApps: () => void; on
       .finally(() => setRefreshing(false));
   };
 
+  const checkService = (id: string) => {
+    setChecking((current) => new Set(current).add(id));
+    void window.chiefbot.health
+      .checkService(id)
+      .then(showServices, failed)
+      .finally(() =>
+        setChecking((current) => {
+          const next = new Set(current);
+          next.delete(id);
+          return next;
+        }),
+      );
+  };
+
+  const actions: ServiceActions = {
+    checking: ({ id }) => refreshing || checking.has(id),
+    onAdd: () => setDialog({ service: null }),
+    onEdit: (service) => setDialog({ service }),
+    onRemove: ({ id, name }) =>
+      void window.chiefbot.health.removeService(id, name).then(async (removed) => {
+        if (removed) await load();
+      }, failed),
+    onCheck: ({ id }) => checkService(id),
+    onAsk,
+  };
+
   return (
     <>
-      <PaneHeader icon={<ActivityIcon className="size-4 text-muted-foreground" />} title="Health" note="Read-only checks of your connections, every 5 minutes">
-        {report !== null && report.connections.length > 0 && (
+      <PaneHeader icon={<ActivityIcon className="size-4 text-muted-foreground" />} title="Health" note="Read-only checks: connections every 5 minutes, services when you open Health and on Refresh">
+        {report !== null && (report.connections.length > 0 || report.services.length > 0) && (
           <Button size="icon-xs" variant="ghost" aria-label="Check again now" title="Check again now" aria-busy={refreshing} disabled={refreshing} onClick={refresh}>
             <RefreshCwIcon className={cn(refreshing && "motion-safe:animate-spin")} />
           </Button>
@@ -64,7 +110,17 @@ export function Health({ onConnectApps, onAsk }: { onConnectApps: () => void; on
       {report === null ? (
         <PaneBody>{error ? <ErrorText message={error} /> : <Muted>Loading…</Muted>}</PaneBody>
       ) : (
-        <HealthView report={report} now={now} error={error} onConnectApps={onConnectApps} onAsk={onAsk} />
+        <HealthView report={report} now={now} error={error} onConnectApps={onConnectApps} onAsk={onAsk} services={actions} />
+      )}
+      {dialog && (
+        <ServiceDialog
+          service={dialog.service}
+          onClose={() => setDialog(null)}
+          onSaved={({ id }) => {
+            setDialog(null);
+            void load().then(() => checkService(id));
+          }}
+        />
       )}
     </>
   );
@@ -77,14 +133,16 @@ export function HealthView({
   error = null,
   onConnectApps,
   onAsk,
+  services,
 }: {
   report: HealthReport;
   now: number;
   error?: string | null;
   onConnectApps: () => void;
   onAsk: ((text: string) => void) | null;
+  services: ServiceActions;
 }) {
-  if (report.connections.length === 0) {
+  if (report.connections.length === 0 && report.services.length === 0) {
     return (
       <Empty>
         <EmptyHeader>
@@ -93,27 +151,36 @@ export function HealthView({
           </EmptyMedia>
           <EmptyTitle>Nothing to check yet</EmptyTitle>
           <EmptyDescription>
-            Health checks {listOf(report.checkable)} for you every 5 minutes, without asking your bots. Turn one on under Connect apps.
+            Health checks {listOf(report.checkable)} for you every 5 minutes, without asking your bots, and your own services when you open it. Turn a
+            connection on under Connect apps, or add a service.
           </EmptyDescription>
         </EmptyHeader>
-        <Button size="sm" variant="outline" onClick={onConnectApps}>
-          Open Connect apps
-        </Button>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" onClick={onConnectApps}>
+            Open Connect apps
+          </Button>
+          <Button size="sm" variant="outline" onClick={services.onAdd}>
+            <PlusIcon />
+            Add service
+          </Button>
+        </div>
       </Empty>
     );
   }
+  // Every connection's latest check and every service environment's, for the headline.
+  const latest = [...report.connections.map(({ latest }) => latest), ...report.services.flatMap(({ environments }) => environments.map(({ latest }) => latest))];
+  const subject = listOf([...(report.connections.length > 0 ? ["connections"] : []), ...(report.services.length > 0 ? ["services"] : [])]);
   return (
     <PaneBody>
-      <Overall connections={report.connections} now={now} />
+      <Overall latest={latest} subject={subject} now={now} />
       <ErrorText message={error} />
       {report.connections.map((connection) => (
         <ConnectionCard key={connection.name} connection={connection} now={now} onAsk={onAsk} />
       ))}
+      <ServicesCard services={report.services} now={now} actions={services} />
     </PaneBody>
   );
 }
-
-const statusLabel: Record<HealthStatus, string> = { ok: "Healthy", degraded: "Degraded", down: "Down", unknown: "Unknown" };
 
 const headline: Record<HealthStatus, string> = {
   ok: "Everything is healthy",
@@ -122,33 +189,12 @@ const headline: Record<HealthStatus, string> = {
   unknown: "Some checks couldn't run",
 };
 
-const badgeVariant = { ok: "success", degraded: "warning", down: "error", unknown: "outline" } as const satisfies Record<HealthStatus, string>;
-
-// The bar's colour per status; the track behind it (no check) is muted.
-const barColor: Record<HealthStatus, string> = {
-  ok: "bg-success",
-  degraded: "bg-warning",
-  down: "bg-destructive",
-  unknown: "bg-muted-foreground/45",
-};
-
-const statusIcon = {
-  ok: [CircleCheckIcon, "text-success"],
-  degraded: [TriangleAlertIcon, "text-warning"],
-  down: [CircleXIcon, "text-destructive"],
-  unknown: [CircleQuestionMarkIcon, "text-muted-foreground"],
-} as const satisfies Record<HealthStatus, readonly [unknown, string]>;
-
-function StatusIcon({ status, className }: { status: HealthStatus; className?: string }) {
-  const [Icon, color] = statusIcon[status];
-  return <Icon aria-hidden className={cn("shrink-0", color, className)} />;
-}
-
-// The worst latest status of all, big, with how many are in each status. While
-// a connection is not checked yet, nothing better than "Checking" shows.
-function Overall({ connections, now }: { connections: ConnectionHealth[]; now: number }) {
-  const latest = connections.flatMap(({ latest }) => (latest ? [latest] : []));
-  const waiting = connections.length - latest.length;
+// The worst latest status of every connection and service environment, big, with
+// how many are in each status. While one is not checked yet, nothing better than
+// "Checking" shows. `subject` names what is checked: "connections and services".
+function Overall({ latest: all, subject, now }: { latest: Array<{ status: HealthStatus; at: number } | null>; subject: string; now: number }) {
+  const latest = all.filter((check) => check !== null);
+  const waiting = all.length - latest.length;
   const worst = latest.length > 0 ? worstStatus(latest.map(({ status }) => status)) : null;
   const status = waiting > 0 && (worst === null || worst === "ok") ? null : worst;
   const counts = (["down", "degraded", "unknown", "ok"] as const)
@@ -161,7 +207,7 @@ function Overall({ connections, now }: { connections: ConnectionHealth[]; now: n
     <section className="flex items-center gap-4 px-1">
       {status ? <StatusIcon status={status} className="size-9" /> : <RefreshCwIcon aria-hidden className="size-9 text-muted-foreground" />}
       <div className="flex min-w-0 flex-col gap-1">
-        <h2 className="font-semibold text-3xl text-foreground tracking-tight">{status ? headline[status] : "Checking your connections"}</h2>
+        <h2 className="font-semibold text-3xl text-foreground tracking-tight">{status ? headline[status] : `Checking your ${subject}`}</h2>
         <p className="text-muted-foreground text-xs tabular-nums">{notes.join(" · ")}</p>
       </div>
     </section>
@@ -279,12 +325,3 @@ export function timeline(history: ConnectionHealth["history"], now: number): Seg
   return segments;
 }
 
-// "just now", "4 min ago", "2 h ago".
-export function ago(at: number, now: number) {
-  const minutes = Math.floor((now - at) / 60_000);
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  return `${Math.floor(minutes / 60)} h ago`;
-}
-
-const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });

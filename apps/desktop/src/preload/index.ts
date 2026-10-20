@@ -3,7 +3,9 @@ import type {
   AttachmentUpload,
   BotAvatar,
   ConnectorInput,
+  EnvironmentInput,
   RoutineInput,
+  ServiceInput,
   SetBotModelRequest,
   SubscriptionInput,
   Theme,
@@ -111,11 +113,20 @@ const api = {
     disconnect: (name: string): Promise<void> => ipcRenderer.invoke("connections:disconnect", name),
     calls: (botId: string): Promise<unknown> => ipcRenderer.invoke("connections:calls", botId),
   },
-  // Control's read-only health checks of the user's connections (Health).
+  // Control's read-only health checks of the user's connections and own services (Health).
   health: {
     get: (): Promise<unknown> => ipcRenderer.invoke("health:get"),
-    // Checks every connection again now; resolves with the report once done.
+    // Checks every connection and service again now; resolves with the report once done.
     refresh: (): Promise<unknown> => ipcRenderer.invoke("health:refresh"),
+    // Checks every service (all, or one); resolves with every service once done.
+    checkServices: (): Promise<unknown> => ipcRenderer.invoke("health:check-services"),
+    checkService: (id: string): Promise<unknown> => ipcRenderer.invoke("health:check-service", id),
+    addService: (input: ServiceInput): Promise<unknown> => ipcRenderer.invoke("health:add-service", input),
+    updateService: (id: string, input: ServiceInput): Promise<unknown> => ipcRenderer.invoke("health:update-service", id, input),
+    // Asks first; resolves true once removed.
+    removeService: (id: string, name: string): Promise<boolean> => ipcRenderer.invoke("health:remove-service", id, name),
+    // Checks one environment of the unsaved form; resolves with its ServiceResult.
+    testEnvironment: (input: EnvironmentInput): Promise<unknown> => ipcRenderer.invoke("health:test-environment", input),
   },
   connectors: {
     list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("connectors:list", workspaceId),
