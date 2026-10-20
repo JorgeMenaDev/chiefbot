@@ -27,11 +27,12 @@ export function copilotSdk({ workingDirectory, gitConfig }: { workingDirectory: 
 // A bot's or task worker's session config: the runtime's full tool set, its
 // custom tools, its connectors' MCP servers and its turn's skill roots (a bot's
 // connections), always named, so a resumed session keeps none of an earlier
-// turn's. No ambient config discovery. No model here: the worker sets the bot's
-// model before each turn that needs it.
+// turn's. Its instructions follow the SDK's own system message. No ambient
+// config discovery. No model here: the worker sets the bot's model before each
+// turn that needs it.
 export const workerSessionConfig =
   (workingDirectory: string) =>
-  ({ onPermissionRequest, tools, mcpServers, onMcpCall, skillDirectories = [] }: Parameters<Copilot["openSession"]>[0]) => ({
+  ({ onPermissionRequest, tools, instructions, mcpServers, onMcpCall, skillDirectories = [] }: Parameters<Copilot["openSession"]>[0]) => ({
     workingDirectory,
     streaming: true,
     onPermissionRequest,
@@ -39,6 +40,7 @@ export const workerSessionConfig =
     enableSkills: true,
     skillDirectories,
     ...connectorConfig(mcpServers, onMcpCall),
+    ...appended(instructions),
   });
 
 // Tokens the agent's shell is not handed: a GitHub token would let gh or curl
@@ -74,9 +76,13 @@ export function coordinatorSessionConfig({
     streaming: true,
     availableTools: [...tools.map(({ name }) => `custom:${name}`), ...(hasMcp ? ["mcp:*"] : [])],
     ...connectorConfig(mcpServers, onMcpCall),
-    ...(instructions === undefined ? {} : { systemMessage: { mode: "append" as const, content: instructions } }),
+    ...appended(instructions),
   };
 }
+
+// A session's `instructions`, after the SDK's own system message.
+const appended = (instructions: string | undefined) =>
+  instructions === undefined ? {} : { systemMessage: { mode: "append" as const, content: instructions } };
 
 // A session's connectors: their MCP servers, and `onMcpCall` before each of their tool calls.
 function connectorConfig(mcpServers: Record<string, MCPServerConfig> = {}, onMcpCall?: (serverName: string, toolName: string) => Promise<void>) {
