@@ -346,6 +346,7 @@ export function startControl({
     payerOf,
     computers,
     context,
+    secrets,
     workers: taskWorkers,
     approvals,
     githubApiUrl,

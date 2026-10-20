@@ -1,27 +1,164 @@
 import { z } from "zod";
 import { ChatItem, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
-import { AgentConnector } from "./connectors.ts";
+import { AgentConnector, ConnectorName } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
 import { RepoFullName } from "./repos.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
-// The repo's chiefbot.project.yaml, at its root on the default branch. Control
-// reads it when the project is created. Unknown keys are errors, so a typo is
-// caught instead of ignored.
-//   connectors  the connectors (MCP servers) the project's agents need, by name
-//   commands    how to build and test the repo, which the coordinator and its workers are told
+// A file or folder inside the repo, relative to its root: no leading slash and no "." or ".." part.
+const RepoPath = z
+  .string()
+  .trim()
+  .min(1)
+  .max(300)
+  .refine((path) => path.replace(/\/$/, "").split("/").every((part) => part !== "" && part !== "." && part !== ".."), "expected a path inside the repo, like docs/agents.md");
+
+// A project secret's name: the environment variable a worker gets it as.
+export const SecretName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,99}$/, "expected an environment variable name, like API_KEY");
+export type SecretName = z.infer<typeof SecretName>;
+
+const Command = z.string().trim().min(1).max(2000);
+//   setup   runs in a worker's clone before its agent starts
+//   build, test  how to build and test the repo
+//   dev     starts the app, and devUrl is where it then answers
+export const ProjectCommands = z.strictObject({
+  setup: Command.optional(),
+  build: Command.optional(),
+  test: Command.optional(),
+  dev: Command.optional(),
+  devUrl: z.url({ protocol: /^https?$/ }).optional(),
+});
+export type ProjectCommands = z.infer<typeof ProjectCommands>;
+
+// A stdio MCP server that runs inside the project's workers only.
+export const ProjectMcpServer = z.strictObject({ command: z.string().trim().min(1).max(500), args: z.array(z.string().max(2000)).max(50).default([]) });
+
+// The repo's chiefbot.project.yaml, at its root on the default branch, and the
+// project's settings in the app: the same keys, every one optional. Unknown keys
+// are errors, so a typo is caught instead of ignored.
+//   instructions  files the agents read besides AGENTS.md
+//   commands      the repo's commands (ProjectCommands)
+//   skills        folders of skills the agents load
+//   verify        the skill a verifier follows
+//   connectors    the connectors (MCP servers) of the workspace the project's agents need, by name
+//   mcp           stdio MCP servers, by name, that run inside workers only
+//   secrets       the names of the project's secrets; members set their values in the app
+//   workers.max   how many worker computers the project runs at once
 export const ProjectFile = z.strictObject({
-  connectors: z.array(z.string().trim().min(1)).default([]),
-  commands: z.strictObject({ build: z.string().trim().min(1).optional(), test: z.string().trim().min(1).optional() }).default({}),
+  instructions: z.array(RepoPath).max(50).optional(),
+  commands: ProjectCommands.optional(),
+  skills: z.array(RepoPath).max(50).optional(),
+  verify: z.string().trim().min(1).max(100).optional(),
+  connectors: z.array(z.string().trim().min(1)).optional(),
+  mcp: z.record(ConnectorName, ProjectMcpServer).optional(),
+  secrets: z.array(SecretName).max(50).optional(),
+  workers: z.strictObject({ max: z.int().min(1).max(10).optional() }).optional(),
 });
 export type ProjectFile = z.infer<typeof ProjectFile>;
 
 // The file name control reads at the repo's root.
 export const projectFileName = "chiefbot.project.yaml";
 
+// What control found at the repo's root when the project was made. A project
+// works without a file, or with an invalid one: it then uses its settings alone.
+export const ProjectFileState = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("found"), file: ProjectFile }),
+  z.object({ status: z.literal("missing") }),
+  z.object({ status: z.literal("invalid"), error: z.string() }),
+]);
+export type ProjectFileState = z.infer<typeof ProjectFileState>;
+
+export const DEFAULT_WORKERS_MAX = 2;
+
+// The config a project's agents use: the settings over the file, then the defaults.
+export const ProjectConfig = z.object({
+  instructions: z.array(RepoPath).default([]),
+  commands: ProjectCommands.default({}),
+  skills: z.array(RepoPath).default([]),
+  verify: z.string().optional(),
+  connectors: z.array(z.string()).default([]),
+  mcp: z.record(ConnectorName, ProjectMcpServer).default({}),
+  secrets: z.array(SecretName).default([]),
+  workers: z.object({ max: z.int().default(DEFAULT_WORKERS_MAX) }).default({ max: DEFAULT_WORKERS_MAX }),
+});
+export type ProjectConfig = z.infer<typeof ProjectConfig>;
+
+// Each key the settings and the file set, and where the config takes it from. A
+// key neither sets is absent: its default applies.
+export const ConfigKey = z.enum([
+  "instructions",
+  "commands.setup",
+  "commands.build",
+  "commands.test",
+  "commands.dev",
+  "commands.devUrl",
+  "skills",
+  "verify",
+  "connectors",
+  "mcp",
+  "secrets",
+  "workers.max",
+]);
+export type ConfigKey = z.infer<typeof ConfigKey>;
+export const ConfigSources = z.partialRecord(ConfigKey, z.enum(["file", "settings"]));
+export type ConfigSources = z.infer<typeof ConfigSources>;
+
+// The config from the repo's file (null when it has none, or an invalid one) and
+// the settings: each key from the settings when they set it, else from the file.
+// `commands` and `workers` merge key by key; any other key is taken whole, so
+// `connectors: []` in the settings clears the file's list.
+export function effectiveConfig(file: ProjectFile | null, settings: ProjectFile): { config: ProjectConfig; sources: ConfigSources } {
+  const sources: ConfigSources = {};
+  const pick = <T>(key: ConfigKey, fromSettings: T | undefined, fromFile: T | undefined) => {
+    if (fromSettings !== undefined) sources[key] = "settings";
+    else if (fromFile !== undefined) sources[key] = "file";
+    return fromSettings ?? fromFile;
+  };
+  const command = (name: keyof ProjectCommands) => {
+    const line = pick(`commands.${name}`, settings.commands?.[name], file?.commands?.[name]);
+    return line === undefined ? {} : { [name]: line };
+  };
+  const config = ProjectConfig.parse({
+    instructions: pick("instructions", settings.instructions, file?.instructions),
+    commands: { ...command("setup"), ...command("build"), ...command("test"), ...command("dev"), ...command("devUrl") },
+    skills: pick("skills", settings.skills, file?.skills),
+    verify: pick("verify", settings.verify, file?.verify),
+    connectors: pick("connectors", settings.connectors, file?.connectors),
+    mcp: pick("mcp", settings.mcp, file?.mcp),
+    secrets: pick("secrets", settings.secrets, file?.secrets),
+    workers: { max: pick("workers.max", settings.workers?.max, file?.workers?.max) },
+  });
+  return { config, sources };
+}
+
 // A project as a member of its workspace sees it. `name` is the repo's name.
-export const Project = z.object({ id: ProjectId, workspaceId: WorkspaceId, name: z.string(), repo: RepoFullName, file: ProjectFile });
+// `settings` is the YAML members saved in the app (ProjectFile's keys); `config`
+// and `sources` are effectiveConfig of the file and the settings.
+export const Project = z.object({
+  id: ProjectId,
+  workspaceId: WorkspaceId,
+  name: z.string(),
+  repo: RepoFullName,
+  file: ProjectFileState,
+  settings: z.string(),
+  config: ProjectConfig,
+  sources: ConfigSources,
+});
 export type Project = z.infer<typeof Project>;
+
+// Body of PUT /projects/:id/settings: the settings as YAML, ProjectFile's keys.
+export const ProjectSettingsRequest = z.object({ text: z.string().max(20_000) });
+export type ProjectSettingsRequest = z.infer<typeof ProjectSettingsRequest>;
+
+// One of the project's secrets as members see it: never its value. `declared`
+// when the config lists it; `set` when control holds a value for it. A value
+// whose name the config no longer lists stays until a member clears it.
+export const ProjectSecret = z.object({ name: SecretName, declared: z.boolean(), set: z.boolean() });
+export type ProjectSecret = z.infer<typeof ProjectSecret>;
+
+// Body of PUT /projects/:id/secrets/:name: the secret's new value.
+export const SetProjectSecretRequest = z.object({ value: z.string().min(1).max(16_384) });
+export type SetProjectSecretRequest = z.infer<typeof SetProjectSecretRequest>;
 
 // Body of POST /workspaces/:id/projects.
 export const CreateProjectRequest = z.object({ repo: RepoFullName });

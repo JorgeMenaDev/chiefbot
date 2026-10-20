@@ -1,9 +1,10 @@
-import { afterEach, expect, test } from "bun:test";
-import { ApiError, ClientEvent, ContextFile, Project, Task, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { ApiError, ClientEvent, ContextFile, Project, ProjectSecret, Task, Workspace, WorkspaceInvite, type ChatEvent, type ProjectFileState } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
+import type { SecretStore } from "./secrets/secretStore.ts";
 
 afterEach(cleanUp);
 
@@ -38,11 +39,15 @@ test("a member creates a project from a repo: control reads its project file, an
 
   expect(res.status).toBe(201);
   const project = Project.parse(await res.json());
+  const file = { connectors: ["github", "jira"], commands: { build: "bun run build", test: "bun test" } };
   expect(project).toMatchObject({
     workspaceId: workspace.id,
     name: "shop",
     repo: "octo-org/shop",
-    file: { connectors: ["github", "jira"], commands: { build: "bun run build", test: "bun test" } },
+    file: { status: "found", file },
+    settings: "",
+    config: file,
+    sources: { connectors: "file", "commands.build": "file", "commands.test": "file" },
   });
   expect(await computers.provider.status(project.id)).toBe("running");
   // Every member sees it; anyone else gets 404.
@@ -54,25 +59,39 @@ test("a member creates a project from a repo: control reads its project file, an
   expect([(await createProject()).status, (await owner.api("GET", `/workspaces/${workspace.id}/projects`)).status]).toEqual([409, 200]);
 });
 
-test("an invalid project file gives a clear error, and no project is made", async () => {
-  const cases: Array<[Record<string, string>, string]> = [
-    [{ "README.md": "# Shop" }, "No chiefbot.project.yaml at the root of octo-org/shop"],
-    [{ "chiefbot.project.yaml": "commands: [unclosed" }, "chiefbot.project.yaml is not valid YAML"],
-    [{ "chiefbot.project.yaml": "commands:\n  test: 42\n" }, "commands.test: Invalid input: expected string, received number"],
-    [{ "chiefbot.project.yaml": "conectors: [github]\n" }, 'Unrecognized key: "conectors"'],
+test("a repo with no project file, or an invalid one, still makes a project, which says so and uses its settings alone", async () => {
+  const cases: Array<[Record<string, string>, ProjectFileState["status"], string]> = [
+    [{ "README.md": "# Shop" }, "missing", ""],
+    [{ "chiefbot.project.yaml": "commands: [unclosed" }, "invalid", "chiefbot.project.yaml: not valid YAML"],
+    [{ "chiefbot.project.yaml": "commands:\n  test: 42\n" }, "invalid", "commands.test: Invalid input: expected string, received number"],
+    [{ "chiefbot.project.yaml": "conectors: [github]\n" }, "invalid", 'Unrecognized key: "conectors"'],
   ];
-  for (const [files, message] of cases) {
-    const { owner, workspace, createProject, computers } = await team(files);
+  for (const [files, status, error] of cases) {
+    const { createProject, computers } = await team(files);
 
     const res = await createProject();
 
-    const body = ApiError.parse(await res.json());
-    expect([res.status, body.error]).toEqual([400, "invalid_project_file"]);
-    expect(body.message).toContain(message);
-    expect(await (await owner.api("GET", `/workspaces/${workspace.id}/projects`)).json()).toEqual([]);
-    expect(computers.computers.size).toBe(0);
+    expect(res.status).toBe(201);
+    const project = Project.parse(await res.json());
+    expect(project.file.status).toBe(status);
+    expect(project.file.status === "invalid" ? project.file.error : "").toContain(error);
+    expect([project.config.connectors, project.config.commands, project.sources]).toEqual([[], {}, {}]);
+    expect(await computers.provider.status(project.id)).toBe("running");
     cleanUp();
   }
+});
+
+test("a repo the member cannot see makes no project", async () => {
+  const { createProject, computers, github } = await team();
+  github.createRepo("octo-org/hidden", { "README.md": "# Hidden" }, { installed: false });
+
+  for (const repo of ["octo-org/nowhere", "octo-org/hidden"]) {
+    const res = await createProject(repo);
+
+    const body = ApiError.parse(await res.json());
+    expect([res.status, body.error, body.message]).toEqual([404, "repo_not_found", `${repo} was not found, or your GitHub account cannot see it.`]);
+  }
+  expect(computers.computers.size).toBe(0);
 });
 
 test("only the workspace owner deletes a project, and its computer goes with it", async () => {
@@ -305,4 +324,110 @@ test("a coordinator's computer stops once idle, not while a turn runs, and the n
   expect(replies(await chat.until(doneCount(2)))).toEqual(["Done.", "You said: wake up"]);
   expect(await computers.provider.status(project.id)).toBe("running");
   expect(computers.destroyed).toEqual([]);
+});
+
+test("any member edits the settings: the config takes them key by key, names each key's source, and the coordinator's next turn uses it", async () => {
+  const { owner, guest, project, copilot, signIn } = await teamProject();
+  const chat = guest.watchProjectChat(project.id);
+  await ask(guest, project, "hi");
+  await chat.until(doneCount(1));
+
+  const text = "# Ours, not the repo's\ncommands:\n  setup: bun install\n  test: bun run test:unit\nconnectors: []\n";
+  const res = await guest.api("PUT", `/projects/${project.id}/settings`, { text });
+
+  expect(res.status).toBe(200);
+  const saved = Project.parse(await res.json());
+  expect(saved).toMatchObject({
+    settings: text,
+    config: { connectors: [], commands: { setup: "bun install", build: "bun run build", test: "bun run test:unit" } },
+    sources: { connectors: "settings", "commands.setup": "settings", "commands.build": "file", "commands.test": "settings" },
+  });
+  expect(Project.parse(await (await owner.api("GET", `/projects/${project.id}`)).json())).toEqual(saved);
+  await ask(guest, project, "How do I set it up?");
+  await chat.until(doneCount(2));
+  expect(copilot.instructions.at(-1)).toContain("- setup: bun install");
+
+  // Settings that are not valid change nothing, and say what is wrong.
+  const refused = await guest.api("PUT", `/projects/${project.id}/settings`, { text: "workers:\n  max: 0\n" });
+  const body = ApiError.parse(await refused.json());
+  expect([refused.status, body.error]).toEqual([400, "invalid_settings"]);
+  expect(body.message).toContain("workers.max");
+  expect(Project.parse(await (await owner.api("GET", `/projects/${project.id}`)).json())).toEqual(saved);
+  // Anyone outside the workspace gets 404.
+  const stranger = await signIn({ id: 6161, login: "octo-stranger", copilot: null });
+  expect((await stranger.api("PUT", `/projects/${project.id}/settings`, { text: "" })).status).toBe(404);
+});
+
+test("a member sets, replaces and clears a declared secret, and its value never comes back in a response, event or log", async () => {
+  const { url, owner, guest, project, signIn } = await teamProject();
+  const values = ["sk-first-value", "sk-second-value"];
+  // Every response body, /events message and log line of the test.
+  const seen: string[] = [];
+  const call = async (member: TestUser, method: string, path: string, body?: unknown) => {
+    const res = await member.api(method, `/projects/${project.id}${path}`, body);
+    seen.push(await res.clone().text());
+    return res;
+  };
+  const events = new WebSocket(`${url.replace("http", "ws")}/events`, { headers: owner.auth });
+  atCleanUp(() => events.close());
+  events.onmessage = (message) => seen.push(String(message.data));
+  const logs = (["log", "warn", "error"] as const).map((method) => spyOn(console, method));
+  atCleanUp(() => logs.forEach((log) => log.mockRestore()));
+  const secrets = async () => ProjectSecret.array().parse(await (await call(guest, "GET", "/secrets")).json());
+
+  await call(guest, "PUT", "/settings", { text: "secrets: [API_KEY, DATABASE_URL]\n" });
+  expect(await secrets()).toEqual([
+    { name: "API_KEY", declared: true, set: false },
+    { name: "DATABASE_URL", declared: true, set: false },
+  ]);
+  expect((await call(guest, "PUT", "/secrets/API_KEY", { value: values[0] })).status).toBe(204);
+  expect((await call(owner, "PUT", "/secrets/API_KEY", { value: values[1] })).status).toBe(204);
+  expect(await secrets()).toEqual([
+    { name: "API_KEY", declared: true, set: true },
+    { name: "DATABASE_URL", declared: true, set: false },
+  ]);
+
+  // Only a name the config declares takes a value.
+  for (const [name, body] of [["OTHER_KEY", { value: "x" }], ["API_KEY", { value: "" }]] as const) {
+    const refused = await call(guest, "PUT", `/secrets/${name}`, body);
+    expect([refused.status, ApiError.parse(await refused.json()).error]).toEqual([400, "invalid_secret"]);
+  }
+  // A value whose name the config drops stays, undeclared, until a member clears it.
+  await call(owner, "PUT", "/settings", { text: "secrets: [DATABASE_URL]\n" });
+  expect(await secrets()).toEqual([
+    { name: "DATABASE_URL", declared: true, set: false },
+    { name: "API_KEY", declared: false, set: true },
+  ]);
+  expect((await call(owner, "DELETE", "/secrets/API_KEY")).status).toBe(204);
+  expect(await secrets()).toEqual([{ name: "DATABASE_URL", declared: true, set: false }]);
+  await call(owner, "GET", "");
+  await call(owner, "GET", "/tasks");
+
+  // Nobody outside the workspace sees or sets one.
+  const stranger = await signIn({ id: 6161, login: "octo-stranger", copilot: null });
+  expect([(await call(stranger, "GET", "/secrets")).status, (await call(stranger, "PUT", "/secrets/DATABASE_URL", { value: "x" })).status]).toEqual([404, 404]);
+  const logged = logs.flatMap((log) => log.mock.calls.map((args) => args.map(String).join(" ")));
+  for (const value of values) expect([...seen, ...logged].filter((text) => text.includes(value))).toEqual([]);
+});
+
+test("deleting a project deletes its settings and its secrets' values", async () => {
+  const held = new Map<string, string>();
+  const secrets: SecretStore = {
+    get: async (name) => held.get(name) ?? null,
+    put: async (name, value) => void held.set(name, value),
+    delete: async (name) => void held.delete(name),
+  };
+  const { owner, project, createProject } = await teamProject({ secrets });
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "secrets: [API_KEY, DATABASE_URL]\n" });
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "sk-api-key" });
+  await owner.api("PUT", `/projects/${project.id}/secrets/DATABASE_URL`, { value: "postgres://dev" });
+  expect([...held.values()]).toEqual(expect.arrayContaining(["sk-api-key", "postgres://dev"]));
+
+  expect((await owner.api("DELETE", `/projects/${project.id}`)).status).toBe(204);
+
+  expect([...held.values()].filter((value) => value === "sk-api-key" || value === "postgres://dev")).toEqual([]);
+  // A new project of the same repo starts with no settings and no secrets.
+  const again = Project.parse(await (await createProject()).json());
+  expect(again.settings).toBe("");
+  expect(await (await owner.api("GET", `/projects/${again.id}/secrets`)).json()).toEqual([]);
 });

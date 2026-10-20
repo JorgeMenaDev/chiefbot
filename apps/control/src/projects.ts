@@ -3,7 +3,10 @@ import {
   CoordinatorToControl,
   CoordinatorToolCall,
   CreateProjectRequest,
+  ProjectSettingsRequest,
+  SecretName,
   SendMessageRequest,
+  SetProjectSecretRequest,
   type AgentConnector,
   type ApprovalKind,
   type ChatEvent,
@@ -14,6 +17,7 @@ import {
   type Project,
   type ProjectId,
   type ProjectMember,
+  type ProjectSecret,
   type SendMessageResponse,
   type Task,
   type User,
@@ -24,8 +28,9 @@ import type { ApprovalOutcome, controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { ContextStore } from "./contextStore.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
-import { readProjectFile } from "./projectFile.ts";
+import { parseProjectFile, readProjectFile } from "./projectFile.ts";
 import type { repoAccess } from "./repos.ts";
+import type { SecretStore } from "./secrets/secretStore.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import type { taskWorkerHost } from "./taskWorkers.ts";
@@ -46,6 +51,8 @@ export type ProjectHostOptions = {
   payerOf: ReturnType<typeof copilotIdentity>;
   computers: ComputerProvider;
   context: ContextStore;
+  // Where the values of the projects' secrets live.
+  secrets: SecretStore;
   // The projects' task workers (taskWorkers.ts): the coordinator's worker tools.
   workers: ReturnType<typeof taskWorkerHost>;
   // Approvals control asks for in a coordinator turn (a connector call).
@@ -69,6 +76,9 @@ export type ProjectHostOptions = {
   onActivity: (projectId: ProjectId) => void;
 };
 
+// The SecretStore name of a project secret's value.
+const projectSecretName = (projectId: ProjectId, name: string) => `project-${projectId}-${name}`;
+
 // Projects: a workspace's repos, each with a coordinator on its own computer
 // (from the ComputerProvider), a task ledger and shared context in control,
 // and one chat with the coordinator per member. The project's scheduler runs
@@ -79,12 +89,19 @@ export type ProjectHostOptions = {
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET    /workspaces/:id/projects  → Project[]
 //   POST   /workspaces/:id/projects  body CreateProjectRequest → 201 Project. Control reads the repo's
-//                                    chiefbot.project.yaml through the repo app, if the user may read it (400
-//                                    invalid_project_file says what is wrong; 409 project_exists;
-//                                    403 reauth_needed), then starts the coordinator's computer.
+//                                    chiefbot.project.yaml through the repo app, if the user may read it
+//                                    (404 repo_not_found; 403 reauth_needed; 409 project_exists), then starts
+//                                    the coordinator's computer. No file, or an invalid one, still makes the
+//                                    project: Project.file says so, and the settings alone make its config.
 //   GET    /projects/:id             → Project
 //   DELETE /projects/:id             → 204 (workspace owner only): its computer, its workers' computers,
-//                                    ledger, chats and context go
+//                                    ledger, chats, context, settings and secrets go
+//   PUT    /projects/:id/settings    body ProjectSettingsRequest → Project with the new config (400
+//                                    invalid_settings says what is wrong)
+//   GET    /projects/:id/secrets     → ProjectSecret[]: names, never a value
+//   PUT    /projects/:id/secrets/:name  body SetProjectSecretRequest → 204, for a name the config declares
+//                                    (400 invalid_secret; 503 secrets_unavailable)
+//   DELETE /projects/:id/secrets/:name  → 204: its value goes
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
 //   POST   /projects/:id/approvals/:approvalId  body AnswerApprovalRequest → 204: the member answers
@@ -107,6 +124,7 @@ export function projectHost({
   payerOf,
   computers,
   context,
+  secrets,
   workers,
   approvals,
   githubApiUrl,
@@ -259,6 +277,15 @@ export function projectHost({
     }
   }
 
+  // The project's secrets as members see them: the names its config declares,
+  // then any value left whose name it no longer declares. Never a value.
+  const secretsOf = (project: Project): ProjectSecret[] => {
+    const held = new Set(projects.secretNames(project.id));
+    const declared = project.config.secrets.map((name) => ({ name, declared: true, set: held.has(name) }));
+    const left = [...held].filter((name) => !project.config.secrets.includes(name)).map((name) => ({ name, declared: false, set: true }));
+    return [...declared, ...left];
+  };
+
   const routes = {
     "/workspaces/:id/projects": {
       GET: (req: Bun.BunRequest<"/workspaces/:id/projects">) => {
@@ -276,11 +303,9 @@ export function projectHost({
         const body = CreateProjectRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "invalid_project");
         const access = await repoReadToken(user.id, body.data.repo);
-        if ("error" in access) {
-          return access.error === "reauth_needed" ? apiError(403, "reauth_needed") : apiError(400, "invalid_project_file", access.message);
-        }
+        if ("error" in access) return apiError(access.status, access.error, access.message);
         const file = await readProjectFile(githubApiUrl, access.token, body.data.repo);
-        if ("error" in file) return apiError(400, "invalid_project_file", file.error);
+        if ("refusal" in file) return apiError(file.refusal.status, file.refusal.error, file.refusal.message);
         const projectToken = crypto.randomUUID() + crypto.randomUUID();
         const project = projects.create(workspace.id, body.data.repo, file, projectToken);
         if (project === "exists") return apiError(409, "project_exists");
@@ -302,7 +327,51 @@ export function projectHost({
         await computers.destroy(project.id, { deleteData: true });
         coordinators.get(project.id)?.close();
         await context.remove(project.id);
+        // Declared names too: a value saved just before control stopped may have no record.
+        for (const name of new Set([...projects.secretNames(project.id), ...project.config.secrets])) {
+          await secrets.delete(projectSecretName(project.id, name));
+        }
         projects.delete(project.id);
+        return new Response(null, { status: 204 });
+      }),
+    },
+    // Any member saves the settings; the coordinator gets the new config at once.
+    "/projects/:id/settings": {
+      PUT: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/settings">) => {
+        const body = ProjectSettingsRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_settings", "expected { text }");
+        const settings = parseProjectFile(body.data.text);
+        if ("error" in settings) return apiError(400, "invalid_settings", `Settings: ${settings.error}`);
+        const saved = projects.setSettings(project.id, body.data.text);
+        if (!saved) return apiError(404, "not_found");
+        toCoordinator(project.id, { type: "bound", project: saved });
+        return Response.json(saved satisfies Project);
+      }),
+    },
+    "/projects/:id/secrets": {
+      GET: member((_user, { project }, _req: Bun.BunRequest<"/projects/:id/secrets">) => Response.json(secretsOf(project) satisfies ProjectSecret[])),
+    },
+    // The value goes to the SecretStore only, and never comes back.
+    "/projects/:id/secrets/:name": {
+      PUT: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/secrets/:name">) => {
+        const { name } = req.params;
+        if (!project.config.secrets.includes(name)) return apiError(400, "invalid_secret", `${project.name}'s config declares no secret ${name}.`);
+        const body = SetProjectSecretRequest.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_secret", "expected { value } of 1 to 16384 characters");
+        try {
+          await secrets.put(projectSecretName(project.id, name), body.data.value);
+        } catch (error) {
+          console.error(`could not save the secret ${name} of ${project.id}:`, error);
+          return apiError(503, "secrets_unavailable", "Couldn't save the secret, so nothing changed. Try again.");
+        }
+        projects.secretSet(project.id, name);
+        return new Response(null, { status: 204 });
+      }),
+      DELETE: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/secrets/:name">) => {
+        const name = SecretName.safeParse(req.params.name);
+        if (!name.success) return apiError(404, "not_found");
+        await secrets.delete(projectSecretName(project.id, name.data));
+        projects.secretCleared(project.id, name.data);
         return new Response(null, { status: 204 });
       }),
     },

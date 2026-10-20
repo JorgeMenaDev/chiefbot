@@ -228,8 +228,8 @@ export function taskWorkerHost({
   }
 
   // The worker's first message: the task, the project and how to hand back the work.
-  function taskPrompt({ name, repo, file }: Project, task: Task, instructions: string) {
-    const commands = Object.entries(file.commands).map(([command, line]) => `- ${command}: ${line}`);
+  function taskPrompt({ name, repo, config }: Project, task: Task, instructions: string) {
+    const commands = Object.entries(config.commands).map(([command, line]) => `- ${command}: ${line}`);
     return [
       `You are a worker of the project ${name} (GitHub repo ${repo}). You have this computer to yourself for one task.`,
       "",
