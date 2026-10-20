@@ -17,9 +17,10 @@ import { botTurn, heldTurn } from "./turnKeys.ts";
 //   POST /bots/:id/handoffs/:handoffId/messages  a session of the bot's owner (404 for anyone else),
 //                                    body ReplyToHandoffRequest → 204: the owner's answer from the
 //                                    handoff's card, delivered as the chief's message_project is.
-//                                    409 question_changed when the project asks something else now.
-// A follow-up to a handoff whose task is done or abandoned gets 409 handoff_closed, and one
-// under a delivery id that carried another message 409 delivery_reused.
+// A follow-up, from the chief or the card, names the question the task asks now (none while it
+// asks none), else 409 question_changed. One to a handoff whose task is done or abandoned gets
+// 409 handoff_closed, and one under a delivery id that carried another message or question 409
+// delivery_reused.
 export function chiefHost({
   store,
   projects,
@@ -34,11 +35,10 @@ export function chiefHost({
     botId: BotId,
     owner: User,
     handoffId: HandoffId,
-    from: "chief" | { answering: string | null },
-    deliveryId: string,
-    message: string,
+    from: "chief" | "owner",
+    delivery: { deliveryId: string; message: string; question: string | null },
   ): Handoff | Response {
-    const sent = store.handoffs.followUp(botId, handoffId, from, deliveryId, message);
+    const sent = store.handoffs.followUp(botId, handoffId, from, delivery);
     if (!sent) return apiError(404, "not_found", `No handoff ${handoffId}`);
     if ("refused" in sent) return apiError(409, sent.refused, sent.message);
     if (sent.queued) {
@@ -64,7 +64,8 @@ export function chiefHost({
         return Response.json(handoff satisfies Handoff);
       }
       case "message_project": {
-        const sent = followUp(botId, owner, call.handoff, "chief", call.deliveryId, call.message);
+        const { deliveryId, message, question = null } = call;
+        const sent = followUp(botId, owner, call.handoff, "chief", { deliveryId, message, question });
         return sent instanceof Response ? sent : Response.json(sent satisfies Handoff);
       }
       case "handoff_status": {
@@ -87,7 +88,7 @@ export function chiefHost({
         const body = ReplyToHandoffRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "invalid_message");
         const { text, question, deliveryId } = body.data;
-        const sent = followUp(bot.id, user, handoffId.data, { answering: question }, deliveryId, text);
+        const sent = followUp(bot.id, user, handoffId.data, "owner", { deliveryId, message: text, question });
         return sent instanceof Response ? sent : new Response(null, { status: 204 });
       },
     },

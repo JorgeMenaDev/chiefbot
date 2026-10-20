@@ -151,8 +151,9 @@ test("the owner answers the project's question from the chief's card: it reaches
   const replies = [
     await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, reply),
     await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, reply),
-    // An edited answer under the delivery id of one control already has.
+    // An edited answer, or the same one to another question, under the delivery id of one control already has.
     await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, { ...reply, text: "Adyen instead." }),
+    await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, { ...reply, question: "Which payment provider?" }),
     await owner.api("POST", `/bots/${otherBot.id}/handoffs/${card.handoffId}/messages`, { ...reply, deliveryId: crypto.randomUUID() }),
     await guest.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, { ...reply, deliveryId: crypto.randomUUID() }),
   ];
@@ -160,8 +161,8 @@ test("the owner answers the project's question from the chief's card: it reaches
   await Bun.sleep(50);
 
   expect(card).toMatchObject({ stage: "needs_input", question: "Stripe or Adyen?" });
-  expect(replies.map(({ status }) => status)).toEqual([204, 204, 409, 404, 404]);
-  expect(ApiError.parse(await replies[2]?.json()).error).toBe("delivery_reused");
+  expect(replies.map(({ status }) => status)).toEqual([204, 204, 409, 409, 404, 404]);
+  for (const refused of replies.slice(2, 4)) expect(ApiError.parse(await refused.json()).error).toBe("delivery_reused");
   const sent = sentToCoordinator(projectChat);
   expect(sent).toHaveLength(2);
   expect(sent[1]).toBe("About task #1, your answer from your chief of staff's chat:\n\nStripe.");
@@ -198,6 +199,41 @@ test("an answer to a question the project no longer asks is refused, and reaches
   const [task] = await tasksOf(owner, project);
   expect(task?.detail).not.toContain("Stripe.");
   expect(task?.detail).toEndWith('octo-user answered "Which production region?": eu-west.');
+});
+
+test("while the project asks a question, a chief's message names it: one naming an older question, or none, is refused", async () => {
+  const { owner, project, chief, copilot } = await setup();
+  const answers: unknown[] = [];
+  const handoffs: Handoff[] = [];
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "hand off the checkout") handoffs.push(Handoff.parse(await answer(runtime.tool("send_to_project", checkout(project)))));
+    else if (prompt.includes("task #1 in the ledger")) {
+      await runtime.tool("update_task", { number: 1, status: "needs_input", question: "Stripe or Adyen?" });
+      await runtime.tool("update_task", { number: 1, status: "needs_input", question: "Which production region?" });
+    } else if (prompt === "answer the project") {
+      const handoff = handoffs[0]?.id ?? null;
+      // The chief read the first question; the project asks another by now.
+      answers.push(await answer(runtime.tool("message_project", { handoff, message: "Stripe.", question: "Stripe or Adyen?" })));
+      answers.push(await answer(runtime.tool("message_project", { handoff, message: "Also take PayPal." })));
+      answers.push(await answer(runtime.tool("message_project", { handoff, message: "eu-west.", question: "Which production region?" })));
+    }
+    yield sdk.idle();
+  };
+  await owner.send(chief.id, "hand off the checkout");
+  await owner.watchChat(chief.id).until(doneCount(1));
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  await owner.send(chief.id, "answer the project");
+  await owner.watchChat(chief.id).until(doneCount(2));
+  const projectChat = await owner.watchProjectChat(project.id).until(doneCount(2));
+
+  const refusal = { refused: "shop now asks: Which production region?" };
+  expect(answers.slice(0, 2)).toEqual([refusal, refusal]);
+  expect(Handoff.parse(answers[2]).taskNumber).toBe(1);
+  expect(sentToCoordinator(projectChat).slice(1)).toEqual(["About task #1, from your chief of staff:\n\neu-west."]);
+  const [task] = await tasksOf(owner, project);
+  expect(task?.detail).not.toContain("Stripe.");
+  expect(task?.detail).not.toContain("PayPal");
+  expect(task?.detail).toEndWith(`octo-user's chief of staff answered "Which production region?": eu-west.`);
 });
 
 test("a follow-up to a handoff whose task is done is refused: new work is a new handoff", async () => {

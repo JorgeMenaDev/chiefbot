@@ -42,6 +42,11 @@ export const SendToProjectArgs = z.object({
 export const MessageProjectArgs = z.object({
   handoff: HandoffId.describe("The handoff's id, from send_to_project or handoff_status"),
   message: z.string().trim().min(1).max(20_000).describe("The follow-up, or your owner's answer to the project's question"),
+  question: z
+    .string()
+    .max(2_000)
+    .optional()
+    .describe("While the project asks a question: that question, word for word from handoff_status. Left out when it asks none"),
 });
 export const HandoffStatusArgs = z.object({
   handoff: HandoffId.optional().describe("One handoff's id; left out, all of them"),
@@ -52,8 +57,8 @@ export const HandoffStatusArgs = z.object({
 // when the answer was started (null for none): control refuses the answer (409
 // question_changed) when the project asks something else by then. The desktop
 // picks `deliveryId` for the answer's exact text and question: sent again
-// unchanged it is delivered once, and control refuses other text under it (409
-// delivery_reused).
+// unchanged it is delivered once, and control refuses other text or another
+// question under it (409 delivery_reused).
 export const ReplyToHandoffRequest = z.object({
   text: z.string().trim().min(1).max(20_000),
   question: z.string().max(2_000).nullable(),
@@ -66,7 +71,9 @@ export type ReplyToHandoffRequest = z.infer<typeof ReplyToHandoffRequest>;
 // handoff_status → Handoff[] (oldest first), or one Handoff when it names one.
 // message_project's `deliveryId` is not the model's: the chief sets it from the
 // tool call's id, so a resent call delivers its message once. A handoff whose
-// task is done or abandoned takes no follow-up (409 handoff_closed).
+// task is done or abandoned takes no follow-up (409 handoff_closed). While the
+// task asks a question, a message must name it in `question`, and must name none
+// otherwise (409 question_changed, saying what the project asks now).
 export const ChiefToolCall = z.discriminatedUnion("tool", [
   ListProjectsArgs.extend({ tool: z.literal("list_projects") }),
   SendToProjectArgs.extend({ tool: z.literal("send_to_project") }),
