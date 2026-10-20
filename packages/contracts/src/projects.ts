@@ -2,7 +2,7 @@ import { z } from "zod";
 import { ChatItem, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
 import { AgentConnector, ConnectorName } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
-import { ReasoningEffort } from "./models.ts";
+import { ModelReport, ReasoningEffort } from "./models.ts";
 import { RepoFullName } from "./repos.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
@@ -345,8 +345,14 @@ export const ControlToCoordinator = z.discriminatedUnion("type", [
 ]);
 export type ControlToCoordinator = z.infer<typeof ControlToCoordinator>;
 
-// Coordinator → control on the same WebSocket: turn-event and hello, as a bot's worker sends them (chat.ts).
-export const CoordinatorToControl = z.discriminatedUnion("type", [TurnEventMessage, TurnHello]);
+// Coordinator → control on the same WebSocket: turn-event and hello, as a bot's worker sends them (chat.ts),
+// and models: the plan's models as the session of `turnId` lists them. Control keeps
+// them as the turn's member's only while that turn runs on the member's own seat.
+export const CoordinatorToControl = z.discriminatedUnion("type", [
+  TurnEventMessage,
+  TurnHello,
+  z.object({ type: z.literal("models"), turnId: TurnId, report: ModelReport }),
+]);
 export type CoordinatorToControl = z.infer<typeof CoordinatorToControl>;
 
 // A member's chat with the project's coordinator as the desktop window shows it.

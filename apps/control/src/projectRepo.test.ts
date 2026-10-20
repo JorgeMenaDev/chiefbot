@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApiError, ModelOption, Project, Workspace, type ChatEvent } from "@chiefbot/contracts";
-import { defaultFakeUser } from "@chiefbot/fake-github";
+import { ApiError, ModelOption, Project, User, Workspace, WorkspaceInvite, type ChatEvent, type ModelReport } from "@chiefbot/contracts";
+import { defaultFakeUser, type FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, fakeRequest, sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions } from "./testControl.ts";
 
@@ -132,6 +132,57 @@ test("a fetch that fails is shown in the chat, and the repo tools say why instea
   expect(replies(events)).toEqual(["1: # Shop", expect.stringMatching(/^refused: The repo copy could not be refreshed this turn: .*octo-org\/shop was not found, or your GitHub account cannot see it/)]);
 });
 
+// Control's project, with octo-friend as a second member who may read the repo.
+async function withGuest(control: Awaited<ReturnType<typeof projectOf>>) {
+  const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan: "individual", sku: "monthly_subscriber" } };
+  await control.owner.api("POST", `/workspaces/${control.workspace.id}/invites`, { login: friend.login });
+  const guest = await control.signIn(friend);
+  const [invite] = WorkspaceInvite.array().parse(await (await guest.api("GET", "/invites")).json());
+  await guest.api("POST", `/invites/${invite?.id}/accept`);
+  control.github.setAccess("octo-org/shop", friend.login, "read");
+  const id = User.parse(await (await guest.api("GET", "/me")).json()).id;
+  return { guest, remove: () => control.owner.api("DELETE", `/workspaces/${control.workspace.id}/members/${id}`) };
+}
+
+test("a member removed while their turn fetches: that turn goes no further, and the next member's turn reads a copy of its own", async () => {
+  const copilot = fakeCopilot({ script: answering(["repo_read", { path: "README.md" }]) });
+  const control = await projectOf(shop, { copilot });
+  const { owner, project, github } = control;
+  const { guest, remove } = await withGuest(control);
+  const hold = github.holdGit();
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "Hold on" });
+  await eventually(() => hold.held() > 0);
+  const chat = owner.watchProjectChat(project.id);
+  await owner.api("POST", `/projects/${project.id}/messages`, { text: "What does the readme say?" });
+
+  await remove();
+  await chat.until((events) => events.some(({ event }) => event.type === "tool-call" && event.toolCallId === "repo-copy"));
+  hold.release();
+  const events = await chat.until(doneCount(1));
+
+  expect(replies(events)).toEqual(["1: # Shop"]);
+  expect(copilot.sends.map(({ prompt }) => prompt)).toEqual(["What does the readme say?"]);
+});
+
+test("a member removed while their turn fetches, with no turn after it: the fetch stops at once, not when GitHub answers", async () => {
+  const copilot = fakeCopilot({ script: answering(["repo_read", { path: "README.md" }]) });
+  const control = await projectOf(shop, { copilot });
+  const { project, github } = control;
+  const { guest, remove } = await withGuest(control);
+  await ask(control, "What does the readme say?");
+  const root = control.computers.computers.get(project.id)?.repoRoot ?? "";
+  const hold = github.holdGit();
+  atCleanUp(hold.release);
+  await guest.api("POST", `/projects/${project.id}/messages`, { text: "Hold on" });
+  await eventually(() => hold.held() > 0);
+
+  await remove();
+
+  // A stopped refresh fails, and a failed one removes the copy.
+  await eventually(() => !existsSync(root));
+  expect(copilot.sends.map(({ prompt }) => prompt)).toEqual(["What does the readme say?"]);
+});
+
 test("the coordinator is told the repo's instructions and gets its skill folders, from the copy of the turn", async () => {
   const copilot = fakeCopilot();
   const control = await projectOf(
@@ -200,14 +251,13 @@ test("the coordinator still cannot run a command or write a file, and the runtim
   expect(asked).toEqual([false, false, false, true, false, false]);
 });
 
-test("any member picks the project's model and effort among their plan's models, and the coordinator's turns run on them", async () => {
+test("any member picks the project's model and effort among the models their turns' sessions report, and the coordinator's turns run on them", async () => {
   const sonnet = { id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6", capabilities: { supports: { reasoningEffort: true } }, supportedReasoningEfforts: ["low", "medium", "high"] };
   const copilot = fakeCopilot({ models: { list: [sonnet, { id: "o9-preview", name: "o9 (Preview)", policy: { state: "disabled" } }], modelPriceCategories: [] } });
   const control = await projectOf(shop, { copilot, user: { ...defaultFakeUser, copilot: { plan: "individual", sku: "monthly_subscriber" } } });
   const { owner, project } = control;
-  // A bot's worker reports the plan's models.
-  await owner.onlineBot("Ada");
-  await eventually(async () => ModelOption.array().parse(await (await owner.api("GET", "/models")).json()).length > 1);
+  const offered = async () => ModelOption.array().parse(await (await owner.api("GET", "/models")).json()).map(({ id }) => id);
+  const before = await offered();
   // What the project runs on after asking for `body`, or control's refusal.
   const pick = async (body: { model: string; effort?: string | null }) => {
     const res = await owner.api("PUT", `/projects/${project.id}/model`, body);
@@ -216,10 +266,13 @@ test("any member picks the project's model and effort among their plan's models,
     return `${model} at ${effort ?? "default"}`;
   };
   await ask(control, "Plan the cart");
+  // The turn's session, on the member's own seat, reported the plan's models.
+  await eventually(async () => (await offered()).length > 1);
 
   const picks = [await pick({ model: "claude-sonnet-4.6", effort: "max" }), await pick({ model: "o9-preview" }), await pick({ model: "claude-sonnet-4.6", effort: "high" })];
   await ask(control, "Plan the checkout", 2);
 
+  expect(before).toEqual(["auto"]);
   expect([project.model, project.effort]).toEqual(["auto", null]);
   expect(picks).toEqual(["400 effort_unavailable", "400 model_unavailable", "claude-sonnet-4.6 at high"]);
   expect(Project.parse(await (await owner.api("GET", `/projects/${project.id}`)).json())).toMatchObject({ model: "claude-sonnet-4.6", effort: "high" });
@@ -227,4 +280,31 @@ test("any member picks the project's model and effort among their plan's models,
     ["Plan the cart", "auto", null],
     ["Plan the checkout", "claude-sonnet-4.6", "high"],
   ]);
+});
+
+test("control keeps the models a coordinator reports only from a running turn, as its member's", async () => {
+  const control = await projectOf(shop, { user: { ...defaultFakeUser, copilot: { plan: "individual", sku: "monthly_subscriber" } } });
+  const { owner, project } = control;
+  const coordinator = await fakeCoordinator(control, project.id);
+  coordinator.hello(null);
+  const offering = (...ids: string[]): ModelReport => ({
+    selectable: ids.map((id) => ({ id, name: id, disabled: false, efforts: [], defaultEffort: null, vision: null })),
+    catalog: [],
+  });
+  const offered = async () => ModelOption.array().parse(await (await owner.api("GET", "/models")).json()).map(({ id }) => id);
+  await owner.api("POST", `/projects/${project.id}/messages`, { text: "Plan the cart" });
+  const first = await coordinator.nth("run-turn");
+  coordinator.event(first.turnId, { type: "done" });
+  const chat = owner.watchProjectChat(project.id);
+  await owner.api("POST", `/projects/${project.id}/messages`, { text: "Plan the checkout" });
+  const second = await coordinator.nth("run-turn", 2);
+  coordinator.newTurn();
+
+  coordinator.models(second.turnId, offering("claude-sonnet-4.6"));
+  coordinator.models(first.turnId, offering("gpt-from-an-ended-turn"));
+  // Control handles the socket's messages in order: once this shows, it has handled both reports.
+  coordinator.event(second.turnId, { type: "text-delta", messageId: "m1", text: "Planning" });
+  await chat.until((events) => events.some(({ event }) => event.type === "text-delta"));
+
+  expect(await offered()).toEqual(["auto", "claude-sonnet-4.6"]);
 });

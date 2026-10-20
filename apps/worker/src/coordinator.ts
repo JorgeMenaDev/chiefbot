@@ -12,7 +12,8 @@ import { connectorServers } from "./connectorServers.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot } from "./copilot.ts";
 import { coordinatorTools } from "./coordinatorTools.ts";
-import { locate, refreshCopy, repoInstructions, repoTools, skillRoots, type RepoCopy } from "./repoCopy.ts";
+import { modelReport } from "./models.ts";
+import { readable, refreshCopy, repoInstructions, repoTools, skillRoots, type RepoCopy } from "./repoCopy.ts";
 
 export type CoordinatorOptions = {
   // Control's base URL as seen from the computer.
@@ -46,7 +47,7 @@ export type CoordinatorOptions = {
 // copy of its default branch that each turn fetches (repoCopy.ts), with its
 // instructions and skills. No shell, and it writes no files. Every call a member's
 // session makes to control carries the key of the turn it was opened for. A
-// member who leaves the workspace has their session stopped.
+// member who leaves the workspace has their turn dropped and their session stopped.
 export function startCoordinator({ controlUrl, projectId, projectToken, copilot, repoRoot, retryMs = 2000, onBound }: CoordinatorOptions) {
   const base = `${controlUrl}/coordinator/${projectId}`;
   let project: Project | null = null;
@@ -55,6 +56,20 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   // holds that turn and its key: a late one from an earlier turn acts in no
   // other. `unsubscribe` stops its events reaching the chat.
   const sessions = new Map<UserId, { turn: Turn; session: Promise<BotSession>; unsubscribe: () => void }>();
+  // Each member's latest turn, from its start: a member who leaves has it
+  // dropped even before it has a session, while it fetches.
+  const turns = new Map<UserId, Turn>();
+  // The copy's refreshes run one at a time, each turn's after the one before,
+  // even one control ended (whose fetch that end stops): no refresh changes the
+  // copy under another turn, or removes it after the next turn fetched it.
+  let refreshing: Promise<unknown> = Promise.resolve();
+  const refresh = (turn: Turn, url: string) => {
+    const refreshed = refreshing.then((): Promise<RepoCopy> | RepoCopy =>
+      turn.ended.aborted ? { error: "The turn ended." } : refreshCopy(repoRoot, url, turn.key, turn.ended),
+    );
+    refreshing = refreshed;
+    return refreshed;
+  };
 
   // Only the coordinator's own tools and its session's connectors run; the
   // empty-mode runtime offers no others anyway, but its skill tool. That may read
@@ -64,7 +79,7 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     async (request) =>
       (request.kind === "custom-tool" && toolNames.has(request.toolName)) ||
       (request.kind === "mcp" && connectors.some(({ name }) => name === request.serverName)) ||
-      (request.kind === "read" && "root" in copy && "real" in (await locate(copy.root, request.path)))
+      (request.kind === "read" && (await readable(copy, request.path)))
         ? { kind: "approve-once" }
         : { kind: "reject", feedback: "The coordinator can only use its task, context, worker and repo tools and the project's connectors." };
 
@@ -77,14 +92,16 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     await session?.disconnect();
   }
 
-  // The member's session for `turn`, in place of the one of their previous turn.
-  // Its repo tools, the repo's instructions and its skills come from `copy`, the
-  // repo as this turn fetched it.
+  // The member's session for `turn`, in place of the one of their previous turn,
+  // or null when control ended the turn first. Its repo tools, the repo's
+  // instructions and its skills come from `copy`, the repo as this turn fetched it.
   async function sessionFor(member: ProjectMember, payer: CopilotPayer, connectors: AgentConnector[], turn: Turn, copy: RepoCopy) {
     if (!project) throw new Error("A turn came before control said which project this is");
+    const [repoTold, skillDirectories] = await Promise.all([repoInstructions(copy, project.config.instructions), skillRoots(copy, project.config.skills)]);
+    if (!link.running(turn)) return null;
+    // From here the session is in `sessions` at once, for stopMember to find.
     const previous = sessions.get(member.userId);
     sessions.delete(member.userId);
-    if (previous) await close(previous, false);
     const bearer = () => turn.key;
     const tools = [
       ...coordinatorTools(async (toolCall: CoordinatorToolCall) =>
@@ -96,13 +113,13 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
       sessionId: `${projectId}-${member.userId}`,
       onPermissionRequest: permissionFor(new Set(tools.map(({ name }) => name)), connectors, copy),
       tools,
-      instructions: [instructions(project, member), await repoInstructions(copy, project.config.instructions)].join("\n\n"),
-      skillDirectories: await skillRoots(copy, project.config.skills),
+      instructions: [instructions(project, member), repoTold].join("\n\n"),
+      skillDirectories,
       mcpServers: connectorServers(connectors, (name) => link.connector(turn, name)),
       onMcpCall: link.reportCalls(connectors, bearer),
     };
     // The member's own seat is brokered by control only while their turn runs.
-    const opening = link.openSession(copilot, payer.kind, options, bearer);
+    const opening = (previous ? close(previous, false) : Promise.resolve()).then(() => link.openSession(copilot, payer.kind, options, bearer));
     let stopEvents = () => {};
     const session = opening.then((opened) => {
       stopEvents = opened.on((event) => link.sessionEvent(turn, event));
@@ -119,9 +136,11 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
   // chat shows the fetch as a tool call, so a member sees when it fails. The turn
   // runs on the project's `model` at `effort`, set on the session first (the SDK
   // switches an open session's model, keeping its conversation; a null effort
-  // clears the last one).
+  // clears the last one). A session on the member's own seat lists their plan's
+  // models for control: the project's model picker offers them.
   async function runTurn({ turnId, turnKey, member, text, model, effort, payer, connectors }: Extract<ControlToCoordinator, { type: "run-turn" }>) {
     const turn = link.begin(turnId, turnKey);
+    turns.set(member.userId, turn);
     try {
       if (!project) throw new Error("A turn came before control said which project this is");
       const { repo } = project;
@@ -129,11 +148,17 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
         if (link.running(turn)) link.emit(turnId, { type: "tool-call", toolCallId: "repo-copy", name: `Fetch ${repo}`, status });
       };
       fetchRow("running");
-      const copy = await refreshCopy(repoRoot, `${controlUrl}/git/${repo}.git`, turn.key);
+      const copy = await refresh(turn, `${controlUrl}/git/${repo}.git`);
       fetchRow("error" in copy ? "failed" : "succeeded");
-      // Control ended the turn while it fetched (its member left): nothing more of it runs.
-      if (!link.running(turn)) return;
       const session = await sessionFor(member, payer, connectors, turn, copy);
+      // Control ended the turn before it had a session (its member left): nothing more of it runs.
+      if (!session) return;
+      if (payer.kind === "seat") {
+        void session.rpc.model.list().then(
+          (list) => link.send({ type: "models", turnId, report: modelReport(list) }),
+          () => {},
+        );
+      }
       await session.setModel(model, effort);
       await session.send(text);
     } catch (error) {
@@ -141,14 +166,16 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
     }
   }
 
-  // The member left the workspace: their session stops now, and closes (an
-  // organization's runtime stops with it). Control ended their turn already.
+  // The member left the workspace: their turn is dropped (a fetch it runs
+  // stops), and their session stops now and closes (an organization's runtime
+  // stops with it). Control ended their turn already.
   async function stopMember(userId: UserId) {
+    const turn = turns.get(userId);
+    turns.delete(userId);
+    if (turn) link.drop(turn);
     const open = sessions.get(userId);
     sessions.delete(userId);
-    if (!open) return;
-    link.drop(open.turn);
-    await close(open, true);
+    if (open) await close(open, true);
   }
 
   const link = controlLink({

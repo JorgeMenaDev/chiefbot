@@ -120,6 +120,9 @@ export function startFakeGitHub({
   const pullRequests: FakePullRequest[] = [];
   // Every push GitHub accepted, and who sent it.
   const pushes: Array<{ repository: string; by: string }> = [];
+  // While set (holdGit), git's requests wait for it; `held` counts those that waited.
+  let gitGate: Promise<void> | null = null;
+  let held = 0;
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
   // Each repo: its id (as GitHub numbers repos), whether the app is installed on it, and who may do what.
   const repos = new Map<string, { id: number; installed: boolean; access: Record<string, FakeRepoAccess> }>();
@@ -330,6 +333,10 @@ export function startFakeGitHub({
       const url = new URL(req.url);
       const repository = url.pathname.match(/^\/([^/]+\/[^/]+)\.git\//)?.[1];
       if (!repository) return new Response("Not Found", { status: 404 });
+      if (gitGate) {
+        held++;
+        await gitGate;
+      }
       const basic = req.headers.get("authorization")?.match(/^Basic (.+)$/)?.[1];
       const password = basic ? atob(basic).split(":").slice(1).join(":") : "";
       if (!validAccessTokens.has(password) && !installationTokens.has(password)) {
@@ -444,6 +451,19 @@ export function startFakeGitHub({
     },
     // A new commit on the repo's main holding `files`, as if someone pushed it.
     commit: (fullName: string, files: Record<string, string>) => commitFiles(bareRepo(fullName), files),
+    // Holds git's requests until `release` runs, as a slow GitHub would. `held` counts the requests that waited.
+    holdGit() {
+      let release = () => {};
+      gitGate = new Promise((resolve) => (release = resolve));
+      held = 0;
+      return {
+        held: () => held,
+        release: () => {
+          gitGate = null;
+          release();
+        },
+      };
+    },
     // Gives `login` `access` to the repo, or takes theirs away (null).
     setAccess(fullName: string, login: string, access: FakeRepoAccess | null) {
       const repo = repos.get(fullName);

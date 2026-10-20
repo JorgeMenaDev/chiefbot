@@ -610,6 +610,14 @@ export function projectHost({
         }
         return;
       }
+      // The plan's models, as a turn's session listed them: the turn's member's,
+      // while the turn runs on their own seat. The project's model picker offers them.
+      if (message.type === "models") {
+        const userId = projects.runningTurnMember(projectId, message.turnId);
+        const run = userId && payerOf({ kind: "project", projectId, askerId: userId });
+        if (userId && run && run.payer.kind === "seat" && run.payer.userId === userId) store.setModelReport(userId, message.report);
+        return;
+      }
       // The coordinator lost the running turn unless it says it still runs it.
       for (const lost of projects.abandonRunningTurn(projectId, message.activeTurnId, "The coordinator restarted before it finished this message.")) {
         approvals.turnEnded(lost.event.turnId);
