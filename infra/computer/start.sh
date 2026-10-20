@@ -11,13 +11,17 @@ while [ ! -e /tmp/.X11-unix/X1 ]; do sleep 0.1; done
 
 openbox &
 
+# No Chromium runs yet, so a profile lock is stale (an update leaves the old computer's on the volume).
+profile="$HOME/.config/chromium"
+rm -f "$profile/SingletonLock" "$profile/SingletonCookie" "$profile/SingletonSocket"
+
 # Chromium comes back if the agent or the user closes it. Only when none runs:
 # a second launch would just open another window in the running one. The
 # container is its sandbox: with no capabilities and no-new-privileges,
 # Chromium's own sandbox cannot start.
 (while true; do
   pgrep -x chromium >/dev/null \
-    || chromium --no-sandbox --disable-dev-shm-usage --no-first-run --start-maximized >/dev/null 2>&1 \
+    || chromium --no-sandbox --disable-dev-shm-usage --no-first-run --hide-crash-restore-bubble --start-maximized >/dev/null 2>&1 \
     || true
   sleep 2
 done) &
