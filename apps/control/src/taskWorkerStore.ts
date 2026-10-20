@@ -17,7 +17,6 @@ import {
 } from "@chiefbot/contracts";
 import { addColumn } from "./addColumn.ts";
 import type { projectStore } from "./projectStore.ts";
-import { rebuildTable } from "./rebuildTable.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 
 // A project's task workers in control's SQLite: each one's launch record, the
@@ -61,8 +60,31 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
     FOREIGN KEY (project_id, task_number) REFERENCES project_tasks (project_id, number) ON DELETE CASCADE
   )`;
   db.run(create);
-  // A table from before engineers set up (no 'setting_up' state) is made again.
-  rebuildTable(db, "task_workers", create, "'kept'");
+  // The table first shipped with CHECKs that lack the 'queued', 'setting_up' and
+  // 'blocked' states and the 'kept' computer, which SQLite cannot change in place:
+  // a table whose definition lacks 'kept', the newest, is made again from
+  // `create`. Each row keeps the columns the old table had; a new column takes
+  // its default. Foreign keys are off meanwhile, so dropping the old table
+  // cascades to no row that references it.
+  const stored = db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'task_workers'").get();
+  if (stored && !stored.sql.includes("'kept'")) {
+    const columns = db
+      .query<{ name: string }, []>("PRAGMA table_info(task_workers)")
+      .all()
+      .map(({ name }) => name)
+      .join(", ");
+    db.run("PRAGMA foreign_keys = OFF");
+    try {
+      db.transaction(() => {
+        db.run(create.replace("CREATE TABLE IF NOT EXISTS task_workers (", "CREATE TABLE task_workers_rebuilt ("));
+        db.run(`INSERT INTO task_workers_rebuilt (${columns}) SELECT ${columns} FROM task_workers`);
+        db.run("DROP TABLE task_workers");
+        db.run("ALTER TABLE task_workers_rebuilt RENAME TO task_workers");
+      })();
+    } finally {
+      db.run("PRAGMA foreign_keys = ON");
+    }
+  }
   // Columns added after the table first shipped. `kind` is engineer or verifier.
   // A verifier's `sha` is the commit it checks and `branch` the pull request's
   // branch (in `pull_request`) then, at the `revision` of the pushes through

@@ -25,8 +25,9 @@ export function EngineerDetails({ worker, max }: { worker: TaskWorker; max: numb
   );
 }
 
-// One setup step: its command and exit code, its log folded away unless the step failed.
-function SetupLog({ step: { step, command, exitCode, log } }: { step: SetupStep }) {
+// One setup step: its command and exit code, its log folded away unless the
+// step failed. Its transcript shows the same row (Engineers.tsx).
+export function SetupLog({ step: { step, command, exitCode, log } }: { step: SetupStep }) {
   return (
     <details open={exitCode !== 0}>
       <summary className={exitCode === 0 ? "cursor-pointer text-muted-foreground text-xs" : "cursor-pointer text-destructive-foreground text-xs"}>

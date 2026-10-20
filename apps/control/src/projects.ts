@@ -41,7 +41,7 @@ import { modelOptions, pickModel } from "./models.ts";
 import { parseProjectFile, readProjectFile } from "./projectFile.ts";
 import { queue } from "./queue.ts";
 import type { repoAccess } from "./repos.ts";
-import type { SecretStore } from "./secrets/secretStore.ts";
+import { secretFailure, type SecretStore } from "./secrets/secretStore.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { movedWhileChecking, type taskWorkerHost } from "./taskWorkers.ts";
@@ -95,14 +95,6 @@ export type ProjectHostOptions = {
 // A new SecretStore name for a project secret's value being written: each value
 // gets its own, so two writes never touch the same one.
 const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.randomUUID()}`;
-
-// What control logs of a SecretStore failure: the error's kind, if a known one,
-// and its numeric code. Never its message or any other name, which may quote the value.
-const knownErrors = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError"]);
-const failure = (error: unknown) => {
-  const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? ` ${error.code}` : "";
-  return `${error instanceof Error && knownErrors.has(error.name) ? error.name : "other"}${code}`;
-};
 
 // Projects: a workspace's repos, each with a coordinator on its own computer
 // (from the ComputerProvider), a task ledger and shared context in control,
@@ -198,7 +190,7 @@ export function projectHost({
           // just before may still be there after its record goes (docs/deploy.md).
           projects.secretDeleted(secretName);
         } catch (error) {
-          console.error(`could not delete the project secret value ${secretName}: ${failure(error)}`);
+          console.error(`could not delete the project secret value ${secretName}: ${secretFailure(error)}`);
         }
       }),
     );
@@ -477,7 +469,7 @@ export function projectHost({
           try {
             await secrets.put(secretName, body.data.value);
           } catch (error) {
-            console.error(`could not save the secret ${name} of ${current.id}: ${failure(error)}`);
+            console.error(`could not save the secret ${name} of ${current.id}: ${secretFailure(error)}`);
             await forget([secretName]);
             return apiError(503, "secrets_unavailable", "Couldn't save the secret, so it keeps its last value. Try again.");
           }

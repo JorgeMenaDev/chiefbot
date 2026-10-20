@@ -116,10 +116,14 @@ export function handoffStore(
       links: JSON.parse(row.links),
       workers: workers.workersOf(ProjectId.parse(row.project_id)).filter(({ taskNumber }) => taskNumber === row.task_number),
       verification: verdictOf(row),
+      // The turns its messages queued, and those control queued to continue its task (a worker's ending).
       summary: projects.lastReply(
         db
-          .query<{ turn_id: string }, [string]>("SELECT turn_id FROM handoff_messages WHERE handoff_id = ?1")
-          .all(row.id)
+          .query<{ turn_id: string }, [string, string, number]>(
+            `SELECT turn_id FROM handoff_messages WHERE handoff_id = ?1
+             UNION SELECT id FROM coordinator_turns WHERE project_id = ?2 AND task_number = ?3`,
+          )
+          .all(row.id, row.project_id, row.task_number)
           .map(({ turn_id }) => TurnId.parse(turn_id)),
       ),
       createdAt: row.created_at,

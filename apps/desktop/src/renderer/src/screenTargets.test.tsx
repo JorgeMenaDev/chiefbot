@@ -37,3 +37,10 @@ test("the member who drives it sees they are in control, with Stop; with nobody 
   expect(pill(null)).toContain("Watching");
   expect(pill(null)).not.toMatch(/disabled=""/);
 });
+
+test("a screen is named for whose it is: an engineer's or a verifier's, on its task", () => {
+  const project = ProjectId.parse("project_1");
+
+  expect(engineerScreen(project, engineer(null), "octo-user").name).toBe("Engineer on #1");
+  expect(engineerScreen(project, { ...engineer(null), kind: "verifier" }, "octo-user").name).toBe("Verifier on #1");
+});

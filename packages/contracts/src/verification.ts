@@ -13,8 +13,11 @@ export const CommitSha = z.string().regex(/^[0-9a-f]{40}$/, "expected a full com
 
 // A verdict in a line: the result, the commit it was given at, whether the pull
 // request's head has moved since (`stale`), and its summary (what passed, the
-// issues, or why it was blocked). What a chief's handoff card shows.
-export const VerdictLine = z.object({ result: VerdictResult, sha: CommitSha, stale: z.boolean(), summary: z.string() });
+// issues, or why it was blocked). `testsOnly` when no screenshot backs a pass
+// or issues: the verifier checked by tests and code only, as on a project with
+// no `commands.devUrl` (on one with it, control records a pass with no
+// screenshot as blocked). What a chief's handoff card shows.
+export const VerdictLine = z.object({ result: VerdictResult, sha: CommitSha, stale: z.boolean(), testsOnly: z.boolean().default(false), summary: z.string() });
 export type VerdictLine = z.infer<typeof VerdictLine>;
 
 // What one verdict may carry: at most this many screenshots, each a PNG of at most this many bytes.

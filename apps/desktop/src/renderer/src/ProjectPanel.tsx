@@ -2,6 +2,7 @@ import { engineerRuns, ProjectTasks, ProjectWorkers, Task, TaskWorker, type Cont
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { Engineers } from "./Engineers.tsx";
+import { followLatest } from "./lib/followLatest.ts";
 import { PanelToggle, SidePanel } from "./Pane.tsx";
 import { ProjectContext } from "./ProjectContext.tsx";
 import { TaskLedger } from "./ProjectTasks.tsx";
@@ -16,16 +17,25 @@ function useProjectWork(projectId: ProjectId) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [workers, setWorkers] = useState<TaskWorker[]>([]);
   useEffect(() => {
-    const unsubscribeTasks = window.chiefbot.projects.onTasks((next) => {
-      const ledger = ProjectTasks.parse(next);
-      if (ledger.projectId === projectId) setTasks(ledger.tasks);
-    });
-    const unsubscribeWorkers = window.chiefbot.projects.onWorkers((next) => {
-      const list = ProjectWorkers.parse(next);
-      if (list.projectId === projectId) setWorkers(list.workers);
-    });
-    void window.chiefbot.projects.tasks(projectId).then((next) => setTasks(TaskList.parse(next)));
-    void window.chiefbot.projects.workers(projectId).then((next) => setWorkers(WorkerList.parse(next)));
+    const main = window.chiefbot.projects;
+    const unsubscribeTasks = followLatest<Task[]>(
+      (listener) =>
+        main.onTasks((next) => {
+          const ledger = ProjectTasks.parse(next);
+          if (ledger.projectId === projectId) listener(ledger.tasks);
+        }),
+      async () => TaskList.parse(await main.tasks(projectId)),
+      setTasks,
+    );
+    const unsubscribeWorkers = followLatest<TaskWorker[]>(
+      (listener) =>
+        main.onWorkers((next) => {
+          const list = ProjectWorkers.parse(next);
+          if (list.projectId === projectId) listener(list.workers);
+        }),
+      async () => WorkerList.parse(await main.workers(projectId)),
+      setWorkers,
+    );
     return () => {
       unsubscribeTasks();
       unsubscribeWorkers();

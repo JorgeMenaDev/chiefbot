@@ -221,8 +221,12 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       );
       return { ...view, working: stillWaiting(items), items };
     }
-    // Only engineers set up: their task shows each step (EngineerDetails), not their transcript.
-    case "setup-step":
+    // An engineer's or verifier's setup, step by step, before its agent's first
+    // message: the rows its task shows too (EngineerDetails). Its end adds none.
+    case "setup-step": {
+      const id = `${turnId}:setup:${event.step.step}`;
+      return { ...view, items: [...view.items, { kind: "setup", id, step: event.step }] };
+    }
     case "setup-done":
       return view;
     // Approvals and questions left pending when a turn ends can no longer be answered.

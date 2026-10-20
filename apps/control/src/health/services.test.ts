@@ -33,18 +33,19 @@ function fakeNet(answer: (sent: Sent) => Response | Promise<Response>) {
 }
 
 // A SecretStore in memory; `failing` makes it refuse to read services' secrets,
-// `refusing` to write that value, and `hold(value)` waits to write it.
+// `refusing` to write that value, and `hold(value)` waits to write it. Its
+// errors quote the value, as a real store's may: control must never log them.
 function memorySecrets() {
   const saved = new Map<string, string>();
   const state: { failing: boolean; refusing: string | null } = { failing: false, refusing: null };
   const held = new Map<string, { reached: () => void; open: Promise<void> }>();
   const store: SecretStore = {
     get: async (name) => {
-      if (state.failing && name.startsWith("service-")) throw new Error("PERMISSION_DENIED on the secret");
+      if (state.failing && name.startsWith("service-")) throw new Error(`PERMISSION_DENIED on the secret ${saved.get(name)}`);
       return saved.get(name) ?? null;
     },
     put: async (name, value) => {
-      if (value === state.refusing) throw new Error("PERMISSION_DENIED on the secret");
+      if (value === state.refusing) throw new Error(`PERMISSION_DENIED on the secret ${value}`);
       const hold = held.get(value);
       if (hold) {
         hold.reached();
@@ -311,13 +312,17 @@ test("a secret never shows in a result, an error or control's log", async () => 
     secrets.state.failing = true;
     const unreadable = await checkAll(user);
     const invalid = await user.api("POST", "/health/services", { ...meta, environments: [{ ...meta.environments[0], secret: `${token}\nX-Injected: 1` }] });
+    secrets.state.refusing = token;
+    const unsaved = await user.api("POST", "/health/services", { ...meta, environments: meta.environments.slice(0, 1) });
 
     expect(refused[0]?.environments[0]?.latest?.problem).toBe("Connection refused");
     expect(unreadable[0]?.environments[0]?.latest?.status).toBe("unknown");
     expect(unreadable[0]?.environments[0]?.latest?.problem).toStartWith("Couldn't read this environment's secret");
     expect(invalid.status).toBe(400);
+    expect(unsaved.status).toBe(503);
     expect(JSON.stringify([refused, unreadable, await invalid.text(), logged])).not.toContain(token);
-    expect(logged.join("\n")).toContain("could not read its secret");
+    expect(logged.join("\n")).toMatch(/could not read its secret service-\S+: Error$/m);
+    expect(logged.join("\n")).toMatch(/could not save a service's secret: Error$/m);
   } finally {
     for (const spy of spies) spy.mockRestore();
   }

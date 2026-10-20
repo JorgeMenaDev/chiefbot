@@ -16,15 +16,20 @@ export function git(cwd: string, args: string[]) {
   return result.stdout.toString().trim();
 }
 
+// Writes `files` into the work tree `work`, by path, making folders as needed.
+function writeFiles(work: string, files: Record<string, string>) {
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(work, path)), { recursive: true });
+    writeFileSync(join(work, path), content);
+  }
+}
+
 // Makes <root>/<fullName>.git with one commit on main holding `files`, by path (folders made as needed).
 export function createBareRepo(root: string, fullName: string, files: Record<string, string>) {
   const work = mkdtempSync(join(tmpdir(), "fake-github-seed-"));
   try {
     git(work, ["init", "-q", "-b", "main"]);
-    for (const [path, content] of Object.entries(files)) {
-      mkdirSync(dirname(join(work, path)), { recursive: true });
-      writeFileSync(join(work, path), content);
-    }
+    writeFiles(work, files);
     git(work, ["add", "."]);
     git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Initial commit"]);
     const bare = join(root, `${fullName}.git`);
@@ -43,10 +48,7 @@ export function commitFiles(bare: string, files: Record<string, string>, branch 
     git(work, ["clone", "-q", bare, "."]);
     const exists = git(work, ["branch", "-r", "--list", `origin/${branch}`]) !== "";
     git(work, ["checkout", "-q", "-B", branch, exists ? `origin/${branch}` : "origin/main"]);
-    for (const [path, content] of Object.entries(files)) {
-      mkdirSync(dirname(join(work, path)), { recursive: true });
-      writeFileSync(join(work, path), content);
-    }
+    writeFiles(work, files);
     git(work, ["add", "."]);
     git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Change"]);
     git(work, ["push", "-q", "origin", `HEAD:${branch}`]);

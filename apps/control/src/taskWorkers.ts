@@ -45,6 +45,7 @@ import type { PullRequestHead } from "./github.ts";
 import type { repoAccess, RepoAgent, RepoReader } from "./repos.ts";
 import { viewerBytes } from "./rfbViewer.ts";
 import { screenTunnel } from "./screens.ts";
+import { secretFailure } from "./secrets/secretStore.ts";
 import type { VerifiedHead } from "./projectStore.ts";
 import type { openStore } from "./store.ts";
 import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
@@ -135,16 +136,18 @@ export type TaskWorkerHostOptions = {
 // when it was dispatched, which its setup checks out. Control refuses its
 // pushes and pull requests. It ends with a verdict (report_verdict), which
 // control keeps with its report and screenshots in the project's context and
-// sets on the task (recordVerdict), BLOCKED when it ends without one
-// (noVerdict). A worker that ends by itself (not stopped) wakes the project's
-// coordinator: one turn, in the chat of the member who requested its task,
-// says how it ended, so the task goes on with nobody's nudge (workerEnded; at
-// most CONTINUATIONS_MAX per task, taskWorkerStore.ts). A push through the git
-// proxy since its commit was pinned, or GitHub's head when the coordinator
-// marks the task done (doneCheck), makes a verdict stale. Control counts the
-// pushes through the proxy to each branch,
-// those started and those in flight (projectStore.ts branch_pushes), so a check
-// that reads GitHub can tell whether a push came in between.
+// sets on the task (recordVerdict): BLOCKED for a PASS with no screenshot on a
+// project with a devUrl, tests only for one no screenshot backs (evidenced),
+// and BLOCKED when it ends without one (noVerdict). A worker that ends by
+// itself (not stopped) wakes the project's coordinator: one turn, in the chat
+// of the member who requested its task, says how it ended, so the task goes on
+// with nobody's nudge (workerEnded; at most CONTINUATIONS_MAX per task,
+// taskWorkerStore.ts). A push through the git proxy since its commit was
+// pinned, or GitHub's head when the coordinator marks the task done
+// (doneCheck), makes a verdict stale.
+// Control counts the pushes through the proxy to each branch, those started
+// and those in flight (projectStore.ts branch_pushes), so a check that reads
+// GitHub can tell whether a push came in between.
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's
@@ -391,9 +394,15 @@ export function taskWorkerHost({
   // without a verdict gets BLOCKED first (noVerdict). Then the project's
   // coordinator continues the task, told how the worker ended, in a turn of the
   // chat of the member who requested it (continueTask). Control stopping
-  // first leaves that to recover.
+  // first, or a BLOCKED report it cannot write (logged), leaves that to
+  // recover: callers start this and move on, so it never rejects.
   async function workerEnded(workerId: TaskWorkerId) {
-    await noVerdict(workerId);
+    try {
+      await noVerdict(workerId);
+    } catch (error) {
+      console.error(`could not end ${workerId}:`, error);
+      return;
+    }
     const worker = workers.worker(workerId);
     if (stopped || !worker) return;
     const verification = projects.tasks(worker.projectId).find(({ number }) => number === worker.taskNumber)?.verification ?? null;
@@ -512,21 +521,27 @@ export function taskWorkerHost({
   // The verifier's brief, its first message: the task, the pull request at the
   // commit it checks, and how to check it: the repo's verify skill, or the
   // default playbook for a web app when the project sets none. The skill gets
-  // the project's dev command and URL too: the app's settings may set them,
-  // which the repo does not show. It ends with report_verdict.
+  // the project's dev command and URL too, and every verifier its test
+  // command: the app's settings may set them, which the repo does not show.
+  // With a devUrl it checks in the browser, as a pass needs a screenshot
+  // (evidenced); without one, by tests and code only. It ends with report_verdict.
   function verifierPrompt({ name, repo, config }: Project, task: Task, pr: PullRequestHead & { url: string }, instructions: string) {
-    const { dev, devUrl } = config.commands;
+    const { dev, devUrl, test } = config.commands;
     const app = [...(dev ? [`Start the app with \`${dev}\` in the clone.`] : []), ...(devUrl ? [`It answers at ${devUrl}.`] : [])];
+    const start = dev ? `run \`${dev}\` in the background in the clone` : "the project sets no `commands.dev`, so start it as the repo says, in the background";
     const playbook = config.verify
       ? [`Check it as the repo's \`${config.verify}\` skill says: it is among your skills.`, ...(app.length > 0 ? [app.join(" ")] : [])]
-      : dev && devUrl
+      : devUrl
         ? [
             "The repo sets no verify skill, so check it this way:",
-            `1. Start the app: run \`${dev}\` in the background in the clone, and wait until ${devUrl} answers.`,
+            `1. Start the app: ${start}, and wait until ${devUrl} answers.`,
             `2. Open ${devUrl} in Chromium and use the change the pull request describes, as a person would. Then try what it may break nearby.`,
             "3. Save a screenshot of each thing you check: `scrot /tmp/verify-1.png`, then -2, -3 and so on.",
           ]
-        : ["The repo sets no verify skill and no `commands.dev` and `commands.devUrl`, so you cannot run the app: check the change with its tests and by reading the code, and say so in your report."];
+        : [];
+    const evidence = devUrl
+      ? "A pass needs at least one screenshot of the app: Chiefbot records a pass with none as blocked."
+      : "The project sets no `commands.devUrl`, so there is no app to open: check the change by its tests and by reading the code. Your verdict shows as tests only.";
     return [
       `You are the verifier of the project ${name} (GitHub repo ${repo}). You have this computer to yourself to check one pull request with fresh eyes. You did not write it.`,
       "",
@@ -541,6 +556,8 @@ export function taskWorkerHost({
       "",
       "Chiefbot cloned the repo, checked that commit out and ran the repo's setup.",
       ...playbook,
+      evidence,
+      ...(test ? [`Run its tests with \`${test}\` in the clone.`] : []),
       "Keep secrets out of your screenshots: no environment pages, and no developer tools that show tokens.",
       "",
       "Change nothing in the repo, and push nothing: Chiefbot refuses a verifier's pushes and pull requests.",
@@ -670,24 +687,26 @@ export function taskWorkerHost({
         if (!screenshots.every((bytes) => isPng(bytes) && bytes.byteLength <= SCREENSHOT_BYTES_MAX)) {
           return apiError(400, "invalid_verdict", "Each screenshot must be a PNG of at most 2 MB.");
         }
-        const evidence = await recordVerdict(turn.workerId, body.data, screenshots);
-        if (evidence === null) return apiError(409, "verdict_recorded", "A verifier reports one verdict, and yours is recorded.");
-        return Response.json({ evidence } satisfies RecordedVerdict);
+        const recorded = await recordVerdict(turn.workerId, body.data, screenshots);
+        if (recorded === null) return apiError(409, "verdict_recorded", "A verifier reports one verdict, and yours is recorded.");
+        return Response.json(recorded satisfies RecordedVerdict);
       },
     },
   };
 
-  // Records a verifier's verdict, its first only, one at a time per verifier.
-  // Its report and screenshots go into the project's context first, so they
-  // outlive its computer: verify/task-<n>-<commit>-<verifier>.md, with its
-  // screenshots beside it as -1.png, -2.png… Then the verdict goes on the worker,
-  // and on its task as the task's verification. Null when it has a verdict.
+  // Records a verifier's verdict, its first only, one at a time per verifier,
+  // as the project's devUrl now asks (evidenced). Its report and screenshots go
+  // into the project's context first, so they outlive its computer:
+  // verify/task-<n>-<commit>-<verifier>.md, with its screenshots beside it as
+  // -1.png, -2.png… Then the verdict goes on the worker, and on its task as the
+  // task's verification. Null when it has a verdict.
   const recording = queue<TaskWorkerId>();
-  function recordVerdict(workerId: TaskWorkerId, verdict: Omit<VerdictReport, "screenshots">, screenshots: Uint8Array[]) {
-    return recording(workerId, async (): Promise<ContextPath | null> => {
+  function recordVerdict(workerId: TaskWorkerId, given: Omit<VerdictReport, "screenshots">, screenshots: Uint8Array[]) {
+    return recording(workerId, async (): Promise<RecordedVerdict | null> => {
       const worker = workers.worker(workerId);
       if (worker?.verdict !== null || worker.sha === null || worker.branch === null || worker.pullRequest === null) return null;
       const { projectId, taskNumber, sha, branch, pullRequest } = worker;
+      const verdict = evidenced(given, screenshots.length, projects.project(projectId)?.config.commands.devUrl);
       const name = `task-${taskNumber}-${sha.slice(0, 7)}-${workerId.replace(/^worker_/, "").slice(0, 8)}`;
       const images = screenshots.map((_, at) => `${name}-${at + 1}.png`);
       await Promise.all(screenshots.map((bytes, at) => context.writeImage(projectId, ContextImagePath.parse(`verify/${images[at]}`), bytes)));
@@ -700,7 +719,7 @@ export function taskWorkerHost({
         [
           `# Verification of task #${taskNumber}: ${title}`,
           "",
-          `**${verdict.result.toUpperCase()}** for ${pullRequest} at ${sha} (branch ${branch}), by verifier ${workerId}, ${new Date(at).toISOString()}.`,
+          `**${verdict.result.toUpperCase()}**${verdict.testsOnly ? " (tests only)" : ""} for ${pullRequest} at ${sha} (branch ${branch}), by verifier ${workerId}, ${new Date(at).toISOString()}.`,
           "",
           verdict.summary,
           ...(verdict.report ? ["", "## Report", "", verdict.report] : []),
@@ -710,10 +729,11 @@ export function taskWorkerHost({
       );
       const pinned = workers.setVerdict(workerId, verdict.result);
       if (pinned === null) return null;
-      projects.setVerdict(projectId, taskNumber, { result: verdict.result, sha, summary: verdict.summary, pullRequest, branch, evidence, worker: workerId, at }, pinned.revision);
+      const { result, summary, testsOnly } = verdict;
+      projects.setVerdict(projectId, taskNumber, { result, sha, testsOnly, summary, pullRequest, branch, evidence, worker: workerId, at }, pinned.revision);
       publishTasks(projectId);
       publish(projectId);
-      return evidence;
+      return { result, summary, evidence };
     });
   }
 
@@ -742,7 +762,7 @@ export function taskWorkerHost({
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
     const setup = await setupOf(projectId, sha).catch((error: unknown) => {
-      console.error(`could not read the secrets of ${projectId} for ${workerId}: ${error instanceof Error ? error.name : "unknown error"}`);
+      console.error(`could not read the secrets of ${projectId} for ${workerId}: ${secretFailure(error)}`);
       return null;
     });
     if (stopped) return;
@@ -1108,6 +1128,18 @@ export function taskWorkerHost({
       if (bytes.length > 0) screens.relay(data.streamId, "viewer", Buffer.from(bytes));
     },
   };
+}
+
+// The verdict control records for one a verifier gave with `shots` screenshots,
+// on a project whose app answers at `devUrl`, if it sets one: there, a pass
+// with no screenshot is blocked, for no browser evidence. A pass or issues that
+// no screenshot backs is tests only (VerdictLine).
+function evidenced(verdict: Omit<VerdictReport, "screenshots">, shots: number, devUrl: string | undefined) {
+  if (verdict.result === "pass" && shots === 0 && devUrl !== undefined) {
+    const summary = `No browser evidence: a PASS needs a screenshot of the app at ${devUrl}. The verifier said: ${verdict.summary}`;
+    return { ...verdict, result: "blocked" as const, summary, testsOnly: false };
+  }
+  return { ...verdict, testsOnly: verdict.result !== "blocked" && shots === 0 };
 }
 
 // Why the project agent may not mark a task done (the done rule), as it reads it.

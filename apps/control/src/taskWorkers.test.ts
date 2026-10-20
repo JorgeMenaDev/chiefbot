@@ -1,12 +1,12 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, TurnId, User, WorkerTranscript, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
 import { setupShell, type SetupShell } from "@chiefbot/worker/engineer-setup";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
@@ -400,6 +400,30 @@ test("an engineer whose turn ends while control reads its secrets never gets the
 
   expect(received.join("\n")).not.toContain("run-task");
   expect(setup.runs).toEqual([]);
+});
+
+test("an engineer whose secrets cannot be read is blocked, and control logs the error's known kind and code only, so a crafted error name cannot carry a value", async () => {
+  const values = new Map<string, string>();
+  const secrets = {
+    get: async (name: string) => {
+      throw Object.assign(new Error("refused"), { name: `Leak ${values.get(name)}`, code: 14 });
+    },
+    put: async (name: string, value: string) => void values.set(name, value),
+    delete: async (name: string) => void values.delete(name),
+  };
+  const control = await teamProject({ secrets }, "secrets: [API_KEY]\n");
+  const { owner, project } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "sk-crafted" });
+  const log = spyOn(console, "error");
+  atCleanUp(() => log.mockRestore());
+  const { tool } = await heldTurn(control);
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  const logged = log.mock.calls.map((args) => args.map(String).join(" "));
+  expect(logged.filter((text) => text.includes("sk-crafted"))).toEqual([]);
+  expect(logged).toContain(`could not read the secrets of ${project.id} for ${id}: other 14`);
 });
 
 test("an engineer whose computer runs an image without setup is blocked at once, told to rebuild the image, and gets no task", async () => {
@@ -1235,6 +1259,35 @@ test("a verifier ends with its verdict on the task, its report and screenshots k
   expect(new Uint8Array(await image.arrayBuffer())).toEqual(png);
 });
 
+test("a verifier's PASS needs browser evidence when the project has a devUrl: one with no screenshot is BLOCKED, and one on a project without a devUrl is tests only", async () => {
+  const control = await teamProject();
+  const { owner, project, copilot } = control;
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "commands:\n  dev: bun run dev\n  devUrl: http://localhost:3000\n" });
+  const said: unknown[] = [];
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) said.push((await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." })).result);
+    yield sdk.idle();
+  });
+  const { head } = await pullRequestOnTask(control, tool);
+  const verificationOf = async () => Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification;
+  const briefOf = (id: string) => copilot.sends.find(({ sessionId }) => sessionId === id)?.prompt ?? "";
+
+  const browser = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(await workerWhen(owner, project, browser.id, ({ state }) => state === "finished")).toMatchObject({ verdict: "blocked" });
+  const noEvidence = "No browser evidence: a PASS needs a screenshot of the app at http://localhost:3000. The verifier said: The README reads The shop.";
+  expect(await verificationOf()).toMatchObject({ result: "blocked", sha: head, testsOnly: false, summary: noEvidence });
+  expect(said[0]).toStartWith(`Recorded your verdict, blocked: ${noEvidence}`);
+  expect(briefOf(browser.id)).toContain("A pass needs at least one screenshot of the app: Chiefbot records a pass with none as blocked.");
+
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "" });
+  const testsOnly = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-2" })).body);
+
+  expect(await workerWhen(owner, project, testsOnly.id, ({ state }) => state === "finished")).toMatchObject({ verdict: "pass" });
+  expect(await verificationOf()).toMatchObject({ result: "pass", testsOnly: true, summary: "The README reads The shop." });
+  expect(briefOf(testsOnly.id)).toContain("The project sets no `commands.devUrl`, so there is no app to open: check the change by its tests and by reading the code. Your verdict shows as tests only.");
+});
+
 test("a verifier that gives no verdict is BLOCKED on the task: its setup failed, with its log as the report, or it ended without one", async () => {
   let installs = 0;
   const setup = fakeSetup((command) => (command === "bun install" && ++installs === 1 ? { exitCode: 1, output: "error: lockfile is frozen\n" } : { exitCode: 0, output: "" }));
@@ -1259,6 +1312,35 @@ test("a verifier that gives no verdict is BLOCKED on the task: its setup failed,
 
   expect(await workerWhen(owner, project, second.id, ({ verdict }) => verdict !== null)).toMatchObject({ state: "finished", verdict: "blocked" });
   expect(await verificationOf()).toMatchObject({ result: "blocked", worker: second.id, summary: "It ended without a verdict. Its last message: I looked around." });
+});
+
+test("a verifier's ending that fails, as its BLOCKED report cannot be written, leaves control running: it is logged and done when control starts again", async () => {
+  const control = await teamProject({ persistent: true });
+  const { owner, project, dbPath } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "I looked around.");
+    yield sdk.idle();
+  });
+  await pullRequestOnTask(control, tool);
+  const verificationOf = async () => Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json())[0]?.verification;
+  // A file where the report's folder goes, so control cannot write the report.
+  const inTheWay = join(dirname(dbPath), "context", project.id, "verify");
+  mkdirSync(dirname(inTheWay), { recursive: true });
+  writeFileSync(inTheWay, "");
+  const logged = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+    await eventually(() => logged.mock.calls.some(([line]) => String(line).startsWith(`could not end ${verifier.id}:`)));
+    expect(await verificationOf()).toBeNull();
+  } finally {
+    logged.mockRestore();
+  }
+
+  rmSync(inTheWay);
+  control.restart();
+
+  await eventually(async () => (await verificationOf())?.result === "blocked");
+  expect(await verificationOf()).toMatchObject({ result: "blocked", summary: "It ended without a verdict. Its last message: I looked around." });
 });
 
 test("a verifier whose computer runs an image that cannot verify is blocked at once, told to rebuild the image, and BLOCKED on the task", async () => {
@@ -1629,6 +1711,21 @@ test("a verifier that follows the repo's verify skill still gets the project's d
   const brief = copilot.sends.find(({ sessionId }) => sessionId === verifier.id)?.prompt ?? "";
   expect(brief).toContain("Check it as the repo's `check-ui` skill says: it is among your skills.");
   expect(brief).toContain("Start the app with `bun run dev` in the clone. It answers at http://localhost:3000.");
+});
+
+test("a verifier gets the project's effective test command: one the app's settings set over the repo's file", async () => {
+  const control = await teamProject();
+  const { owner, project, copilot } = control;
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "commands:\n  test: bun run test:unit\n" });
+  const { tool } = await heldTurn(control);
+  await pullRequestOnTask(control, tool);
+
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  await eventually(() => copilot.sends.some(({ sessionId }) => sessionId === verifier.id));
+  const brief = copilot.sends.find(({ sessionId }) => sessionId === verifier.id)?.prompt ?? "";
+  expect(brief).toContain("Run its tests with `bun run test:unit` in the clone.");
+  expect(brief).not.toContain("`bun test`");
 });
 
 test("a verifier takes one of the project's workers.max places, as an engineer does: beyond it, it is queued, and checks its pinned commit once one ends", async () => {
