@@ -391,6 +391,25 @@ test("a handoff's card and handoff_status show its task's verdict: Verified PASS
   expect(Handoff.array().parse(answers[1])).toMatchObject([{ status: "in_progress", verification: { ...verdict, stale: true } }]);
 });
 
+test("while the task's engineer sets up its template stack, the chief's card shows the stage it is on, and shows none once the engineer works", async () => {
+  const { owner, project, chief, copilot } = await setup();
+  expect((await owner.api("PUT", `/projects/${project.id}/settings`, { text: "template: java-react-enterprise\nservice: ui\n" })).status).toBe(200);
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "hand off the checkout") await runtime.tool("send_to_project", checkout(project));
+    else if (prompt.includes("task #1 in the ledger")) await runtime.tool("dispatch_worker", { task: 1, creationId: "c-1" });
+    else if (prompt.startsWith("You are an engineer")) yield sdk.message("msg-1", "Added the checkout page.");
+    yield sdk.idle();
+  };
+  const chiefChat = owner.watchChat(chief.id);
+
+  await owner.send(chief.id, "hand off the checkout");
+
+  await eventually(async () => (await workersOf(owner, project)).some(({ state }) => state === "finished"));
+  await Bun.sleep(50);
+  // One card per change: each stage as the stack gets to it, then none.
+  expect(cards(chiefChat.events).map(({ settingUp }) => settingUp)).toEqual([null, "Build", "Database", "API", "Gateway", "Seed", null]);
+});
+
 test("a card change a crash kept from the chief reaches it when control starts again", async () => {
   const { owner, project, chief, copilot, dbPath, stopControl, startControl } = await setup({ persistent: true });
   copilot.script = async function* (prompt, runtime) {

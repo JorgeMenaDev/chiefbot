@@ -36,16 +36,44 @@ export type SetupStep = z.infer<typeof SetupStep>;
 // stack (docs/templates.md), which control starts before the computer's setup:
 // Build (it clones the services' repos and builds their images), then each of
 // the template's stages that waits for a service the stack starts. Control
-// reports each stage as it starts (running), then once as it passes or fails, at
-// `at` (epoch milliseconds). `log` is the end of its commands' and services'
-// output, with the project's secrets hidden.
+// reports every stage as waiting before the first starts, then each as it
+// starts (running), then once as it passes or fails, at `at` (epoch
+// milliseconds). `log` is the end of its commands' and services' output, with
+// the project's secrets hidden.
 export const StackStage = z.object({
   label: z.string(),
-  state: z.enum(["running", "passed", "failed"]),
+  state: z.enum(["waiting", "running", "passed", "failed"]),
   log: z.string().max(SETUP_LOG_MAX),
   at: z.number(),
 });
 export type StackStage = z.infer<typeof StackStage>;
+
+// A stage of a worker's stack as the app shows it, folded from its StackStage
+// reports (foldStage): its latest state and log, when it started and when it
+// passed or failed (epoch milliseconds, null until then).
+export const StackRow = z.object({
+  label: z.string(),
+  state: StackStage.shape.state,
+  log: z.string().max(SETUP_LOG_MAX),
+  startedAt: z.number().nullable(),
+  endedAt: z.number().nullable(),
+});
+export type StackRow = z.infer<typeof StackRow>;
+
+// Folds one report into the stack's rows, one row per stage label in the order
+// they were first reported (a template's labels are distinct, and none is Build).
+export function foldStage(rows: StackRow[], { label, state, log, at }: StackStage): StackRow[] {
+  const index = rows.findIndex((row) => row.label === label);
+  const row = rows[index] ?? { label, state, log, startedAt: null, endedAt: null };
+  const next = {
+    label,
+    state,
+    log,
+    startedAt: state === "running" ? at : row.startedAt,
+    endedAt: state === "passed" || state === "failed" ? at : row.endedAt,
+  };
+  return index === -1 ? [...rows, next] : rows.with(index, next);
+}
 
 // What happens during one turn, as the worker reports it. The worker turns
 // Copilot SDK session events into these; a turn always ends with `done`.
@@ -169,7 +197,9 @@ export type HandoffStage = z.infer<typeof HandoffStage>;
 
 // What a handoff's card in its chief's chat shows. `project` is the project's
 // name; `question` is set only at needs_input; `pullRequests` are the task's;
-// `verification` is its verdict on the latest of them, or null for none.
+// `verification` is its verdict on the latest of them, or null for none;
+// `settingUp` is the stage of its template stack an engineer or verifier of the
+// task is on while it sets up (the first that has not passed), or null.
 export const HandoffCard = z.object({
   handoffId: HandoffId,
   workspaceId: WorkspaceId,
@@ -181,6 +211,7 @@ export const HandoffCard = z.object({
   question: z.string().nullable(),
   pullRequests: z.array(z.url()),
   verification: VerdictLine.nullable().default(null),
+  settingUp: z.string().nullable().default(null),
 });
 export type HandoffCard = z.infer<typeof HandoffCard>;
 
@@ -249,8 +280,9 @@ export const ChatItem = z.discriminatedUnion("kind", [
   // Control's note: about a handoff, from before cards (HandoffUpdate), or the
   // start of a turn control queued in a project chat (SystemMessage).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
-  // One step of an engineer's or verifier's setup, before its agent starts.
-  z.object({ kind: z.literal("setup"), id: z.string(), step: SetupStep }),
+  // An engineer's or verifier's setup, before its agent starts, as one list:
+  // each stage of its template stack (none without a template), then each step of its computer's setup.
+  z.object({ kind: z.literal("setup"), id: z.string(), stack: z.array(StackRow), steps: z.array(SetupStep) }),
   // Who pays for the turn that follows.
   z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) }),
   // expired: the turn ended before anyone answered (its worker restarted).

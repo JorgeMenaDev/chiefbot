@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, TurnId, User, WorkerTranscript, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
+import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, TurnId, User, WorkerTranscript, Workspace, WorkspaceInvite, type ChatEvent, type StackRow } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -1931,8 +1931,10 @@ test("an engineer of a project with a template gets its own stack before its set
 
   await workerWhen(owner, project, id, ({ state }) => state === "finished");
   const transcript = await owner.watchWorkerTranscript(project.id, id).settled();
+  const labels = ["Build", "Database", "API", "Gateway", "Seed"];
   expect(setupLines(transcript)).toEqual([
-    ...["Build", "Database", "API", "Gateway", "Seed"].flatMap((label) => [`${label} running`, `${label} passed`]),
+    ...labels.map((label) => `${label} waiting`),
+    ...labels.flatMap((label) => [`${label} running`, `${label} passed`]),
     "clone 0",
     "setup 0",
   ]);
@@ -1961,7 +1963,7 @@ test("a stage of the stack that fails blocks the engineer with that stage's log,
   const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
   expect(blocked.result).toBe("Its stack did not start: its API stage failed.");
   const transcript = await owner.watchWorkerTranscript(project.id, id).settled();
-  expect(setupLines(transcript)).toEqual(["Build running", "Build passed", "Database running", "Database passed", "API running", "API failed"]);
+  expect(setupLines(transcript).slice(5)).toEqual(["Build running", "Build passed", "Database running", "Database passed", "API running", "API failed"]);
   expect(transcript.flatMap(({ event }) => (event.type === "stack-stage" && event.stage.state === "failed" ? [event.stage.log] : []))).toEqual([
     "meta exited with 1: could not connect as acme:***\n",
   ]);
@@ -1973,6 +1975,26 @@ test("a stage of the stack that fails blocks the engineer with that stage's log,
     "stack API: failed\nmeta exited with 1: could not connect as acme:***\n",
     "error: Its stack did not start: its API stage failed.",
   ]);
+});
+
+test("an engineer's task lists its stack's stages from the start, each waiting until it runs, then passed or failed with when it started and ended and its log, also once control restarts", async () => {
+  const time = fakeClock(1_000);
+  const control = await templateProject({ persistent: true, clock: time.clock });
+  const { owner, project, stacks } = control;
+  const { tool } = await heldTurn(control);
+  stacks.failAt("API", "meta exited with 1\n");
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  const passed = (label: string): StackRow => ({ label, state: "passed", log: `${label} is up\n`, startedAt: 1_000, endedAt: 1_000 });
+  const waiting = (label: string): StackRow => ({ label, state: "waiting", log: "", startedAt: null, endedAt: null });
+  const stages: StackRow[] = [passed("Build"), passed("Database"), { label: "API", state: "failed", log: "meta exited with 1\n", startedAt: 1_000, endedAt: 1_000 }, waiting("Gateway"), waiting("Seed")];
+  expect(blocked.stack).toEqual(stages);
+  expect(setupLines(await owner.watchWorkerTranscript(project.id, id).settled()).slice(0, 5)).toEqual(["Build", "Database", "API", "Gateway", "Seed"].map((label) => `${label} waiting`));
+
+  control.restart();
+  expect((await workersOf(owner, project)).find((worker) => worker.id === id)?.stack).toEqual(stages);
 });
 
 test("a stack runner's own failure blocks the engineer with its message, the project's secrets and the repo tokens hidden", async () => {

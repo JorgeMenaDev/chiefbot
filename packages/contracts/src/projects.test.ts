@@ -147,6 +147,7 @@ test("a project's dot says what most needs a member: their answer, then work goi
     computerRemoved: false,
     screenHolder: null,
     setup: [],
+    stack: [],
     createdAt: 0,
     updatedAt: 0,
   });
