@@ -39,7 +39,11 @@ export type TaskWorkerSocketData = { kind: "task-worker"; workerId: TaskWorkerId
 
 // A WebSocket watching a worker for a member: one end of a stream of its screen,
 // the member's viewer or the worker piping its VNC server (screens.ts).
-export type WorkerWatchSocketData = { kind: "worker-viewer"; workerId: TaskWorkerId; streamId: string } | { kind: "worker-screen"; streamId: string };
+// Or a member following its transcript from event `after` on.
+export type WorkerWatchSocketData =
+  | { kind: "worker-viewer"; workerId: TaskWorkerId; streamId: string }
+  | { kind: "worker-screen"; streamId: string }
+  | { kind: "worker-transcript"; workerId: TaskWorkerId; after: number };
 
 // The coordinator's worker tools.
 export type WorkerToolCall = Extract<CoordinatorToolCall, { tool: "dispatch_worker" | "worker_status" | "worker_transcript" | "stop_worker" }>;
@@ -99,6 +103,8 @@ export type TaskWorkerHostOptions = {
 //   POST /projects/:id/workers/:workerId/take-over  → TaskWorker: the member drives its screen; the
 //                                worker's tool calls wait meanwhile. Any member may.
 //   POST /projects/:id/workers/:workerId/hand-back  → TaskWorker: the agent drives its screen again
+//   WS   /projects/:id/workers/:workerId/transcript  ?after=<seq> → each ChatEvent of the worker's turn
+//                                after seq, then live ones, as a chat's socket sends them
 // Worker routes. The WebSocket takes the task worker's credential (403 for another worker's); every
 // other route takes the key of the worker's running turn (403 invalid_turn_key otherwise):
 //   WS   /task-worker/:workerId                ControlToWorker; WorkerToControl back
@@ -134,14 +140,28 @@ export function taskWorkerHost({
   const waitLimits = new Map<ApprovalId, () => void>();
   // Who drives each worker's screen, and the streams of members watching it.
   const screens = screenTunnel<TaskWorkerId>({ onStreamEnd: () => {} });
+  // The sockets following each worker's transcript, with the last event each was sent.
+  const transcripts = new Map<TaskWorkerId, { projectId: ProjectId; sent: Map<Socket, number> }>();
+
+  // Sends each follower of the worker's transcript the events it has not had yet.
+  const sendTranscript = (workerId: TaskWorkerId) => {
+    for (const [socket, after] of transcripts.get(workerId)?.sent ?? []) {
+      const events = workers.transcript(workerId, after);
+      for (const event of events) socket.send(JSON.stringify(event satisfies ChatEvent));
+      transcripts.get(workerId)?.sent.set(socket, events.at(-1)?.seq ?? after);
+    }
+  };
 
   // The project's workers as members see them: with who drives each one's screen.
   const workersShown = (projectId: ProjectId): TaskWorker[] =>
     workers.workersOf(projectId).map((worker) => ({ ...worker, screenControl: screens.controlOf(worker.id) }));
+  // Every worker change reaches the project's members; one control made (an
+  // approval asked or answered, a turn ended) reaches each transcript's followers.
   const publish = (projectId: ProjectId) => {
     const event = { type: "workers", projectId, workers: workersShown(projectId) } satisfies ClientEvent;
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, event);
     onStateChange(projectId);
+    for (const [workerId, followers] of transcripts) if (followers.projectId === projectId) sendTranscript(workerId);
   };
   const publishTasks = (projectId: ProjectId) => {
     const event = { type: "tasks", projectId, tasks: projects.tasks(projectId) } satisfies ClientEvent;
@@ -306,6 +326,15 @@ export function taskWorkerHost({
         if (found instanceof Response) return found;
         if (!sockets.has(found.worker.id)) return apiError(409, "worker_offline");
         return upgrade(req, { kind: "worker-viewer", workerId: found.worker.id, streamId: crypto.randomUUID() });
+      },
+    },
+    "/projects/:id/workers/:workerId/transcript": {
+      GET: (req: Bun.BunRequest<"/projects/:id/workers/:workerId/transcript">) => {
+        const found = memberWorker(req);
+        if (found instanceof Response) return found;
+        const after = Number(new URL(req.url).searchParams.get("after") ?? 0);
+        if (!Number.isInteger(after) || after < 0) return apiError(400, "invalid_after");
+        return upgrade(req, { kind: "worker-transcript", workerId: found.worker.id, after });
       },
     },
     "/projects/:id/workers/:workerId/take-over": {
@@ -542,6 +571,7 @@ export function taskWorkerHost({
         const now = clock.now();
         const stored = workers.appendTurnEvent(workerId, message.turnId, message.index, message.event, now);
         if (!stored) return;
+        sendTranscript(workerId);
         if (message.event.type === "approval-request") limitWait(workerId, message.event.approvalId, now);
         if (message.event.type === "approval-withdrawn") stopWaitLimit(message.event.approvalId);
         if (message.event.type === "done") turnOver(workerId, message.turnId);
@@ -568,9 +598,19 @@ export function taskWorkerHost({
       }
     },
 
-    // A socket watching a worker opened: a viewer waits while its worker dials
-    // back; the worker's end joins the viewer's stream.
+    // A socket watching a worker opened: a transcript's follower gets what it
+    // has not had; a viewer waits while its worker dials back; the worker's end
+    // joins the viewer's stream.
     watchOpen(ws: Socket, data: WorkerWatchSocketData) {
+      if (data.kind === "worker-transcript") {
+        const projectId = workers.worker(data.workerId)?.projectId;
+        if (!projectId) return ws.close();
+        const followers = transcripts.get(data.workerId) ?? { projectId, sent: new Map() };
+        transcripts.set(data.workerId, followers);
+        followers.sent.set(ws, data.after);
+        sendTranscript(data.workerId);
+        return;
+      }
       if (data.kind === "worker-screen") {
         if (!screens.joinScreen(data.streamId, ws)) ws.close();
         return;
@@ -580,10 +620,17 @@ export function taskWorkerHost({
       send(data.workerId, { type: "screen-open", streamId: data.streamId });
     },
 
-    watchClose: (data: WorkerWatchSocketData) => screens.end(data.streamId),
+    watchClose(ws: Socket, data: WorkerWatchSocketData) {
+      if (data.kind !== "worker-transcript") return screens.end(data.streamId);
+      const followers = transcripts.get(data.workerId);
+      followers?.sent.delete(ws);
+      if (followers?.sent.size === 0) transcripts.delete(data.workerId);
+    },
 
-    watchMessage: (data: WorkerWatchSocketData, raw: string | Buffer) =>
-      screens.relay(data.streamId, data.kind === "worker-viewer" ? "viewer" : "screen", raw),
+    // A transcript's follower sends nothing; a screen's ends pipe bytes to each other.
+    watchMessage(data: WorkerWatchSocketData, raw: string | Buffer) {
+      if (data.kind !== "worker-transcript") screens.relay(data.streamId, data.kind === "worker-viewer" ? "viewer" : "screen", raw);
+    },
   };
 }
 

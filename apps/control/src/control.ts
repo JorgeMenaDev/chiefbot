@@ -800,7 +800,7 @@ export function startControl({
       open(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.open(ws, ws.data);
         if (ws.data.kind === "task-worker") return taskWorkers.open(ws, ws.data);
-        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen") return taskWorkers.watchOpen(ws, ws.data);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen" || ws.data.kind === "worker-transcript") return taskWorkers.watchOpen(ws, ws.data);
         if (ws.data.kind === "viewer") {
           const worker = workers.get(ws.data.botId);
           if (!worker) return ws.close();
@@ -839,7 +839,7 @@ export function startControl({
       close(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.close(ws, ws.data);
         if (ws.data.kind === "task-worker") return taskWorkers.close(ws, ws.data);
-        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen") return taskWorkers.watchClose(ws.data);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen" || ws.data.kind === "worker-transcript") return taskWorkers.watchClose(ws, ws.data);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.end(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
@@ -849,7 +849,7 @@ export function startControl({
       message(ws, raw) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.message(ws.data, raw);
         if (ws.data.kind === "task-worker") return taskWorkers.message(ws.data, raw);
-        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen") return taskWorkers.watchMessage(ws.data, raw);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen" || ws.data.kind === "worker-transcript") return taskWorkers.watchMessage(ws.data, raw);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.relay(ws.data.streamId, ws.data.kind, raw);
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));

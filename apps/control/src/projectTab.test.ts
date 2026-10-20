@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from "bun:test";
-import { ClientEvent, Project, TaskWorker, Workspace, WorkspaceInvite, type ProjectId, type ProjectState } from "@chiefbot/contracts";
+import { ChatEvent, ClientEvent, Project, TaskWorker, Workspace, WorkspaceInvite, type ProjectId, type ProjectState } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
+import { sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { atCleanUp, cleanUp, eventually, fakeCoordinator, startTestControl, type TestControl, type TestUser } from "./testControl.ts";
 
 // What the desktop's Projects tab reads from control: each project's state dot,
-// and a running engineer's screen.
+// and a running engineer's screen and transcript.
 
 afterEach(cleanUp);
 
@@ -39,12 +40,10 @@ function watchStates({ url }: TestControl, member: TestUser) {
 
 // A fake coordinator takes the project's and holds the owner's turn open, after
 // making task #1, so the test calls the coordinator's tools on control with the
-// turn's key. Engineers run on the fake Copilot, and never finish.
-async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>) {
+// turn's key. Engineers run `engineer` on the fake Copilot: by default they never finish.
+async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>, engineer: FakeScript = forever) {
   const { url, project, owner, copilot } = control;
-  copilot.script = async function* () {
-    await new Promise(() => {});
-  };
+  copilot.script = engineer;
   const coordinator = await fakeCoordinator(control, project.id);
   coordinator.hello(null);
   await owner.api("POST", `/projects/${project.id}/messages`, { text: "Fix the typo" });
@@ -55,9 +54,13 @@ async function heldTurn(control: Awaited<ReturnType<typeof teamProject>>) {
   return { coordinator, tool, release: () => coordinator.event(turnId, { type: "done" }) };
 }
 
-// An engineer on task #1 whose worker is connected and runs it.
-async function runningEngineer(control: Awaited<ReturnType<typeof teamProject>>) {
-  const turn = await heldTurn(control);
+const forever: FakeScript = async function* () {
+  await new Promise(() => {});
+};
+
+// An engineer on task #1 whose worker is connected and runs `script`.
+async function runningEngineer(control: Awaited<ReturnType<typeof teamProject>>, script: FakeScript = forever) {
+  const turn = await heldTurn(control, script);
   const engineer = TaskWorker.parse(await (await turn.tool({ tool: "dispatch_worker", task: 1, creationId: "session/call-1" })).json());
   await eventually(async () => (await engineerOf(control.owner, control.project, engineer))?.state === "working");
   return { ...turn, engineer };
@@ -158,4 +161,30 @@ test("a member takes control of an engineer's screen and its worker waits; hand 
   await guest.api("POST", `/projects/${project.id}/workers/${engineer.id}/hand-back`);
   expect((await engineerOf(control.owner, project, engineer))?.screenControl).toBe("agent");
   await eventually(() => worker()?.screenControl() === "agent");
+});
+
+test("a member follows an engineer's transcript: what it did so far, then live, and resumes after the last event it has", async () => {
+  const control = await teamProject();
+  const { project, guest, signIn, url } = control;
+  let finish = () => {};
+  const finished = new Promise<void>((resolve) => (finish = resolve));
+  const { engineer } = await runningEngineer(control, async function* () {
+    yield sdk.message("msg-1", "Cloned the repo.");
+    await finished;
+    yield sdk.message("msg-2", "Fixed the typo.");
+    yield sdk.idle();
+  });
+  const texts = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "text-delta" ? [event.text] : []));
+
+  const transcript = guest.watchWorkerTranscript(project.id, engineer.id);
+  const sofar = await transcript.until((events) => texts(events).includes("Cloned the repo."));
+  const seen = sofar.at(-1)?.seq ?? 0;
+  finish();
+  const all = await transcript.until((events) => events.some(({ event }) => event.type === "done"));
+  expect(texts(all)).toEqual(["Cloned the repo.", "Fixed the typo."]);
+
+  const resumed = await guest.watchWorkerTranscript(project.id, engineer.id, seen).settled();
+  expect(resumed.map(({ seq }) => seq)).toEqual(all.filter(({ seq }) => seq > seen).map(({ seq }) => seq));
+  const outsider = await signIn({ id: 666, login: "mallory", copilot: null });
+  expect((await fetch(`${url}/projects/${project.id}/workers/${engineer.id}/transcript`, { headers: outsider.auth })).status).toBe(404);
 });
