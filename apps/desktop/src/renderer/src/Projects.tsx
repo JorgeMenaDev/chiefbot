@@ -351,9 +351,12 @@ function WorkerRow({ project, worker, login }: { project: Project; worker: TaskW
 }
 
 const workerStateText: Record<TaskWorkerState, string> = {
+  queued: "queued",
   launching: "starting its computer",
+  setting_up: "setting up",
   working: "working",
   finished: "finished",
+  blocked: "blocked",
   failed: "failed",
   stopped: "stopped",
 };

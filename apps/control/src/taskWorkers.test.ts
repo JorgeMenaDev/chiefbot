@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakeClock } from "@chiefbot/worker/clock";
+import type { SetupResult, SetupShell } from "@chiefbot/worker/engineer-setup";
 import { startFakeMcpServer } from "./connectors/fakeMcpServer.ts";
 import { atCleanUp, cleanUp, doneCount, eventually, fakeCoordinator, startTestControl, type TestControlOptions, type TestUser } from "./testControl.ts";
 
@@ -131,6 +132,118 @@ const connectorOf = (copilot: FakeCopilot, name: string) => {
   return server?.type === "http" ? { url: server.url, headers: server.headers ?? {} } : { url: "", headers: {} };
 };
 
+// An engineer's setup shell that runs nothing: each command answers as `answer`
+// says (exit 0 and no output by default), and every run is recorded.
+function fakeSetup(answer: (command: string) => SetupResult | Promise<SetupResult> = () => ({ exitCode: 0, output: "" })) {
+  const runs: Array<{ command: string; cwd: string; env: Record<string, string> }> = [];
+  const run: SetupShell = async (command, { cwd, env }) => {
+    runs.push({ command, cwd, env });
+    return answer(command);
+  };
+  return { runs, run };
+}
+
+test("an engineer sets up before its agent starts: it clones the repo and runs the setup command, and its transcript shows each with its exit code first", async () => {
+  let install = () => {};
+  const installed = new Promise<void>((resolve) => (install = resolve));
+  const setup = fakeSetup(async (command) => {
+    if (command !== "bun install") return { exitCode: 0, output: "" };
+    await installed;
+    return { exitCode: 0, output: "3 packages installed\n" };
+  });
+  const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install\n");
+  const { owner, project, copilot } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Added the page.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const settingUp = await workerWhen(owner, project, id, ({ setup }) => setup.length === 1);
+  expect(settingUp.state).toBe("setting_up");
+  expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
+  install();
+
+  const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  expect(finished.setup).toEqual([
+    { step: "clone", command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "" },
+    { step: "setup", command: "bun install", exitCode: 0, log: "3 packages installed\n" },
+  ]);
+  // The clone lands in the engineer's workspace, and the setup runs in it.
+  const [clone, install_] = setup.runs;
+  expect(install_?.cwd).toBe(join(clone?.cwd ?? "", "shop"));
+  expect((await tool({ tool: "worker_transcript", worker: id })).body).toEqual({
+    worker: id,
+    lines: ["clone: git clone https://github.com/octo-org/shop.git shop (exit 0)", "setup: bun install (exit 0)", "setup done", "worker: Added the page."],
+    truncated: false,
+  });
+});
+
+test("a setup command that fails blocks the engineer: its agent never starts, its computer stops, and it keeps the step's log", async () => {
+  const lockfile = "error: lockfile had changes, but lockfile is frozen\n";
+  const setup = fakeSetup((command) => (command === "bun install --frozen-lockfile" ? { exitCode: 1, output: lockfile } : { exitCode: 0, output: "" }));
+  const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install --frozen-lockfile\n");
+  const { owner, project, copilot, computers } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Never said.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+
+  expect(blocked).toMatchObject({ result: "Its setup failed: `bun install --frozen-lockfile` exited with 1.", computerRemoved: false });
+  expect(blocked.setup.at(-1)).toEqual({ step: "setup", command: "bun install --frozen-lockfile", exitCode: 1, log: lockfile });
+  expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
+  await eventually(async () => (await computers.provider.status(id)) === "stopped");
+  expect(((await tool({ tool: "worker_transcript", worker: id })).body as { lines: string[] }).lines.slice(1)).toEqual([
+    `setup: bun install --frozen-lockfile (exit 1)\n${lockfile}`,
+    "error: Its setup failed: `bun install --frozen-lockfile` exited with 1.",
+  ]);
+});
+
+test("an engineer gets the project's secrets for its task only: in its setup and its agent's runtime, never on the project's computer, and gone once its turn ends", async () => {
+  const setup = fakeSetup((command) => ({ exitCode: 0, output: command === "bun install" ? "using API_KEY=dev-key-1\n" : "" }));
+  const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install\nsecrets: [API_KEY, UNSET_KEY]\n");
+  const { owner, guest, project, copilot, computers } = control;
+  expect((await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "dev-key-1" })).status).toBe(204);
+  let dispatched: unknown = null;
+  copilot.script = async function* (prompt, runtime) {
+    if (isWorker(prompt)) {
+      yield sdk.message("msg-1", "Called the API.");
+      yield sdk.idle();
+      return;
+    }
+    await runtime.tool("create_task", { title: "Call the API" });
+    dispatched = await answer(runtime.tool("dispatch_worker", { task: 1 }));
+    yield sdk.idle();
+  };
+
+  await ask(guest, project, "Call the API");
+  const { id } = TaskWorker.parse(dispatched);
+  const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+
+  // The setup command and the engineer's runtime get the value that is set; the clone gets none.
+  expect(setup.runs.map(({ command, env }) => [command.split(" ")[0], env])).toEqual([
+    ["git", {}],
+    ["bun", { API_KEY: "dev-key-1" }],
+  ]);
+  const sessions = copilot.sessionIds.map((sessionId, at) => ({ sessionId, env: copilot.envs[at], instructions: copilot.instructions[at] ?? "" }));
+  expect(sessions.filter(({ sessionId }) => sessionId === id).map(({ env }) => env)).toEqual([{ API_KEY: "dev-key-1" }]);
+  // The engineer is told the name, never the value, and its setup's log hides it.
+  const told = sessions.find(({ sessionId }) => sessionId === id)?.instructions ?? "";
+  expect([told.includes("API_KEY"), told.includes("dev-key-1")]).toEqual([true, false]);
+  expect(finished.setup[1]?.log).toBe("using API_KEY=***\n");
+  // The project's computer and its coordinator's sessions never get it.
+  const coordinator = sessions.filter(({ sessionId }) => sessionId !== id);
+  expect(coordinator.length).toBeGreaterThan(0);
+  expect(coordinator.every(({ env }) => env === undefined)).toBe(true);
+  const elsewhere = JSON.stringify([computers.computers.get(project.id)?.spec, computers.computers.get(id)?.spec, coordinator, copilot.sends, await workersOf(owner, project)]);
+  expect(elsewhere).not.toContain("dev-key-1");
+  // Its turn is over: its session closed, and the runtime that held the secret with it.
+  await eventually(() => copilot.closed.includes(id));
+});
+
 test("a resent dispatch with the same creation id starts one worker, even while the first is still getting its computer", async () => {
   const creates: string[] = [];
   let openGate = () => {};
@@ -192,7 +305,7 @@ async function gitTeamProject() {
   return control;
 }
 
-test("the worker pushes and opens its pull request through control, each approved by the member who asked, and the task links it", async () => {
+test("the worker pushes and opens its draft pull request through control, each approved by the member who asked, and the task links it", async () => {
   const { owner, guest, project, copilot, github } = await gitTeamProject();
   const exitCodes: number[] = [];
   let dispatched: unknown = null;
@@ -231,9 +344,27 @@ test("the worker pushes and opens its pull request through control, each approve
   expect(exitCodes).toEqual([0, 0]);
   expect(github.git("octo-org/shop", "show", "fix-typo:README.md")).toBe("# Shop\nThe shop.");
   expect(github.pushes).toEqual([{ repository: "octo-org/shop", by: "app" }]);
-  expect(github.pullRequests).toMatchObject([{ repository: "octo-org/shop", head: "fix-typo", base: "main", by: "app" }]);
+  expect(github.pullRequests).toMatchObject([{ repository: "octo-org/shop", head: "fix-typo", base: "main", by: "app", draft: true }]);
   const [task] = Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json());
   expect(task?.links).toEqual([{ kind: "pull-request", url }]);
+});
+
+test("an engineer is told to reproduce on the base branch first, and when nothing needs to change it ends with a report and no pull request", async () => {
+  const control = await teamProject();
+  const { owner, project, copilot, github } = control;
+  const report = "Report: README.md on main already says \"The shop\", so the typo is fixed. Nothing to change.";
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", report);
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  expect(await workerWhen(owner, project, id, ({ state }) => state === "finished")).toMatchObject({ result: report, pullRequest: null });
+  expect(github.pushes).toEqual([]);
+  const brief = copilot.sends.find(({ sessionId }) => sessionId === id)?.prompt ?? "";
+  expect(brief).toContain("First reproduce the problem, or see how the code behaves now, on the base branch");
+  expect(brief).toContain("If nothing needs to change (it is already fixed, or the task only asks a question), push nothing: end with a report");
+  expect(brief).toContain("open a draft pull request with create_pull_request");
 });
 
 test("the coordinator reads a worker's transcript and stops it: its turn ends and its computer is removed", async () => {
@@ -250,7 +381,8 @@ test("the coordinator reads a worker's transcript and stops it: its turn ends an
   const read = async (lines?: number) => (await tool({ tool: "worker_transcript", worker: id, ...(lines ? { lines } : {}) })).body;
   await eventually(async () => JSON.stringify(await read()).includes("fail before my change."));
 
-  expect(await read()).toEqual({ worker: id, lines: ["tool Run the tests: failed", "worker: The tests fail before my change."], truncated: false });
+  const setUp = ["clone: git clone https://github.com/octo-org/shop.git shop (exit 0)", "setup done"];
+  expect(await read()).toEqual({ worker: id, lines: [...setUp, "tool Run the tests: failed", "worker: The tests fail before my change."], truncated: false });
   expect(await read(1)).toEqual({ worker: id, lines: ["worker: The tests fail before my change."], truncated: true });
   expect(TaskWorker.parse((await tool({ tool: "worker_status", worker: id })).body).state).toBe("working");
 
@@ -259,7 +391,7 @@ test("the coordinator reads a worker's transcript and stops it: its turn ends an
   expect(TaskWorker.parse(stopped.body)).toMatchObject({ state: "stopped", result: "The coordinator stopped this worker." });
   await workerWhen(owner, project, id, ({ computerRemoved }) => computerRemoved);
   expect(computers.destroyed).toEqual([{ id, deleteData: true }]);
-  expect((await read()) as unknown).toMatchObject({ lines: ["tool Run the tests: failed", "worker: The tests fail before my change.", "error: The coordinator stopped this worker."] });
+  expect((await read()) as unknown).toMatchObject({ lines: [...setUp, "tool Run the tests: failed", "worker: The tests fail before my change.", "error: The coordinator stopped this worker."] });
   expect(await tool({ tool: "worker_status", worker: "worker_missing" })).toEqual({
     status: 404,
     body: { error: "invalid_tool_call", message: "No worker worker_missing in this project" },

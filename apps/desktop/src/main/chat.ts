@@ -218,6 +218,10 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       );
       return { ...view, working: stillWaiting(items), items };
     }
+    // Only engineers set up, and no chat shows an engineer's turn.
+    case "setup-step":
+    case "setup-done":
+      return view;
     // Approvals and questions left pending when a turn ends can no longer be answered.
     case "done": {
       const items = view.items.map(

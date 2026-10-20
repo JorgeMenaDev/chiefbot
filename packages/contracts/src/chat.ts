@@ -15,6 +15,21 @@ import { CopilotPayer } from "./workspaces.ts";
 export const ApprovalKind = z.enum(["push", "pull-request", "tool", "connector", "command", "file-change"]);
 export type ApprovalKind = z.infer<typeof ApprovalKind>;
 
+// The most of a setup step's output an engineer keeps: the end of it.
+export const SETUP_LOG_MAX = 16_384;
+
+// One step of an engineer's setup (a project's task worker), before its agent
+// starts: the command it ran, how it ended and the end of its output.
+//   clone  clones the project's repo from its default branch, through control's git proxy
+//   setup  the project's commands.setup, in the clone, with the project's secrets in its environment
+export const SetupStep = z.object({
+  step: z.enum(["clone", "setup"]),
+  command: z.string(),
+  exitCode: z.int(),
+  log: z.string().max(SETUP_LOG_MAX),
+});
+export type SetupStep = z.infer<typeof SetupStep>;
+
 // What happens during one turn, as the worker reports it. The worker turns
 // Copilot SDK session events into these; a turn always ends with `done`.
 //   text-delta  a chunk of an assistant message; chunks of one message share messageId
@@ -32,6 +47,10 @@ export type ApprovalKind = z.infer<typeof ApprovalKind>;
 //   question-withdrawn  the agent no longer waits on that question, which can no
 //               longer be answered: the SDK ended it, its turn ended, or the bot was stopped
 //               (control adds that one).
+//   setup-step  an engineer ran one step of its setup (SetupStep), before its agent starts.
+//               A step that fails ends the turn: the engineer is blocked.
+//   setup-done  the engineer's setup is over and its agent starts, with the repo's
+//               instruction files and skill folders it found
 export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text-delta"), messageId: z.string(), text: z.string() }),
   z.object({
@@ -46,6 +65,8 @@ export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("approval-withdrawn"), approvalId: ApprovalId }),
   z.object({ type: z.literal("question-request"), questionId: QuestionId, form: QuestionForm }),
   z.object({ type: z.literal("question-withdrawn"), questionId: QuestionId }),
+  z.object({ type: z.literal("setup-step"), step: SetupStep }),
+  z.object({ type: z.literal("setup-done"), instructions: z.array(z.string()), skills: z.array(z.string()) }),
   z.object({ type: z.literal("done") }),
 ]);
 export type TurnEvent = z.infer<typeof TurnEvent>;

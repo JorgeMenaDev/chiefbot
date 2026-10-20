@@ -257,6 +257,14 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         .map(({ name }) => name);
     },
 
+    // The project's secrets that control holds a value for, each with the SecretStore name of its value.
+    secretRefs(projectId: ProjectId): Array<{ name: string; secretName: string }> {
+      return db
+        .query<{ name: string; secret_name: string }, [string]>("SELECT name, secret_name FROM project_secrets WHERE project_id = ?1 ORDER BY rowid")
+        .all(projectId)
+        .map(({ name, secret_name }) => ({ name, secretName: secret_name }));
+    },
+
     // A value is about to be written under `secretName`: a leftover until it is published.
     stageSecret(secretName: string) {
       db.query("INSERT OR IGNORE INTO project_secret_leftovers (secret_name) VALUES (?1)").run(secretName);

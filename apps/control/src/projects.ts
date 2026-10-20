@@ -487,6 +487,18 @@ export function projectHost({
     // Projects whose coordinator is connected: their computers run.
     awake: () => [...coordinators.keys()].map((id) => ({ id })),
 
+    // The values of the project's secrets that its config declares and that are
+    // set, by name, for one of its engineers (taskWorkers.ts). Read in turn with
+    // the secrets' writes, so a value being replaced is read whole. Throws when
+    // the SecretStore fails.
+    secretValues: (projectId: ProjectId) =>
+      inOrder(projectId, async () => {
+        const declared = projects.project(projectId)?.config.secrets ?? [];
+        const refs = projects.secretRefs(projectId).filter(({ name }) => declared.includes(name));
+        const values = await Promise.all(refs.map(async ({ name, secretName }) => ({ name, value: await secrets.get(secretName) })));
+        return Object.fromEntries(values.flatMap(({ name, value }) => (value === null ? [] : [[name, value]])));
+      }),
+
     // Whether the project's coordinator has a turn running or waiting.
     busy: (projectId: ProjectId) => projects.hasUnfinishedTurn(projectId),
 

@@ -10,6 +10,7 @@ import {
   type ControlToWorker,
   type CoordinatorToolCall,
   type CopilotPayer,
+  type EngineerSetup,
   type OpenedPullRequest,
   type Project,
   type ProjectId,
@@ -47,6 +48,8 @@ export type TaskWorkerHostOptions = {
   payerOf: ReturnType<typeof copilotIdentity>;
   // The project's connectors ready for the member who asked (connectors.ts).
   connectorsFor: (projectId: ProjectId, userId: UserId) => Promise<AgentConnector[]>;
+  // The values of the project's secrets that are set, by name (projects.ts). Throws when they cannot be read.
+  secretsFor: (projectId: ProjectId) => Promise<Record<string, string>>;
   computers: ComputerProvider;
   approvals: ReturnType<typeof controlApprovals>;
   // A worker that waits this long on one approval stops, keeping its disk.
@@ -65,20 +68,26 @@ export type TaskWorkerHostOptions = {
   upgrade: (req: Request, data: TaskWorkerSocketData) => Response | undefined;
 };
 
-// A project's workers: one task each, on a throwaway computer from the
-// ComputerProvider. The coordinator dispatches them (dispatch_worker): control
-// writes the launch record first, keyed by the tool call's creation id, then
-// asks for the computer, so a resent call starts no second worker. The worker
-// is a bot's worker (apps/worker) on control's /task-worker routes: it runs the
-// task as one turn for the member who asked, on the Copilot that pays for it
-// (their seat, or their organization's: copilotIdentity.ts) and with the
-// project's connectors ready for them (through connectors.ts's proxy). It clones
-// and pushes through control's git proxy and opens its pull request through
-// control, each push and pull request approved by that member. Its last message is its
-// result; its pull request is linked on the task. Its computer stops as soon as
-// its turn ends, keeping its disk, and goes once the worker is stopped or its
-// task is done or abandoned; on start, control stops every computer of an
-// ended turn and removes every one that should be gone (`recover`).
+// A project's workers, its engineers: one task each, on a throwaway computer
+// from the ComputerProvider. The coordinator dispatches them (dispatch_worker):
+// control writes the launch record first, keyed by the tool call's creation id,
+// then asks for the computer, so a resent call starts no second worker. A
+// project runs at most its workers.max at once: another dispatch is queued, and
+// launches when one of them ends. The worker is a bot's worker (apps/worker) on
+// control's /task-worker routes: it runs the task as one turn for the member who
+// asked, on the Copilot that pays for it (their seat, or their organization's:
+// copilotIdentity.ts) and with the project's connectors ready for them (through
+// connectors.ts's proxy). It first sets up (setting_up): it clones the repo
+// through control's git proxy and runs the project's setup command with the
+// project's secrets, which control sends with its task and nowhere else
+// (EngineerSetup); a step that fails blocks it. Then its agent works on the task:
+// it pushes through the git proxy and opens a draft pull request through
+// control, each push and pull request approved by that member, or ends with a
+// report when nothing needs to change. Its last message is its result; its pull
+// request is linked on the task. Its computer stops as soon as its turn ends,
+// keeping its disk, and goes once the worker is stopped or its task is done or
+// abandoned; on start, control stops every computer of an ended turn, removes
+// every one that should be gone and launches what the queue has room for (`recover`).
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's
@@ -93,13 +102,14 @@ export type TaskWorkerHostOptions = {
 //                                its task runs on their seat (404 otherwise; 403 reauth_needed)
 //   GET  /task-worker/:workerId/installation-token  → CopilotInstallationToken, when its task runs
 //                                on the organization's Copilot (404 otherwise; 502 copilot_token_failed)
-//   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest once the
-//                                member who asked approves (errors as a bot's)
+//   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest, a draft,
+//                                once the member who asked approves (errors as a bot's)
 // The git proxy (repos.ts) takes the turn's key through agentOf.
 export function taskWorkerHost({
   store,
   payerOf,
   connectorsFor,
+  secretsFor,
   computers,
   approvals,
   approvalWaitMinutes,
@@ -181,19 +191,39 @@ export function taskWorkerHost({
     waitLimits.delete(approvalId);
   };
 
-  // Makes the worker's computer. A failure fails the worker and removes what was made.
-  async function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
-    try {
-      await computers.create({
-        id: workerId,
-        env: { CHIEFBOT_CONTROL_URL: controlUrlForComputers(), CHIEFBOT_TASK_WORKER_ID: workerId, CHIEFBOT_TASK_WORKER_TOKEN: token },
-      });
-      await computers.start(workerId);
-    } catch (error) {
-      workers.launchFailed(workerId, `Its computer could not start: ${error instanceof Error ? error.message : String(error)}`);
-      void reap();
+  // A new worker credential.
+  const newToken = () => crypto.randomUUID() + crypto.randomUUID();
+
+  // Makes the worker's computer, a launch that a resent dispatch and a reap wait
+  // for. A failure fails the worker, removes what was made and frees its place.
+  function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
+    const launched = (async () => {
+      try {
+        await computers.create({
+          id: workerId,
+          env: { CHIEFBOT_CONTROL_URL: controlUrlForComputers(), CHIEFBOT_TASK_WORKER_ID: workerId, CHIEFBOT_TASK_WORKER_TOKEN: token },
+        });
+        await computers.start(workerId);
+      } catch (error) {
+        workers.launchFailed(workerId, `Its computer could not start: ${error instanceof Error ? error.message : String(error)}`);
+        void reap();
+        promote(projectId);
+      }
+      publish(projectId);
+    })();
+    launches.set(workerId, launched);
+    void launched.finally(() => launches.delete(workerId));
+    return launched;
+  }
+
+  // Launches the project's queued workers, oldest first, while it runs fewer than its workers.max.
+  function promote(projectId: ProjectId) {
+    const max = projects.project(projectId)?.config.workers.max;
+    if (max === undefined) return;
+    for (let token = newToken(), next = workers.dequeue(projectId, max, token); next; token = newToken(), next = workers.dequeue(projectId, max, token)) {
+      publish(projectId);
+      void launch(projectId, next, token);
     }
-    publish(projectId);
   }
 
   // Deletes every worker computer that must go (after any launch still making
@@ -214,10 +244,13 @@ export function taskWorkerHost({
   }
 
   // The worker's turn ended: its approvals stop waiting and its computer stops,
-  // keeping its disk until the task closes. A failed stop is retried on control's next start.
+  // keeping its disk until the task closes, which frees its place for a queued
+  // worker. A failed stop is retried on control's next start.
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
     computers.stop(workerId).catch((error: unknown) => console.error(`could not stop the computer of ${workerId}:`, error));
+    const projectId = workers.worker(workerId)?.projectId;
+    if (projectId) promote(projectId);
   }
 
   // Ends the worker's turn (if it runs) and marks its computer to go.
@@ -227,21 +260,32 @@ export function taskWorkerHost({
     if (turnId) approvals.turnEnded(turnId);
   }
 
-  // The worker's first message: the task, the project and how to hand back the work.
+  // The engineer's brief, its first message: the task, the project and how to
+  // hand back the work. Its instructions say where its setup cloned the repo.
   function taskPrompt({ name, repo, config }: Project, task: Task, instructions: string) {
     const commands = Object.entries(config.commands).map(([command, line]) => `- ${command}: ${line}`);
     return [
-      `You are a worker of the project ${name} (GitHub repo ${repo}). You have this computer to yourself for one task.`,
+      `You are an engineer of the project ${name} (GitHub repo ${repo}). You have this computer to yourself for one task. Chiefbot cloned the repo and set it up for you.`,
       "",
       `Task #${task.number}: ${task.title}`,
       ...(task.detail ? [task.detail] : []),
-      ...(instructions ? ["", "From the project's coordinator:", instructions] : []),
+      ...(instructions ? ["", "From the project agent:", instructions] : []),
       "",
-      `Clone https://github.com/${repo} and work on a new branch.`,
-      ...(commands.length > 0 ? ["The repo's commands:", ...commands] : []),
-      "Push the branch and open a pull request with create_pull_request. The member who asked for this approves each push and the pull request.",
-      "End with a short summary of what you changed and the pull request's link.",
+      ...(commands.length > 0 ? ["The repo's commands:", ...commands, ""] : []),
+      "First reproduce the problem, or see how the code behaves now, on the base branch as cloned, before you change anything.",
+      "If nothing needs to change (it is already fixed, or the task only asks a question), push nothing: end with a report of what you checked and what you found.",
+      "Otherwise work on a new branch, push it and open a draft pull request with create_pull_request. The member who asked for this approves each push and the pull request.",
+      "End with a short summary: the pull request's link and what it changes, or your report.",
     ].join("\n");
+  }
+
+  // What the engineer sets up: the project's config as it is now, and the values
+  // of its secrets. Null when the project is gone.
+  async function setupOf(projectId: ProjectId): Promise<EngineerSetup | null> {
+    const project = projects.project(projectId);
+    if (!project) return null;
+    const { repo, config } = project;
+    return { repo, command: config.commands.setup ?? null, instructions: config.instructions, skills: config.skills, mcp: config.mcp, secrets: await secretsFor(projectId) };
   }
 
   const routes = {
@@ -289,7 +333,7 @@ export function taskWorkerHost({
       GET: (req: Bun.BunRequest<"/task-worker/:workerId/installation-token">) => turnToken(req, "org"),
     },
     // The worker's create_pull_request tool. Waits, however long, for the requester's
-    // answer; once opened, the pull request is linked on the worker and its task.
+    // answer; once opened, as a draft, the pull request is linked on the worker and its task.
     "/task-worker/:workerId/pull-requests": {
       POST: async (req: Bun.BunRequest<"/task-worker/:workerId/pull-requests">, server: Bun.Server<unknown>) => {
         const turn = heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId));
@@ -297,7 +341,7 @@ export function taskWorkerHost({
         const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
         if (!args.success) return apiError(400, "invalid_pull_request");
         server.timeout(req, 0);
-        const opened = await pullRequest(agentOf(turn), args.data, req.signal);
+        const opened = await pullRequest(agentOf(turn), args.data, req.signal, { draft: true });
         if ("error" in opened) return apiError(opened.status, opened.error, opened.message);
         const worker = workers.worker(turn.workerId);
         if (worker) {
@@ -326,8 +370,9 @@ export function taskWorkerHost({
   }
 
   // Starts the worker's task, once: on the Copilot of whoever pays for the
-  // member who asked, with the connectors ready for them. On the organization's
-  // Copilot the worker renews its one-hour token mid-task (installationSession.ts).
+  // member who asked, with the connectors ready for them and its setup. On the
+  // organization's Copilot the worker renews its one-hour token mid-task
+  // (installationSession.ts). Secrets control cannot read block it: its setup cannot run.
   async function startTask(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId) {
     const run = payerOf({ kind: "project", projectId, askerId: userId });
     const started = run && workers.startTurn(workerId, run.payer);
@@ -335,7 +380,18 @@ export function taskWorkerHost({
     const turnKey = store.turnKeys.issue({ agent: "task-worker", workerId, projectId, userId, turnId: started.turnId });
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
-    send(workerId, { type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors });
+    const setup = await setupOf(projectId).catch((error: unknown) => {
+      console.error(`could not read the secrets of ${projectId} for ${workerId}: ${error instanceof Error ? error.name : "unknown error"}`);
+      return null;
+    });
+    if (!setup) {
+      if (workers.end(workerId, "blocked", "Chiefbot could not read the project's secrets, so its setup did not run. Dispatch the task again.").length > 0) {
+        turnOver(workerId, started.turnId);
+      }
+      publish(projectId);
+      return;
+    }
+    send(workerId, { type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors, setup });
   }
 
   // The worker whose credential the request carries, if it is :workerId's; 401 or 403 otherwise.
@@ -364,7 +420,7 @@ export function taskWorkerHost({
         const task = projects.tasks(project.id).find(({ number }) => number === call.task);
         if (!task) return refused(`No task #${call.task} in this project`, 404);
         if (task.status === "done" || task.status === "abandoned") return refused(`Task #${task.number} is ${task.status}`);
-        const token = crypto.randomUUID() + crypto.randomUUID();
+        const token = newToken();
         const record = workers.launch({
           projectId: project.id,
           taskNumber: task.number,
@@ -372,19 +428,14 @@ export function taskWorkerHost({
           userId: asker.userId,
           prompt: taskPrompt(project, task, call.instructions),
           token,
+          max: project.config.workers.max,
         });
         if ("busy" in record) return refused(`Worker ${record.busy.id} still works on task #${task.number}: stop it first, or wait for it`, 409);
         const { id } = record.worker;
-        if (record.launched) {
-          publish(project.id);
-          const launched = launch(project.id, id, token);
-          launches.set(id, launched);
-          await launched;
-          launches.delete(id);
-        } else {
-          // A resent call: the first one's launch, once it is done.
-          await launches.get(id);
-        }
+        if (record.launched) publish(project.id);
+        // A new worker launches now, unless it is queued. A resent call waits for the first one's launch.
+        if (record.launched && record.worker.state === "launching") await launch(project.id, id, token);
+        else await launches.get(id);
         return Response.json(workers.worker(id) satisfies TaskWorker | null);
       }
       if (call.tool === "worker_status" && call.worker === undefined) return Response.json(workers.workersOf(project.id) satisfies TaskWorker[]);
@@ -401,6 +452,7 @@ export function taskWorkerHost({
           stop(worker.id, "The coordinator stopped this worker.");
           publish(project.id);
           void reap();
+          promote(project.id);
           return Response.json(workers.worker(worker.id) satisfies TaskWorker | null);
       }
     },
@@ -410,7 +462,10 @@ export function taskWorkerHost({
     memberRemoved(workspaceId: WorkspaceId, userId: UserId) {
       const stopped = workers.runningFor(workspaceId, userId);
       for (const { workerId } of stopped) stop(workerId, "The member who asked for it left the workspace.");
-      for (const projectId of new Set(stopped.map(({ projectId }) => projectId))) publish(projectId);
+      for (const projectId of new Set(stopped.map(({ projectId }) => projectId))) {
+        publish(projectId);
+        promote(projectId);
+      }
       void reap();
     },
 
@@ -419,6 +474,7 @@ export function taskWorkerHost({
       for (const workerId of workers.running(projectId, taskNumber)) stop(workerId, "The task was closed.");
       publish(projectId);
       void reap();
+      promote(projectId);
     },
 
     // The project is being deleted: its workers stop and every computer of theirs
@@ -436,7 +492,8 @@ export function taskWorkerHost({
     // On control's start: every approval a worker waits on gets its wait limit
     // again. A worker still launching whose computer is not running lost its
     // launch to the restart, so it fails. A computer whose turn ended but still
-    // runs stops. Then every worker computer that should be gone is removed.
+    // runs stops. Then every worker computer that should be gone is removed, and
+    // queued workers launch where there is room.
     async recover() {
       for (const { workerId, approvalId, requestedAt } of workers.waitingApprovals()) limitWait(workerId, approvalId, requestedAt);
       for (const workerId of workers.launching()) {
@@ -446,6 +503,7 @@ export function taskWorkerHost({
         if ((await computers.status(workerId)) === "running") await computers.stop(workerId);
       }
       await reap();
+      for (const projectId of workers.queuedProjects()) promote(projectId);
     },
 
     // Control is stopping: no wait limit fires any more.
@@ -476,7 +534,7 @@ export function taskWorkerHost({
         if (message.event.type === "approval-request") limitWait(workerId, message.event.approvalId, now);
         if (message.event.type === "approval-withdrawn") stopWaitLimit(message.event.approvalId);
         if (message.event.type === "done") turnOver(workerId, message.turnId);
-        if (["done", "approval-request", "approval-withdrawn"].includes(message.event.type)) publish(worker.projectId);
+        if (["done", "approval-request", "approval-withdrawn", "setup-step", "setup-done"].includes(message.event.type)) publish(worker.projectId);
         return;
       }
       // The models report is for a bot's model picker, and connection calls for a
@@ -484,13 +542,14 @@ export function taskWorkerHost({
       if (message.type === "models" || message.type === "connection-calls") return;
       // Hello. The first one starts the task; after that, the worker lost the
       // task unless it says it still runs it, and may have missed answers.
+      const started = worker.state === "setting_up" || worker.state === "working";
       if (worker.state === "launching") {
         void startTask(workerId, worker.projectId, userId);
-      } else if (worker.state === "working" && message.activeTurnId !== turnId) {
+      } else if (started && message.activeTurnId !== turnId) {
         workers.end(workerId, "failed", "The worker's computer restarted before it finished the task.");
         turnOver(workerId, turnId);
         publish(worker.projectId);
-      } else if (worker.state === "working") {
+      } else if (started) {
         for (const answer of workers.answeredApprovals(workerId, turnId)) send(workerId, { type: "approval-answer", ...answer });
         // Control restarted since the turn started: it gets a new key.
         if (store.turnKeys.missing(turnId)) {
@@ -501,8 +560,9 @@ export function taskWorkerHost({
   };
 }
 
-// A worker's turn as transcript lines for the coordinator: each message whole,
-// each tool call with its latest status, approvals, answers and errors.
+// A worker's turn as transcript lines for the coordinator: each setup step with
+// its exit code (and its log when it failed), each message whole, each tool call
+// with its latest status, approvals, answers and errors.
 function transcriptLines(events: ChatEvent[]): string[] {
   const lines: string[] = [];
   // Where each message and tool call is, to grow or update its line.
@@ -531,6 +591,16 @@ function transcriptLines(events: ChatEvent[]): string[] {
         break;
       case "error":
         lines.push(`error: ${event.message}`);
+        break;
+      case "setup-step": {
+        const { step, command, exitCode, log } = event.step;
+        lines.push(`${step}: ${command} (exit ${exitCode})${exitCode === 0 ? "" : `\n${log}`}`);
+        break;
+      }
+      case "setup-done":
+        lines.push(
+          ["setup done", ...(event.instructions.length > 0 ? [`instructions ${event.instructions.join(", ")}`] : []), ...(event.skills.length > 0 ? [`skills ${event.skills.join(", ")}`] : [])].join("; "),
+        );
         break;
     }
   }

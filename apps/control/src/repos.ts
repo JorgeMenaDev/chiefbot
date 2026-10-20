@@ -142,21 +142,23 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
 
     // The create_pull_request tool (POST /worker/:botId/pull-requests, or a task worker's):
     // asks the owner, then opens the pull request with the app's installation token.
+    // An engineer's opens as a draft (`draft`).
     async pullRequest(
       bot: RepoAgent,
       args: PullRequestArgs,
       signal: AbortSignal,
+      { draft = false }: { draft?: boolean } = {},
     ): Promise<OpenedPullRequest | Refusal> {
       const access = await grant(bot.userId, args.repository, "write");
       if ("error" in access) return access;
-      const outcome = await bot.ask("pull-request", `${args.repository}: ${args.head} → ${args.base}\n${args.title}`, signal);
+      const outcome = await bot.ask("pull-request", `${args.repository}: ${args.head} → ${args.base}${draft ? " (draft)" : ""}\n${args.title}`, signal);
       if (outcome !== "approved") {
         return { error: outcome === "declined" ? "declined" : "no_turn", status: outcome === "declined" ? 403 : 409, message: unapproved["pull-request"][outcome] };
       }
       const fresh = await grant(bot.userId, args.repository, "write");
       if ("error" in fresh) return fresh;
       // grant only returns a null token for reads.
-      const opened = await createPullRequest(githubApiUrl, fresh.token ?? "", args);
+      const opened = await createPullRequest(githubApiUrl, fresh.token ?? "", args, draft);
       return "refused" in opened ? { error: "github_failed", status: 502, message: opened.refused } : opened;
     },
   };

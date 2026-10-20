@@ -36,14 +36,15 @@ export function copilotSdk({ workingDirectory, gitConfig }: { workingDirectory: 
 
 // A bot's or task worker's session config: the runtime's full tool set, its
 // custom tools, its connectors' MCP servers and its turn's skill roots (a bot's
-// connections), always named, so a resumed session keeps none of an earlier
-// turn's. Its instructions follow the SDK's own system message. No ambient
-// config discovery. No model here: the worker sets the bot's model before each
-// turn that needs it.
+// connections, or an engineer's repo's skill folders), always named, so a
+// resumed session keeps none of an earlier turn's. Its instructions follow the
+// SDK's own system message. No ambient config discovery. No model here: the
+// worker sets the bot's model before each turn that needs it. It works in
+// `workingDirectory` unless the session names its own (an engineer's clone).
 export const workerSessionConfig =
   (workingDirectory: string) =>
-  ({ onPermissionRequest, tools, instructions, mcpServers, onMcpCall, skillDirectories = [] }: Parameters<Copilot["openSession"]>[0]) => ({
-    workingDirectory,
+  ({ onPermissionRequest, tools, instructions, mcpServers, onMcpCall, skillDirectories = [], ...options }: Parameters<Copilot["openSession"]>[0]) => ({
+    workingDirectory: options.workingDirectory ?? workingDirectory,
     streaming: true,
     onPermissionRequest,
     tools,
@@ -131,9 +132,11 @@ export function askUser({ ask, ended }: Questions) {
 
 // A Copilot on the SDK with `clientOptions`. Seat sessions share one runtime
 // and get their tokens from gitHubTokenProvider. An installation session gets a
-// runtime of its own, started with its token in COPILOT_GITHUB_TOKEN, which
-// stops when the session disconnects. Either resumes the session's history
-// when it exists on disk. A session opened with `questions` gets the ask_user tool (askUser).
+// runtime of its own, started with its token in COPILOT_GITHUB_TOKEN, and so
+// does a session with an `env` (an engineer's secrets), whose variables the
+// runtime's own override. That runtime stops when the session disconnects.
+// Either resumes the session's history when it exists on disk. A session
+// opened with `questions` gets the ask_user tool (askUser).
 function sdkCopilot(
   clientOptions: CopilotClientOptions & { env: Record<string, string | undefined> },
   sessionConfig: (options: Parameters<Copilot["openSession"]>[0]) => ResumeSessionConfig,
@@ -143,7 +146,8 @@ function sdkCopilot(
     async openSession(options) {
       const asks = options.questions && askUser(options.questions);
       const config = { ...sessionConfig(options), ...asks?.config };
-      if (options.auth.kind === "seat") {
+      const extra = options.env ?? {};
+      if (options.auth.kind === "seat" && Object.keys(extra).length === 0) {
         const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
         const disconnect = () => {
           asks?.close();
@@ -151,8 +155,10 @@ function sdkCopilot(
         };
         return { ...bound(session), disconnect };
       }
-      const own = new CopilotClient({ ...clientOptions, env: { ...clientOptions.env, COPILOT_GITHUB_TOKEN: options.auth.token } });
-      const session = await openOn(own, options.sessionId, config);
+      const env = { ...extra, ...clientOptions.env };
+      const own = new CopilotClient({ ...clientOptions, env: options.auth.kind === "seat" ? env : { ...env, COPILOT_GITHUB_TOKEN: options.auth.token } });
+      const auth = options.auth.kind === "seat" ? { gitHubTokenProvider: options.auth.gitHubTokenProvider } : {};
+      const session = await openOn(own, options.sessionId, { ...config, ...auth });
       const disconnect = async () => {
         asks?.close();
         await own.stop();

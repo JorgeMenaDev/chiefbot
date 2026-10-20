@@ -187,16 +187,17 @@ function appJwt({ id, privateKey }: GitHubAppKey) {
   return `${unsigned}.${createSign("RSA-SHA256").update(unsigned).sign(privateKey, "base64url")}`;
 }
 
-// Opens a pull request; GitHub's refusal (e.g. 422, no such branch) comes back as `refused`.
+// Opens a pull request, as a draft when `draft`; GitHub's refusal (e.g. 422, no such branch) comes back as `refused`.
 export async function createPullRequest(
   apiUrl: string,
   token: string,
   { repository, head, base, title, body }: PullRequestArgs,
+  draft: boolean,
 ): Promise<OpenedPullRequest | { refused: string }> {
   const res = await fetch(`${apiUrl}/repos/${repository}/pulls`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" },
-    body: JSON.stringify({ head, base, title, body }),
+    body: JSON.stringify({ head, base, title, body, draft }),
   });
   if (!res.ok) return { refused: `GitHub refused the pull request (${res.status}): ${await res.text()}` };
   const pr = z.object({ number: z.number().int(), html_url: z.string() }).parse(await res.json());

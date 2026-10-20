@@ -18,6 +18,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Clock } from "@chiefbot/worker/clock";
+import type { SetupShell } from "@chiefbot/worker/engineer-setup";
 import type { CopilotTokenMinter } from "./copilotIdentity.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
 import type { Probes } from "./health/probe.ts";
@@ -55,6 +56,8 @@ export type TestControlOptions = {
   gitSocket?: string;
   // Where the bots' workers stage connections for a turn (fakeComputers).
   connectionsRoot?: string;
+  // Runs engineers' setup commands (fakeComputers). Default: none runs, each answers exit 0.
+  setupShell?: SetupShell;
   // Wraps the fake provider, e.g. to make start fail.
   provider?: (fake: ComputerProvider) => ComputerProvider;
   // The bot a new user gets at their first sign-in. Default: none.
@@ -84,6 +87,7 @@ export async function startTestControl({
   copilot = fakeCopilot(),
   gitSocket,
   connectionsRoot,
+  setupShell,
   provider,
   firstBot,
   clock,
@@ -102,6 +106,7 @@ export async function startTestControl({
     ...(gitSocket === undefined ? {} : { gitSocket }),
     ...(connectionsRoot === undefined ? {} : { connectionsRoot }),
     ...(clock === undefined ? {} : { clock }),
+    ...(setupShell === undefined ? {} : { setupShell }),
   });
   const options = {
     port: 0,

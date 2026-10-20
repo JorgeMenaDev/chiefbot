@@ -6,7 +6,7 @@ import { RepoFullName } from "./repos.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // A file or folder inside the repo, relative to its root: no leading slash and no "." or ".." part.
-const RepoPath = z
+export const RepoPath = z
   .string()
   .trim()
   .min(1)

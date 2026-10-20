@@ -1,10 +1,11 @@
 import type { TCPSocketListener } from "bun";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startWorker } from "@chiefbot/worker";
 import { startCoordinator } from "@chiefbot/worker/coordinator";
 import type { Clock } from "@chiefbot/worker/clock";
+import type { SetupShell } from "@chiefbot/worker/engineer-setup";
 import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import { fakeDisplay } from "@chiefbot/worker/fake-display";
 import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
@@ -20,13 +21,16 @@ import type { ComputerId, ComputerProvider, ComputerSpec } from "./computer.ts";
 // Bots' workers stage their turns' connections under `connectionsRoot` (a new
 // temporary folder by default), never the real computer's /tmp/chiefbot, and save
 // the files sent with messages in another new temporary folder. Their computer
-// tools all drive one fake `display`.
+// tools all drive one fake `display`. Each computer's workspace is a folder of
+// its own under one more. Engineers run their setup on `setupShell`: by default
+// one that runs nothing and answers every command with exit 0.
 export function fakeComputers({
   copilot = fakeCopilot(),
   gitSocket,
   clock,
   connectionsRoot = mkdtempSync(join(tmpdir(), "chiefbot-connections-")),
-}: { copilot?: FakeCopilot; gitSocket?: string; clock?: Clock; connectionsRoot?: string } = {}) {
+  setupShell = async () => ({ exitCode: 0, output: "" }),
+}: { copilot?: FakeCopilot; gitSocket?: string; clock?: Clock; connectionsRoot?: string; setupShell?: SetupShell } = {}) {
   type FakeComputer = {
     spec: ComputerSpec;
     worker: ReturnType<typeof startWorker> | null;
@@ -36,6 +40,7 @@ export function fakeComputers({
   };
   const computers = new Map<ComputerId, FakeComputer>();
   const attachmentsRoot = mkdtempSync(join(tmpdir(), "chiefbot-attachments-"));
+  const workspaces = mkdtempSync(join(tmpdir(), "chiefbot-workspaces-"));
   const display = fakeDisplay();
   // Every destroy call, so tests can check whether data was kept.
   const destroyed: Array<{ id: ComputerId; deleteData: boolean }> = [];
@@ -100,6 +105,8 @@ export function fakeComputers({
             : null;
       if (!agent) throw new Error("worker env missing");
       computer.screen = fakeScreen(computer.spec.id);
+      const workspace = join(workspaces, computer.spec.id);
+      mkdirSync(workspace, { recursive: true });
       computer.worker = startWorker({
         controlUrl: CHIEFBOT_CONTROL_URL,
         ...agent,
@@ -110,6 +117,8 @@ export function fakeComputers({
         ...(clock === undefined ? {} : { clock }),
         connectionsRoot,
         attachmentsRoot,
+        workspace,
+        setupShell,
         retryMs: 20,
       });
     },
