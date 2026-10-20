@@ -9,8 +9,8 @@ export const pullRequestToolName = "create_pull_request";
 // answer, so the request has no idle timeout.
 // `base` is the computer's control routes (/worker/:id or /task-worker/:id);
 // `turnKey` gives the key of the turn its session was opened for (it throws for none).
-// An engineer's (`holdsSecret`, secretRedactor.ts) refuses a branch, title or body
-// that holds one of its project's secrets, before control or anyone sees it.
+// An engineer's (`holdsSecret`, secretRedactor.ts) refuses a pull request with one
+// of its project's secrets in any field, before control or anyone sees it.
 export function pullRequestTool({ base, turnKey, holdsSecret }: { base: string; turnKey: () => string; holdsSecret?: (text: string) => boolean }) {
   return {
     name: pullRequestToolName,
@@ -18,8 +18,8 @@ export function pullRequestTool({ base, turnKey, holdsSecret }: { base: string; 
     parameters: PullRequestArgs,
     async handler(raw) {
       const args = PullRequestArgs.parse(raw);
-      if (holdsSecret && [args.head, args.title, args.body].some(holdsSecret)) {
-        throw new Error("The pull request's branch, title or body holds one of the project's secrets. Take it out, then open it again.");
+      if (holdsSecret && Object.values(args).some(holdsSecret)) {
+        throw new Error("The pull request holds one of the project's secrets in its repository, branches, title or body. Take it out, then open it again.");
       }
       const res = await fetch(`${base}/pull-requests`, {
         method: "POST",

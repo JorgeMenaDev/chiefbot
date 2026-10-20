@@ -307,15 +307,14 @@ test("an engineer's messages, errors and result hide the project's secrets, one 
   const control = await teamProject({}, "commands:\n  test: bun test\nsecrets: [API_KEY]\n");
   const { owner, project, github } = control;
   await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: secret });
-  let refusal = "";
+  const refusals: string[] = [];
   const { tool } = await heldTurn(control, async function* (_prompt, runtime) {
     yield sdk.delta("msg-1", `The key is ${secret.slice(0, 7)}`);
     yield sdk.delta("msg-1", `${secret.slice(7)}.`);
     const pr = { repository: "octo-org/shop", head: "fix-typo", base: "main", title: "Fix the typo" };
-    refusal = await runtime.tool("create_pull_request", { ...pr, body: `Tested with ${btoa(secret)}` }).then(
-      () => "opened",
-      (error: Error) => error.message,
-    );
+    for (const args of [{ ...pr, body: `Tested with ${btoa(secret)}` }, { ...pr, base: secret }]) {
+      refusals.push(await runtime.tool("create_pull_request", args).then(() => "opened", (error: Error) => error.message));
+    }
     yield sdk.error(`curl failed: 401 for ${encodeURIComponent(secret)}`);
   });
   const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
@@ -323,11 +322,32 @@ test("an engineer's messages, errors and result hide the project's secrets, one 
   const failed = await workerWhen(owner, project, id, ({ state }) => state === "failed");
 
   expect(failed.result).toBe("curl failed: 401 for ***");
-  expect(refusal).toBe("The pull request's branch, title or body holds one of the project's secrets. Take it out, then open it again.");
+  expect(refusals).toEqual(Array(2).fill("The pull request holds one of the project's secrets in its repository, branches, title or body. Take it out, then open it again."));
   expect(github.pullRequests).toEqual([]);
   const { lines } = WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body);
   expect(lines.slice(2)).toEqual(["worker: The key is ***.", "error: curl failed: 401 for ***"]);
   expect(JSON.stringify([lines, await workersOf(owner, project)])).not.toContain(secret.slice(0, 12));
+});
+
+test("an engineer with secrets keeps its messages in order: each before the tool rows after it, and its last one is the result", async () => {
+  const control = await teamProject({}, "commands:\n  test: bun test\nsecrets: [API_KEY]\n");
+  const { owner, project } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "sk-live-4f9a2b7c1d8e" });
+  const report = "Nothing to change: the typo was fixed on main in #37.";
+  const { tool } = await heldTurn(control, async function* () {
+    for (const [messageId, text] of [["msg-1", "Checking."], ["msg-2", "Looking closer."], ["msg-3", report]] as const) {
+      yield sdk.delta(messageId, text);
+      // The SDK's whole message; only the first asks for a tool.
+      yield sdk.message(messageId, text);
+      if (messageId === "msg-1") yield* [sdk.toolStart("t-1", "bash", "Run bun test"), sdk.toolComplete("t-1", true)];
+    }
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  expect(await workerWhen(owner, project, id, ({ state }) => state === "finished")).toMatchObject({ result: report });
+  const { lines } = WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body);
+  expect(lines.slice(2)).toEqual(["worker: Checking.", "tool Run bun test: succeeded", "worker: Looking closer.", `worker: ${report}`]);
 });
 
 test("an engineer whose turn ends while control reads its secrets never gets them or its task, on any connection", async () => {
@@ -525,6 +545,115 @@ test("an ended engineer keeps its place until its computer has stopped: a stop t
   advance(30_000);
   await workerWhen(owner, project, second.id, ({ state }) => state === "finished");
   expect(await computers.provider.status(first.id)).toBe("stopped");
+});
+
+test("a stopped engineer keeps its place until its computer is gone: a removal that fails is retried, and only then does a queued one launch", async () => {
+  const { clock, advance } = fakeClock(Date.now());
+  let removals = 0;
+  const control = await teamProject(
+    {
+      clock,
+      provider: (fake) => ({
+        ...fake,
+        async destroy(id, options) {
+          if (id.startsWith("worker_") && ++removals === 1) throw new Error("Docker is not answering");
+          await fake.destroy(id, options);
+        },
+      }),
+    },
+    "commands:\n  test: bun test\nworkers:\n  max: 1\n",
+  );
+  const { owner, project } = control;
+  const { tool } = await heldTurn(control);
+  await tool({ tool: "create_task", title: "Add dark mode" });
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, first.id, ({ state }) => state === "working");
+  await tool({ tool: "stop_worker", worker: first.id });
+  await eventually(async () => removals === 1);
+
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-2" })).body);
+
+  expect(second.state).toBe("queued");
+  advance(30_000);
+  await workerWhen(owner, project, second.id, ({ state }) => state === "working");
+  expect(removals).toBe(2);
+  expect((await workersOf(owner, project)).find(({ id }) => id === first.id)?.computerRemoved).toBe(true);
+});
+
+test("a worker's computer gets one provider call at a time: a task closed while its computer stops has it removed once the stop is over", async () => {
+  const calls: string[] = [];
+  const stopping = Promise.withResolvers<void>();
+  const control = await teamProject({
+    provider: (fake) => ({
+      ...fake,
+      async stop(id) {
+        if (!id.startsWith("worker_")) return fake.stop(id);
+        calls.push("stop");
+        await stopping.promise;
+        await fake.stop(id);
+        calls.push("stopped");
+      },
+      async destroy(id, options) {
+        if (id.startsWith("worker_")) calls.push("destroy");
+        await fake.destroy(id, options);
+      },
+    }),
+  });
+  const { owner, project } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  await eventually(async () => calls.length === 1);
+
+  await tool({ tool: "update_task", number: 1, status: "done" });
+  await Bun.sleep(20);
+  stopping.resolve();
+
+  await workerWhen(owner, project, id, ({ computerRemoved }) => computerRemoved);
+  expect(calls).toEqual(["stop", "stopped", "destroy"]);
+});
+
+test("control that stopped tries nothing more: a computer stop that fails after it stopped is not tried again", async () => {
+  const { clock, advance } = fakeClock(Date.now());
+  let stops = 0;
+  const answer = Promise.withResolvers<void>();
+  const control = await teamProject({
+    clock,
+    persistent: true,
+    provider: (fake) => ({
+      ...fake,
+      async stop(id) {
+        if (!id.startsWith("worker_")) return fake.stop(id);
+        stops++;
+        await answer.promise;
+        throw new Error("Docker is not answering");
+      },
+    }),
+  });
+  const { owner, project } = control;
+  const { tool, release } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  await eventually(async () => stops === 1);
+  release();
+
+  control.restart();
+  // The new control's recovery tries it too; then both tries fail.
+  await eventually(async () => stops === 2);
+  answer.resolve();
+  await Bun.sleep(20);
+  advance(30_000);
+
+  // Only the new control tries again.
+  await eventually(async () => stops === 3);
+  await Bun.sleep(50);
+  expect(stops).toBe(3);
 });
 
 test("the worker pushes and opens its draft pull request through control, each approved by the member who asked, and the task links it", async () => {

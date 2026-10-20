@@ -2,46 +2,79 @@ import { SETUP_LOG_MAX, type TurnEvent } from "@chiefbot/contracts";
 
 // Hides an engineer's secret values (its project's secrets, for one task) in
 // what its worker sends control: setup logs, the agent's messages, tool rows and
-// errors, so no transcript, task result or event keeps one. Each value counts
-// in its common forms: as it is, base64 (with or without its padding), URL-encoded, and
-// each line of 8 or more characters of a value that has several. Each form found
-// becomes `***`.
+// errors, so no transcript, task result or event keeps one.
+//
+// What it is for: accidents, such as `env` output, a test that logs a token, or
+// an error that echoes a header. It cannot stop an agent that re-encodes a
+// secret on purpose, since the agent holds the value. So it covers the forms
+// GitHub Actions masks, and no more: each value as it is, URL-encoded, base64 (at
+// each of the three byte alignments it can have inside longer base64), and each
+// line of a multi-line value. A value under 6 characters is hidden only as it is.
+// Each stretch of text that any form covers, overlaps included, becomes one `***`.
 export type SecretRedactor = {
   redact(text: string): string;
   // Whether `text` holds any form of a secret.
   holds(text: string): boolean;
   // For text that comes in chunks: `push` gives back what may pass now and holds
   // back the end that could still start a form (as long as the longest form,
-  // less one), so a form split across chunks is still found; `end` gives the rest.
+  // less one, and any form found that reaches into it), so a form split across
+  // chunks is still found; `end` gives the rest.
   stream(): { push(chunk: string): string; end(): string };
 };
 
-// A line of a multi-line secret shorter than this is not hidden alone: it
-// reveals little, and one such as `}` would hide common text.
-const lineMin = 8;
+// Shorter values, and shorter lines of a multi-line value, are too common to
+// hide in other forms or line by line: one such as `}` would hide ordinary text.
+const minLength = 6;
+
+type Span = [start: number, end: number];
 
 export function secretRedactor(values: string[]): SecretRedactor {
-  const forms = [...new Set(values.flatMap(formsOf))].filter((form) => form.length > 0).sort((a, b) => b.length - a.length);
-  // Longest first, so where two forms start at one place the longer one is hidden.
-  const pattern = forms.length === 0 ? null : new RegExp(forms.map(escapeRegExp).join("|"), "g");
-  const held = (forms[0]?.length ?? 1) - 1;
-  const redact = (text: string) => (pattern ? text.replace(pattern, "***") : text);
+  const forms = [...new Set(values.flatMap(formsOf))].filter((form) => form.length > 0);
+  const held = Math.max(1, ...forms.map((form) => form.length)) - 1;
+  // Every place a form is found (overlaps too), merged into spans in order. Each
+  // find costs its form's length, so this is linear in the text, but for a long
+  // secret that overlaps itself (`aaaa…`) printed over and over.
+  const spansIn = (text: string) => {
+    const found: Span[] = [];
+    for (const form of forms) {
+      for (let at = text.indexOf(form); at !== -1; at = text.indexOf(form, at + 1)) found.push([at, at + form.length]);
+    }
+    const spans: Span[] = [];
+    for (const [start, end] of found.sort(([a], [b]) => a - b)) {
+      const last = spans.at(-1);
+      if (last && start <= last[1]) last[1] = Math.max(last[1], end);
+      else spans.push([start, end]);
+    }
+    return spans;
+  };
+  const mask = (text: string, spans: Span[]) => {
+    let out = "";
+    let from = 0;
+    for (const [start, end] of spans) {
+      out += `${text.slice(from, start)}***`;
+      from = end;
+    }
+    return out + text.slice(from);
+  };
+  const redact = (text: string) => mask(text, spansIn(text));
   return {
     redact,
-    holds: (text) => pattern !== null && text.search(pattern) !== -1,
+    holds: (text) => spansIn(text).length > 0,
     stream() {
       let rest = "";
       return {
         push(chunk) {
-          if (!pattern) return chunk;
           const text = rest + chunk;
+          const spans = spansIn(text);
           let cut = Math.max(0, text.length - held);
-          // A form found whole across the cut passes with what comes before it.
-          for (const match of text.matchAll(pattern)) {
-            if (match.index < cut && match.index + match[0].length > cut) cut = match.index + match[0].length;
-          }
+          // A span that reaches into the held end waits whole: a form not yet
+          // complete there may overlap it.
+          for (const [start, end] of spans) if (start < cut && end > cut) cut = start;
           rest = text.slice(cut);
-          return redact(text.slice(0, cut));
+          return mask(
+            text.slice(0, cut),
+            spans.filter(([, end]) => end <= cut),
+          );
         },
         end() {
           const last = rest;
@@ -54,58 +87,73 @@ export function secretRedactor(values: string[]): SecretRedactor {
 }
 
 // An engineer's turn events with its secrets hidden in every text they carry.
-// A message's deltas stream through the redactor, so a secret split across them
-// is still hidden; what a message holds back follows (as one more delta of it)
-// before the turn's next event other than a delta or status, by when the message
-// is over. Returns the events to send, in order: none while a delta is held.
-export function turnEventRedactor({ redact, stream }: SecretRedactor) {
-  const messages = new Map<string, ReturnType<SecretRedactor["stream"]>>();
-  const rest = (): TurnEvent[] => {
-    const deltas = [...messages].flatMap(([messageId, message]): TurnEvent[] => {
-      const text = message.end();
-      return text ? [{ type: "text-delta", messageId, text }] : [];
-    });
-    messages.clear();
-    return deltas;
+// The message being written streams through the redactor, so a secret split
+// across its deltas is still hidden, even around a tool row between them. What
+// it holds back follows when the message is whole (`messageDone`, on the SDK's
+// assistant.message), when the next message starts, or before the turn's error
+// or done. So messages keep their order, each before the tool rows after it.
+// Each call returns the events to send, in order: none while a delta is held.
+export type TurnEventRedactor = { event(event: TurnEvent): TurnEvent[]; messageDone(messageId: string): TurnEvent[] };
+
+export function turnEventRedactor({ redact, stream }: SecretRedactor): TurnEventRedactor {
+  let current: { messageId: string; text: ReturnType<SecretRedactor["stream"]> } | null = null;
+  const finish = (): TurnEvent[] => {
+    if (!current) return [];
+    const { messageId, text } = current;
+    current = null;
+    const last = text.end();
+    return last ? [{ type: "text-delta", messageId, text: last }] : [];
   };
-  return (event: TurnEvent): TurnEvent[] => {
-    switch (event.type) {
-      case "text-delta": {
-        const message = messages.get(event.messageId) ?? stream();
-        messages.set(event.messageId, message);
-        const text = message.push(event.text);
-        return text ? [{ ...event, text }] : [];
+  return {
+    messageDone: (messageId) => (current?.messageId === messageId ? finish() : []),
+    event(event) {
+      switch (event.type) {
+        case "text-delta": {
+          const before = current?.messageId === event.messageId ? [] : finish();
+          current ??= { messageId: event.messageId, text: stream() };
+          const text = current.text.push(event.text);
+          return text ? [...before, { ...event, text }] : before;
+        }
+        case "status":
+          return [{ ...event, text: redact(event.text) }];
+        case "tool-call":
+          return [{ ...event, name: redact(event.name) }];
+        case "approval-request":
+          return [{ ...event, detail: redact(event.detail) }];
+        case "setup-step":
+          return [{ ...event, step: { ...event.step, command: redact(event.step.command), log: redact(event.step.log).slice(-SETUP_LOG_MAX) } }];
+        case "setup-done":
+          return [{ ...event, instructions: event.instructions.map(redact), skills: event.skills.map(redact) }];
+        // No text of the agent's in these. An engineer asks no questions (worker.ts).
+        case "approval-withdrawn":
+        case "question-request":
+        case "question-withdrawn":
+          return [event];
+        case "error":
+          return [...finish(), { ...event, message: redact(event.message) }];
+        case "done":
+          return [...finish(), event];
       }
-      // An intent can come between a message's deltas.
-      case "status":
-        return [{ ...event, text: redact(event.text) }];
-      case "tool-call":
-        return [...rest(), { ...event, name: redact(event.name) }];
-      case "error":
-        return [...rest(), { ...event, message: redact(event.message) }];
-      case "approval-request":
-        return [...rest(), { ...event, detail: redact(event.detail) }];
-      case "setup-step":
-        return [...rest(), { ...event, step: { ...event.step, command: redact(event.step.command), log: redact(event.step.log).slice(-SETUP_LOG_MAX) } }];
-      case "setup-done":
-        return [...rest(), { ...event, instructions: event.instructions.map(redact), skills: event.skills.map(redact) }];
-      // No text of the agent's in these. An engineer asks no questions (worker.ts).
-      case "approval-withdrawn":
-      case "question-request":
-      case "question-withdrawn":
-      case "done":
-        return [...rest(), event];
-    }
+    },
   };
 }
 
+// The forms of one value to hide (see above).
 function formsOf(value: string): string[] {
-  const lines = value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length >= lineMin);
-  const base64 = Buffer.from(value).toString("base64");
-  return [value, base64, base64.replace(/=+$/, ""), encodeURIComponent(value), ...(lines.length > 1 ? lines : [])];
+  if (value.length < minLength) return [value];
+  const bytes = Buffer.from(value);
+  // Base64 of the value from each byte alignment on, less the end characters
+  // that the bytes after it would change (GitHub's runner, ADR 0297).
+  const aligned = [0, 1, 2].map((skip) => {
+    const base64 = bytes.subarray(skip).toString("base64");
+    return base64.endsWith("=") ? base64.replace(/=+$/, "").slice(0, -1) : base64;
+  });
+  // Whether a value has several lines is decided before short lines drop out.
+  const lines = value.includes("\n")
+    ? value
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length >= minLength)
+    : [];
+  return [value, encodeURIComponent(value), bytes.toString("base64"), ...aligned, ...lines];
 }
-
-const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

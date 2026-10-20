@@ -130,8 +130,13 @@ export function taskWorkerHost({
   const launches = new Map<TaskWorkerId, Promise<void>>();
   // The wait limit of each approval a worker waits on: its cancel, by approval id.
   const waitLimits = new Map<ApprovalId, () => void>();
-  // The next try of each ended worker's computer stop that failed: its cancel.
-  const stopRetries = new Map<TaskWorkerId, () => void>();
+  // Each worker computer's chore under way (settle), each that must look again
+  // when its step is over, and the next try of each whose step failed: its cancel.
+  const chores = new Map<TaskWorkerId, Promise<void>>();
+  const again = new Set<TaskWorkerId>();
+  const retries = new Map<TaskWorkerId, () => void>();
+  // Control is stopping: nothing new starts, and no answer that comes after is acted on.
+  let stopped = false;
 
   const publish = (projectId: ProjectId) => {
     const event = { type: "workers", projectId, workers: workers.workersOf(projectId) } satisfies ClientEvent;
@@ -162,6 +167,7 @@ export function taskWorkerHost({
         }
         return event;
       }, signal);
+      if (stopped) return outcome;
       if (asked && signal.aborted && workers.withdrawApproval(workerId, asked)) {
         stopWaitLimit(asked);
         publish(projectId);
@@ -204,6 +210,7 @@ export function taskWorkerHost({
   // for. A failure fails the worker and removes what was made, which frees its place.
   function launch(projectId: ProjectId, workerId: TaskWorkerId, token: string) {
     const launched = (async () => {
+      let failure: string | null = null;
       try {
         await computers.create({
           id: workerId,
@@ -211,7 +218,11 @@ export function taskWorkerHost({
         });
         await computers.start(workerId);
       } catch (error) {
-        workers.launchFailed(workerId, `Its computer could not start: ${error instanceof Error ? error.message : String(error)}`);
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      if (stopped) return;
+      if (failure !== null) {
+        workers.launchFailed(workerId, `Its computer could not start: ${failure}`);
         void reap();
       }
       publish(projectId);
@@ -224,60 +235,81 @@ export function taskWorkerHost({
   // Launches the project's queued workers, oldest first, while it runs fewer than its workers.max.
   function promote(projectId: ProjectId) {
     const max = projects.project(projectId)?.config.workers.max;
-    if (max === undefined) return;
+    if (max === undefined || stopped) return;
     for (let token = newToken(), next = workers.dequeue(projectId, max, token); next; token = newToken(), next = workers.dequeue(projectId, max, token)) {
       publish(projectId);
       void launch(projectId, next, token);
     }
   }
 
-  // Deletes every worker computer that must go (after any launch still making
-  // it). One that fails stays marked, for the next reap.
-  async function reap() {
-    for (const workerId of workers.toReap()) {
-      await launches.get(workerId);
-      sockets.get(workerId)?.close();
-      const projectId = workers.worker(workerId)?.projectId;
-      try {
-        await computers.destroy(workerId, { deleteData: true });
-        workers.computerRemoved(workerId);
-        if (projectId) promote(projectId);
-      } catch (error) {
-        console.error(`could not remove the computer of ${workerId}:`, error);
-      }
-      if (projectId) publish(projectId);
-    }
-  }
+  // Removes every worker computer that must go (settle).
+  const reap = () => Promise.all(workers.toReap().map(settle));
 
   // The worker's turn ended: its approvals stop waiting and its computer stops
-  // (release).
+  // (settle).
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
-    void release(workerId);
+    void settle(workerId);
   }
 
-  // Stops the ended worker's computer, keeping its disk until the task closes.
-  // Only once it has stopped does its place go to a queued worker. A stop that
-  // fails is tried again after stopRetryMs, the place held meanwhile, unless the
-  // computer no longer needs stopping (it went with its task).
-  async function release(workerId: TaskWorkerId) {
-    if (!workers.stopPending(workerId)) return;
+  // Brings the worker's computer to what its record wants: removed when it must
+  // go (after any launch still making it), else stopped, keeping its disk, once
+  // its turn ended. Only then does its place go to a queued worker. One chore
+  // runs per computer: a call while it runs makes it look again after its step.
+  // A step that fails is tried again after retryMs, the place held meanwhile.
+  function settle(workerId: TaskWorkerId): Promise<void> {
+    const running = chores.get(workerId);
+    if (running) {
+      again.add(workerId);
+      return running;
+    }
+    const chore = (async () => {
+      do {
+        again.delete(workerId);
+        await settleStep(workerId);
+      } while (again.has(workerId) && !stopped);
+      chores.delete(workerId);
+    })();
+    chores.set(workerId, chore);
+    return chore;
+  }
+
+  // One step of settle: the provider call the computer needs, if any.
+  async function settleStep(workerId: TaskWorkerId) {
+    const goes = workers.mustGo(workerId);
+    if (!goes && !workers.stopPending(workerId)) return;
+    if (goes) {
+      await launches.get(workerId);
+      if (stopped) return;
+      sockets.get(workerId)?.close();
+    }
     try {
-      await computers.stop(workerId);
+      await (goes ? computers.destroy(workerId, { deleteData: true }) : computers.stop(workerId));
     } catch (error) {
-      console.error(`could not stop the computer of ${workerId}:`, error);
-      stopRetries.set(
-        workerId,
-        clock.setTimeout(() => {
-          stopRetries.delete(workerId);
-          void release(workerId);
-        }, stopRetryMs),
-      );
+      console.error(`could not ${goes ? "remove" : "stop"} the computer of ${workerId}:`, error);
+      if (!stopped) retryLater(workerId);
       return;
     }
-    workers.computerStopped(workerId);
+    if (stopped) return;
+    if (goes) workers.computerRemoved(workerId);
+    else workers.computerStopped(workerId);
     const projectId = workers.worker(workerId)?.projectId;
-    if (projectId) promote(projectId);
+    if (projectId) {
+      publish(projectId);
+      promote(projectId);
+    }
+  }
+
+  // Settles the worker's computer again after retryMs, instead of any try already waiting.
+  function retryLater(workerId: TaskWorkerId) {
+    retries.get(workerId)?.();
+    retries.set(
+      workerId,
+      clock.setTimeout(() => {
+        retries.delete(workerId);
+        void settle(workerId);
+      }, retryMs),
+    );
   }
 
   // Ends the worker's turn (if it runs) and marks its computer to go.
@@ -413,6 +445,7 @@ export function taskWorkerHost({
       console.error(`could not read the secrets of ${projectId} for ${workerId}: ${error instanceof Error ? error.name : "unknown error"}`);
       return null;
     });
+    if (stopped) return;
     if (!setup) {
       if (workers.end(workerId, "blocked", "Chiefbot could not read the project's secrets, so its setup did not run. Dispatch the task again.").length > 0) {
         turnOver(workerId, started.turnId);
@@ -525,21 +558,27 @@ export function taskWorkerHost({
     async recover() {
       for (const { workerId, approvalId, requestedAt } of workers.waitingApprovals()) limitWait(workerId, approvalId, requestedAt);
       for (const workerId of workers.launching()) {
-        if ((await computers.status(workerId)) !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
+        const status = await computers.status(workerId);
+        if (stopped) return;
+        if (status !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
       }
       for (const workerId of workers.ended()) {
-        if ((await computers.status(workerId)) === "running") await release(workerId);
+        const status = await computers.status(workerId);
+        if (stopped) return;
+        if (status === "running") await settle(workerId);
         else workers.computerStopped(workerId);
       }
       await reap();
       for (const projectId of workers.queuedProjects()) promote(projectId);
     },
 
-    // Control is stopping: no wait limit or stop retry fires any more.
+    // Control is stopping: no wait limit or computer retry fires any more, and
+    // nothing new starts.
     stop() {
-      for (const cancel of [...waitLimits.values(), ...stopRetries.values()]) cancel();
+      stopped = true;
+      for (const cancel of [...waitLimits.values(), ...retries.values()]) cancel();
       waitLimits.clear();
-      stopRetries.clear();
+      retries.clear();
     },
 
     open(ws: Socket, { workerId }: TaskWorkerSocketData) {
@@ -598,8 +637,8 @@ export function taskWorkerHost({
 const outdatedImage =
   "Its computer runs an older Chiefbot image, which cannot set up an engineer. Rebuild the computer image (`bun run computer:build`), then dispatch the task again.";
 
-// How long control waits to try again to stop an ended worker's computer.
-const stopRetryMs = 30_000;
+// How long control waits to try again to stop or remove a worker's computer.
+const retryMs = 30_000;
 
 // A worker's turn as transcript lines for the coordinator: each setup step with
 // its exit code (and its log when it failed), each message whole, each tool call

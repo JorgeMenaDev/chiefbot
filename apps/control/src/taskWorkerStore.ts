@@ -366,15 +366,15 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     toReap(projectId?: ProjectId): TaskWorkerId[] {
       return db
         .query<{ id: string }, [string | null]>(
-          `SELECT task_workers.id FROM task_workers JOIN project_tasks
-             ON project_tasks.project_id = task_workers.project_id AND project_tasks.number = task_workers.task_number
-           WHERE CASE WHEN ?1 IS NULL
-             THEN task_workers.computer = 'unwanted' OR (task_workers.computer IN ('wanted', 'kept') AND project_tasks.status IN ('done', 'abandoned'))
-             ELSE task_workers.project_id = ?1 AND task_workers.computer != 'removed' END`,
+          `SELECT task_workers.id FROM ${withTask}
+           WHERE CASE WHEN ?1 IS NULL THEN (${computerMustGo}) ELSE task_workers.project_id = ?1 AND task_workers.computer != 'removed' END`,
         )
         .all(projectId ?? null)
         .map((row) => TaskWorkerId.parse(row.id));
     },
+
+    // Whether the worker's computer must go (as toReap's without a project).
+    mustGo: (workerId: TaskWorkerId) => db.query(`SELECT 1 FROM ${withTask} WHERE task_workers.id = ?1 AND (${computerMustGo})`).get(workerId) !== null,
 
     // The provider deleted the worker's computer.
     computerRemoved(workerId: TaskWorkerId) {
@@ -433,6 +433,11 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
 const running = "'launching', 'setting_up', 'working'";
 const unended = `'queued', ${running}`;
 const ended = "'finished', 'blocked', 'failed'";
+
+// Workers with their task, and which of them have a computer that must go.
+const withTask = `task_workers JOIN project_tasks
+  ON project_tasks.project_id = task_workers.project_id AND project_tasks.number = task_workers.task_number`;
+const computerMustGo = "task_workers.computer = 'unwanted' OR (task_workers.computer IN ('wanted', 'kept') AND project_tasks.status IN ('done', 'abandoned'))";
 
 // How a turn that ended went: failed with its last error, or finished with its
 // last assistant message as the result.
