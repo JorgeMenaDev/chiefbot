@@ -437,7 +437,7 @@ export function taskWorkerHost({
   async function noVerdict(workerId: TaskWorkerId) {
     const worker = workers.worker(workerId);
     if (worker?.kind !== "verifier" || worker.verdict !== null || !["finished", "blocked", "failed"].includes(worker.state)) return;
-    const failed = worker.setup.find(({ exitCode }) => exitCode !== 0);
+    const failed = worker.setup.find(({ exitCode }) => exitCode !== null && exitCode !== 0);
     const stage = worker.stack.find(({ state }) => state === "failed");
     const log = failed ? { title: `\`${failed.command}\` exited with ${failed.exitCode}:`, text: failed.log } : stage ? { title: `Its stack's ${stage.label} stage failed:`, text: stage.log } : null;
     await recordVerdict(
@@ -648,7 +648,7 @@ export function taskWorkerHost({
     const report = (stage: StackReport) => {
       if (workers.stackStage(workerId, { ...stage, at: clock.now() })) publish(projectId);
     };
-    for (const label of [BUILD_STAGE, ...stackStages(template, config.service).map(({ label }) => label)]) report({ label, state: "waiting", log: "" });
+    for (const { id, label } of [BUILD_STAGE, ...stackStages(template, config.service)]) report({ id, label, state: "waiting", log: "" });
     let last = "";
     const outcome = await stacks
       .start(workerId, { template, own: config.service, repos, secrets: Object.values(secrets) }, (stage) => {
@@ -1321,7 +1321,7 @@ function transcriptLines(events: ChatEvent[]): string[] {
         break;
       case "setup-step": {
         const { step, command, exitCode, log } = event.step;
-        lines.push(`${step}: ${command} (exit ${exitCode})${exitCode === 0 ? "" : `\n${log}`}`);
+        if (exitCode !== null) lines.push(`${step}: ${command} (exit ${exitCode})${exitCode === 0 ? "" : `\n${log}`}`);
         break;
       }
       case "stack-stage": {

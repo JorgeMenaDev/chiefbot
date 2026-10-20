@@ -42,7 +42,8 @@ const instructionMax = 64 * 1024;
 // Sets an engineer's computer up for `setup`, before its agent starts: clones
 // the repo into <workspace>/<repo name> (a verifier's then checks out the commit
 // it checks, `setup.sha`, detached) and runs the setup command there with
-// the project's secrets, each step reported as it ends. Its log is the end of its
+// the project's secrets, each step reported as it starts and again as it ends,
+// at `now` (epoch milliseconds). Its log is the end of its
 // output with every secret hidden (secretRedactor.ts) as it streams, before it
 // is cut to SETUP_LOG_MAX, so no cut leaves a piece of one. Then reads the
 // repo's instruction files and finds its skill folders; a configured one the
@@ -55,12 +56,14 @@ export async function setUpEngineer({
   shell,
   signal,
   report,
+  now,
 }: {
   setup: EngineerSetup;
   workspace: string;
   shell: SetupShell;
   signal: AbortSignal;
   report: (step: SetupStep) => void;
+  now: () => number;
 }): Promise<EngineerReady | { failed: SetupStep }> {
   const name = setup.repo.split("/")[1] ?? setup.repo;
   const clone = join(workspace, name);
@@ -69,9 +72,11 @@ export async function setUpEngineer({
     const output = secrets.stream();
     let log = "";
     const keep = (text: string) => (log = (log + text).slice(-SETUP_LOG_MAX));
+    const startedAt = now();
+    report({ step, command, exitCode: null, log, startedAt, endedAt: null });
     const exitCode = await shell(command, { cwd, env, signal, onOutput: (text) => keep(output.push(text)) });
     keep(output.end());
-    const done: SetupStep = { step, command, exitCode, log };
+    const done = { step, command, exitCode, log, startedAt, endedAt: now() };
     report(done);
     return done;
   };

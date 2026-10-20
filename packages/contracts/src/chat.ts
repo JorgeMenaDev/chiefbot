@@ -20,17 +20,28 @@ export type ApprovalKind = z.infer<typeof ApprovalKind>;
 export const SETUP_LOG_MAX = 16_384;
 
 // One step of an engineer's setup (a project's task worker), before its agent
-// starts: the command it ran, how it ended and the end of its output.
+// starts: the command it runs, how it ended and the end of its output. The
+// worker reports it as it starts, its `exitCode` and `endedAt` null, then again
+// as it ends. `startedAt` and `endedAt` are epoch milliseconds: both null in a
+// step reported before steps had times.
 //   clone     clones the project's repo from its default branch, through control's git proxy
 //   checkout  a verifier's: fetches the commit it checks and checks it out
 //   setup     the project's commands.setup, in the clone, with the project's secrets in its environment
 export const SetupStep = z.object({
   step: z.enum(["clone", "checkout", "setup"]),
   command: z.string(),
-  exitCode: z.int(),
+  exitCode: z.int().nullable(),
   log: z.string().max(SETUP_LOG_MAX),
+  startedAt: z.number().nullable().default(null),
+  endedAt: z.number().nullable().default(null),
 });
 export type SetupStep = z.infer<typeof SetupStep>;
+
+// Folds a step's report into the setup's steps, one per step: its end takes the place of its start.
+export function foldStep(steps: SetupStep[], step: SetupStep): SetupStep[] {
+  const index = steps.findIndex((each) => each.step === step.step);
+  return index === -1 ? [...steps, step] : steps.with(index, step);
+}
 
 // One stage of an engineer's or verifier's own copy of its project's template
 // stack (docs/templates.md), which control starts before the computer's setup:
@@ -38,9 +49,11 @@ export type SetupStep = z.infer<typeof SetupStep>;
 // the template's stages that waits for a service the stack starts. Control
 // reports every stage as waiting before the first starts, then each as it
 // starts (running), then once as it passes or fails, at `at` (epoch
-// milliseconds). `log` is the end of its commands' and services' output, with
-// the project's secrets hidden.
+// milliseconds). `id` says which stage it is: "build" for Build, else its index
+// in the template's stages, whose labels need not differ. `log` is the end of
+// its commands' and services' output, with the project's secrets hidden.
 export const StackStage = z.object({
+  id: z.union([z.literal("build"), z.int().nonnegative()]),
   label: z.string(),
   state: z.enum(["waiting", "running", "passed", "failed"]),
   log: z.string().max(SETUP_LOG_MAX),
@@ -52,6 +65,7 @@ export type StackStage = z.infer<typeof StackStage>;
 // reports (foldStage): its latest state and log, when it started and when it
 // passed or failed (epoch milliseconds, null until then).
 export const StackRow = z.object({
+  id: StackStage.shape.id,
   label: z.string(),
   state: StackStage.shape.state,
   log: z.string().max(SETUP_LOG_MAX),
@@ -60,12 +74,13 @@ export const StackRow = z.object({
 });
 export type StackRow = z.infer<typeof StackRow>;
 
-// Folds one report into the stack's rows, one row per stage label in the order
-// they were first reported (a template's labels are distinct, and none is Build).
-export function foldStage(rows: StackRow[], { label, state, log, at }: StackStage): StackRow[] {
-  const index = rows.findIndex((row) => row.label === label);
-  const row = rows[index] ?? { label, state, log, startedAt: null, endedAt: null };
+// Folds one report into the stack's rows, one row per stage (`id`), in the
+// order they were first reported.
+export function foldStage(rows: StackRow[], { id, label, state, log, at }: StackStage): StackRow[] {
+  const index = rows.findIndex((row) => row.id === id);
+  const row = rows[index] ?? { id, label, state, log, startedAt: null, endedAt: null };
   const next = {
+    id,
     label,
     state,
     log,
@@ -92,7 +107,7 @@ export function foldStage(rows: StackRow[], { label, state, log, at }: StackStag
 //   question-withdrawn  the agent no longer waits on that question, which can no
 //               longer be answered: the SDK ended it, its turn ended, or the bot was stopped
 //               (control adds that one).
-//   setup-step  an engineer ran one step of its setup (SetupStep), before its agent starts.
+//   setup-step  a step of an engineer's setup (SetupStep) started or ended, before its agent starts.
 //               A step that fails ends the turn: the engineer is blocked.
 //   setup-done  the engineer's setup is over and its agent starts, with the repo's
 //               instruction files and skill folders it found

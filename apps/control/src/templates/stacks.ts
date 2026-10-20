@@ -41,13 +41,15 @@ export type StackRunner = {
 };
 
 // The first stage of every stack: it clones the repos and builds the images.
-export const BUILD_STAGE = "Build";
+// Its id is its own, so a template's stage may have its label too.
+export const BUILD_STAGE = { id: "build", label: "Build" } as const;
 
-// The template's stages a stack waits for, in order: not one that waits for the
-// project's own service, which is the computer's setup, not the stack's. Such a
-// stage waits for it alone (templateProblem refuses a template choice where not).
-export function stackStages({ stages }: Template, own: string): TemplateStage[] {
-  return stages.filter(({ waitsFor }) => !waitsFor.includes(own));
+// The template's stages a stack waits for, in order, each with its index in the
+// template's stages as its id: not one that waits for the project's own
+// service, which is the computer's setup, not the stack's. Such a stage waits
+// for it alone (templateProblem refuses a template choice where not).
+export function stackStages({ stages }: Template, own: string): Array<TemplateStage & { id: number }> {
+  return stages.flatMap((stage, id) => (stage.waitsFor.includes(own) ? [] : [{ ...stage, id }]));
 }
 
 export type DockerStacksOptions = {
@@ -97,20 +99,21 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
     const work = mkdtempSync(join(tmpdir(), "chiefbot-stack-"));
     const file = join(work, "compose.json");
     const hide = secretRedactor([...secrets, ...Object.values(repos).flatMap(({ token }) => (token === null ? [] : [token]))]);
-    let label = BUILD_STAGE;
+    // The stage under way, as its reports name it.
+    let current: Pick<StackReport, "id" | "label"> = BUILD_STAGE;
     let log = stageLog(hide);
     // Runs one step of the current stage (killed at `deadline`), its output into
     // the stage's log. A step that fails ends the stage.
     const step = async (command: string[], deadline: AbortSignal, env: Record<string, string> = dockerEnv) => {
       const { exitCode, output } = await run(command, env, deadline, (text) => log.push(text));
       if (exitCode === 0) return output;
-      if (deadline.aborted && !signal.aborted) log.push(`\nChiefbot stopped waiting after ${Math.round((label === BUILD_STAGE ? buildMs : stageMs) / 60_000)} minutes.\n`);
+      if (deadline.aborted && !signal.aborted) log.push(`\nChiefbot stopped waiting after ${Math.round((current.id === BUILD_STAGE.id ? buildMs : stageMs) / 60_000)} minutes.\n`);
       throw new StepFailed();
     };
     const compose = (args: string[]) => ["docker", "compose", "-p", project, "-f", file, ...args];
     const services = (waitsFor: string[]) => waitsFor.filter((service) => service !== template.seed);
     try {
-      onStage({ label, state: "running", log: "" });
+      onStage({ ...current, state: "running", log: "" });
       const build = AbortSignal.any([signal, AbortSignal.timeout(buildMs)]);
       const templateFile = join(templatesDir, template.name, template.compose);
       await step(["docker", "compose", "-p", project, "-f", templateFile, "config", "--format", "json", "--output", file], build);
@@ -143,12 +146,12 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
       writeFileSync(file, JSON.stringify(stackModel(model, { computer: `${prefix}${id}`, own, seed: template.seed, images })));
       const toBuild = Object.entries(images).flatMap(([service, { context }]) => (context === undefined ? [] : [service]));
       if (toBuild.length > 0) await step(compose(["build", ...toBuild]), build);
-      onStage({ label, state: "passed", log: log.end() });
+      onStage({ ...current, state: "passed", log: log.end() });
 
       for (const stage of stackStages(template, own)) {
-        label = stage.label;
+        current = { id: stage.id, label: stage.label };
         log = stageLog(hide);
-        onStage({ label, state: "running", log: "" });
+        onStage({ ...current, state: "running", log: "" });
         const deadline = AbortSignal.any([signal, AbortSignal.timeout(stageMs)]);
         try {
           const healthy = services(stage.waitsFor);
@@ -163,12 +166,12 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
             await run(compose(["logs", "--no-color", "--tail", "100", ...stage.waitsFor]), dockerEnv, AbortSignal.any([signal, AbortSignal.timeout(30_000)]), (text) => log.push(text));
           }
         }
-        onStage({ label, state: "passed", log: log.end() });
+        onStage({ ...current, state: "passed", log: log.end() });
       }
       return "ready";
     } catch (error) {
       if (!(error instanceof StepFailed)) log.push(`${error instanceof Error ? error.message : String(error)}\n`);
-      onStage({ label, state: "failed", log: log.end() });
+      onStage({ ...current, state: "failed", log: log.end() });
       return "failed";
     } finally {
       rmSync(work, { recursive: true, force: true });

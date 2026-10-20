@@ -2,6 +2,7 @@ import {
   ChatEvent,
   SendMessageResponse,
   foldStage,
+  foldStep,
   type ApprovalId,
   type AttachmentId,
   type AttachmentUpload,
@@ -232,7 +233,7 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
         const { stack, steps } = existing?.kind === "setup" ? existing : { stack: [], steps: [] };
         return event.type === "stack-stage"
           ? { kind: "setup", id, stack: foldStage(stack, event.stage), steps }
-          : { kind: "setup", id, stack, steps: [...steps, event.step] };
+          : { kind: "setup", id, stack, steps: foldStep(steps, event.step) };
       });
       return { ...view, items };
     }

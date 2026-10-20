@@ -14,6 +14,7 @@ import {
   type ChatView,
   type HandoffCard,
   type QuestionForm,
+  type SetupStep,
   type StackStage,
 } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
@@ -357,17 +358,19 @@ test("a turn control queued in a project chat shows as a notice, not as the memb
 
 test("an engineer's or verifier's transcript shows its stack's stages and its setup steps as one list, with the rows its task shows, before its agent's first message", () => {
   const turnId = TurnId.parse("turn-1");
-  const clone = { step: "clone" as const, command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "" };
-  const checkout = { step: "checkout" as const, command: "git fetch -q origin abc && git checkout -q --detach abc", exitCode: 0, log: "" };
-  const stage = (label: string, state: StackStage["state"], at: number, log = ""): ChatEvent["event"] => ({ type: "stack-stage", stage: { label, state, log, at } });
+  const clone: SetupStep = { step: "clone", command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "", startedAt: 64_500, endedAt: 66_000 };
+  const checkout: SetupStep = { step: "checkout", command: "git fetch -q origin abc && git checkout -q --detach abc", exitCode: 0, log: "", startedAt: 66_000, endedAt: 67_000 };
+  const stage = (id: StackStage["id"], label: string, state: StackStage["state"], at: number, log = ""): ChatEvent["event"] => ({ type: "stack-stage", stage: { id, label, state, log, at } });
   const events: ChatEvent["event"][] = [
-    stage("Build", "waiting", 1_000),
-    stage("Database", "waiting", 1_000),
-    stage("Build", "running", 1_000),
-    stage("Build", "passed", 61_000, "built meta\n"),
-    stage("Database", "running", 61_000),
-    stage("Database", "passed", 64_500, "postgres is healthy\n"),
+    stage("build", "Build", "waiting", 1_000),
+    stage(0, "Database", "waiting", 1_000),
+    stage("build", "Build", "running", 1_000),
+    stage("build", "Build", "passed", 61_000, "built meta\n"),
+    stage(0, "Database", "running", 61_000),
+    stage(0, "Database", "passed", 64_500, "postgres is healthy\n"),
+    { type: "setup-step", step: { ...clone, exitCode: null, endedAt: null } },
     { type: "setup-step", step: clone },
+    { type: "setup-step", step: { ...checkout, exitCode: null, endedAt: null } },
     { type: "setup-step", step: checkout },
     { type: "setup-done", instructions: ["AGENTS.md"], skills: [] },
     { type: "text-delta", messageId: "m1", text: "Checking the pull request." },
@@ -381,8 +384,8 @@ test("an engineer's or verifier's transcript shows its stack's stages and its se
       kind: "setup",
       id: "turn-1:setup",
       stack: [
-        { label: "Build", state: "passed", log: "built meta\n", startedAt: 1_000, endedAt: 61_000 },
-        { label: "Database", state: "passed", log: "postgres is healthy\n", startedAt: 61_000, endedAt: 64_500 },
+        { id: "build", label: "Build", state: "passed", log: "built meta\n", startedAt: 1_000, endedAt: 61_000 },
+        { id: 0, label: "Database", state: "passed", log: "postgres is healthy\n", startedAt: 61_000, endedAt: 64_500 },
       ],
       steps: [clone, checkout],
     },

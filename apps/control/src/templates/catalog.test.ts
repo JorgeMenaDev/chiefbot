@@ -69,9 +69,6 @@ test("a template that breaks the rules stops control, naming its file and what i
   expect(withManifest(manifest.replace("api: { context: . }", "web: { context: . }"))).toThrow(/shop\/template\.yaml: service web is not in compose\.yaml/);
   expect(withManifest(manifest.replace("api: { context: . }", "db: { context: . }"))).toThrow(/shop\/template\.yaml: service db needs a build in compose\.yaml/);
   expect(withManifest(manifest.replace("seed: seed", "seed: fixtures"))).toThrow(/shop\/template\.yaml: seed fixtures is not in compose\.yaml/);
-  // The task lists each stage by its label, after Chiefbot's own Build.
-  expect(withManifest(manifest.replace("label: API", "label: Database"))).toThrow(/shop\/template\.yaml: two stages are labelled Database: give each its own label/);
-  expect(withManifest(manifest.replace("label: Database", "label: Build"))).toThrow(/shop\/template\.yaml: a stage is labelled Build, which is Chiefbot's own first stage: pick another label/);
   expect(load({ "template.yaml": manifest })).toThrow(/shop\/compose\.yaml: missing/);
   expect(withManifest(`${manifest}# ${"x".repeat(256 * 1024)}\n`)).toThrow(/shop\/template\.yaml: over 256 KB/);
   expect(() => loadTemplates(templatesDir({ "Not Valid": { "template.yaml": manifest, "compose.yaml": compose() } }))).toThrow(/Not Valid[\s\S]*lower-case/);

@@ -2,7 +2,6 @@ import { computerPorts, TemplateManifest, TemplateName, type Template } from "@c
 import { join } from "node:path";
 import { z } from "zod";
 import { catalogFolders, readYaml } from "../catalogFolders.ts";
-import { BUILD_STAGE } from "./stacks.ts";
 
 // The templates the repo ships: templates/ at its root.
 export const repoTemplates = join(import.meta.dir, "../../../../templates");
@@ -34,8 +33,7 @@ const RepoBuild = z.union([z.string().min(1), z.looseObject({ context: z.string(
 // breaks a rule throws, naming the file and what is wrong, so control does not start.
 // The rules: the folder's name, the manifest's contract, every service, stage and
 // seed it names is a service of the compose file (a service a repo may replace has a
-// build with a context), each stage has its own label and none is Build (an
-// engineer's task lists its stack's stages by label: stacks.ts), and no compose service binds a port the engineer computer
+// build with a context), and no compose service binds a port the engineer computer
 // listens on itself (computerPorts, same port and protocol) inside the namespace,
 // which the stack joins. A port published on the Docker host is not in the namespace.
 export function loadTemplates(dir: string): Template[] {
@@ -58,11 +56,9 @@ export function loadTemplates(dir: string): Template[] {
         throw refuse(`service ${service} needs a build in ${compose}, a folder or { context: <folder> }, so a repo can replace it`);
       }
     }
-    for (const [index, { label, waitsFor }] of stages.entries()) {
+    for (const { label, waitsFor } of stages) {
       const missing = waitsFor.find((service) => !has(service));
       if (missing) throw refuse(`stage ${label} waits for ${missing}, which ${compose} has no service for`);
-      if (label === BUILD_STAGE) throw refuse(`a stage is labelled ${BUILD_STAGE}, which is Chiefbot's own first stage: pick another label`);
-      if (stages.findIndex((stage) => stage.label === label) !== index) throw refuse(`two stages are labelled ${label}: give each its own label`);
     }
     if (!has(seed)) throw refuse(`seed ${seed} is not in ${compose}`);
 

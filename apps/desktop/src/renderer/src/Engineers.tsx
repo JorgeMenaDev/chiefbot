@@ -73,7 +73,7 @@ const stateDot: Record<TaskWorkerState, { dot: string; ping?: string }> = {
   stopped: { dot: "bg-muted-foreground/40" },
 };
 
-// What an engineer does before its agent works, in its screen's place and as its transcript's status.
+// What an engineer does before its agent works, in its screen's place, and as its transcript's status while its computer starts.
 const startingText: Partial<Record<TaskWorkerState, string>> = { launching: "Starting its computer", setting_up: "Setting up" };
 
 // An engineer's state as a dot, pinging while its computer starts, it sets up or it works.
@@ -109,7 +109,8 @@ function EngineerDetail({ project, login, title, worker, onBack }: { project: Pr
       <ChatTimeline
         chatKey={worker.id}
         items={view.items}
-        status={running ? (view.working ?? startingText[worker.state] ?? "Working") : null}
+        // While it sets up, its screen's place and its setup list's first line say so.
+        status={running && worker.state !== "setting_up" ? (view.working ?? startingText[worker.state] ?? "Working") : null}
         empty="Its transcript shows here once it starts."
         renderItem={(item, streaming) => <TranscriptRow project={project} login={login} worker={worker} item={item} streaming={streaming} />}
       />

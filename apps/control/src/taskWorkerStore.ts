@@ -9,6 +9,7 @@ import {
   TurnId,
   UserId,
   foldStage,
+  foldStep,
   type ApprovalId,
   type ApprovalKind,
   type ChatEvent,
@@ -38,7 +39,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
   // project's places (workers.max) while its computer is wanted or unwanted, so
   // a computer that is slow or fails to stop or go keeps its place until it has. `payer` is who pays
   // for its Copilot (JSON), set when its task starts. `setup` is a JSON array of
-  // the SetupSteps it ran. The worker's credential is stored as a SHA-256: a
+  // the SetupSteps it reported, as each started and ended. The worker's credential is stored as a SHA-256: a
   // queued worker's is replaced as it launches.
   const create = `CREATE TABLE IF NOT EXISTS task_workers (
     id TEXT PRIMARY KEY,
@@ -175,7 +176,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
       requestedBy: row.login,
       payer: row.payer === null ? null : CopilotPayer.parse(JSON.parse(row.payer)),
       state: row.state,
-      setup: SetupStep.array().parse(JSON.parse(row.setup)),
+      setup: SetupStep.array().parse(JSON.parse(row.setup)).reduce(foldStep, []),
       stack: StackStage.array().parse(JSON.parse(row.stack)).reduce(foldStage, []),
       result: row.result,
       pullRequest: row.pull_request,

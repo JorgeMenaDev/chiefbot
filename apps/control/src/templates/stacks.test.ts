@@ -32,7 +32,7 @@ test("a stage's log keeps the end of what its steps print, every secret hidden b
     );
 
     expect(outcome).toBe("failed");
-    expect(reports.map(({ label, state }) => `${label} ${state}`)).toEqual(["Build running", "Build failed"]);
+    expect(reports.map(({ id, label, state }) => `${id} ${label} ${state}`)).toEqual(["build Build running", "build Build failed"]);
     expect(reports.at(-1)?.log).toBe(`${"a".repeat(25)}***\n***\n${"b".repeat(SETUP_LOG_MAX - 33)}`);
   } finally {
     rmSync(bin, { recursive: true, force: true });
