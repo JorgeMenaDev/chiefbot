@@ -116,6 +116,20 @@ const api = {
       ipcRenderer.invoke("projects:answer", id, workerId, approvalId, approved),
     // { projectId, workers } whenever one of a project's workers changes.
     onWorkers: (listener: (workers: unknown) => void) => subscribe("projects:workers", listener),
+    // Each project's state dot for the user, by project id; then all of them again on every change.
+    states: (): Promise<unknown> => ipcRenderer.invoke("projects:states"),
+    onStates: (listener: (states: unknown) => void) => subscribe("projects:states", listener),
+    // The transcript of one of the project's workers (main follows one at a time), then its changes.
+    openWorkerChat: (id: string, workerId: string): Promise<unknown> => ipcRenderer.invoke("projects:open-worker-chat", id, workerId),
+    onWorkerChat: (listener: (view: unknown) => void) => subscribe("projects:worker-chat", listener),
+    closeWorkerChat: (workerId: string): Promise<void> => ipcRenderer.invoke("projects:close-worker-chat", workerId),
+    // A worker's screen, as a bot's: take-over, hand-back and its WebSocket for noVNC (main adds the session).
+    takeOver: (id: string, workerId: string): Promise<unknown> => ipcRenderer.invoke("projects:take-over", id, workerId),
+    handBack: (id: string, workerId: string): Promise<unknown> => ipcRenderer.invoke("projects:hand-back", id, workerId),
+    workerScreenUrl: (id: string, workerId: string): Promise<string> => ipcRenderer.invoke("projects:worker-screen-url", id, workerId),
+    // The shared context: its files, and one file's Markdown.
+    context: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:context", id),
+    contextFile: (id: string, path: string): Promise<unknown> => ipcRenderer.invoke("projects:context-file", id, path),
   },
   // The Theme setting: main sets Electron's native theme to match.
   theme: {
