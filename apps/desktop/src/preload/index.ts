@@ -147,6 +147,10 @@ const api = {
     disconnect: (name: string): Promise<void> => ipcRenderer.invoke("connections:disconnect", name),
     calls: (botId: string): Promise<unknown> => ipcRenderer.invoke("connections:calls", botId),
   },
+  // The template catalog control loaded, read-only (Connect apps lists it).
+  templates: {
+    list: (): Promise<unknown> => ipcRenderer.invoke("templates:list"),
+  },
   // Control's read-only health checks of the user's connections and own services (Health).
   health: {
     get: (): Promise<unknown> => ipcRenderer.invoke("health:get"),

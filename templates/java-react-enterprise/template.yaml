@@ -1,0 +1,22 @@
+# What Chiefbot needs to know about this template that compose.yaml cannot say
+# (docs/templates.md, "Add one").
+title: Java and React enterprise
+description: A Next.js UI behind a Java gateway, a Spring Boot API, PostgreSQL with three schemas and a seed step.
+compose: compose.yaml
+# The services a project may point at its own repos. Each stand-in's folder here is its repo.
+services:
+  ui: { context: . }
+  meta: { context: . }
+  auth: { context: . }
+stages:
+  - { label: Database, waitsFor: [postgres] }
+  - { label: API, waitsFor: [meta] }
+  - { label: Gateway, waitsFor: [auth] }
+  - { label: Seed, waitsFor: [seed] }
+  - { label: App, waitsFor: [ui] }
+seed: seed
+# Dev-only sample values: the stand-in gateway's user, which the seed signs in as.
+notes:
+  - "The app: http://localhost:3000/acme-ui"
+  - "The gateway: http://localhost:8081. The API is behind it at http://localhost:8081/acme-meta/v1."
+  - "Sign in as alice, password alice-password. The seed made her records in the live, sandbox and experimental schemas."

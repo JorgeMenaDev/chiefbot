@@ -21,7 +21,11 @@ rm -f "$profile/SingletonLock" "$profile/SingletonCookie" "$profile/SingletonSoc
 hsetroot -center /opt/chiefbot/wallpaper.png >/dev/null
 tint2 -c /opt/chiefbot/dock/tint2rc >/dev/null 2>&1 &
 
+# The computer's own ports (VNC_PORT), which build.ts writes from packages/contracts
+# computer.ts: the worker and control's template check read the same list.
+. /opt/chiefbot/ports.env
+
 # VNC on loopback only; -bg returns once it listens. The worker pipes it to control for each viewer.
-x11vnc -display :1 -localhost -rfbport 5900 -shared -forever -nopw -quiet -bg
+x11vnc -display :1 -localhost -rfbport "$VNC_PORT" -shared -forever -nopw -quiet -bg
 
 exec bun /opt/chiefbot/worker.js

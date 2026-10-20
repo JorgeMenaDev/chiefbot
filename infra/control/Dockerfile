@@ -2,7 +2,8 @@
 # VM (infra/gcp). Build from the repo root: `docker build -f infra/control/Dockerfile .`.
 # The first stage bundles apps/control into one file with `bun build`.
 # SQLite and the projects' context live under /data: mount a volume or disk there.
-# The connections people may turn on are read from /opt/chiefbot/connections at start.
+# The connections people may turn on are read from /opt/chiefbot/connections at start,
+# and the template catalog from /opt/chiefbot/templates.
 FROM oven/bun:1-slim AS bundle
 WORKDIR /src
 COPY . .
@@ -11,5 +12,6 @@ RUN bun install --frozen-lockfile --ignore-scripts --production --filter @chiefb
 FROM oven/bun:1-slim
 COPY --from=bundle /out/control.js /opt/chiefbot/control.js
 COPY connections /opt/chiefbot/connections
-ENV CHIEFBOT_DB_PATH=/data/control.sqlite CHIEFBOT_CONNECTIONS_DIR=/opt/chiefbot/connections
+COPY templates /opt/chiefbot/templates
+ENV CHIEFBOT_DB_PATH=/data/control.sqlite CHIEFBOT_CONNECTIONS_DIR=/opt/chiefbot/connections CHIEFBOT_TEMPLATES_DIR=/opt/chiefbot/templates
 CMD ["bun", "/opt/chiefbot/control.js"]
