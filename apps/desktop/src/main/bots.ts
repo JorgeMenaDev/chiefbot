@@ -6,6 +6,7 @@ import {
   type BotId,
   type CreateBotRequest,
   type ProjectId,
+  type ProjectStates,
   type SetBotModelRequest,
   type Task,
   type TaskWorker,
@@ -25,15 +26,21 @@ export type BotsOptions = {
   onTasks?: (projectId: ProjectId, tasks: Task[]) => void;
   // A project of one of the user's workspaces has a worker that changed.
   onWorkers?: (projectId: ProjectId, workers: TaskWorker[]) => void;
+  // The user's projects' states changed (their dots in the Projects tab): every one, as main now has them.
+  onProjectStates?: (states: ProjectStates) => void;
   // Wait between reconnects after the events socket drops.
   retryMs?: number;
 };
 
 // The signed-in user's bots, owned by Electron main. A WebSocket to control's
-// /events keeps the list live (and passes on project ledgers and workers); actions are
+// /events keeps the list live (and passes on project ledgers, workers and states); actions are
 // plain HTTP calls to control.
-export function createBots({ controlUrl, session, onChange, onUser, onTasks, onWorkers, retryMs = 2000 }: BotsOptions) {
+export function createBots({ controlUrl, session, onChange, onUser, onTasks, onWorkers, onProjectStates, retryMs = 2000 }: BotsOptions) {
   let bots: Bot[] = [];
+  // Each project's latest state, kept for a window that opens after control sent
+  // it. Control's snapshot replaces it whole (on every connect, and once a
+  // project goes), so a deleted project's dot cannot linger.
+  let projectStates: ProjectStates = {};
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
   let connected = false;
@@ -54,7 +61,11 @@ export function createBots({ controlUrl, session, onChange, onUser, onTasks, onW
       if (message.type === "bots") set(message.bots);
       else if (message.type === "user") onUser?.(message.user);
       else if (message.type === "tasks") onTasks?.(message.projectId, message.tasks);
-      else onWorkers?.(message.projectId, message.workers);
+      else if (message.type === "workers") onWorkers?.(message.projectId, message.workers);
+      else {
+        projectStates = message.type === "project-states" ? message.states : { ...projectStates, [message.projectId]: message.state };
+        onProjectStates?.(projectStates);
+      }
     };
     socket.onclose = () => {
       if (connected) retry = setTimeout(open, retryMs);
@@ -65,6 +76,7 @@ export function createBots({ controlUrl, session, onChange, onUser, onTasks, onW
 
   return {
     list: () => bots,
+    projectStates: () => projectStates,
 
     // Call after sign-in. Stays connected (reconnecting) until disconnect().
     connect() {
@@ -79,6 +91,7 @@ export function createBots({ controlUrl, session, onChange, onUser, onTasks, onW
       if (retry) clearTimeout(retry);
       socket?.close();
       socket = null;
+      projectStates = {};
       set([]);
     },
 

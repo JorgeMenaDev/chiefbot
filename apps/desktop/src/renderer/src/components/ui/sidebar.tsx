@@ -2,14 +2,14 @@
 // (`SidebarProvider`, `Sidebar` with collapsible="offcanvas", `SidebarTrigger`, `SidebarInput`,
 // `SidebarGroupLabel` and `sidebarMenuButtonVariants`) and apps/web/src/components/AppSidebarLayout.tsx
 // (the toggle fixed beside the macOS window buttons, and its Mod+B shortcut).
-import { PanelLeftCloseIcon, PanelLeftIcon } from "lucide-react";
+import { PanelLeftCloseIcon, PanelLeftIcon, PlusIcon } from "lucide-react";
 import { useEffect, useState, type ComponentProps, type CSSProperties, type ReactNode } from "react";
 import { cn } from "../../lib/utils.ts";
 
 // Whether the sidebar is open survives a restart.
 const sidebarKey = "chiefbot.sidebar";
 
-const isMac = navigator.userAgent.includes("Mac");
+export const isMac = navigator.userAgent.includes("Mac");
 
 // The sidebar's open state, persisted, and toggled by Cmd+B (Ctrl+B off macOS), as in T3 Code.
 export function useSidebarOpen() {
@@ -153,5 +153,20 @@ export function SidebarRow({ className, active = false, ...props }: ComponentPro
       )}
       {...props}
     />
+  );
+}
+
+// A sidebar row's quiet trailing note (a status, a role, a repo owner).
+export function SidebarRowNote({ children }: { children: ReactNode }) {
+  return <span className="shrink-0 font-normal text-sidebar-muted-foreground text-xs">{children}</span>;
+}
+
+// The quiet "+ New …" row an empty section shows; the search row's icons open the same form.
+export function SidebarNewRow({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <SidebarRow className="text-sidebar-muted-foreground" onClick={onClick}>
+      <PlusIcon />
+      <span>{label}</span>
+    </SidebarRow>
   );
 }

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApprovalKind } from "./chat.ts";
+import { ApprovalKind, ChatItem } from "./chat.ts";
 import { ApprovalId, ProjectId, TaskWorkerId } from "./ids.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
@@ -31,6 +31,10 @@ export const TaskWorker = z.object({
   // What it waits on the requester to approve: a push, a pull request or a GitHub tool.
   pendingApprovals: z.array(z.object({ approvalId: ApprovalId, kind: ApprovalKind, detail: z.string() })),
   computerRemoved: z.boolean(),
+  // Who drives its screen while it runs: null, the agent; else the login of the
+  // one member who took control. Control keeps it in memory, so it is the
+  // agent's again after control restarts.
+  screenHolder: z.string().nullable().default(null),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
@@ -40,6 +44,11 @@ export type TaskWorker = z.infer<typeof TaskWorker>;
 // ClientEvent), and what Electron main hands the renderer.
 export const ProjectWorkers = z.object({ projectId: ProjectId, workers: z.array(TaskWorker) });
 export type ProjectWorkers = z.infer<typeof ProjectWorkers>;
+
+// A worker's transcript as a member watches it, folded like a chat by Electron
+// main: what main hands the renderer. `working` is null once its turn ended.
+export const WorkerChatView = z.object({ workerId: TaskWorkerId, items: z.array(ChatItem), working: z.string().nullable() });
+export type WorkerChatView = z.infer<typeof WorkerChatView>;
 
 // The answer of the coordinator's worker_transcript tool: what the worker did, one line per
 // message, tool call, approval or error, oldest first. `truncated` when older lines were left out.

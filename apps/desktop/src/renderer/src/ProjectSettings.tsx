@@ -1,5 +1,5 @@
 import { ConfigKey, ProjectSecret, projectFileName, type Project, type ProjectConfig } from "@chiefbot/contracts";
-import { Fragment, useEffect, useState, type FormEvent } from "react";
+import { Fragment, useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { z } from "zod";
 import { ErrorText, Muted, PaneBody, Row, Section } from "./Pane.tsx";
 import { Badge } from "./components/ui/badge.tsx";
@@ -11,13 +11,15 @@ const SecretList = z.array(ProjectSecret);
 // A project's settings view: the settings members keep in the app (the project
 // file's keys, as YAML), the project's secrets, and the config its agents get with
 // where each key comes from. Any member edits them. `onSaved` runs once new
-// settings are saved, so the caller fetches the project again.
-export function ProjectSettings({ project, onSaved }: { project: Project; onSaved: () => void }) {
+// settings are saved, so the caller fetches the project again. `children` (the
+// owner's Delete) come last.
+export function ProjectSettings({ project, onSaved, children }: { project: Project; onSaved: () => void; children?: ReactNode }) {
   return (
     <PaneBody>
       <SettingsEditor project={project} onSaved={onSaved} />
       <Secrets project={project} />
       <EffectiveConfig project={project} />
+      {children}
     </PaneBody>
   );
 }
