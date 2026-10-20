@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, TurnId, User, WorkerTranscript, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
+import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, TurnId, User, WorkerTranscript, Workspace, WorkspaceInvite, type ChatEvent, type StackRow } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -163,7 +163,7 @@ function fakeSetup(answer: (command: string) => SetupAnswer | Promise<SetupAnswe
   return { runs, run };
 }
 
-test("an engineer sets up before its agent starts: it clones the repo and runs the setup command, and its transcript shows each with its exit code first", async () => {
+test("an engineer sets up before its agent starts: it clones the repo and runs the setup command, each step showing as it runs and as it ends, and its transcript shows each with its exit code first", async () => {
   let install = () => {};
   const installed = new Promise<void>((resolve) => (install = resolve));
   const setup = fakeSetup(async (command) => {
@@ -179,15 +179,20 @@ test("an engineer sets up before its agent starts: it clones the repo and runs t
   });
   const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
 
-  const settingUp = await workerWhen(owner, project, id, ({ setup }) => setup.length === 1);
+  const settingUp = await workerWhen(owner, project, id, ({ setup }) => setup.length === 2);
   expect(settingUp.state).toBe("setting_up");
+  expect(settingUp.setup.map(({ step, exitCode, endedAt }) => [step, exitCode, endedAt === null])).toEqual([
+    ["clone", 0, false],
+    ["setup", null, true],
+  ]);
   expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
   install();
 
   const finished = await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  const times = { startedAt: expect.any(Number), endedAt: expect.any(Number) };
   expect(finished.setup).toEqual([
-    { step: "clone", command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "" },
-    { step: "setup", command: "bun install", exitCode: 0, log: "3 packages installed\n" },
+    { step: "clone", command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "", ...times },
+    { step: "setup", command: "bun install", exitCode: 0, log: "3 packages installed\n", ...times },
   ]);
   // The clone lands in the engineer's workspace, and the setup runs in it.
   const [clone, install_] = setup.runs;
@@ -213,7 +218,7 @@ test("a setup command that fails blocks the engineer: its agent never starts, it
   const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
 
   expect(blocked).toMatchObject({ result: "Its setup failed: `bun install --frozen-lockfile` exited with 1.", computerRemoved: false });
-  expect(blocked.setup.at(-1)).toEqual({ step: "setup", command: "bun install --frozen-lockfile", exitCode: 1, log: lockfile });
+  expect(blocked.setup.at(-1)).toMatchObject({ step: "setup", command: "bun install --frozen-lockfile", exitCode: 1, log: lockfile });
   expect(copilot.sends.some(({ sessionId }) => sessionId === id)).toBe(false);
   await eventually(async () => (await computers.provider.status(id)) === "stopped");
   expect(WorkerTranscript.parse((await tool({ tool: "worker_transcript", worker: id })).body).lines.slice(1)).toEqual([
@@ -1915,7 +1920,7 @@ async function templateProject(options: TestControlOptions = {}, projectFile?: s
 // with its state, then each step of its computer's setup.
 const setupLines = (events: ChatEvent[]) =>
   events.flatMap(({ event }) =>
-    event.type === "stack-stage" ? [`${event.stage.label} ${event.stage.state}`] : event.type === "setup-step" ? [`${event.step.step} ${event.step.exitCode}`] : [],
+    event.type === "stack-stage" ? [`${event.stage.label} ${event.stage.state}`] : event.type === "setup-step" ? [`${event.step.step} ${event.step.exitCode ?? "running"}`] : [],
   );
 
 test("an engineer of a project with a template gets its own stack before its setup: each stage streams into its transcript in order, its brief has the template's notes, and the stack goes with its computer", async () => {
@@ -1931,10 +1936,11 @@ test("an engineer of a project with a template gets its own stack before its set
 
   await workerWhen(owner, project, id, ({ state }) => state === "finished");
   const transcript = await owner.watchWorkerTranscript(project.id, id).settled();
+  const labels = ["Build", "Database", "API", "Gateway", "Seed"];
   expect(setupLines(transcript)).toEqual([
-    ...["Build", "Database", "API", "Gateway", "Seed"].flatMap((label) => [`${label} running`, `${label} passed`]),
-    "clone 0",
-    "setup 0",
+    ...labels.map((label) => `${label} waiting`),
+    ...labels.flatMap((label) => [`${label} running`, `${label} passed`]),
+    ...["clone running", "clone 0", "setup running", "setup 0"],
   ]);
   // meta runs from its repo at its ref, read as the member who asked; the project's own ui runs in the computer.
   expect(stacks.started.map(({ id, plan }) => [id, plan.template.name, plan.own, plan.repos])).toEqual([
@@ -1961,7 +1967,7 @@ test("a stage of the stack that fails blocks the engineer with that stage's log,
   const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
   expect(blocked.result).toBe("Its stack did not start: its API stage failed.");
   const transcript = await owner.watchWorkerTranscript(project.id, id).settled();
-  expect(setupLines(transcript)).toEqual(["Build running", "Build passed", "Database running", "Database passed", "API running", "API failed"]);
+  expect(setupLines(transcript).slice(5)).toEqual(["Build running", "Build passed", "Database running", "Database passed", "API running", "API failed"]);
   expect(transcript.flatMap(({ event }) => (event.type === "stack-stage" && event.stage.state === "failed" ? [event.stage.log] : []))).toEqual([
     "meta exited with 1: could not connect as acme:***\n",
   ]);
@@ -1973,6 +1979,28 @@ test("a stage of the stack that fails blocks the engineer with that stage's log,
     "stack API: failed\nmeta exited with 1: could not connect as acme:***\n",
     "error: Its stack did not start: its API stage failed.",
   ]);
+});
+
+test("an engineer's task lists its stack's stages from the start, each waiting until it runs, then passed or failed with when it started and ended and its log, also once control restarts", async () => {
+  const time = fakeClock(1_000);
+  const control = await templateProject({ persistent: true, clock: time.clock });
+  const { owner, project, stacks } = control;
+  const { tool } = await heldTurn(control);
+  stacks.failAt("API", "meta exited with 1\n");
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  const blocked = await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  // Each stage by which it is: Build, then its index in the template's stages.
+  const passed = (id: StackRow["id"], label: string): StackRow => ({ id, label, state: "passed", log: `${label} is up\n`, startedAt: 1_000, endedAt: 1_000 });
+  const waiting = (id: number, label: string): StackRow => ({ id, label, state: "waiting", log: "", startedAt: null, endedAt: null });
+  const failed: StackRow = { id: 1, label: "API", state: "failed", log: "meta exited with 1\n", startedAt: 1_000, endedAt: 1_000 };
+  const stages: StackRow[] = [passed("build", "Build"), passed(0, "Database"), failed, waiting(2, "Gateway"), waiting(3, "Seed")];
+  expect(blocked.stack).toEqual(stages);
+  expect(setupLines(await owner.watchWorkerTranscript(project.id, id).settled()).slice(0, 5)).toEqual(["Build", "Database", "API", "Gateway", "Seed"].map((label) => `${label} waiting`));
+
+  control.restart();
+  expect((await workersOf(owner, project)).find((worker) => worker.id === id)?.stack).toEqual(stages);
 });
 
 test("a stack runner's own failure blocks the engineer with its message, the project's secrets and the repo tokens hidden", async () => {
@@ -2136,7 +2164,7 @@ test("template: null in the settings turns the file's template off: the engineer
   const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
 
   await workerWhen(owner, project, id, ({ state }) => state === "finished");
-  expect(setupLines(await owner.watchWorkerTranscript(project.id, id).settled())).toEqual(["clone 0"]);
+  expect(setupLines(await owner.watchWorkerTranscript(project.id, id).settled())).toEqual(["clone running", "clone 0"]);
   expect(stacks.started).toEqual([]);
   expect(copilot.sends.find(({ sessionId }) => sessionId === id)?.prompt).not.toContain("template");
 });

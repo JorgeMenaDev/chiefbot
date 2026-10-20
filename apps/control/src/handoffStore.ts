@@ -128,12 +128,17 @@ export function handoffStore(
       ),
       createdAt: row.created_at,
     });
-  // The handoff's card: where it stands, from its task.
+  // The handoff's card: where it stands, from its task and the stack of its worker that sets up.
   const cardOf = (row: HandoffRow): HandoffCard => {
     const pullRequests = TaskLink.array()
       .parse(JSON.parse(row.links))
       .flatMap((link) => (link.kind === "pull-request" ? [link.url] : []));
     const verification = verdictOf(row);
+    // A task has one worker at a time.
+    const settingUp = workers
+      .workersOf(ProjectId.parse(row.project_id))
+      .find(({ taskNumber, state }) => taskNumber === row.task_number && state === "setting_up")
+      ?.stack.find(({ state }) => state !== "passed");
     return HandoffCard.parse({
       handoffId: row.id,
       workspaceId: row.workspace_id,
@@ -145,6 +150,7 @@ export function handoffStore(
       question: row.question,
       pullRequests,
       verification,
+      settingUp: settingUp?.label ?? null,
     });
   };
   const byId = (handoffId: string) => {

@@ -2,7 +2,7 @@ import { engineerRuns, WorkerChatView, type Project, type Task, type TaskWorker,
 import { ChevronLeftIcon, ChevronRightIcon, RotateCwIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
-import { SetupLog } from "./EngineerDetails.tsx";
+import { SetupProgress } from "./EngineerDetails.tsx";
 import { AssistantMessage, ChatTimeline, ErrorMessage, UserMessage } from "./Chat.tsx";
 import type { LaneItem } from "./chatRows.ts";
 import { LiveScreen } from "./LiveScreen.tsx";
@@ -73,7 +73,7 @@ const stateDot: Record<TaskWorkerState, { dot: string; ping?: string }> = {
   stopped: { dot: "bg-muted-foreground/40" },
 };
 
-// What an engineer does before its agent works, in its screen's place and as its transcript's status.
+// What an engineer does before its agent works, in its screen's place, and as its transcript's status while its computer starts.
 const startingText: Partial<Record<TaskWorkerState, string>> = { launching: "Starting its computer", setting_up: "Setting up" };
 
 // An engineer's state as a dot, pinging while its computer starts, it sets up or it works.
@@ -109,7 +109,8 @@ function EngineerDetail({ project, login, title, worker, onBack }: { project: Pr
       <ChatTimeline
         chatKey={worker.id}
         items={view.items}
-        status={running ? (view.working ?? startingText[worker.state] ?? "Working") : null}
+        // While it sets up, its screen's place and its setup list's first line say so.
+        status={running && worker.state !== "setting_up" ? (view.working ?? startingText[worker.state] ?? "Working") : null}
         empty="Its transcript shows here once it starts."
         renderItem={(item, streaming) => <TranscriptRow project={project} login={login} worker={worker} item={item} streaming={streaming} />}
       />
@@ -164,8 +165,8 @@ function ScreenNote({ children }: { children: ReactNode }) {
   return <p className="flex items-center justify-center gap-2 py-2 text-center text-muted-foreground text-xs">{children}</p>;
 }
 
-// What the engineer did, as the bot chat draws it, its setup steps first as its
-// task shows them. Only the member who asked for the work answers its
+// What the engineer did, as the bot chat draws it, its setup first as its task
+// shows it: its stack's stages and its setup steps, folded once it works. Only the member who asked for the work answers its
 // approvals; the others see who must.
 function TranscriptRow({ project, login, worker, item, streaming }: { project: Project; login: string; worker: TaskWorker; item: LaneItem; streaming: boolean }) {
   switch (item.kind) {
@@ -178,7 +179,7 @@ function TranscriptRow({ project, login, worker, item, streaming }: { project: P
     case "payer":
       return <p className="text-muted-foreground text-xs">{payerText(item.payer)}</p>;
     case "setup":
-      return <SetupLog step={item.step} />;
+      return <SetupProgress stack={item.stack} steps={item.steps} live={worker.state === "setting_up"} />;
     case "approval":
       return item.state !== "pending" || worker.requestedBy === login ? (
         <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answer(project.id, worker.id, item.approvalId, approved)} />

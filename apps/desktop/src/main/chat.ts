@@ -1,6 +1,8 @@
 import {
   ChatEvent,
   SendMessageResponse,
+  foldStage,
+  foldStep,
   type ApprovalId,
   type AttachmentId,
   type AttachmentUpload,
@@ -221,16 +223,21 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       );
       return { ...view, working: stillWaiting(items), items };
     }
-    // An engineer's or verifier's setup, step by step, before its agent's first
-    // message: the rows its task shows too (EngineerDetails). Its end adds none.
+    // An engineer's or verifier's setup, before its agent's first message: one
+    // list of its stack's stages, then its setup steps, as its task shows them
+    // too (SetupProgress). Its end adds nothing.
+    case "stack-stage":
     case "setup-step": {
-      const id = `${turnId}:setup:${event.step.step}`;
-      return { ...view, items: [...view.items, { kind: "setup", id, step: event.step }] };
+      const id = `${turnId}:setup`;
+      const items = upsert(id, (existing) => {
+        const { stack, steps } = existing?.kind === "setup" ? existing : { stack: [], steps: [] };
+        return event.type === "stack-stage"
+          ? { kind: "setup", id, stack: foldStage(stack, event.stage), steps }
+          : { kind: "setup", id, stack, steps: foldStep(steps, event.step) };
+      });
+      return { ...view, items };
     }
     case "setup-done":
-      return view;
-    // A stage of the worker's template stack (StackStage) adds no chat row.
-    case "stack-stage":
       return view;
     // Approvals and questions left pending when a turn ends can no longer be answered.
     case "done": {

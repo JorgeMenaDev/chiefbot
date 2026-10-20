@@ -49,7 +49,7 @@ import { secretRedactor } from "@chiefbot/worker/secret-redactor";
 import { screenTunnel } from "./screens.ts";
 import { secretFailure } from "./secrets/secretStore.ts";
 import { templateProblem } from "./templates/projectTemplate.ts";
-import type { StackPlan, StackRunner } from "./templates/stacks.ts";
+import { BUILD_STAGE, stackStages, type StackPlan, type StackReport, type StackRunner } from "./templates/stacks.ts";
 import type { VerifiedHead } from "./projectStore.ts";
 import type { openStore } from "./store.ts";
 import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
@@ -437,8 +437,8 @@ export function taskWorkerHost({
   async function noVerdict(workerId: TaskWorkerId) {
     const worker = workers.worker(workerId);
     if (worker?.kind !== "verifier" || worker.verdict !== null || !["finished", "blocked", "failed"].includes(worker.state)) return;
-    const failed = worker.setup.find(({ exitCode }) => exitCode !== 0);
-    const stage = workers.transcript(workerId).flatMap(({ event }) => (event.type === "stack-stage" && event.stage.state === "failed" ? [event.stage] : []))[0];
+    const failed = worker.setup.find(({ exitCode }) => exitCode !== null && exitCode !== 0);
+    const stage = worker.stack.find(({ state }) => state === "failed");
     const log = failed ? { title: `\`${failed.command}\` exited with ${failed.exitCode}:`, text: failed.log } : stage ? { title: `Its stack's ${stage.label} stage failed:`, text: stage.log } : null;
     await recordVerdict(
       workerId,
@@ -618,8 +618,8 @@ export function taskWorkerHost({
   }
 
   // Starts the worker's own copy of its project's template stack, when the
-  // project has a template, before its setup: each stage goes into its
-  // transcript as the stack reports it, the stack runner hiding the project's
+  // project has a template, before its setup: every stage goes into its stack
+  // and transcript as waiting first, then each as the stack reports it, the stack runner hiding the project's
   // `secrets` and the repo tokens in its log. The project's template keys are
   // checked against the catalog as it is now, and each service's repo against
   // the member who asked (`userId`), on every start: the member who saved the
@@ -645,12 +645,15 @@ export function taskWorkerHost({
       repos[service] = { ...source, token: access.token };
     }
     if (workers.worker(workerId)?.state !== "setting_up") return null;
+    const report = (stage: StackReport) => {
+      if (workers.stackStage(workerId, { ...stage, at: clock.now() })) publish(projectId);
+    };
+    for (const { id, label } of [BUILD_STAGE, ...stackStages(template, config.service)]) report({ id, label, state: "waiting", log: "" });
     let last = "";
     const outcome = await stacks
       .start(workerId, { template, own: config.service, repos, secrets: Object.values(secrets) }, (stage) => {
         last = stage.label;
-        const event = workers.stackStage(workerId, { ...stage, at: clock.now() });
-        if (event) publish(projectId);
+        report(stage);
       })
       .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
     if (workers.worker(workerId)?.state !== "setting_up") {
@@ -1318,12 +1321,12 @@ function transcriptLines(events: ChatEvent[]): string[] {
         break;
       case "setup-step": {
         const { step, command, exitCode, log } = event.step;
-        lines.push(`${step}: ${command} (exit ${exitCode})${exitCode === 0 ? "" : `\n${log}`}`);
+        if (exitCode !== null) lines.push(`${step}: ${command} (exit ${exitCode})${exitCode === 0 ? "" : `\n${log}`}`);
         break;
       }
       case "stack-stage": {
         const { label, state, log } = event.stage;
-        if (state !== "running") lines.push(`stack ${label}: ${state}${state === "failed" ? `\n${log}` : ""}`);
+        if (state === "passed" || state === "failed") lines.push(`stack ${label}: ${state}${state === "failed" ? `\n${log}` : ""}`);
         break;
       }
       case "setup-done":
