@@ -89,7 +89,7 @@ function status({ source, addedBy, identity, lastPolledAt, lastError, nextDueAt,
 // One form for the three kinds. Saving waits for control, which refuses a
 // connector the project does not declare or a schedule it cannot run.
 function SubscriptionForm({ project, onSave, onCancel }: { project: Project; onSave: (input: SubscriptionInput) => Promise<void>; onCancel: () => void }) {
-  const declared = project.file.connectors;
+  const declared = project.config.connectors;
   const [kind, setKind] = useState<SubscriptionKind>("ci-status");
   const [fields, setFields] = useState({
     connector: declared.includes("github-actions") ? "github-actions" : (declared[0] ?? ""),
@@ -179,7 +179,7 @@ function SubscriptionForm({ project, onSave, onCancel }: { project: Project; onS
           Save
         </Button>
       </div>
-      {kind !== "schedule" && declared.length === 0 && <Muted>{project.name}'s chiefbot.project.yaml declares no connectors.</Muted>}
+      {kind !== "schedule" && declared.length === 0 && <Muted>{project.name}'s config declares no connectors.</Muted>}
     </form>
   );
 }

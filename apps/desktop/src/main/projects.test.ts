@@ -59,10 +59,13 @@ test("a member creates a project from a repo, chats with its coordinator and see
       changed();
     });
 
-  await expect(projects.create(team.id, "octo-org/notes")).rejects.toThrow("invalid_project_file: No chiefbot.project.yaml");
+  // A repo with no project file makes a project too: it then uses its settings alone.
+  const notes = await projects.create(team.id, "octo-org/notes");
+  expect(notes.file).toEqual({ status: "missing" });
+  await expect(projects.create(team.id, "octo-org/nowhere")).rejects.toThrow("repo_not_found");
   const project = await projects.create(team.id, "octo-org/shop");
-  expect(await projects.list(team.id)).toEqual([project]);
-  expect(project.file.commands).toEqual({ test: "bun test" });
+  expect(await projects.list(team.id)).toEqual([notes, project]);
+  expect(project.config.commands).toEqual({ test: "bun test" });
 
   projects.openChat(project.id);
   await projects.send(project.id, "Add dark mode");
@@ -81,7 +84,9 @@ test("a member creates a project from a repo, chats with its coordinator and see
   expect(ledgers).toEqual([{ projectId: project.id, tasks: ledger }]);
 });
 
-test("a member adds and removes what a project listens to, and sees control's refusals", async () => {
+// Control with a fake GitHub and fake computers, the fake's user signed in with
+// a workspace, and the desktop's projects as Electron main keeps them.
+async function signedIn() {
   const github = startFakeGitHub();
   const computers = fakeComputers();
   const control = startControl({ port: 0, dbPath: ":memory:", githubApiUrl: github.url, githubClientId: "test-client", githubApp: github.app, computers: computers.provider });
@@ -94,9 +99,14 @@ test("a member adds and removes what a project listens to, and sees control's re
   const { sessionToken } = SignInResponse.parse(await signIn.json());
   const headers = { authorization: `Bearer ${sessionToken}` };
   const team = Workspace.parse(await (await fetch(`${control.url}/workspaces`, { method: "POST", headers, body: '{"name":"Platform team"}' })).json());
-  github.createRepo("octo-org/shop", { "chiefbot.project.yaml": "connectors: [github-actions]\n" });
   const projects = createProjects({ controlUrl: control.url, session: () => sessionToken, onChat: () => {} });
   stops.push(projects.disconnect);
+  return { github, team, projects };
+}
+
+test("a member adds and removes what a project listens to, and sees control's refusals", async () => {
+  const { github, team, projects } = await signedIn();
+  github.createRepo("octo-org/shop", { "chiefbot.project.yaml": "connectors: [github-actions]\n" });
   const project = await projects.create(team.id, "octo-org/shop");
 
   const added = await projects.subscribe(project.id, { kind: "schedule", prompt: "Triage new bugs", cron: "0 9 * * 1-5", timezone: "Europe/London" });
@@ -109,4 +119,21 @@ test("a member adds and removes what a project listens to, and sees control's re
   await expect(projects.subscribe(project.id, { kind: "ci-status", connector: "github-actions", branch: "main", intervalSeconds: 300 })).rejects.toThrow(
     "invalid_subscription",
   );
+});
+
+test("a member saves a project's settings and sets and clears its secrets, whose values never come back", async () => {
+  const { github, team, projects } = await signedIn();
+  github.createRepo("octo-org/shop", { "README.md": "# Shop" });
+  const project = await projects.create(team.id, "octo-org/shop");
+
+  const saved = await projects.saveSettings(project.id, "secrets: [API_KEY]\ncommands:\n  setup: bun install\n");
+  await projects.setSecret(project.id, "API_KEY", "sk-desktop-value");
+  const set = await projects.secrets(project.id);
+  await projects.clearSecret(project.id, "API_KEY");
+
+  expect([saved.config.commands, saved.sources]).toEqual([{ setup: "bun install" }, { secrets: "settings", "commands.setup": "settings" }]);
+  expect(set).toEqual([{ name: "API_KEY", declared: true, set: true }]);
+  expect(await projects.secrets(project.id)).toEqual([{ name: "API_KEY", declared: true, set: false }]);
+  await expect(projects.saveSettings(project.id, "workers:\n  max: 0\n")).rejects.toThrow("invalid_settings: Settings: workers.max");
+  await expect(projects.setSecret(project.id, "OTHER_KEY", "x")).rejects.toThrow("invalid_secret");
 });

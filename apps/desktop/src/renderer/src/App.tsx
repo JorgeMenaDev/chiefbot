@@ -412,6 +412,7 @@ function Workspace({ user }: { user: User }) {
               setSelectedId(null);
               void reloadProjects();
             }}
+            onChanged={() => void reloadProjects()}
           />
         ) : selected ? (
           <BotPane key={selected.id} bot={selected} draft={askDraft?.botId === selected.id ? askDraft.text : undefined} />

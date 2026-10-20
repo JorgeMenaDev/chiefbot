@@ -1,5 +1,6 @@
 import {
   Project,
+  ProjectSecret,
   SendMessageResponse,
   Subscription,
   Task,
@@ -35,9 +36,18 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
 
   return {
     list: async (workspaceId: WorkspaceId) => Project.array().parse(await (await call("GET", `/workspaces/${workspaceId}/projects`)).json()),
-    // Throws with control's reason, e.g. what is wrong with the repo's chiefbot.project.yaml.
+    // Throws with control's reason, e.g. the user's GitHub account cannot see the repo.
     create: async (workspaceId: WorkspaceId, repo: string) =>
       Project.parse(await (await call("POST", `/workspaces/${workspaceId}/projects`, { repo })).json()),
+    // Saves the project's settings (YAML, the project file's keys) and resolves
+    // with the project and its new config; throws with what is wrong in them.
+    saveSettings: async (projectId: ProjectId, text: string) =>
+      Project.parse(await (await call("PUT", `/projects/${projectId}/settings`, { text })).json()),
+    // The project's secrets, which control never sends the value of.
+    secrets: async (projectId: ProjectId) => ProjectSecret.array().parse(await (await call("GET", `/projects/${projectId}/secrets`)).json()),
+    setSecret: async (projectId: ProjectId, name: string, value: string) =>
+      void (await call("PUT", `/projects/${projectId}/secrets/${encodeURIComponent(name)}`, { value })),
+    clearSecret: async (projectId: ProjectId, name: string) => void (await call("DELETE", `/projects/${projectId}/secrets/${encodeURIComponent(name)}`)),
     // The workspace owner only. Its computer, ledger, chats and context go too.
     remove: async (projectId: ProjectId) => {
       await call("DELETE", `/projects/${projectId}`);
