@@ -11,6 +11,13 @@ export type QuestionItem = Extract<ChatItem, { kind: "question" }>;
 // Where a pending card keeps its draft, so a reload of the window keeps it too.
 const draftKey = (item: QuestionItem) => `chiefbot.question.${item.questionId}`;
 
+type CardProps = {
+  item: QuestionItem;
+  // Whether this card takes keys 1–9 while no question card has focus: the newest pending one.
+  shortcuts: boolean;
+  onAnswer: (result: QuestionResult) => Promise<void>;
+};
+
 // What the bot asks its user, after T3 Code's ComposerPendingUserInputPanel:
 // one question at a time with a step counter, numbered options (keys 1–9 pick
 // one while no text field has focus), "Other" to type an answer of your own and
@@ -18,24 +25,29 @@ const draftKey = (item: QuestionItem) => `chiefbot.question.${item.questionId}`;
 // which has its own Submit answers button: no pick sends anything by itself.
 // Don't answer declines; Esc does nothing. Answered, it shows the answers; a
 // withdrawn or expired question is muted. `onAnswer` sends to control.
-export function QuestionCard({ item, onAnswer }: { item: QuestionItem; onAnswer: (result: QuestionResult) => Promise<void> }) {
-  return item.state === "pending" ? <PendingQuestion item={item} onAnswer={onAnswer} /> : <SettledQuestion item={item} state={item.state} />;
+export function QuestionCard({ item, shortcuts, onAnswer }: CardProps) {
+  return item.state === "pending" ? (
+    <PendingQuestion item={item} shortcuts={shortcuts} onAnswer={onAnswer} />
+  ) : (
+    <SettledQuestion item={item} state={item.state} />
+  );
 }
 
-function PendingQuestion({ item, onAnswer }: { item: QuestionItem; onAnswer: (result: QuestionResult) => Promise<void> }) {
+function PendingQuestion({ item, shortcuts, onAnswer }: CardProps) {
   const { form } = item;
   const key = draftKey(item);
-  const [draft, setDraft] = useState<QuestionDraft>(() => draftOf(readSaved(key)));
+  const total = form.questions.length;
+  const [draft, setDraft] = useState<QuestionDraft>(() => draftOf(readSaved(key), total));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const id = useId();
+  const root = useRef<HTMLDivElement>(null);
   const fieldset = useRef<HTMLFieldSetElement>(null);
   // Set when the user moves to another step, so focus follows to it (never on mount).
   const moved = useRef(false);
-  const total = form.questions.length;
   const step = Math.min(draft.step, total - 1);
   const question = form.questions[step] ?? form.questions[0];
-  const answer = draft.answers[question.key] ?? emptyAnswer;
+  const answer = draft.answers[step] ?? emptyAnswer;
   const answered = answerOf(question, answer) !== null;
   const last = step === total - 1;
   const result = formResult(form, draft);
@@ -47,8 +59,9 @@ function PendingQuestion({ item, onAnswer }: { item: QuestionItem; onAnswer: (re
     fieldset.current?.querySelector<HTMLElement>("input:checked, input, textarea")?.focus();
   }, [step]);
 
+  // Changes this step's answer.
   const change = (next: (answer: AnswerDraft) => AnswerDraft) =>
-    setDraft((current) => ({ ...current, answers: { ...current.answers, [question.key]: next(current.answers[question.key] ?? emptyAnswer) } }));
+    setDraft((current) => ({ ...current, answers: current.answers.map((answer, i) => (i === step ? next(answer) : answer)) }));
   const goTo = (next: number) => {
     moved.current = true;
     setDraft((current) => ({ ...current, step: next }));
@@ -73,22 +86,25 @@ function PendingQuestion({ item, onAnswer }: { item: QuestionItem; onAnswer: (re
     else if (result) void send(result);
   };
 
-  // Keys 1–9 pick an option while focus is not in a text field (T3 Code's shortcut).
+  // Keys 1–9 pick an option while focus is not in a text field (T3 Code's
+  // shortcut). Only one card takes them: the one with focus, or else the newest.
   useEffect(() => {
     if (question.kind === "text" || busy) return;
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey || typing(event.target) || !/^[1-9]$/.test(event.key)) return;
+      const card = event.target instanceof Element ? event.target.closest("[data-question-card]") : null;
+      if (card ? card !== root.current : !shortcuts) return;
       const option = question.options[Number(event.key) - 1];
       if (!option) return;
       event.preventDefault();
       setDraft((current) => ({
         ...current,
-        answers: { ...current.answers, [question.key]: togglePick(question, current.answers[question.key] ?? emptyAnswer, option.value) },
+        answers: current.answers.map((answer, i) => (i === step ? togglePick(question, answer, option.value) : answer)),
       }));
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [question, busy]);
+  }, [question, step, busy, shortcuts]);
 
   // Enter moves on; Shift+Enter is a new line in a text box, and a button's Enter presses it.
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -99,7 +115,14 @@ function PendingQuestion({ item, onAnswer }: { item: QuestionItem; onAnswer: (re
 
   const status = busy ? "Sending your answers…" : `Question ${step + 1} of ${total}: ${question.title}`;
   return (
-    <div role="group" aria-labelledby={`${id}-message`} className="rounded-xl border border-info/40 bg-info/4 px-4 py-3" onKeyDown={onKeyDown}>
+    <div
+      ref={root}
+      data-question-card
+      role="group"
+      aria-labelledby={`${id}-message`}
+      className="rounded-xl border border-info/40 bg-info/4 px-4 py-3"
+      onKeyDown={onKeyDown}
+    >
       <div className="flex min-w-0 items-center gap-2">
         <span className="shrink-0 text-[11px] text-info-foreground uppercase tracking-[0.2em]">Question</span>
         {total > 1 && (
@@ -123,7 +146,7 @@ function PendingQuestion({ item, onAnswer }: { item: QuestionItem; onAnswer: (re
             rows={1}
             aria-label={question.title}
             className="mt-2 min-h-9 resize-none"
-            placeholder="Type your answer"
+            placeholder={question.type === "string" ? "Type your answer" : "Type a number"}
             value={answer.text}
             onChange={(event) => change((draft) => typeAnswer(draft, event.target.value))}
           />
@@ -253,22 +276,22 @@ const outcome = {
 function SettledQuestion({ item, state }: { item: QuestionItem; state: Exclude<QuestionItem["state"], "pending"> }) {
   const key = draftKey(item);
   useEffect(() => saveDraft(key, null), [key]);
-  const content = item.answer?.action === "accept" ? item.answer.content : null;
-  const shown = state === "answered" ? (content ? "answered" : "declined") : state;
+  const answers = item.answer?.action === "accept" ? item.answer.answers : null;
+  const shown = state === "answered" ? (answers ? "answered" : "declined") : state;
   return (
-    <div role="group" aria-label="Question" className={cn("rounded-xl border bg-card/40 px-4 py-3", !content && "text-muted-foreground")}>
+    <div role="group" aria-label="Question" className={cn("rounded-xl border bg-card/40 px-4 py-3", !answers && "text-muted-foreground")}>
       <span className="text-[11px] text-muted-foreground uppercase tracking-[0.2em]">Question</span>
       <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed">{item.form.message}</p>
       <dl className="mt-2 grid gap-2">
-        {item.form.questions.map((question) => (
+        {item.form.questions.map((question, i) => (
           <div key={question.key} className="min-w-0">
             <dt className="text-muted-foreground text-xs">{question.title}</dt>
-            {content && <dd className="whitespace-pre-wrap break-words text-sm">{answerText(question, content[question.key])}</dd>}
+            {answers && <dd className="whitespace-pre-wrap break-words text-sm">{answerText(question, answers[i])}</dd>}
           </div>
         ))}
       </dl>
-      <p role="status" className={cn("mt-3 flex items-center gap-1.5 text-xs", content ? "text-success-foreground" : "text-muted-foreground")}>
-        {content ? <CheckIcon className="size-3.5 shrink-0" /> : <XIcon className="size-3.5 shrink-0" />}
+      <p role="status" className={cn("mt-3 flex items-center gap-1.5 text-xs", answers ? "text-success-foreground" : "text-muted-foreground")}>
+        {answers ? <CheckIcon className="size-3.5 shrink-0" /> : <XIcon className="size-3.5 shrink-0" />}
         {outcome[shown]}
       </p>
     </div>

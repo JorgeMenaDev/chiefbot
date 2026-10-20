@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import {
   AnswerApprovalRequest,
   ApprovalId,
-  formContent,
+  formAnswers,
   QuestionId,
   QuestionResult,
   BotToken,
@@ -665,7 +665,7 @@ export function startControl({
           const questionId = QuestionId.safeParse(req.params.questionId);
           const form = questionId.success ? store.answerableQuestion(botId, questionId.data) : null;
           if (!form || !questionId.success) return apiError(409, "not_pending");
-          const misfit = body.data.action === "accept" ? formContent(form).safeParse(body.data.content).error : undefined;
+          const misfit = body.data.action === "accept" ? formAnswers(form).safeParse(body.data.answers).error : undefined;
           if (misfit) return apiError(400, "invalid_answer", misfit.issues[0]?.message);
           const answer = store.answerQuestion(botId, questionId.data, body.data);
           if (!answer) return apiError(409, "not_pending");

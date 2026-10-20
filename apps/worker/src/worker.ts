@@ -28,7 +28,7 @@ import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot, FileAttachment, QuestionRequest } from "./copilot.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
-import { questionForm } from "./questions.ts";
+import { elicitationResult, questionForm } from "./questions.ts";
 import { openScreenStream, type ScreenAddress } from "./screen.ts";
 
 export type WorkerOptions = {
@@ -172,7 +172,8 @@ export function startWorker({
       asking.set(questionId, { turnId: turn.turnId, requestId: request.requestId, answer }),
     );
     link.emit(turn.turnId, { type: "question-request", questionId, form });
-    return (await answered) ?? { action: "cancel" };
+    const result = await answered;
+    return result ? elicitationResult(form, result) : { action: "cancel" };
   }
 
   // The agent no longer waits on the questions that `match`: each card is

@@ -206,25 +206,25 @@ test("a bot's question shows as a card, still pending after a relaunch, and answ
     kind: "question",
     id: expect.any(String),
     questionId: expect.any(String),
-    form: { message: "Which one?", questions: [{ key: "pick", title: "pick", description: "", kind: "single", options: [{ value: "a", label: "a" }, { value: "b", label: "b" }] }] },
+    form: { message: "Which one?", questions: [{ key: "pick", title: "pick", description: "", kind: "single", type: "string", options: [{ value: "a", label: "a" }, { value: "b", label: "b" }] }] },
     state: "pending",
   });
   expect(pending.working).toBe("Waiting for your answer");
 
-  const result = { action: "accept" as const, content: { pick: "b" } };
+  const result = { action: "accept" as const, answers: ["b"] };
   await relaunched.chats.answerQuestion(botId, QuestionId.parse(card?.kind === "question" ? card.questionId : ""), result);
   const view = await relaunched.until(botId, (view) => view.working === null);
   expect(view.items.find((item) => item.kind === "question")).toMatchObject({ state: "answered", answer: result });
-  expect(answers).toEqual([result]);
+  expect(answers).toEqual([{ action: "accept", content: { pick: "b" } }]);
 });
 
 test("a question settles once, answered or withdrawn; one still pending when its turn ends expires", () => {
-  const form: QuestionForm = { message: "Name?", questions: [{ key: "name", title: "Name", description: "", kind: "text", options: [] }] };
+  const form: QuestionForm = { message: "Name?", questions: [{ key: "name", title: "Name", description: "", kind: "text", type: "string", options: [] }] };
   const asked = (turn: string, question: string): ChatEvent[] => [
     { seq: 0, turnId: TurnId.parse(turn), event: { type: "user-message", text: "go" } },
     { seq: 0, turnId: TurnId.parse(turn), event: { type: "question-request", questionId: QuestionId.parse(question), form } },
   ];
-  const answer = { action: "accept" as const, content: { name: "Atlas" } };
+  const answer = { action: "accept" as const, answers: ["Atlas"] };
   const events: ChatEvent[] = [
     ...asked("turn-1", "answered"),
     { seq: 0, turnId: TurnId.parse("turn-1"), event: { type: "question-answer", questionId: QuestionId.parse("answered"), result: answer } },
@@ -247,6 +247,23 @@ test("a question settles once, answered or withdrawn; one still pending when its
     ["withdrawn", "withdrawn", undefined],
     ["expired", "expired", undefined],
   ]);
+});
+
+test("the bot waits for your answer while any of its questions is still pending", () => {
+  const turnId = TurnId.parse("turn-1");
+  const form: QuestionForm = { message: "Name?", questions: [{ key: "name", title: "Name", description: "", kind: "text", type: "string", options: [] }] };
+  const steps: ChatEvent["event"][] = [
+    { type: "user-message", text: "go" },
+    { type: "question-request", questionId: QuestionId.parse("first"), form },
+    { type: "question-request", questionId: QuestionId.parse("second"), form },
+    { type: "question-answer", questionId: QuestionId.parse("first"), result: { action: "decline" } },
+    { type: "question-withdrawn", questionId: QuestionId.parse("second") },
+  ];
+
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+  const views = steps.reduce<ChatView[]>((views, event, seq) => [...views, foldChat(views.at(-1) ?? empty, { seq, turnId, event })], []);
+
+  expect(views.map((view) => view.working)).toEqual(["", "Waiting for your answer", "Waiting for your answer", "Waiting for your answer", ""]);
 });
 
 test("control's handoff notice shows in the chief's chat as a notice, even in the middle of a reply", () => {

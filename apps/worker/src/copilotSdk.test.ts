@@ -109,24 +109,30 @@ test("a worker session gets its instructions after the SDK's own system message"
   expect(config.systemMessage).toEqual({ mode: "append", content: "You have your own computer." });
 });
 
-test("ask_user forms: each SDK call gets the request id of the elicitation.requested event it was dispatched with", async () => {
+test("ask_user forms: each SDK call gets the request id of the elicitation.requested event it was dispatched with, and close cancels the rest", async () => {
   const asked: QuestionRequest[] = [];
   const asks = askUser(async (request) => {
     asked.push(request);
     return { action: "decline" };
   });
-  // As the SDK dispatches each event: its own handler first, then the subscribers.
+  const { onElicitationRequest, onEvent } = asks.config;
+  const call = () => onElicitationRequest({ sessionId: "bot_1", message: "Same form", mode: "form" });
+  // As the SDK dispatches each event: its own handler first, then the subscribers
+  // (onEvent among them, subscribed before the session opened).
   const dispatch = (requestId: string) => {
-    const answer = asks.config.onElicitationRequest({ sessionId: "bot_1", message: "Same form", mode: "form" });
-    asks.onEvent(sdk.elicitationRequested(requestId, "Same form"));
+    const answer = call();
+    onEvent(sdk.elicitationRequested(requestId, "Same form"));
     return answer;
   };
 
   const answers = await Promise.all([dispatch("request-1"), dispatch("request-2")]);
-  asks.onEvent(sdk.elicitationRequested("request-3", "Nobody's handler asked this"));
+  onEvent(sdk.elicitationRequested("request-3", "Nobody's handler asked this"));
+  const unmatched = call();
+  asks.close();
 
   expect(asks.config.askUserVariant).toBe("elicitation");
   expect(answers).toEqual([{ action: "decline" }, { action: "decline" }]);
+  expect(await unmatched).toEqual({ action: "cancel" });
   expect(asked).toEqual([
     { sessionId: "bot_1", message: "Same form", mode: "form", requestId: "request-1" },
     { sessionId: "bot_1", message: "Same form", mode: "form", requestId: "request-2" },

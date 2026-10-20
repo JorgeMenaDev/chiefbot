@@ -1,6 +1,7 @@
 import {
   CopilotClient,
   type CopilotClientOptions,
+  type ElicitationContext,
   type ElicitationHandler,
   type ElicitationResult,
   type MCPServerConfig,
@@ -105,16 +106,23 @@ function connectorConfig(mcpServers: Record<string, MCPServerConfig> = {}, onMcp
 // each answered by `onQuestion`. The SDK calls onElicitationRequest without the
 // request's id, but always synchronously while it dispatches the raw
 // elicitation.requested event, before any subscriber sees it (dist/session.js
-// _dispatchEvent). So each call waits in line until `onEvent`, subscribed to the
-// session, hands it that event's requestId: two identical forms still get their own.
+// _dispatchEvent). So each call waits in line until `onEvent` hands it that
+// event's requestId: two identical forms still get their own. `onEvent` is in the
+// config, so the SDK subscribes it before it creates or resumes the session and
+// a request made while the session opens is matched too. `close` cancels the
+// calls still waiting for their event once the session closes.
 export function askUser(onQuestion: (request: QuestionRequest) => Promise<ElicitationResult>) {
-  const unmatched: Array<(requestId: string) => void> = [];
-  const onElicitationRequest: ElicitationHandler = (context) =>
-    new Promise((resolve, reject) => void unmatched.push((requestId) => void onQuestion({ ...context, requestId }).then(resolve, reject)));
+  const waiting: Array<{ context: ElicitationContext; resolve: (result: ElicitationResult) => void; reject: (reason: unknown) => void }> = [];
+  const onElicitationRequest: ElicitationHandler = (context) => new Promise((resolve, reject) => void waiting.push({ context, resolve, reject }));
+  const onEvent = (event: SessionEvent) => {
+    if (event.type !== "elicitation.requested") return;
+    const call = waiting.shift();
+    if (call) onQuestion({ ...call.context, requestId: event.data.requestId }).then(call.resolve, call.reject);
+  };
   return {
-    config: { askUserVariant: "elicitation" as const, onElicitationRequest },
-    onEvent(event: SessionEvent) {
-      if (event.type === "elicitation.requested") unmatched.shift()?.(event.data.requestId);
+    config: { askUserVariant: "elicitation" as const, onElicitationRequest, onEvent },
+    close() {
+      for (const { resolve } of waiting.splice(0)) resolve({ action: "cancel" });
     },
   };
 }
@@ -133,17 +141,21 @@ function sdkCopilot(
     async openSession(options) {
       const asks = options.onQuestion && askUser(options.onQuestion);
       const config = { ...sessionConfig(options), ...asks?.config };
-      const opened = (session: Awaited<ReturnType<typeof openOn>>) => {
-        if (asks) session.on(asks.onEvent);
-        return bound(session);
-      };
       if (options.auth.kind === "seat") {
         const session = await openOn(shared, options.sessionId, { ...config, gitHubTokenProvider: options.auth.gitHubTokenProvider });
-        return { ...opened(session), disconnect: () => session.disconnect() };
+        const disconnect = () => {
+          asks?.close();
+          return session.disconnect();
+        };
+        return { ...bound(session), disconnect };
       }
       const own = new CopilotClient({ ...clientOptions, env: { ...clientOptions.env, COPILOT_GITHUB_TOKEN: options.auth.token } });
       const session = await openOn(own, options.sessionId, config);
-      return { ...opened(session), disconnect: async () => void (await own.stop()) };
+      const disconnect = async () => {
+        asks?.close();
+        await own.stop();
+      };
+      return { ...bound(session), disconnect };
     },
   };
 }

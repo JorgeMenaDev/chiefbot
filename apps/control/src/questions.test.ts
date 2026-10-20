@@ -15,23 +15,26 @@ const form: Parameters<FakeRuntime["ask"]>[1] = {
   },
 };
 
-const accepted = {
+// The user's answer to `form`, and the content the agent gets for it.
+const accepted = { action: "accept", answers: ["ts — strict, please", ["tests", "lint", "and a smoke run"], "Atlas"] } satisfies QuestionResult;
+const received: Awaited<ReturnType<FakeRuntime["ask"]>> = {
   action: "accept",
   content: { language: "ts — strict, please", checks: ["tests", "lint", "and a smoke run"], name: "Atlas" },
-} satisfies QuestionResult;
+};
 
-// Control and an online bot whose agent asks `form` and keeps each answer it
-// gets. While it waits, `then` runs with the runtime and the turn may end with
-// `ending` (default: done).
+// Control and an online bot whose agent asks `asks` (default: form) and keeps
+// each answer it gets. While it waits, `then` runs with the runtime and the
+// turn may end with `ending` (default: done).
 async function setup({
   persistent = false,
+  asks = form,
   then,
   ending = sdk.idle(),
-}: { persistent?: boolean; then?: (runtime: FakeRuntime) => Promise<void>; ending?: ReturnType<typeof sdk.idle> } = {}) {
+}: { persistent?: boolean; asks?: typeof form; then?: (runtime: FakeRuntime) => Promise<void>; ending?: ReturnType<typeof sdk.idle> } = {}) {
   const control = await startTestControl({ persistent });
   const answers: Array<Awaited<ReturnType<FakeRuntime["ask"]>>> = [];
   control.computers.copilot.script = async function* (_prompt, runtime) {
-    const answer = runtime.ask("Before I start", form);
+    const answer = runtime.ask("Before I start", asks);
     await then?.(runtime);
     if (ending.type === "session.idle") answers.push(await answer);
     yield ending;
@@ -67,9 +70,9 @@ test("the agent's form becomes a question card; the answer reaches it as the for
   expect(request.form).toEqual({
     message: "Before I start",
     questions: [
-      { key: "language", title: "Language", description: "", kind: "single", options: [{ value: "ts", label: "TypeScript" }, { value: "go", label: "Go" }] },
-      { key: "checks", title: "Checks", description: "", kind: "multi", options: [{ value: "tests", label: "tests" }, { value: "lint", label: "lint" }] },
-      { key: "name", title: "Name", description: "", kind: "text", options: [] },
+      { key: "language", title: "Language", description: "", kind: "single", type: "string", options: [{ value: "ts", label: "TypeScript" }, { value: "go", label: "Go" }] },
+      { key: "checks", title: "Checks", description: "", kind: "multi", type: "string", options: [{ value: "tests", label: "tests" }, { value: "lint", label: "lint" }] },
+      { key: "name", title: "Name", description: "", kind: "text", type: "string", options: [] },
     ],
   });
   expect((await answer(request.questionId, accepted)).status).toBe(204);
@@ -78,7 +81,7 @@ test("the agent's form becomes a question card; the answer reaches it as the for
   expect((await answer(declined.questionId, { action: "decline" })).status).toBe(204);
   await chat.until(doneCount(2));
 
-  expect(answers).toEqual([accepted, { action: "decline" }]);
+  expect(answers).toEqual([received, { action: "decline" }]);
   expect(chat.events.filter((e) => e.event.type === "question-answer").map((e) => e.event)).toEqual([
     { type: "question-answer", questionId: request.questionId, result: accepted },
     { type: "question-answer", questionId: declined.questionId, result: { action: "decline" } },
@@ -90,10 +93,10 @@ test("control checks each answer: 400 when it does not fit the form, 404 from an
   const { questionId } = await ask();
   const stranger = await signIn({ id: 6161, login: "octo-stranger", copilot: null });
   const misfits = [
-    { action: "accept", content: { language: "ts", checks: ["tests"] } },
-    { action: "accept", content: { ...accepted.content, checks: "tests" } },
-    { action: "accept", content: { ...accepted.content, name: "  " } },
-    { action: "accept", content: { ...accepted.content, color: "blue" } },
+    { action: "accept", answers: ["ts", ["tests"]] },
+    { action: "accept", answers: ["ts", "tests", "Atlas"] },
+    { action: "accept", answers: ["ts", ["tests"], "  "] },
+    { action: "accept", answers: [...accepted.answers, "blue"] },
     { action: "cancel" },
   ];
 
@@ -107,7 +110,39 @@ test("control checks each answer: 400 when it does not fit the form, 404 from an
   expect(wrongUser.status).toBe(404);
   expect(first.status).toBe(204);
   expect([second.status, ApiError.parse(await second.json())]).toEqual([409, { error: "not_pending" }]);
-  expect(answers).toEqual([accepted]);
+  expect(answers).toEqual([received]);
+});
+
+test("any schema key works, even __proto__, and a number or yes/no reaches the agent typed unless the user typed their own", async () => {
+  // Object.fromEntries, as JSON.parse would: `__proto__` is the schema's own key.
+  const odd: typeof form = {
+    type: "object",
+    properties: Object.fromEntries([
+      ["__proto__", { type: "string", title: "Name" }],
+      ["constructor", { type: "integer", title: "Replicas" }],
+      ["public", { type: "boolean", title: "Public?" }],
+    ] as const),
+  };
+  const { chat, answers, ask, answer } = await setup({ asks: odd });
+
+  const typed = await ask();
+  const misfit = await answer(typed.questionId, { action: "accept", answers: ["Atlas", 2.5, false] });
+  const ok = await answer(typed.questionId, { action: "accept", answers: ["Atlas", 3, false] });
+  await chat.until(doneCount(1));
+  const own = await ask();
+  expect((await answer(own.questionId, { action: "accept", answers: ["Atlas", "three or four", "only on Fridays"] })).status).toBe(204);
+  await chat.until(doneCount(2));
+
+  expect(typed.form.questions.map(({ key, kind, type }) => ({ key, kind, type }))).toEqual([
+    { key: "__proto__", kind: "text", type: "string" },
+    { key: "constructor", kind: "text", type: "integer" },
+    { key: "public", kind: "single", type: "boolean" },
+  ]);
+  expect([misfit.status, ok.status]).toEqual([400, 204]);
+  expect(answers.map((got) => JSON.stringify(got))).toEqual([
+    '{"action":"accept","content":{"__proto__":"Atlas","constructor":3,"public":false}}',
+    '{"action":"accept","content":{"__proto__":"Atlas","constructor":"three or four","public":"only on Fridays"}}',
+  ]);
 });
 
 test("a question still pending when control restarts can be answered after, and the answer reaches the agent", async () => {
@@ -119,7 +154,7 @@ test("a question still pending when control restarts can be answered after, and 
 
   expect((await answer(questionId, accepted)).status).toBe(204);
   await watchChat(bot.id).until(doneCount(1));
-  expect(answers).toEqual([accepted]);
+  expect(answers).toEqual([received]);
 });
 
 test("a worker that reconnects mid-turn is sent the answers it missed", async () => {

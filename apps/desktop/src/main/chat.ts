@@ -130,6 +130,13 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
 const waitingForApproval = "Waiting for your approval";
 const waitingForAnswer = "Waiting for your answer";
 
+// The status once a card settles: it waits on as long as another card is still
+// pending (a question first), and otherwise the turn goes on.
+function stillWaiting(items: ChatItem[]) {
+  const pending = (kind: "approval" | "question") => items.some((item) => item.kind === kind && item.state === "pending");
+  return pending("question") ? waitingForAnswer : pending("approval") ? waitingForApproval : "";
+}
+
 // Folds one stored chat event into what the window shows. Item ids are scoped
 // to their turn, since the SDK's message and tool ids are only unique per turn.
 // While an approval or a question is pending, the bot's status says it waits for the user.
@@ -175,14 +182,14 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       const items = view.items.map(
         (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state } : item),
       );
-      return { ...view, working: "", items };
+      return { ...view, working: stillWaiting(items), items };
     }
     // A withdrawn approval can no longer be answered. The turn goes on.
     case "approval-withdrawn": {
       const items = view.items.map(
         (item): ChatItem => (item.kind === "approval" && item.approvalId === event.approvalId ? { ...item, state: "withdrawn" } : item),
       );
-      return { ...view, working: "", items };
+      return { ...view, working: stillWaiting(items), items };
     }
     case "question-request": {
       const { questionId, form } = event;
@@ -196,7 +203,7 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       const items = view.items.map(
         (item): ChatItem => (item.kind === "question" && item.questionId === event.questionId && item.state === "pending" ? { ...item, ...settled } : item),
       );
-      return { ...view, working: "", items };
+      return { ...view, working: stillWaiting(items), items };
     }
     // Approvals and questions left pending when a turn ends can no longer be answered.
     case "done": {
