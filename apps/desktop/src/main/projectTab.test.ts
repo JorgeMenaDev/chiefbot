@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ContextPath, Project, SignInResponse, Workspace, type ProjectId, type ProjectState, type WorkerChatView } from "@chiefbot/contracts";
+import { ContextPath, Project, SignInResponse, Workspace, type ProjectStates, type WorkerChatView } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
@@ -46,19 +46,22 @@ async function eventually(check: () => boolean | Promise<boolean>) {
   }
 }
 
-test("each project's state reaches main live, and main keeps the latest for a window that opens later", async () => {
-  const { control, project, session } = await projectControl();
-  const states: Array<[ProjectId, ProjectState]> = [];
-  const bots = createBots({ controlUrl: control.url, session, onChange: () => {}, onProjectState: (projectId, state) => states.push([projectId, state]) });
+test("each project's state reaches main live, main keeps them for a window that opens later, and a deleted project's goes", async () => {
+  const { control, headers, project, session } = await projectControl();
+  const sent: ProjectStates[] = [];
+  const bots = createBots({ controlUrl: control.url, session, onChange: () => {}, onProjectStates: (states) => sent.push(states) });
   stops.push(bots.disconnect);
 
   bots.connect();
-
   await eventually(() => bots.projectStates()[project.id] === "idle");
-  expect(states.at(-1)).toEqual([project.id, "idle"]);
+  expect(sent.at(-1)).toEqual({ [project.id]: "idle" });
+
+  expect((await fetch(`${control.url}/projects/${project.id}`, { method: "DELETE", headers })).status).toBe(204);
+  await eventually(() => bots.projectStates()[project.id] === undefined);
+  expect(sent.at(-1)).toEqual({});
 });
 
-test("main follows one engineer's transcript at a time, reads the shared context, and takes and hands back an engineer's screen", async () => {
+test("main follows one engineer's transcript at a time until the window leaves it, reads the shared context, and takes and hands back an engineer's screen", async () => {
   // The project agent files the request, notes it and starts an engineer, which says one thing and keeps working.
   const copilot = fakeCopilot({
     script: async function* (prompt, runtime) {
@@ -72,7 +75,7 @@ test("main follows one engineer's transcript at a time, reads the shared context
       yield sdk.idle();
     },
   });
-  const { control, project, session } = await projectControl(copilot);
+  const { control, headers, project, session } = await projectControl(copilot);
   const views: WorkerChatView[] = [];
   const projects = createProjects({ controlUrl: control.url, session, retryMs: 20, onChat: () => {}, onWorkerChat: (view) => views.push(view) });
   stops.push(projects.disconnect);
@@ -87,10 +90,16 @@ test("main follows one engineer's transcript at a time, reads the shared context
   const said = (view: WorkerChatView | undefined) => view?.items.some((item) => item.kind === "assistant" && item.text === "Cloned the repo.");
   await eventually(() => said(views.at(-1)) === true);
   expect(projects.workerChatView(engineer.id)).toEqual(views.at(-1) ?? { workerId: engineer.id, items: [], working: null });
+  projects.closeWorkerChat(engineer.id);
+  expect(projects.workerChatView(engineer.id)).toEqual({ workerId: engineer.id, items: [], working: null });
 
   expect((await projects.context(project.id)).map(({ path }) => String(path))).toEqual(["notes.md"]);
   expect(await projects.contextFile(project.id, "notes.md")).toEqual({ path: ContextPath.parse("notes.md"), content: "Started task #1." });
 
-  expect((await projects.takeOver(project.id, engineer.id)).screenControl).toBe("human");
-  expect((await projects.handBack(project.id, engineer.id)).screenControl).toBe("agent");
+  // Control is taken from a view of the screen: the window's noVNC, here a bare socket.
+  const screen = new WebSocket(`${control.url.replace("http", "ws")}/projects/${project.id}/workers/${engineer.id}/screen`, { headers });
+  stops.push(() => screen.close());
+  await new Promise((resolve) => (screen.onopen = resolve));
+  expect((await projects.takeOver(project.id, engineer.id)).screenHolder).toBe("octo-user");
+  expect((await projects.handBack(project.id, engineer.id)).screenHolder).toBeNull();
 });

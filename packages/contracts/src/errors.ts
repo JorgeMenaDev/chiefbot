@@ -64,6 +64,8 @@ import { z } from "zod";
 //                         one the project declares; `message` says why (400)
 //   requester_only        only the member who asked for a project's worker answers its approvals (403)
 //   worker_offline        a project's worker has no screen to watch: its worker is not connected (409)
+//   screen_taken          another member has control of the engineer's screen (409)
+//   screen_not_open       taking control of an engineer's screen needs the member's own view of it open (409)
 //   invalid_turn_key      a call from an agent's computer carried no turn key, an unknown one, another
 //                         agent's, or one whose turn ended (403). Never answered with anyone else's turn.
 //   expected_websocket    a WebSocket route got a plain request (400)
@@ -92,6 +94,8 @@ export const ApiErrorCode = z.enum([
   "bot_offline",
   "bot_stopping",
   "worker_offline",
+  "screen_taken",
+  "screen_not_open",
   "turn_running",
   "human_has_screen",
   "computer_outdated",

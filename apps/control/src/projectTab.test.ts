@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ChatEvent, ClientEvent, ContextFile, ContextFileText, ContextPath, Project, TaskWorker, Workspace, WorkspaceInvite, type ProjectId, type ProjectState } from "@chiefbot/contracts";
+import { ApiError, ChatEvent, ClientEvent, ContextFile, ContextFileText, ContextPath, Project, TaskWorker, User, Workspace, WorkspaceInvite, type ProjectId, type ProjectState } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { atCleanUp, cleanUp, eventually, fakeCoordinator, startTestControl, type TestControl, type TestUser } from "./testControl.ts";
@@ -10,6 +10,8 @@ import { atCleanUp, cleanUp, eventually, fakeCoordinator, startTestControl, type
 afterEach(cleanUp);
 
 const friend: FakeGitHubUser = { id: 5151, login: "octo-friend", copilot: { plan: "individual", sku: "free_limited_copilot" } };
+
+type TeamProject = Awaited<ReturnType<typeof teamProject>>;
 
 // Control with a workspace owned by the signed-in user, octo-friend as its
 // member, and a project for octo-org/shop.
@@ -26,16 +28,22 @@ async function teamProject() {
   return { ...control, owner, guest, workspace, project };
 }
 
-// The project states a member's /events socket has said, latest per project.
+// The project states a member's /events socket has said: a whole snapshot
+// replaces them, a change sets one.
 function watchStates({ url }: TestControl, member: TestUser) {
   const socket = new WebSocket(`${url.replace("http", "ws")}/events`, { headers: member.auth });
   atCleanUp(() => socket.close());
-  const states = new Map<ProjectId, ProjectState>();
+  let states = new Map<ProjectId, ProjectState>();
   socket.onmessage = (event) => {
     const message = ClientEvent.parse(JSON.parse(String(event.data)));
+    if (message.type === "project-states") states = new Map(Object.entries(message.states) as Array<[ProjectId, ProjectState]>);
     if (message.type === "project-state") states.set(message.projectId, message.state);
   };
-  return { until: (projectId: ProjectId, state: ProjectState) => eventually(() => states.get(projectId) === state) };
+  return {
+    until: (projectId: ProjectId, state: ProjectState) => eventually(() => states.get(projectId) === state),
+    gone: (projectId: ProjectId) => eventually(() => !states.has(projectId)),
+    has: (projectId: ProjectId) => states.has(projectId),
+  };
 }
 
 // A fake coordinator takes the project's and holds the owner's turn open, after
@@ -97,6 +105,27 @@ test("each member sees a project's state: sleeping while its computer is stopped
   await guestStates.until(project.id, "idle");
 });
 
+test("a deleted project leaves every member's states at once, and a workspace's projects leave a member who is removed", async () => {
+  const control = await teamProject();
+  const { owner, guest, project, workspace, github } = control;
+  github.createRepo("octo-org/api", { "README.md": "# API\n" }, { access: { "octo-user": "write", "octo-friend": "write" } });
+  const api = Project.parse(await (await owner.api("POST", `/workspaces/${workspace.id}/projects`, { repo: "octo-org/api" })).json());
+  const ownerStates = watchStates(control, owner);
+  const guestStates = watchStates(control, guest);
+  await ownerStates.until(project.id, "idle");
+  await guestStates.until(api.id, "idle");
+
+  expect((await owner.api("DELETE", `/projects/${project.id}`)).status).toBe(204);
+  await ownerStates.gone(project.id);
+  await guestStates.gone(project.id);
+  expect(ownerStates.has(api.id)).toBe(true);
+
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+  await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`);
+  await guestStates.gone(api.id);
+  expect(ownerStates.has(api.id)).toBe(true);
+});
+
 // A viewer on an engineer's screen through control, as the desktop's noVNC opens it.
 function openScreen({ url }: TestControl, project: Project, engineer: TaskWorker, headers: Record<string, string>) {
   const socket = new WebSocket(`${url.replace("http", "ws")}/projects/${project.id}/workers/${engineer.id}/screen`, { headers });
@@ -147,20 +176,127 @@ test("an engineer's worker joins only a screen stream control opened for it", as
   expect((await join(engineer.id, "never-opened")).status).toBe(404);
 });
 
-test("a member takes control of an engineer's screen and its worker waits; hand back returns it to the agent", async () => {
+// A member's view of an engineer's screen, past noVNC's opening bytes (RFB 3.8,
+// security None, ClientInit), so what it sends next are RFB messages.
+async function viewer(control: TeamProject, engineer: TaskWorker, member: TestUser) {
+  const view = openScreen(control, control.project, engineer, member.auth);
+  await eventually(() => view.received.join("") === "RFB 003.008\n");
+  view.socket.send(new Uint8Array([...new TextEncoder().encode("RFB 003.008\n"), 1, 1]));
+  return { ...view, send: (bytes: number[]) => view.socket.send(new Uint8Array(bytes)) };
+}
+const key = (letter: string) => [4, 1, 0, 0, 0, 0, 0, letter.charCodeAt(0)]; // KeyEvent, key down
+const updateRequest = (x: number) => [3, 1, 0, x, 0, 0, 0, 1, 0, 1]; // FramebufferUpdateRequest at x
+const text = (bytes: number[]) => new TextDecoder().decode(new Uint8Array(bytes));
+// What the engineer's screen received from every viewer, as text.
+const screenInput = ({ computers }: TestControl, engineer: TaskWorker) => computers.screenInput.get(engineer.id)?.join("") ?? "";
+const screenPath = (project: Project, engineer: TaskWorker, action: "take-over" | "hand-back") => `/projects/${project.id}/workers/${engineer.id}/${action}`;
+const errorOf = async (res: Response) => ApiError.parse(await res.json()).error;
+
+test("a member who watches takes control and the engineer's worker waits; hand back returns it to the agent", async () => {
   const control = await teamProject();
   const { project, guest, computers } = control;
   const { engineer } = await runningEngineer(control);
   const worker = () => computers.computers.get(engineer.id)?.worker;
+  await viewer(control, engineer, guest);
 
-  const taken = TaskWorker.parse(await (await guest.api("POST", `/projects/${project.id}/workers/${engineer.id}/take-over`)).json());
-  expect(taken.screenControl).toBe("human");
-  expect((await engineerOf(control.owner, project, engineer))?.screenControl).toBe("human");
+  const taken = TaskWorker.parse(await (await guest.api("POST", screenPath(project, engineer, "take-over"))).json());
+  expect(taken.screenHolder).toBe("octo-friend");
+  expect((await engineerOf(control.owner, project, engineer))?.screenHolder).toBe("octo-friend");
   await eventually(() => worker()?.screenControl() === "human");
 
-  await guest.api("POST", `/projects/${project.id}/workers/${engineer.id}/hand-back`);
-  expect((await engineerOf(control.owner, project, engineer))?.screenControl).toBe("agent");
+  await guest.api("POST", screenPath(project, engineer, "hand-back"));
+  expect((await engineerOf(control.owner, project, engineer))?.screenHolder).toBeNull();
   await eventually(() => worker()?.screenControl() === "agent");
+});
+
+test("one member drives an engineer's screen at a time: another's take-over is refused, and their keys never reach it", async () => {
+  const control = await teamProject();
+  const { project, owner, guest } = control;
+  const { engineer } = await runningEngineer(control);
+  // Control is taken from a screen the member has open.
+  expect(await errorOf(await guest.api("POST", screenPath(project, engineer, "take-over")))).toBe("screen_not_open");
+  const ownerView = await viewer(control, engineer, owner);
+  const guestView = await viewer(control, engineer, guest);
+
+  expect((await guest.api("POST", screenPath(project, engineer, "take-over"))).status).toBe(200);
+  const refused = await owner.api("POST", screenPath(project, engineer, "take-over"));
+  expect(refused.status).toBe(409);
+  expect(await errorOf(refused)).toBe("screen_taken");
+  expect(await errorOf(await owner.api("POST", screenPath(project, engineer, "hand-back")))).toBe("screen_taken");
+  expect((await engineerOf(owner, project, engineer))?.screenHolder).toBe("octo-friend");
+
+  // The owner's key would reach the screen before their update request, on the same stream.
+  ownerView.send([...key("o"), ...updateRequest(0x41)]);
+  guestView.send(key("g"));
+  await eventually(() => screenInput(control, engineer).includes(text(updateRequest(0x41))) && screenInput(control, engineer).includes(text(key("g"))));
+  expect(screenInput(control, engineer)).not.toContain(text(key("o")));
+});
+
+// The engineers a member's /events socket has said, latest per project.
+function watchWorkers({ url }: TestControl, member: TestUser) {
+  const socket = new WebSocket(`${url.replace("http", "ws")}/events`, { headers: member.auth });
+  atCleanUp(() => socket.close());
+  const latest = new Map<ProjectId, TaskWorker[]>();
+  socket.onmessage = (event) => {
+    const message = ClientEvent.parse(JSON.parse(String(event.data)));
+    if (message.type === "workers") latest.set(message.projectId, message.workers);
+  };
+  return { until: (projectId: ProjectId, check: (workers: TaskWorker[]) => boolean) => eventually(() => check(latest.get(projectId) ?? [])) };
+}
+
+test("when the member in control closes their screen, it goes back to the agent and every member is told", async () => {
+  const control = await teamProject();
+  const { project, owner, guest, computers } = control;
+  const { engineer } = await runningEngineer(control);
+  const worker = () => computers.computers.get(engineer.id)?.worker;
+  const ownerSees = watchWorkers(control, owner);
+  const guestView = await viewer(control, engineer, guest);
+  await guest.api("POST", screenPath(project, engineer, "take-over"));
+  await ownerSees.until(project.id, (workers) => workers.some(({ screenHolder }) => screenHolder === "octo-friend"));
+
+  guestView.socket.close();
+
+  await eventually(() => worker()?.screenControl() === "agent");
+  await ownerSees.until(project.id, (workers) => workers.every(({ screenHolder }) => screenHolder === null));
+});
+
+// A member following an engineer's transcript on its own socket.
+function follow({ url }: TestControl, project: Project, engineer: TaskWorker, member: TestUser) {
+  const socket = new WebSocket(`${url.replace("http", "ws")}/projects/${project.id}/workers/${engineer.id}/transcript`, { headers: member.auth });
+  atCleanUp(() => socket.close());
+  return socket;
+}
+
+test("removing a member closes their screen and transcript of every engineer at once, and control they held goes back to the agent", async () => {
+  const control = await teamProject();
+  const { project, workspace, owner, guest, computers } = control;
+  const { engineer } = await runningEngineer(control);
+  const worker = () => computers.computers.get(engineer.id)?.worker;
+  const guestView = await viewer(control, engineer, guest);
+  const transcript = follow(control, project, engineer, guest);
+  await eventually(() => transcript.readyState === WebSocket.OPEN);
+  await guest.api("POST", screenPath(project, engineer, "take-over"));
+  await eventually(() => worker()?.screenControl() === "human");
+  const guestId = User.parse(await (await guest.api("GET", "/me")).json()).id;
+
+  await owner.api("DELETE", `/workspaces/${workspace.id}/members/${guestId}`);
+
+  await eventually(() => guestView.socket.readyState === WebSocket.CLOSED && transcript.readyState === WebSocket.CLOSED);
+  await eventually(() => worker()?.screenControl() === "agent");
+  expect((await engineerOf(owner, project, engineer))?.screenHolder).toBeNull();
+});
+
+test("deleting the project closes every member's screens and transcripts of its engineers", async () => {
+  const control = await teamProject();
+  const { project, owner, guest } = control;
+  const { engineer } = await runningEngineer(control);
+  const guestView = await viewer(control, engineer, guest);
+  const transcript = follow(control, project, engineer, owner);
+  await eventually(() => transcript.readyState === WebSocket.OPEN);
+
+  expect((await owner.api("DELETE", `/projects/${project.id}`)).status).toBe(204);
+
+  await eventually(() => guestView.socket.readyState === WebSocket.CLOSED && transcript.readyState === WebSocket.CLOSED);
 });
 
 test("a member follows an engineer's transcript: what it did so far, then live, and resumes after the last event it has", async () => {

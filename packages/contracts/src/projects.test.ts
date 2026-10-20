@@ -97,7 +97,7 @@ test("a project's dot says what most needs a member: their answer, then work goi
     pullRequest: null,
     pendingApprovals: pending ? [{ approvalId: ApprovalId.parse("approval_1"), kind: "push", detail: "Push fix-typo" }] : [],
     computerRemoved: false,
-    screenControl: "agent",
+    screenHolder: null,
     createdAt: 0,
     updatedAt: 0,
   });

@@ -80,6 +80,8 @@ export type ProjectHostOptions = {
   // The project's state may have changed for its members (contracts projectState):
   // its agent woke, slept or got a message to answer.
   onStateChange: (projectId: ProjectId) => void;
+  // The project was deleted: these were its members.
+  onDeleted: (memberIds: UserId[]) => void;
   // The coordinator did something: its idle time starts again (idle.ts).
   onActivity: (projectId: ProjectId) => void;
 };
@@ -156,6 +158,7 @@ export function projectHost({
   connectorsFor,
   onLedgerChange,
   onStateChange,
+  onDeleted,
   onActivity,
 }: ProjectHostOptions) {
   const { projects } = store;
@@ -366,12 +369,14 @@ export function projectHost({
       GET: member((_user, { project }) => Response.json(project satisfies Project)),
       DELETE: member(async (_user, { project, owner }: { project: Project; owner: boolean }, _req: Bun.BunRequest<"/projects/:id">) => {
         if (!owner) return apiError(403, "owner_only");
+        const members = projects.memberIds(project.id);
         await workers.removeProject(project.id);
         await computers.destroy(project.id, { deleteData: true });
         coordinators.get(project.id)?.close();
         await context.remove(project.id);
         return inOrder(project.id, async () => {
           await forget(projects.delete(project.id));
+          onDeleted(members);
           return new Response(null, { status: 204 });
         });
       }),

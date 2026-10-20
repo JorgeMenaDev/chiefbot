@@ -5,7 +5,7 @@ import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
 import { ApprovalId, BotId, ProjectId, QuestionId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
-import { ProjectStateChange, ProjectTasks } from "./projects.ts";
+import { ProjectStateChange, ProjectStates, ProjectTasks } from "./projects.ts";
 import { QuestionResult } from "./questions.ts";
 import { ScreenControl } from "./screens.ts";
 import { ProjectWorkers } from "./taskWorkers.ts";
@@ -73,13 +73,15 @@ export type CreateBotRequest = z.infer<typeof CreateBotRequest>;
 //   user   the user changed: their GitHub sign-in was lost or restored
 //   tasks    the whole task ledger of one of the user's projects; sent on every change
 //   workers  every worker of one of the user's projects; sent on every change
-//   project-state  one of the user's projects' state dot for them (projects.ts projectState); each
-//           project's on connect, then on every change
+//   project-states  every project of the user's workspaces with its state dot for them (projects.ts
+//           projectState), replacing what they had: on connect, and once a project of theirs goes
+//   project-state  one of those projects' new state dot for them, on every change
 export const ClientEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bots"), bots: z.array(Bot) }),
   z.object({ type: z.literal("user"), user: User }),
   ProjectTasks.extend({ type: z.literal("tasks") }),
   ProjectWorkers.extend({ type: z.literal("workers") }),
+  z.object({ type: z.literal("project-states"), states: ProjectStates }),
   ProjectStateChange.extend({ type: z.literal("project-state") }),
 ]);
 export type ClientEvent = z.infer<typeof ClientEvent>;

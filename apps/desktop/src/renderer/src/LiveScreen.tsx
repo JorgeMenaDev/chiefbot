@@ -1,42 +1,14 @@
-import type { Bot, ScreenControl } from "@chiefbot/contracts";
+import type { Bot } from "@chiefbot/contracts";
 import RFB from "@novnc/novnc";
-import { EyeIcon, Maximize2Icon, Minimize2Icon, MousePointer2Icon, PowerIcon, RotateCwIcon } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
+import { Maximize2Icon, Minimize2Icon, PowerIcon, RotateCwIcon } from "lucide-react";
+import { useContext, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type ReactNode, type SetStateAction } from "react";
 import { Avatar, type AvatarMood } from "./Avatar.tsx";
-import { ErrorText } from "./Pane.tsx";
+import { ErrorText, PaneShown } from "./Pane.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
 import { afterDisconnect, computerView, type ComputerView } from "./computerView.ts";
+import { botScreen, ControlPill, type ScreenTarget } from "./screenTargets.tsx";
 import { cn } from "./lib/utils.ts";
-
-// A computer whose live screen shows: a bot's, or an engineer's (Engineers.tsx).
-//   id       remounts the screen when it changes
-//   name     its owner, for the full-screen bar and the dialog's label
-//   face     drawn before the name in the full-screen bar
-//   control  who drives it; online says Take control can work now
-//   url      its screen's WebSocket on control (main adds the session)
-export type ScreenTarget = {
-  id: string;
-  name: string;
-  face: ReactNode;
-  control: ScreenControl;
-  online: boolean;
-  url: () => Promise<string>;
-  takeOver: () => Promise<unknown>;
-  handBack: () => Promise<unknown>;
-};
-
-// The bot's computer as a screen target.
-const botScreen = (bot: Bot): ScreenTarget => ({
-  id: bot.id,
-  name: bot.name,
-  face: <Avatar avatar={bot.avatar} className="size-5" />,
-  control: bot.screenControl,
-  online: bot.status === "online",
-  url: () => window.chiefbot.bots.screenUrl(bot.id),
-  takeOver: () => window.chiefbot.bots.takeOver(bot.id),
-  handBack: () => window.chiefbot.bots.handBack(bot.id),
-});
 
 // The details panel's Computer tab. While the bot is online it shows the bot's live screen
 // through control, with full screen and the control pill. Otherwise it shows the bot's face:
@@ -125,6 +97,10 @@ export function LiveScreen({ target, setFailures }: { target: ScreenTarget; setF
   const [connected, setConnected] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const [full, setFull] = useState(false);
+  // Its pane hidden (another tab), full screen closes in the same render: a modal
+  // dialog in a hidden pane would block the whole window.
+  const shown = useContext(PaneShown);
+  if (full && !shown) setFull(false);
   const interactive = target.control === "human";
   // The target's calls as they are now: a new render of the same computer must not reconnect.
   const screenUrl = useRef(target.url);
@@ -250,66 +226,5 @@ function FullScreen({ target, onClose, children }: { target: ScreenTarget; onClo
         <ControlPill target={target} />
       </div>
     </dialog>
-  );
-}
-
-// Who drives the screen and the switch, after Grok's floating pill: "Watching | Take control"
-// while the agent drives, "You're in control | Stop" while the user does (take-over, hand-back).
-// A refused switch shows a short line under the pill, with control's reason on hover, until the next try
-// or until who drives changes.
-export function ControlPill({ target }: { target: ScreenTarget }) {
-  const human = target.control === "human";
-  const [error, setError] = useState<{ text: string; reason: string } | null>(null);
-  // A switch made since (in the other pill, or by control) makes an old refusal stale:
-  // one already shown goes, and one that comes back later is dropped (`switches`).
-  const [control, setControl] = useState(target.control);
-  if (control !== target.control) {
-    setControl(target.control);
-    setError(null);
-  }
-  // Counted as the switch commits, before any refusal can be handled against it.
-  const switches = useRef(0);
-  useLayoutEffect(() => {
-    switches.current += 1;
-  }, [target.control]);
-  const toggle = () => {
-    setError(null);
-    const text = human ? "Couldn't hand the screen back." : "Couldn't take control.";
-    const at = switches.current;
-    (human ? target.handBack : target.takeOver)().catch((caught: unknown) => {
-      if (switches.current === at) setError({ text, reason: caught instanceof Error ? caught.message : String(caught) });
-    });
-  };
-  return (
-    <div className="relative">
-      <div role="group" aria-label="Screen control" className="dropdown-glass flex items-center gap-2 rounded-full py-1 ps-3 pe-1 text-xs shadow-lg/5">
-        <span aria-live="polite" className="flex items-center gap-1.5 font-medium">
-          {human ? <MousePointer2Icon className="size-3.5 text-success" /> : <EyeIcon className="size-3.5 text-muted-foreground" />}
-          {human ? "You're in control" : "Watching"}
-        </span>
-        <span aria-hidden="true" className="h-4 w-px bg-border" />
-        {human ? (
-          <Button size="xs" variant="ghost" className="rounded-full" aria-label="Stop and hand the screen back" onClick={toggle}>
-            Stop
-          </Button>
-        ) : (
-          <Button
-            size="xs"
-            className="rounded-full"
-            aria-label="Take control of the screen"
-            disabled={!target.online}
-            onClick={toggle}
-          >
-            Take control
-          </Button>
-        )}
-      </div>
-      {/* Under the pill without moving it, so the buttons beside it stay in line. */}
-      {error && (
-        <p role="alert" title={error.reason} className="absolute top-full left-1/2 mt-1 -translate-x-1/2 whitespace-nowrap text-destructive-foreground text-xs">
-          {error.text}
-        </p>
-      )}
-    </div>
   );
 }

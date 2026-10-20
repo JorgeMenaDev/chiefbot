@@ -72,7 +72,8 @@ export function createProjects({ controlUrl, session, onChat, onWorkerChat, retr
     context: async (projectId: ProjectId) => ContextFile.array().parse(await (await call("GET", `/projects/${projectId}/context`)).json()),
     contextFile: async (projectId: ProjectId, path: string) =>
       ContextFileText.parse(await (await call("GET", `/projects/${projectId}/context/file?path=${encodeURIComponent(path)}`)).json()),
-    // The user drives a worker's screen until handBack; its tool calls wait meanwhile. Any member may.
+    // The user drives a worker's screen from their open view of it until handBack; its tool calls
+    // wait meanwhile. Any member may, one at a time.
     takeOver: async (projectId: ProjectId, workerId: TaskWorkerId) =>
       TaskWorker.parse(await (await call("POST", `/projects/${projectId}/workers/${workerId}/take-over`)).json()),
     handBack: async (projectId: ProjectId, workerId: TaskWorkerId) =>
@@ -128,6 +129,13 @@ export function createProjects({ controlUrl, session, onChat, onWorkerChat, retr
           onWorkerChat?.(worker.view);
         },
       }).close;
+    },
+
+    // Stops following the worker's transcript: the window left it.
+    closeWorkerChat(workerId: TaskWorkerId) {
+      if (watched?.view.workerId !== workerId) return;
+      watched.close();
+      watched = null;
     },
 
     workerChatView: (workerId: TaskWorkerId): WorkerChatView =>

@@ -1,7 +1,6 @@
-import { CreateProjectRequest, Project, ProjectId, ProjectState, ProjectStateChange, type Workspace } from "@chiefbot/contracts";
+import { CreateProjectRequest, Project, ProjectStates, type ProjectId, type ProjectState, type Workspace } from "@chiefbot/contracts";
 import { FolderPlusIcon, PlugIcon, SearchIcon, UsersIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
-import { z } from "zod";
 import { ErrorText } from "./Pane.tsx";
 import { WorkspaceSwitcher, type useWorkspaces } from "./Workspaces.tsx";
 import { Button } from "./components/ui/button.tsx";
@@ -10,21 +9,14 @@ import { SidebarGroupLabel, SidebarIconButton, SidebarNewRow, SidebarRow, Sideba
 import { Spinner } from "./components/ui/spinner.tsx";
 import { cn } from "./lib/utils.ts";
 
-// Each project's state for the user, by project id.
-export type ProjectStates = Partial<Record<ProjectId, ProjectState>>;
-const StateList = z.partialRecord(ProjectId, ProjectState);
-
 // The user's state of every project of their workspaces: what Electron main has
-// kept, then each change control sends.
+// kept, then all of them again on every change. Each replaces the last, so a
+// project that went loses its dot.
 export function useProjectStates() {
   const [states, setStates] = useState<ProjectStates>({});
   useEffect(() => {
-    const unsubscribe = window.chiefbot.projects.onState((change) => {
-      const { projectId, state } = ProjectStateChange.parse(change);
-      setStates((was) => ({ ...was, [projectId]: state }));
-    });
-    // A change that came first is newer than what main had.
-    void window.chiefbot.projects.states().then((kept) => setStates((was) => ({ ...StateList.parse(kept), ...was })));
+    const unsubscribe = window.chiefbot.projects.onStates((next) => setStates(ProjectStates.parse(next)));
+    void window.chiefbot.projects.states().then((kept) => setStates(ProjectStates.parse(kept)));
     return unsubscribe;
   }, []);
   return states;

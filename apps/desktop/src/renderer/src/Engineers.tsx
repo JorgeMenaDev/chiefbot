@@ -1,10 +1,11 @@
 import { WorkerChatView, type Project, type Task, type TaskWorker, type TaskWorkerId, type TaskWorkerState } from "@chiefbot/contracts";
-import { ChevronLeftIcon, ChevronRightIcon, HardHatIcon, RotateCwIcon } from "lucide-react";
+import { ChevronLeftIcon, ChevronRightIcon, RotateCwIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
 import { AssistantMessage, ChatTimeline, ErrorMessage, UserMessage } from "./Chat.tsx";
 import type { LaneItem } from "./chatRows.ts";
-import { LiveScreen, type ScreenTarget } from "./LiveScreen.tsx";
+import { LiveScreen } from "./LiveScreen.tsx";
+import { engineerScreen } from "./screenTargets.tsx";
 import { payerText, workerStateText } from "./ProjectTasks.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
@@ -94,7 +95,7 @@ function EngineerDetail({ project, login, title, worker, onBack }: { project: Pr
         <span className="shrink-0 text-muted-foreground text-xs">{workerStateText[worker.state]}</span>
       </div>
       <div className="flex shrink-0 flex-col gap-3 border-b px-4 py-3">
-        <EngineerScreen project={project} worker={worker} />
+        <EngineerScreen project={project} login={login} worker={worker} />
       </div>
       <ChatTimeline
         chatKey={worker.id}
@@ -116,14 +117,17 @@ function useWorkerChat(project: Project, workerId: TaskWorkerId) {
       if (parsed.workerId === workerId) setView(parsed);
     });
     void window.chiefbot.projects.openWorkerChat(project.id, workerId).then((next) => setView(WorkerChatView.parse(next)));
-    return unsubscribe;
+    return () => {
+      unsubscribe();
+      void window.chiefbot.projects.closeWorkerChat(workerId);
+    };
   }, [project.id, workerId]);
   return view;
 }
 
 // The engineer's screen through control while its worker runs: watch, or take
-// control (any member of the project may). Before and after, a line in its place.
-function EngineerScreen({ project, worker }: { project: Project; worker: TaskWorker }) {
+// control (any member of the project, one at a time). Before and after, a line in its place.
+function EngineerScreen({ project, login, worker }: { project: Project; login: string; worker: TaskWorker }) {
   const [failures, setFailures] = useState(0);
   if (worker.state === "launching") return <ScreenNote><Spinner className="size-3.5" />Starting its computer…</ScreenNote>;
   if (worker.state !== "working") return <ScreenNote>Its computer is gone. Its screen shows only while it works.</ScreenNote>;
@@ -138,17 +142,7 @@ function EngineerScreen({ project, worker }: { project: Project; worker: TaskWor
       </ScreenNote>
     );
   }
-  const target: ScreenTarget = {
-    id: worker.id,
-    name: `Engineer on #${worker.taskNumber}`,
-    face: <HardHatIcon className="size-4 text-muted-foreground" />,
-    control: worker.screenControl,
-    online: true,
-    url: () => window.chiefbot.projects.workerScreenUrl(project.id, worker.id),
-    takeOver: () => window.chiefbot.projects.takeOver(project.id, worker.id),
-    handBack: () => window.chiefbot.projects.handBack(project.id, worker.id),
-  };
-  return <LiveScreen target={target} setFailures={setFailures} />;
+  return <LiveScreen target={engineerScreen(project.id, worker, login)} setFailures={setFailures} />;
 }
 
 function ScreenNote({ children }: { children: ReactNode }) {

@@ -114,12 +114,13 @@ const api = {
       ipcRenderer.invoke("projects:answer", id, workerId, approvalId, approved),
     // { projectId, workers } whenever one of a project's workers changes.
     onWorkers: (listener: (workers: unknown) => void) => subscribe("projects:workers", listener),
-    // Each project's state dot for the user, by project id; then { projectId, state } on every change.
+    // Each project's state dot for the user, by project id; then all of them again on every change.
     states: (): Promise<unknown> => ipcRenderer.invoke("projects:states"),
-    onState: (listener: (change: unknown) => void) => subscribe("projects:state", listener),
+    onStates: (listener: (states: unknown) => void) => subscribe("projects:states", listener),
     // The transcript of one of the project's workers (main follows one at a time), then its changes.
     openWorkerChat: (id: string, workerId: string): Promise<unknown> => ipcRenderer.invoke("projects:open-worker-chat", id, workerId),
     onWorkerChat: (listener: (view: unknown) => void) => subscribe("projects:worker-chat", listener),
+    closeWorkerChat: (workerId: string): Promise<void> => ipcRenderer.invoke("projects:close-worker-chat", workerId),
     // A worker's screen, as a bot's: take-over, hand-back and its WebSocket for noVNC (main adds the session).
     takeOver: (id: string, workerId: string): Promise<unknown> => ipcRenderer.invoke("projects:take-over", id, workerId),
     handBack: (id: string, workerId: string): Promise<unknown> => ipcRenderer.invoke("projects:hand-back", id, workerId),

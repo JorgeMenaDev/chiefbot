@@ -1,10 +1,15 @@
 import { PanelRightIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { createContext, type ReactNode } from "react";
 import { Button } from "./components/ui/button.tsx";
 import { Card, CardDescription, CardHeader, CardPanel, CardTitle } from "./components/ui/card.tsx";
 
 // The pieces every main-column screen shares, after T3 Code's chat header and
 // settings panels: a slim top bar, panels that open under it, list rows, cards.
+
+// Whether the pane around is on screen. App keeps a hidden tab's pane mounted,
+// so its drafts stay; what must not stay open while hidden (a full-screen view,
+// a modal that would block the window) closes when this turns false.
+export const PaneShown = createContext(true);
 
 // The top bar: the screen's name (and a quiet note), its actions on the right.
 // It is the window's drag handle, as macOS hides the title bar. While the sidebar

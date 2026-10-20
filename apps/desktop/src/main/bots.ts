@@ -6,7 +6,7 @@ import {
   type BotId,
   type CreateBotRequest,
   type ProjectId,
-  type ProjectState,
+  type ProjectStates,
   type SetBotModelRequest,
   type Task,
   type TaskWorker,
@@ -26,8 +26,8 @@ export type BotsOptions = {
   onTasks?: (projectId: ProjectId, tasks: Task[]) => void;
   // A project of one of the user's workspaces has a worker that changed.
   onWorkers?: (projectId: ProjectId, workers: TaskWorker[]) => void;
-  // A project of one of the user's workspaces has a new state for them (its dot in the Projects tab).
-  onProjectState?: (projectId: ProjectId, state: ProjectState) => void;
+  // The user's projects' states changed (their dots in the Projects tab): every one, as main now has them.
+  onProjectStates?: (states: ProjectStates) => void;
   // Wait between reconnects after the events socket drops.
   retryMs?: number;
 };
@@ -35,10 +35,12 @@ export type BotsOptions = {
 // The signed-in user's bots, owned by Electron main. A WebSocket to control's
 // /events keeps the list live (and passes on project ledgers, workers and states); actions are
 // plain HTTP calls to control.
-export function createBots({ controlUrl, session, onChange, onUser, onTasks, onWorkers, onProjectState, retryMs = 2000 }: BotsOptions) {
+export function createBots({ controlUrl, session, onChange, onUser, onTasks, onWorkers, onProjectStates, retryMs = 2000 }: BotsOptions) {
   let bots: Bot[] = [];
-  // Each project's latest state, kept for a window that opens after control sent it.
-  let projectStates: Partial<Record<ProjectId, ProjectState>> = {};
+  // Each project's latest state, kept for a window that opens after control sent
+  // it. Control's snapshot replaces it whole (on every connect, and once a
+  // project goes), so a deleted project's dot cannot linger.
+  let projectStates: ProjectStates = {};
   let socket: WebSocket | null = null;
   let retry: Timer | null = null;
   let connected = false;
@@ -61,8 +63,8 @@ export function createBots({ controlUrl, session, onChange, onUser, onTasks, onW
       else if (message.type === "tasks") onTasks?.(message.projectId, message.tasks);
       else if (message.type === "workers") onWorkers?.(message.projectId, message.workers);
       else {
-        projectStates = { ...projectStates, [message.projectId]: message.state };
-        onProjectState?.(message.projectId, message.state);
+        projectStates = message.type === "project-states" ? message.states : { ...projectStates, [message.projectId]: message.state };
+        onProjectStates?.(projectStates);
       }
     };
     socket.onclose = () => {

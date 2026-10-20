@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { ApprovalKind, ChatItem } from "./chat.ts";
 import { ApprovalId, ProjectId, TaskWorkerId } from "./ids.ts";
-import { ScreenControl } from "./screens.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // A worker's life:
@@ -32,9 +31,10 @@ export const TaskWorker = z.object({
   // What it waits on the requester to approve: a push, a pull request or a GitHub tool.
   pendingApprovals: z.array(z.object({ approvalId: ApprovalId, kind: ApprovalKind, detail: z.string() })),
   computerRemoved: z.boolean(),
-  // Who drives its screen while it runs: a member may take control. Control keeps
-  // it in memory, so it is the agent's again after control restarts.
-  screenControl: ScreenControl.default("agent"),
+  // Who drives its screen while it runs: null, the agent; else the login of the
+  // one member who took control. Control keeps it in memory, so it is the
+  // agent's again after control restarts.
+  screenHolder: z.string().nullable().default(null),
   createdAt: z.number(),
   updatedAt: z.number(),
 });

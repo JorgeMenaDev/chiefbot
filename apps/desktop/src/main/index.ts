@@ -96,7 +96,7 @@ const bots = createBots({
   onUser: (user) => auth.userChanged(user),
   onTasks: (projectId, tasks) => window?.webContents.send("projects:tasks", { projectId, tasks }),
   onWorkers: (projectId, workers) => window?.webContents.send("projects:workers", { projectId, workers }),
-  onProjectState: (projectId, state) => window?.webContents.send("projects:state", { projectId, state }),
+  onProjectStates: (states) => window?.webContents.send("projects:states", states),
 });
 
 const chats = createChats({
@@ -232,6 +232,7 @@ ipcMain.handle("projects:open-worker-chat", (_event, id: unknown, workerId: unkn
   projects.openWorkerChat(ProjectId.parse(id), worker);
   return projects.workerChatView(worker);
 });
+ipcMain.handle("projects:close-worker-chat", (_event, workerId: unknown) => projects.closeWorkerChat(TaskWorkerId.parse(workerId)));
 ipcMain.handle("projects:take-over", (_event, id: unknown, workerId: unknown) => projects.takeOver(ProjectId.parse(id), TaskWorkerId.parse(workerId)));
 ipcMain.handle("projects:hand-back", (_event, id: unknown, workerId: unknown) => projects.handBack(ProjectId.parse(id), TaskWorkerId.parse(workerId)));
 ipcMain.handle(

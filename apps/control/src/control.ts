@@ -29,6 +29,7 @@ import {
   type OpenedPullRequest,
   type ProjectId,
   type ProjectState,
+  type ProjectStates,
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
@@ -373,24 +374,42 @@ export function startControl({
       projectStateChanged(projectId);
     },
     onStateChange: (projectId) => projectStateChanged(projectId),
+    onDeleted: (memberIds) => projectsGone(memberIds),
     onActivity: (projectId) => coordinatorIdle.touch(projectId),
   });
 
   // The state dot each member last got of each project, so only a change goes
   // out. Each member gets their own: a project needs only the member it asks.
-  const sentStates = new Map<string, ProjectState>();
+  const sentStates = new Map<UserId, Map<ProjectId, ProjectState>>();
+  // The member's state of the project now, and whether it differs from what they last got.
   const memberState = (projectId: ProjectId, userId: UserId) => {
+    const sent = sentStates.get(userId) ?? new Map<ProjectId, ProjectState>();
+    sentStates.set(userId, sent);
     const state = projects.stateOf(projectId, store.user(userId).login);
-    const changed = sentStates.get(`${projectId}:${userId}`) !== state;
-    sentStates.set(`${projectId}:${userId}`, state);
-    return { changed, event: JSON.stringify({ type: "project-state", projectId, state } satisfies ClientEvent) };
+    const changed = sent.get(projectId) !== state;
+    sent.set(projectId, state);
+    return { state, changed };
   };
   function projectStateChanged(projectId: ProjectId) {
     for (const userId of store.projects.memberIds(projectId)) {
-      const { changed, event } = memberState(projectId, userId);
-      if (changed) server.publish(topic(userId), event);
+      const { state, changed } = memberState(projectId, userId);
+      if (changed) server.publish(topic(userId), JSON.stringify({ type: "project-state", projectId, state } satisfies ClientEvent));
     }
   }
+  // Every project of the member's workspaces with its state, as one snapshot
+  // that replaces what they had: on /events open, and once a project of theirs
+  // goes (deleted, or they left its workspace).
+  const statesEvent = (userId: UserId) => {
+    sentStates.delete(userId);
+    const states: ProjectStates = {};
+    for (const workspace of store.workspaces.workspacesFor(userId)) {
+      for (const { id } of store.projects.projectsIn(workspace.id)) states[id] = memberState(id, userId).state;
+    }
+    return JSON.stringify({ type: "project-states", states } satisfies ClientEvent);
+  };
+  const projectsGone = (userIds: UserId[]) => {
+    for (const userId of userIds) server.publish(topic(userId), statesEvent(userId));
+  };
   // Chiefs of staff handing work to projects (handoffs.ts).
   const chiefs = chiefHost({ store, projects });
   // What projects listen to: polled CI runs and issue queries, and schedules (subscriptions.ts).
@@ -514,6 +533,7 @@ export function startControl({
       ...workspaceRoutes(store, async (workspaceId, userId) => {
         projects.memberRemoved(workspaceId, userId);
         taskWorkers.memberRemoved(workspaceId, userId);
+        projectsGone([userId]);
       }),
       ...projects.routes,
       ...taskWorkers.routes,
@@ -816,9 +836,7 @@ export function startControl({
           const { userId } = ws.data;
           ws.subscribe(topic(userId));
           ws.send(botsEvent(userId));
-          for (const workspace of store.workspaces.workspacesFor(userId)) {
-            for (const project of store.projects.projectsIn(workspace.id)) ws.send(memberState(project.id, userId).event);
-          }
+          ws.send(statesEvent(userId));
           return;
         }
         if (ws.data.kind === "chat") {

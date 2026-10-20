@@ -26,7 +26,7 @@ import { Settings } from "./Settings.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { NewProject, ProjectList, useProjectStates, type ProjectView } from "./ProjectList.tsx";
 import { ProjectPane, useProjects } from "./Projects.tsx";
-import { Column, PaneHeader } from "./Pane.tsx";
+import { Column, PaneHeader, PaneShown } from "./Pane.tsx";
 import { Members, useWorkspaces } from "./Workspaces.tsx";
 import { Alert, AlertDescription, AlertTitle } from "./components/ui/alert.tsx";
 import { Button, buttonVariants } from "./components/ui/button.tsx";
@@ -385,47 +385,49 @@ function Workspace({ user }: { user: User }) {
               )}
             </div>
             <div hidden={tab !== "projects"} className="flex min-w-0 flex-1">
-              {!current ? (
-                <EmptyPane title="Projects" icon={<UsersIcon />} heading="Projects live in a workspace" text="Pick a workspace in the sidebar, or make one. Then add a repo." />
-              ) : workspaceScreen === "members" ? (
-                <Column>
-                  <Members
-                    key={`${current.id}:${visit}`}
+              <PaneShown value={tab === "projects"}>
+                {!current ? (
+                  <EmptyPane title="Projects" icon={<UsersIcon />} heading="Projects live in a workspace" text="Pick a workspace in the sidebar, or make one. Then add a repo." />
+                ) : workspaceScreen === "members" ? (
+                  <Column>
+                    <Members
+                      key={`${current.id}:${visit}`}
+                      workspace={current}
+                      user={user}
+                      onLeft={() => {
+                        selectWorkspace(null);
+                        void teams.reload();
+                      }}
+                    />
+                  </Column>
+                ) : workspaceScreen === "connectors" ? (
+                  <Column>
+                    <Connectors key={`${current.id}:${visit}`} workspace={current} />
+                  </Column>
+                ) : project ? (
+                  <ProjectPane
+                    key={project.id}
+                    login={user.login}
+                    project={project}
                     workspace={current}
-                    user={user}
-                    onLeft={() => {
-                      selectWorkspace(null);
-                      void teams.reload();
-                    }}
-                  />
-                </Column>
-              ) : workspaceScreen === "connectors" ? (
-                <Column>
-                  <Connectors key={`${current.id}:${visit}`} workspace={current} />
-                </Column>
-              ) : project ? (
-                <ProjectPane
-                  key={project.id}
-                  login={user.login}
-                  project={project}
-                  workspace={current}
-                  onDeleted={() => {
-                    setProjectView(null);
-                    void reloadProjects();
-                  }}
-                  onChanged={() => void reloadProjects()}
-                />
-              ) : (
-                <EmptyPane title={current.name} icon={<FolderGit2Icon />} heading="No projects yet" text="Add a repo. Your bots can then hand work to it.">
-                  <NewProject
-                    workspace={current}
-                    onCreated={(created) => {
+                    onDeleted={() => {
+                      setProjectView(null);
                       void reloadProjects();
-                      setProjectView(created.id);
                     }}
+                    onChanged={() => void reloadProjects()}
                   />
-                </EmptyPane>
-              )}
+                ) : (
+                  <EmptyPane title={current.name} icon={<FolderGit2Icon />} heading="No projects yet" text="Add a repo. Your bots can then hand work to it.">
+                    <NewProject
+                      workspace={current}
+                      onCreated={(created) => {
+                        void reloadProjects();
+                        setProjectView(created.id);
+                      }}
+                    />
+                  </EmptyPane>
+                )}
+              </PaneShown>
             </div>
           </>
         )}

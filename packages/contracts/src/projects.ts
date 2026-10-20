@@ -237,10 +237,16 @@ export type ProjectTasks = z.infer<typeof ProjectTasks>;
 export const ProjectState = z.enum(["idle", "working", "needs_you", "sleeping"]);
 export type ProjectState = z.infer<typeof ProjectState>;
 
-// A project's new state for the user: what /events sends (a `project-state`
-// ClientEvent), and what Electron main hands the renderer.
+// A project's new state for the user: what /events sends (a `project-state` ClientEvent).
 export const ProjectStateChange = z.object({ projectId: ProjectId, state: ProjectState });
 export type ProjectStateChange = z.infer<typeof ProjectStateChange>;
+
+// Every project of the user's workspaces with its state for them, by project id:
+// what /events sends whole (a `project-states` ClientEvent), and what Electron
+// main hands the renderer. It replaces what the user had, so a project that
+// went (deleted, or its workspace left) goes with it.
+export const ProjectStates = z.partialRecord(ProjectId, ProjectState);
+export type ProjectStates = z.infer<typeof ProjectStates>;
 
 // The member `login`'s state of a project: `awake` while its computer runs the
 // project agent, `busy` while the agent has a message of any member to answer.
