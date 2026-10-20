@@ -114,8 +114,14 @@ export function displayCommands({ deadlineMs = 10_000, maxOutput = 1024 * 1024 }
 
 export const computerToolName = "computer";
 
-// The line every bot's and task worker's session gets in its system message, so it knows the screen is there.
-export const computerInstructions = `You have your own Linux computer with a ${SCREEN.width}×${SCREEN.height} screen and Chromium. Use the \`${computerToolName}\` tool to see and operate it.`;
+// What the screen shows: the desktop and dock of infra/computer (start.sh, dock/tint2rc).
+// Nothing opens at boot.
+const desktop = "a desktop with a dock at the bottom centre that opens Chromium, Files and Terminal, left to right";
+
+// The lines every bot's and task worker's session gets in its system message, so it knows the screen is there.
+export const computerInstructions =
+  `You have your own Linux computer with a ${SCREEN.width}×${SCREEN.height} screen showing ${desktop}. ` +
+  `Use the \`${computerToolName}\` tool to see and operate it. To browse, open Chromium from the dock first, unless it is already open.`;
 
 const buttons = { left: "1", middle: "2", right: "3" } as const;
 const wheel = { up: "4", down: "5", left: "6", right: "7" } as const;
@@ -234,9 +240,10 @@ export function computerTool({
   return {
     name: computerToolName,
     description:
-      `See and operate your computer's ${SCREEN.width}×${SCREEN.height} screen, with Chromium open on it. Runs 1 to 10 actions in order and stops at the first that fails, ` +
-      "then waits 300 ms and returns { ran, cursor, error? } with one screenshot. Coordinates are screenshot pixels. " +
-      'To look, send only { kind: "screenshot" }. To open a page in Chromium: key ctrl+l, type the address, key Return, wait. ' +
+      `See and operate your computer's ${SCREEN.width}×${SCREEN.height} screen: ${desktop}. Files and Terminal open in /home/bot/workspace. ` +
+      "Runs 1 to 10 actions in order and stops at the first that fails, then waits 300 ms and returns { ran, cursor, error? } with one screenshot. " +
+      'Coordinates are screenshot pixels. To look, send only { kind: "screenshot" }. ' +
+      "To open a page: if no Chromium window is open, click Chromium in the dock and wait for it; then key ctrl+l, type the address, key Return, wait. " +
       `A key action presses one key or chord; a type action types up to ${MAX_TEXT} printable characters, newlines and tabs.`,
     parameters: ComputerArgs,
     async handler(raw: unknown, invocation: ToolInvocation): Promise<ToolResultObject> {

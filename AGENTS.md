@@ -16,7 +16,7 @@ packages/fake-github  The fake GitHub every test uses.
 infra/        Computer and control Docker images (built from the repo root), Caddy for compose.yaml, Terraform for GCP (written, NOT applied until the deployer approves the spend). docs/deploy.md.
 ```
 
-- **Bot computer** = one Docker image (Xvfb + Chromium + x11vnc on loopback + xdotool and scrot for the agent's `computer` tool + git + worker) with one volume per bot. It runs locally under Docker now and on GCP later, one Compute Engine VM per bot. Both sit behind one `ComputerProvider` interface (`create / start / stop / destroy / status`): `DockerProvider` (local) and `GceProvider` (GCP). The screen opens no port: for each viewer the worker dials control and pipes x11vnc, and control checks the viewer owns the bot.
+- **Bot computer** = one Docker image (Xvfb + a desktop whose dock opens Chromium, Files and Terminal + x11vnc on loopback + xdotool and scrot for the agent's `computer` tool + git + worker) with one volume per bot. It runs locally under Docker now and on GCP later, one Compute Engine VM per bot. Both sit behind one `ComputerProvider` interface (`create / start / stop / destroy / status`): `DockerProvider` (local) and `GceProvider` (GCP). The screen opens no port: for each viewer the worker dials control and pipes x11vnc, and control checks the viewer owns the bot.
 - **Tokens:** the desktop does device-flow sign-in with the deployer's sign-in app (no repository permissions; or an OAuth App with only `read:user`), then hands the tokens to control. The refresh token never leaves control. Workers fetch short-lived access tokens from control's broker through the SDK's `gitHubTokenProvider`. Repo writes go only through control: its git proxy and pull request route ask the owner first, then use the repo app's installation tokens, which never reach a bot computer. The sign-in token a bot computer gets cannot write to any repo (`docs/isolation.md`).
 - **Durable state lives in control,** never only in a bot computer. Bots keep working when the desktop app is closed.
 - **Multi-user data model** from day one: every row is owned by a `UserId`.
@@ -27,6 +27,7 @@ infra/        Computer and control Docker images (built from the repo root), Cad
 - Keep it simple (YAGNI). No abstraction until a second caller exists. `ComputerProvider` is the one planned seam.
 - Build each ticket test-first (`tdd`). Tests are focused, with no smoke-test sprawl. Tests use fakes for Copilot, Docker and GCP, so `bun test` needs no network, Docker or tokens.
 - **No GCP spend.** Never run `terraform apply` or create any cloud resource. GCP code is tested with fakes only.
+- **Docker cleanup:** remove only the objects you created, by ID. Remove images with `docker rmi --no-prune <id>`. Never run `docker system/image/builder prune`: it deletes the owner's build cache.
 - **Copilot Free has 200 chats/month.** Live Copilot calls happen only in explicitly named manual checks, at most a handful per ticket.
 - Never print or commit tokens. `.env*` is git-ignored. The repo app's secrets live in `~/.chiefbot/` (owner-only), never in the repo.
 - Generic code only: no personal or company names, client IDs or private links. `scripts/check-public.sh` (in `bun run check`) fails on them; test fixtures use logins like `octo-user`.

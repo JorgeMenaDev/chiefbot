@@ -2,9 +2,10 @@
 # worker. Build with `bun run computer:build`, or with Docker alone from the repo
 # root: `docker build -f infra/computer/Dockerfile .`. The first stage bundles
 # the worker into dist/worker.js and pins the Copilot SDK in dist/package.json
-# (infra/computer/build.ts). start.sh brings up the screen (Xvfb, Openbox,
-# Chromium, x11vnc on loopback) and then runs the worker, whose `computer` tool
-# drives that screen with xdotool and sees it with scrot (apps/worker/src/computerUse.ts). The image carries every
+# (infra/computer/build.ts) and draws the wallpaper. start.sh brings up the
+# screen (Xvfb, Openbox, a desktop with a dock, x11vnc on loopback) and then
+# runs the worker, whose `computer` tool drives that screen with xdotool and
+# sees it with scrot (apps/worker/src/computerUse.ts). The image carries every
 # connection's CLI (connections/), never a connection's fields.
 FROM oven/bun:1-slim AS dist
 WORKDIR /src
@@ -13,9 +14,13 @@ RUN bun install --frozen-lockfile --ignore-scripts --production --filter @chiefb
 
 FROM oven/bun:1-slim
 
+# The desktop: hsetroot sets the wallpaper, tint2 is the dock, Thunar is Files
+# and xfce4-terminal is Terminal. librsvg2-common lets GTK draw the Adwaita
+# icon theme's SVG icons.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates \
      xvfb openbox x11vnc chromium fonts-liberation xdotool scrot \
+     hsetroot tint2 thunar xfce4-terminal librsvg2-common \
   && rm -rf /var/lib/apt/lists/*
 
 # Every connection's CLI, from its connections/<name>/install.sh (run as root,
@@ -44,8 +49,10 @@ RUN cd /opt/chiefbot \
   && bun install --production \
   && rm -rf node_modules/@github/copilot-sdk-linuxmusl-* /root/.bun/install/cache
 
-COPY --from=dist /src/infra/computer/dist/worker.js /src/infra/computer/dist/git-credential.js /opt/chiefbot/
+COPY --from=dist /src/infra/computer/dist/worker.js /src/infra/computer/dist/git-credential.js /src/infra/computer/dist/wallpaper.png /opt/chiefbot/
 COPY infra/computer/start.sh /opt/chiefbot/start.sh
+COPY infra/computer/dock /opt/chiefbot/dock
+COPY infra/computer/chromium-flags /etc/chromium.d/chiefbot
 
 # Git here gets no GitHub token. The worker points the
 # agent's git at control's git proxy for github.com (GIT_CONFIG_* variables,

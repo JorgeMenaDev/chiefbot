@@ -15,16 +15,11 @@ openbox &
 profile="$HOME/.config/chromium"
 rm -f "$profile/SingletonLock" "$profile/SingletonCookie" "$profile/SingletonSocket"
 
-# Chromium comes back if the agent or the user closes it. Only when none runs:
-# a second launch would just open another window in the running one. The
-# container is its sandbox: with no capabilities and no-new-privileges,
-# Chromium's own sandbox cannot start.
-(while true; do
-  pgrep -x chromium >/dev/null \
-    || chromium --no-sandbox --disable-dev-shm-usage --no-first-run --hide-crash-restore-bubble --start-maximized >/dev/null 2>&1 \
-    || true
-  sleep 2
-done) &
+# The desktop: the wallpaper (wallpaper.ts) and the dock, which opens Chromium,
+# Files and Terminal (dock/tint2rc). Nothing else opens at boot: the person or
+# the bot opens apps from the dock.
+hsetroot -center /opt/chiefbot/wallpaper.png >/dev/null
+tint2 -c /opt/chiefbot/dock/tint2rc >/dev/null 2>&1 &
 
 # VNC on loopback only; -bg returns once it listens. The worker pipes it to control for each viewer.
 x11vnc -display :1 -localhost -rfbport 5900 -shared -forever -nopw -quiet -bg
