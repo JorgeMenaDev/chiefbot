@@ -63,6 +63,7 @@ import { z } from "zod";
 //   invalid_subscription  a subscription failed its schema, or names a connector that is not a remote
 //                         one the project declares; `message` says why (400)
 //   requester_only        only the member who asked for a project's worker answers its approvals (403)
+//   worker_offline        a project's worker has no screen to watch: its worker is not connected (409)
 //   invalid_turn_key      a call from an agent's computer carried no turn key, an unknown one, another
 //                         agent's, or one whose turn ended (403). Never answered with anyone else's turn.
 //   expected_websocket    a WebSocket route got a plain request (400)
@@ -89,6 +90,7 @@ export const ApiErrorCode = z.enum([
   "computer_failed",
   "bot_offline",
   "bot_stopping",
+  "worker_offline",
   "turn_running",
   "human_has_screen",
   "computer_outdated",

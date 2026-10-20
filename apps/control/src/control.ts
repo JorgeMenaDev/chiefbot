@@ -59,7 +59,7 @@ import { serviceHost } from "./health/services.ts";
 import { localContextStore, type ContextStore } from "./contextStore.ts";
 import { projectHost, type ProjectSocketData } from "./projects.ts";
 import { subscriptionHost } from "./subscriptions.ts";
-import { taskWorkerHost, type TaskWorkerSocketData } from "./taskWorkers.ts";
+import { taskWorkerHost, type TaskWorkerSocketData, type WorkerWatchSocketData } from "./taskWorkers.ts";
 import { localSecretStore, type SecretStore } from "./secrets/secretStore.ts";
 import { openStore } from "./store.ts";
 import { tokenBroker } from "./tokens.ts";
@@ -141,7 +141,8 @@ type SocketData =
   | { kind: "viewer"; botId: BotId; streamId: string }
   | { kind: "screen"; streamId: string }
   | ProjectSocketData
-  | TaskWorkerSocketData;
+  | TaskWorkerSocketData
+  | WorkerWatchSocketData;
 
 // The control plane's HTTP + WebSocket server.
 //   POST   /sessions          body GitHubTokens → SignInResponse
@@ -265,7 +266,7 @@ export function startControl({
   // or screen viewer: it would die with the computer.
   const stopping = new Set<BotId>();
   // Who drives each screen and the viewers' streams (screens.ts).
-  const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
+  const screens = screenTunnel<BotId>({ onStreamEnd: (botId) => idle.touch(botId) });
   // People's connections, which their bots' turns carry (connections/connections.ts).
   // Saving or turning one off drops a health check of it still running.
   const connections = connectionHost({
@@ -799,6 +800,7 @@ export function startControl({
       open(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.open(ws, ws.data);
         if (ws.data.kind === "task-worker") return taskWorkers.open(ws, ws.data);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen") return taskWorkers.watchOpen(ws, ws.data);
         if (ws.data.kind === "viewer") {
           const worker = workers.get(ws.data.botId);
           if (!worker) return ws.close();
@@ -837,6 +839,7 @@ export function startControl({
       close(ws) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.close(ws, ws.data);
         if (ws.data.kind === "task-worker") return taskWorkers.close(ws, ws.data);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen") return taskWorkers.watchClose(ws.data);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.end(ws.data.streamId);
         if (ws.data.kind !== "worker" || workers.get(ws.data.botId) !== ws) return;
         workers.delete(ws.data.botId);
@@ -846,6 +849,7 @@ export function startControl({
       message(ws, raw) {
         if (ws.data.kind === "coordinator" || ws.data.kind === "project-chat") return projects.message(ws.data, raw);
         if (ws.data.kind === "task-worker") return taskWorkers.message(ws.data, raw);
+        if (ws.data.kind === "worker-viewer" || ws.data.kind === "worker-screen") return taskWorkers.watchMessage(ws.data, raw);
         if (ws.data.kind === "viewer" || ws.data.kind === "screen") return screens.relay(ws.data.streamId, ws.data.kind, raw);
         if (ws.data.kind !== "worker") return;
         const message = WorkerToControl.parse(JSON.parse(String(raw)));

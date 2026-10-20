@@ -14,6 +14,7 @@ import {
   type Project,
   type ProjectId,
   type ProjectMember,
+  type ScreenControl,
   type Task,
   type TaskWorker,
   type TaskWorkerId,
@@ -28,6 +29,7 @@ import type { ComputerProvider } from "./computers/computer.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
 import type { repoAccess, RepoAgent } from "./repos.ts";
+import { screenTunnel } from "./screens.ts";
 import type { openStore } from "./store.ts";
 import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
 
@@ -35,11 +37,15 @@ import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
 // runs and the member who asked for it.
 export type TaskWorkerSocketData = { kind: "task-worker"; workerId: TaskWorkerId; turnId: TurnId; userId: UserId };
 
+// A WebSocket watching a worker for a member: one end of a stream of its screen,
+// the member's viewer or the worker piping its VNC server (screens.ts).
+export type WorkerWatchSocketData = { kind: "worker-viewer"; workerId: TaskWorkerId; streamId: string } | { kind: "worker-screen"; streamId: string };
+
 // The coordinator's worker tools.
 export type WorkerToolCall = Extract<CoordinatorToolCall, { tool: "dispatch_worker" | "worker_status" | "worker_transcript" | "stop_worker" }>;
 
 // The slice of a Bun ServerWebSocket this module uses.
-type Socket = { send(message: string): unknown; close(code?: number, reason?: string): void };
+type Socket = { send(message: string | Buffer): unknown; close(code?: number, reason?: string): void };
 
 export type TaskWorkerHostOptions = {
   store: ReturnType<typeof openStore>;
@@ -63,8 +69,8 @@ export type TaskWorkerHostOptions = {
   onLedgerChange: (projectId: ProjectId) => void;
   // One of the project's workers changed, so its state may have (contracts projectState).
   onStateChange: (projectId: ProjectId) => void;
-  // Upgrades the request to the worker's WebSocket; undefined once upgraded.
-  upgrade: (req: Request, data: TaskWorkerSocketData) => Response | undefined;
+  // Upgrades the request to a worker's WebSocket, or one watching it; undefined once upgraded.
+  upgrade: (req: Request, data: TaskWorkerSocketData | WorkerWatchSocketData) => Response | undefined;
 };
 
 // A project's workers: one task each, on a throwaway computer from the
@@ -88,6 +94,11 @@ export type TaskWorkerHostOptions = {
 //   POST /projects/:id/workers/:workerId/approvals/:approvalId  body AnswerApprovalRequest → 204
 //                                (403 requester_only for anyone but the member who asked;
 //                                409 not_pending when it is answered, unknown or its turn ended)
+//   WS   /projects/:id/workers/:workerId/screen  ↔ the worker's screen's RFB bytes (noVNC speaks it),
+//                                as a bot's screen; 409 worker_offline while its worker is not connected
+//   POST /projects/:id/workers/:workerId/take-over  → TaskWorker: the member drives its screen; the
+//                                worker's tool calls wait meanwhile. Any member may.
+//   POST /projects/:id/workers/:workerId/hand-back  → TaskWorker: the agent drives its screen again
 // Worker routes. The WebSocket takes the task worker's credential (403 for another worker's); every
 // other route takes the key of the worker's running turn (403 invalid_turn_key otherwise):
 //   WS   /task-worker/:workerId                ControlToWorker; WorkerToControl back
@@ -97,6 +108,8 @@ export type TaskWorkerHostOptions = {
 //                                on the organization's Copilot (404 otherwise; 502 copilot_token_failed)
 //   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest once the
 //                                member who asked approves (errors as a bot's)
+//   WS   /task-worker/:workerId/screen/:streamId  the worker's credential ↔ the VNC bytes for one
+//                                viewer, after screen-open (404 for a stream control did not open for it)
 // The git proxy (repos.ts) takes the turn's key through agentOf.
 export function taskWorkerHost({
   store,
@@ -119,9 +132,14 @@ export function taskWorkerHost({
   const launches = new Map<TaskWorkerId, Promise<void>>();
   // The wait limit of each approval a worker waits on: its cancel, by approval id.
   const waitLimits = new Map<ApprovalId, () => void>();
+  // Who drives each worker's screen, and the streams of members watching it.
+  const screens = screenTunnel<TaskWorkerId>({ onStreamEnd: () => {} });
 
+  // The project's workers as members see them: with who drives each one's screen.
+  const workersShown = (projectId: ProjectId): TaskWorker[] =>
+    workers.workersOf(projectId).map((worker) => ({ ...worker, screenControl: screens.controlOf(worker.id) }));
   const publish = (projectId: ProjectId) => {
-    const event = { type: "workers", projectId, workers: workers.workersOf(projectId) } satisfies ClientEvent;
+    const event = { type: "workers", projectId, workers: workersShown(projectId) } satisfies ClientEvent;
     for (const userId of projects.memberIds(projectId)) publishToUser(userId, event);
     onStateChange(projectId);
   };
@@ -206,6 +224,7 @@ export function taskWorkerHost({
     for (const workerId of workers.toReap()) {
       await launches.get(workerId);
       sockets.get(workerId)?.close();
+      screens.forget(workerId);
       try {
         await computers.destroy(workerId, { deleteData: true });
         workers.computerRemoved(workerId);
@@ -221,6 +240,7 @@ export function taskWorkerHost({
   // keeping its disk until the task closes. A failed stop is retried on control's next start.
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
+    screens.forget(workerId);
     computers.stop(workerId).catch((error: unknown) => console.error(`could not stop the computer of ${workerId}:`, error));
   }
 
@@ -255,7 +275,7 @@ export function taskWorkerHost({
         if (!user) return unauthorized();
         const found = projects.projectFor(user.id, req.params.id);
         if (!found) return apiError(404, "not_found");
-        return Response.json(workers.workersOf(found.project.id) satisfies TaskWorker[]);
+        return Response.json(workersShown(found.project.id) satisfies TaskWorker[]);
       },
     },
     // The answer is stored first, so it reaches the worker even if it is offline now.
@@ -277,6 +297,30 @@ export function taskWorkerHost({
         send(worker.id, { type: "approval-answer", approvalId, approved });
         publish(worker.projectId);
         return new Response(null, { status: 204 });
+      },
+    },
+    // A member watches the worker's screen: control asks its worker to dial back.
+    "/projects/:id/workers/:workerId/screen": {
+      GET: (req: Bun.BunRequest<"/projects/:id/workers/:workerId/screen">) => {
+        const found = memberWorker(req);
+        if (found instanceof Response) return found;
+        if (!sockets.has(found.worker.id)) return apiError(409, "worker_offline");
+        return upgrade(req, { kind: "worker-viewer", workerId: found.worker.id, streamId: crypto.randomUUID() });
+      },
+    },
+    "/projects/:id/workers/:workerId/take-over": {
+      POST: (req: Bun.BunRequest<"/projects/:id/workers/:workerId/take-over">) => setScreenControl(req, "human"),
+    },
+    "/projects/:id/workers/:workerId/hand-back": {
+      POST: (req: Bun.BunRequest<"/projects/:id/workers/:workerId/hand-back">) => setScreenControl(req, "agent"),
+    },
+    // Only a stream control opened for this worker, and only once.
+    "/task-worker/:workerId/screen/:streamId": {
+      GET: (req: Bun.BunRequest<"/task-worker/:workerId/screen/:streamId">) => {
+        const own = ownWorker(req);
+        if (own instanceof Response) return own;
+        if (!screens.joinable(own.workerId, req.params.streamId)) return apiError(404, "not_found");
+        return upgrade(req, { kind: "worker-screen", streamId: req.params.streamId });
       },
     },
     "/task-worker/:workerId": {
@@ -340,6 +384,26 @@ export function taskWorkerHost({
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
     send(workerId, { type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors });
+  }
+
+  // The signed-in member and the project's worker :workerId; 401 or 404 otherwise.
+  function memberWorker(req: Request & { params: { id: string; workerId: string } }) {
+    const user = store.userForSession(bearer(req));
+    if (!user) return unauthorized();
+    const found = projects.projectFor(user.id, req.params.id);
+    const worker = found && workers.workerIn(found.project.id, req.params.workerId);
+    if (!worker) return apiError(404, "not_found");
+    return { user, worker };
+  }
+
+  // Take-over and hand-back of the worker's screen: tell its worker and the members.
+  function setScreenControl(req: Request & { params: { id: string; workerId: string } }, control: ScreenControl) {
+    const found = memberWorker(req);
+    if (found instanceof Response) return found;
+    screens.setControl(found.worker.id, control);
+    send(found.worker.id, { type: "screen-control", control });
+    publish(found.worker.projectId);
+    return Response.json({ ...found.worker, screenControl: control } satisfies TaskWorker);
   }
 
   // The worker whose credential the request carries, if it is :workerId's; 401 or 403 otherwise.
@@ -463,6 +527,7 @@ export function taskWorkerHost({
       sockets.get(workerId)?.close(4000, "replaced");
       sockets.set(workerId, ws);
       ws.send(JSON.stringify({ type: "bound" } satisfies ControlToWorker));
+      ws.send(JSON.stringify({ type: "screen-control", control: screens.controlOf(workerId) } satisfies ControlToWorker));
     },
 
     close(ws: Socket, { workerId }: TaskWorkerSocketData) {
@@ -502,6 +567,23 @@ export function taskWorkerHost({
         }
       }
     },
+
+    // A socket watching a worker opened: a viewer waits while its worker dials
+    // back; the worker's end joins the viewer's stream.
+    watchOpen(ws: Socket, data: WorkerWatchSocketData) {
+      if (data.kind === "worker-screen") {
+        if (!screens.joinScreen(data.streamId, ws)) ws.close();
+        return;
+      }
+      if (!sockets.has(data.workerId)) return ws.close();
+      screens.openViewer(data.workerId, data.streamId, ws);
+      send(data.workerId, { type: "screen-open", streamId: data.streamId });
+    },
+
+    watchClose: (data: WorkerWatchSocketData) => screens.end(data.streamId),
+
+    watchMessage: (data: WorkerWatchSocketData, raw: string | Buffer) =>
+      screens.relay(data.streamId, data.kind === "worker-viewer" ? "viewer" : "screen", raw),
   };
 }
 
