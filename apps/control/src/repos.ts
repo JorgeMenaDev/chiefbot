@@ -42,8 +42,10 @@ export type RepoAccessOptions = {
   ownerLogin: (userId: UserId) => Promise<string | null>;
   // The agent whose running turn a key is (a bot's, task worker's or coordinator's), if any.
   agentFor: (key: string) => RepoAgent | RepoReader | null;
-  // GitHub took an approved push to the repo: each branch it moves, and the commit it moves it to.
-  onPushed: (fullName: string, moved: Array<{ branch: string; sha: string }>) => void;
+  // An approved push to the repo is about to reach GitHub, to move `branches`.
+  // What it returns is called once GitHub has answered, or failed to: with each
+  // branch GitHub took the push for and the commit it moves it to, none when it refused it.
+  onPush: (fullName: string, branches: string[]) => (moved: Array<{ branch: string; sha: string }>) => void;
 };
 
 type Refusal = { error: ApiErrorCode; status: number; message: string };
@@ -62,7 +64,7 @@ const unapproved = {
   },
 };
 
-export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor, onPushed }: RepoAccessOptions) {
+export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor, onPush }: RepoAccessOptions) {
   // A token that may `access` the repo: the app's installation token for it,
   // once it shows the bot owner may do it themselves. For a read where the app
   // is not installed the token is null: GitHub is asked without one, which works
@@ -143,22 +145,28 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor,
       }
       if (token) headers.set("authorization", `Basic ${btoa(`x-access-token:${token}`)}`);
       const rest = url.pathname.slice(`/git/${owner}/${repo}`.length);
-      const res = await fetch(`${githubUrl}/${fullName}.git${rest}${url.search}`, { method: req.method, headers, body, timeout: false });
+      const moves = (pushed?.refs ?? []).flatMap(({ ref, sha }) => (ref.startsWith("refs/heads/") ? [{ branch: ref.slice("refs/heads/".length), sha }] : []));
+      const ended = pushed ? onPush(fullName, moves.map(({ branch }) => branch)) : null;
+      let res: Response | null = null;
+      let answer: ArrayBuffer | ReadableStream<Uint8Array> | null;
+      try {
+        res = await fetch(`${githubUrl}/${fullName}.git${rest}${url.search}`, { method: req.method, headers, body, timeout: false });
+        // A push is over once GitHub's whole answer, each ref's status, is in.
+        answer = pushed ? await res.arrayBuffer() : res.body;
+      } finally {
+        // GitHub may still refuse a ref (a push that is not a fast-forward): what
+        // hears of it checks GitHub again before it counts on it (taskWorkers.ts's done check).
+        ended?.(res?.ok ? moves : []);
+      }
       // Without an installation token GitHub sees an anonymous request, which only a public repo answers.
       if (!token && (res.status === 401 || res.status === 404)) return text(403, notInstalled(fullName).message);
-      // GitHub may still refuse a ref (a push that is not a fast-forward): what
-      // hears of it checks GitHub again before it counts on it (taskWorkers.ts's done check).
-      if (pushed && res.ok) {
-        const moved = pushed.refs.flatMap(({ ref, sha }) => (ref.startsWith("refs/heads/") ? [{ branch: ref.slice("refs/heads/".length), sha }] : []));
-        onPushed(fullName, moved);
-      }
       // Only what git reads: GitHub's auth challenge must not reach git, and the body is already decoded.
       const forwarded = new Headers();
       for (const name of ["content-type", "cache-control"]) {
         const value = res.headers.get(name);
         if (value !== null) forwarded.set(name, value);
       }
-      return new Response(res.body, { status: res.status, headers: forwarded });
+      return new Response(answer, { status: res.status, headers: forwarded });
     },
 
     // Pull request `number` of the repo as `userId` may read it: its head now,

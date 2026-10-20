@@ -64,11 +64,13 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   rebuildTable(db, "task_workers", create, "'kept'");
   // Columns added after the table first shipped. `kind` is engineer or verifier.
   // A verifier's `sha` is the commit it checks and `branch` the pull request's
-  // branch (in `pull_request`) then; `verdict` is the result it ended with, once it has one.
+  // branch (in `pull_request`) then, at that branch's push `revision`
+  // (projectStore.ts branch_pushes); `verdict` is the result it ended with, once it has one.
   addColumn(db, "task_workers", "kind", "TEXT NOT NULL DEFAULT 'engineer'");
   addColumn(db, "task_workers", "sha", "TEXT");
   addColumn(db, "task_workers", "branch", "TEXT");
   addColumn(db, "task_workers", "verdict", "TEXT");
+  addColumn(db, "task_workers", "revision", "INTEGER NOT NULL DEFAULT 0");
   // The worker's turn as control stores it: its transcript.
   db.run(`CREATE TABLE IF NOT EXISTS task_worker_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -201,7 +203,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         prompt: string;
         token: string;
         max: number;
-        verifies?: { pullRequest: string; sha: string; branch: string };
+        verifies?: { pullRequest: string; sha: string; branch: string; revision: number };
       }): { worker: TaskWorker; launched: boolean } | { busy: TaskWorker } => {
         const existing = db
           .query<{ id: string }, [string, string]>("SELECT id FROM task_workers WHERE project_id = ?1 AND creation_id = ?2")
@@ -221,8 +223,8 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         const { verifies } = launch;
         db.query(
           `INSERT INTO task_workers (id, project_id, task_number, creation_id, user_id, turn_id, prompt, token_hash, state, computer, created_at, updated_at,
-             kind, pull_request, sha, branch)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'wanted', ?10, ?10, ?11, ?12, ?13, ?14)`,
+             kind, pull_request, sha, branch, revision)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'wanted', ?10, ?10, ?11, ?12, ?13, ?14, ?15)`,
         ).run(
           id,
           launch.projectId,
@@ -238,6 +240,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
           verifies?.pullRequest ?? null,
           verifies?.sha ?? null,
           verifies?.branch ?? null,
+          verifies?.revision ?? 0,
         );
         const created = worker(id);
         if (!created) throw new Error("task worker insert returned no row");
@@ -337,9 +340,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       return stored;
     }),
 
-    // Records a verifier's verdict, the first only: false when it has one.
-    setVerdict(workerId: TaskWorkerId, verdict: VerdictResult): boolean {
-      return db.query("UPDATE task_workers SET verdict = ?2 WHERE id = ?1 AND verdict IS NULL").run(workerId, verdict).changes > 0;
+    // Records a verifier's verdict, the first only: the push revision of its
+    // branch when control pinned its commit, or null when it has one.
+    setVerdict(workerId: TaskWorkerId, verdict: VerdictResult): number | null {
+      return (
+        db
+          .query<{ revision: number }, [string, string]>("UPDATE task_workers SET verdict = ?2 WHERE id = ?1 AND verdict IS NULL RETURNING revision")
+          .get(workerId, verdict)?.revision ?? null
+      );
     },
 
     // Ends the worker's turn from control's side (it was stopped, or lost the

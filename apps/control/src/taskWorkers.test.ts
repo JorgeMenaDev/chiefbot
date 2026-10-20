@@ -1174,6 +1174,7 @@ test("a verifier checks the task's pull request at the head control pinned, on a
   expect(brief).toContain(`Pull request: ${url}\nCommit: ${head}\nFix a typo\nTeh becomes The in the README.`);
   expect(brief).toContain("1. Start the app: run `bun run dev` in the background in the clone, and wait until http://localhost:3000 answers.");
   expect(brief).toContain("report_verdict");
+  expect(brief).toContain("Keep secrets out of your screenshots: no environment pages, and no developer tools that show tokens.");
   expect(push.exitCode).not.toBe(0);
   expect(push.output).toContain("A verifier may only fetch octo-org/shop.");
   expect(github.pushes).toEqual([]);
@@ -1382,6 +1383,123 @@ test("a member marks a task done in the app over the done rule, and the task rec
   const again = await owner.api("POST", `/projects/${project.id}/tasks/1/done`);
   expect([again.status, ApiError.parse(await again.json()).error]).toEqual([409, "task_closed"]);
   expect((await owner.api("POST", `/projects/${project.id}/tasks/9/done`)).status).toBe(404);
+});
+
+test("the project agent cannot mark a task done while a push through Chiefbot moves its pull request: one that lands while control reads the head on GitHub, or one in flight", async () => {
+  const control = await gitProject();
+  const { owner, project, copilot, github } = control;
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
+    else if (isWorker(prompt)) {
+      const clone = copilot.workingDirectories.at(-1) ?? "";
+      await runtime.shell(`cd ${clone} && git checkout -q fix-typo && git commit -q --allow-empty -m one && git push -q origin fix-typo`);
+      await runtime.shell(`cd ${clone} && git commit -q --allow-empty -m two && git push -q origin fix-typo`);
+    }
+    yield sdk.idle();
+  });
+  await pullRequestOnTask(control, tool);
+  const verify = async (creationId: string) => {
+    const { id } = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId })).body);
+    await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  };
+  await verify("v-1");
+  // Another task's engineer pushes twice to the pull request's branch, each push approved by the test.
+  await tool({ tool: "create_task", title: "Tidy the README" });
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-1" })).body);
+  const nextPush = async (after?: string) => {
+    const asked = await workerWhen(owner, project, engineer.id, ({ pendingApprovals }) => (pendingApprovals[0]?.approvalId ?? after) !== after);
+    return asked.pendingApprovals[0]?.approvalId ?? "";
+  };
+  const approve = (approvalId: string) => owner.api("POST", `/projects/${project.id}/workers/${engineer.id}/approvals/${approvalId}`, { approved: true });
+  const done = () => tool({ tool: "update_task", number: 1, status: "done" });
+  const moved = {
+    status: 400,
+    body: { error: "invalid_tool_call", message: "Task #1 is not done: its pull request moved while Chiefbot checked it. Verify it again. A member can still mark it done in the app." },
+  };
+  const first = await nextPush();
+  const reads = github.holdPullRequests();
+  const landing = done();
+  await eventually(() => reads.held() === 1);
+  await approve(first);
+  // The engineer asks for its second push once the first has landed.
+  const second = await nextPush(first);
+  reads.release();
+
+  expect(await landing).toEqual(moved);
+
+  await verify("v-2");
+  const pushes = github.holdGit();
+  await approve(second);
+  await eventually(() => pushes.held() === 1);
+
+  expect(await done()).toEqual(moved);
+
+  pushes.release();
+  await workerWhen(owner, project, engineer.id, ({ state }) => state === "finished");
+  expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]).toMatchObject({ status: "open", verification: { result: "pass", stale: true } });
+});
+
+test("a pull request linked on a done task reopens it, so done needs a PASS for it; a member can still mark it done, and a task that ended in a report stays done", async () => {
+  const control = await teamProject();
+  const { owner, project, github } = control;
+  const { tool } = await heldTurn(control);
+  const update = async (call: Record<string, unknown>) => {
+    const { status, body } = await tool({ tool: "update_task", number: 1, ...call });
+    return status === 200 ? Task.parse(body).status : body;
+  };
+  expect(await update({ status: "done", links: [{ kind: "url", url: "https://example.com/report" }] })).toBe("done");
+  expect(await update({ detail: "The README says Teh." })).toBe("done");
+  github.commit("octo-org/shop", { "README.md": "# Shop\nThe shop.\n" }, "fix-typo");
+  const url = github.openPullRequest("octo-org/shop", { head: "fix-typo", title: "Fix a typo" });
+  const link = [{ kind: "pull-request", url }];
+  const refusal = {
+    error: "invalid_tool_call",
+    message: `Task #1 needs a verifier's PASS for ${url} at its head before it is done: dispatch_verifier first. A member can still mark it done in the app.`,
+  };
+
+  expect(await update({ status: "done", links: link })).toEqual(refusal);
+  expect(await update({ links: link })).toBe("in_progress");
+  expect(await update({ status: "done" })).toEqual(refusal);
+  const res = await owner.api("POST", `/projects/${project.id}/tasks/1/done`);
+  expect(Task.parse(await res.json())).toMatchObject({ status: "done", overrides: [{ by: "octo-user", verification: null }] });
+});
+
+test("a verifier's PASS is stale when a push through Chiefbot moved the pull request's branch after control pinned its commit", async () => {
+  const control = await gitProject("commands:\n  test: bun test\nworkers:\n  max: 1\n");
+  const { owner, project, copilot } = control;
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
+    else if (isWorker(prompt)) {
+      const clone = copilot.workingDirectories.at(-1) ?? "";
+      await runtime.shell(`cd ${clone} && git checkout -q fix-typo && git commit -q --allow-empty -m more && git push -q origin fix-typo`);
+    }
+    yield sdk.idle();
+  });
+  const { head } = await pullRequestOnTask(control, tool);
+  await tool({ tool: "create_task", title: "Tidy the README" });
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 2, creationId: "c-1" })).body);
+  const [push] = (await workerWhen(owner, project, engineer.id, ({ pendingApprovals }) => pendingApprovals.length > 0)).pendingApprovals;
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+  expect(verifier).toMatchObject({ state: "queued", sha: head });
+
+  await owner.api("POST", `/projects/${project.id}/workers/${engineer.id}/approvals/${push?.approvalId}`, { approved: true });
+
+  expect(await workerWhen(owner, project, verifier.id, ({ verdict }) => verdict !== null)).toMatchObject({ verdict: "pass", sha: head });
+  expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification).toMatchObject({ result: "pass", sha: head, stale: true });
+});
+
+test("a verifier that follows the repo's verify skill still gets the project's dev command and URL", async () => {
+  const control = await teamProject({}, "verify: check-ui\ncommands:\n  dev: bun run dev\n  devUrl: http://localhost:3000\n");
+  const { copilot } = control;
+  const { tool } = await heldTurn(control);
+  await pullRequestOnTask(control, tool);
+
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  await eventually(() => copilot.sends.some(({ sessionId }) => sessionId === verifier.id));
+  const brief = copilot.sends.find(({ sessionId }) => sessionId === verifier.id)?.prompt ?? "";
+  expect(brief).toContain("Check it as the repo's `check-ui` skill says: it is among your skills.");
+  expect(brief).toContain("Start the app with `bun run dev` in the clone. It answers at http://localhost:3000.");
 });
 
 test("a verifier takes one of the project's workers.max places, as an engineer does: beyond it, it is queued, and checks its pinned commit once one ends", async () => {

@@ -124,6 +124,10 @@ export function startFakeGitHub({
   // While set (holdGit), git's requests wait for it; `held` counts those that waited.
   let gitGate: Promise<void> | null = null;
   let held = 0;
+  // While set (holdPullRequests), a pull request's read waits for it once it has
+  // read the head; `pullsHeld` counts those that waited.
+  let pullGate: Promise<void> | null = null;
+  let pullsHeld = 0;
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
   // Each repo: its id (as GitHub numbers repos), whether the app is installed on it, and who may do what.
   const repos = new Map<string, { id: number; installed: boolean; access: Record<string, FakeRepoAccess> }>();
@@ -329,12 +333,16 @@ export function startFakeGitHub({
       // One pull request, its head as its branch is now. Like GitHub, 404 for a
       // repo the token cannot read.
       "/repos/:owner/:repo/pulls/:number": {
-        GET: (req) => {
+        GET: async (req) => {
           const repository = `${req.params.owner}/${req.params.repo}`;
           const pr = pullRequests.find((candidate) => candidate.repository === repository && candidate.number === Number(req.params.number));
           if (!pr || !reader(bearerToken(req), repository)) return Response.json({ message: "Not Found" }, { status: 404 });
           const { number, title, body, head, base } = pr;
           const sha = git(bareRepo(repository), ["rev-parse", `refs/heads/${head}`]);
+          if (pullGate) {
+            pullsHeld++;
+            await pullGate;
+          }
           return Response.json({ number, html_url: pullRequestUrl(pr), state: "open", title, body, head: { ref: head, sha }, base: { ref: base } });
         },
       },
@@ -485,6 +493,20 @@ export function startFakeGitHub({
         held: () => held,
         release: () => {
           gitGate = null;
+          release();
+        },
+      };
+    },
+    // Holds each pull request's answer, the head it read, until `release` runs:
+    // its branch may move meanwhile, as on a slow GitHub. `held` counts the reads that waited.
+    holdPullRequests() {
+      let release = () => {};
+      pullGate = new Promise((resolve) => (release = resolve));
+      pullsHeld = 0;
+      return {
+        held: () => pullsHeld,
+        release: () => {
+          pullGate = null;
           release();
         },
       };

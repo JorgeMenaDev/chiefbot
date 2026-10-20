@@ -268,11 +268,13 @@ export const Task = z.object({
 });
 export type Task = z.infer<typeof Task>;
 
+// The URL of the latest pull request among `links`: the one a verifier checks.
+export const latestPullRequest = (links: TaskLink[]) => links.flatMap((link) => (link.kind === "pull-request" ? [link.url] : [])).at(-1);
+
 // The task's verification when it is about its latest pull request, else null:
 // a verdict on an older one says nothing of the newest.
 export function currentVerification({ links, verification }: Pick<Task, "links" | "verification">): Verification | null {
-  const latest = links.flatMap((link) => (link.kind === "pull-request" ? [link.url] : [])).at(-1);
-  return verification !== null && verification.pullRequest === latest ? verification : null;
+  return verification !== null && verification.pullRequest === latestPullRequest(links) ? verification : null;
 }
 
 // What control answers a verifier's verdict: where its report is in the project's context.

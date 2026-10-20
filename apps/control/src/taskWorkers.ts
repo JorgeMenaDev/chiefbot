@@ -6,6 +6,7 @@ import {
   ContextImagePath,
   ContextPath,
   isPng,
+  latestPullRequest,
   PullRequestArgs,
   SCREENSHOT_BYTES_MAX,
   VerdictReport,
@@ -43,6 +44,7 @@ import type { PullRequestHead } from "./github.ts";
 import type { repoAccess, RepoAgent, RepoReader } from "./repos.ts";
 import { viewerBytes } from "./rfbViewer.ts";
 import { screenTunnel } from "./screens.ts";
+import type { VerifiedHead } from "./projectStore.ts";
 import type { openStore } from "./store.ts";
 import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
 import { queue } from "./queue.ts";
@@ -130,8 +132,11 @@ export type TaskWorkerHostOptions = {
 // pushes and pull requests. It ends with a verdict (report_verdict), which
 // control keeps with its report and screenshots in the project's context and
 // sets on the task (recordVerdict), BLOCKED when it ends without one
-// (noVerdict). A push through the git proxy, or GitHub's head when the
-// coordinator marks the task done (doneRefusal), makes a verdict stale.
+// (noVerdict). A push through the git proxy since its commit was pinned, or
+// GitHub's head when the coordinator marks the task done (doneCheck), makes a
+// verdict stale. Each push through the proxy bumps its branch's push revision
+// as it starts and ends (projectStore.ts branch_pushes), so a check that reads
+// GitHub can tell whether a push came in between.
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's
@@ -481,11 +486,14 @@ export function taskWorkerHost({
 
   // The verifier's brief, its first message: the task, the pull request at the
   // commit it checks, and how to check it: the repo's verify skill, or the
-  // default playbook for a web app when the project sets none. It ends with report_verdict.
+  // default playbook for a web app when the project sets none. The skill gets
+  // the project's dev command and URL too: the app's settings may set them,
+  // which the repo does not show. It ends with report_verdict.
   function verifierPrompt({ name, repo, config }: Project, task: Task, pr: PullRequestHead & { url: string }, instructions: string) {
     const { dev, devUrl } = config.commands;
+    const app = [...(dev ? [`Start the app with \`${dev}\` in the clone.`] : []), ...(devUrl ? [`It answers at ${devUrl}.`] : [])];
     const playbook = config.verify
-      ? [`Check it as the repo's \`${config.verify}\` skill says: it is among your skills.`]
+      ? [`Check it as the repo's \`${config.verify}\` skill says: it is among your skills.`, ...(app.length > 0 ? [app.join(" ")] : [])]
       : dev && devUrl
         ? [
             "The repo sets no verify skill, so check it this way:",
@@ -508,6 +516,7 @@ export function taskWorkerHost({
       "",
       "Chiefbot cloned the repo, checked that commit out and ran the repo's setup.",
       ...playbook,
+      "Keep secrets out of your screenshots: no environment pages, and no developer tools that show tokens.",
       "",
       "Change nothing in the repo, and push nothing: Chiefbot refuses a verifier's pushes and pull requests.",
       "End by calling report_verdict once, with your screenshots: pass when the change does what the task asks; issues when it does not, naming each issue; blocked when you could not check it, saying why.",
@@ -674,8 +683,9 @@ export function taskWorkerHost({
           "",
         ].join("\n"),
       );
-      if (!workers.setVerdict(workerId, verdict.result)) return null;
-      projects.setVerification(projectId, taskNumber, { result: verdict.result, sha, stale: false, summary: verdict.summary, pullRequest, branch, evidence, worker: workerId, at });
+      const revision = workers.setVerdict(workerId, verdict.result);
+      if (revision === null) return null;
+      projects.setVerdict(projectId, taskNumber, { result: verdict.result, sha, summary: verdict.summary, pullRequest, branch, evidence, worker: workerId, at }, revision);
       publishTasks(projectId);
       publish(projectId);
       return evidence;
@@ -726,7 +736,9 @@ export function taskWorkerHost({
   }
 
   // Starts a verifier on the task's pull request (the one named, else the latest
-  // the task links), pinned to its head now, read on GitHub as `asker` may.
+  // the task links), pinned to its head now, read on GitHub as `asker` may, and
+  // to its branch's push revision read before that head (a first read names the
+  // branch): a push through Chiefbot after it makes its verdict stale.
   // Like an engineer, it takes one of the project's workers.max places, and
   // waits while another worker of the task is unended.
   async function dispatchVerifier(project: Project, asker: ProjectMember, call: Extract<WorkerToolCall, { tool: "dispatch_verifier" }>) {
@@ -739,6 +751,9 @@ export function taskWorkerHost({
     if (!linked.includes(url)) return refused(`Task #${task.number} does not link ${url}: add it with update_task first.`);
     const number = pullRequestNumber(url, project.repo);
     if (number === null) return refused(`${url} is not a pull request of ${project.repo}.`);
+    const first = await pullRequestHead(asker.userId, project.repo, number);
+    if ("error" in first) return refused(`Couldn't read ${url} on GitHub: ${first.message}`, 502);
+    const revision = projects.pushRevision(project.repo, first.branch);
     const head = await pullRequestHead(asker.userId, project.repo, number);
     if ("error" in head) return refused(`Couldn't read ${url} on GitHub: ${head.message}`, 502);
     const token = newToken();
@@ -750,7 +765,7 @@ export function taskWorkerHost({
       prompt: verifierPrompt(project, task, { ...head, url }, call.instructions),
       token,
       max: project.config.workers.max,
-      verifies: { pullRequest: url, sha: head.sha, branch: head.branch },
+      verifies: { pullRequest: url, sha: head.sha, branch: head.branch, revision },
     });
     return launched(project, task, record, token);
   }
@@ -813,38 +828,42 @@ export function taskWorkerHost({
     // PASS for the head of its pull request (its latest, `links` added), read
     // again on GitHub as `asker` may, so a push from anywhere counts: the
     // verification's `stale` follows what it finds. A task that links no pull
-    // request has nothing to verify, and one already done stays so. Null when
-    // the task may be done, else why not. A member may mark it done over this
-    // in the app (projects.ts).
-    async doneRefusal(project: Project, asker: ProjectMember, number: number, links: TaskLink[] = []): Promise<string | null> {
+    // request has nothing to verify, and one already done stays so unless it
+    // gets a new pull request. Answers why not (`refused`), or what the done
+    // write must find unchanged (`verified`, projectStore.ts completeTask): the
+    // head GitHub showed and its branch's push revision, read before GitHub.
+    // A member may mark it done over this in the app (projects.ts).
+    async doneCheck(project: Project, asker: ProjectMember, number: number, links: TaskLink[] = []): Promise<{ refused: string } | { verified?: VerifiedHead }> {
       const task = projects.tasks(project.id).find((candidate) => candidate.number === number);
-      const url = [...(task?.links ?? []), ...links].flatMap((link) => (link.kind === "pull-request" ? [link.url] : [])).at(-1);
-      if (!task || task.status === "done" || url === undefined) return null;
-      const why = await (async () => {
-        const { verification } = task;
-        if (verification?.pullRequest !== url) return `Task #${number} needs a verifier's PASS for ${url} at its head before it is done: dispatch_verifier first.`;
-        const at = verification.sha.slice(0, 7);
-        if (verification.result === "issues") return `Task #${number} is not done: its verifier found issues in ${url} at ${at}. ${verification.summary}`;
-        if (verification.result === "blocked") return `Task #${number} is not done: its verifier could not check ${url} at ${at}. ${verification.summary}`;
-        const prNumber = pullRequestNumber(url, project.repo);
-        const head = prNumber === null ? null : await pullRequestHead(asker.userId, project.repo, prNumber);
-        if (head === null || "error" in head) {
-          return `Task #${number} is not done: Chiefbot couldn't read ${url} on GitHub to check that its PASS is for its head${head ? ` (${head.message})` : ""}. Try again.`;
-        }
-        const stale = head.sha !== verification.sha;
-        if (stale !== verification.stale) {
-          projects.setVerification(project.id, number, { ...verification, stale });
-          publishTasks(project.id);
-        }
-        return stale ? `Task #${number} is not done: its PASS is for ${at}, and ${url} has moved to ${head.sha.slice(0, 7)} since. Dispatch a verifier again.` : null;
-      })();
-      return why === null ? null : `${why} A member can still mark it done in the app.`;
+      const url = latestPullRequest([...(task?.links ?? []), ...links]);
+      if (!task || url === undefined || (task.status === "done" && url === latestPullRequest(task.links))) return {};
+      const refused = (why: string) => ({ refused: notDone(why) });
+      const { verification } = task;
+      if (verification?.pullRequest !== url) return refused(`Task #${number} needs a verifier's PASS for ${url} at its head before it is done: dispatch_verifier first.`);
+      const at = verification.sha.slice(0, 7);
+      if (verification.result === "issues") return refused(`Task #${number} is not done: its verifier found issues in ${url} at ${at}. ${verification.summary}`);
+      if (verification.result === "blocked") return refused(`Task #${number} is not done: its verifier could not check ${url} at ${at}. ${verification.summary}`);
+      const revision = projects.pushRevision(project.repo, verification.branch);
+      if (revision % 2 === 1) return { refused: movedWhileChecking(number) };
+      const prNumber = pullRequestNumber(url, project.repo);
+      const head = prNumber === null ? null : await pullRequestHead(asker.userId, project.repo, prNumber);
+      if (head === null || "error" in head) {
+        return refused(`Task #${number} is not done: Chiefbot couldn't read ${url} on GitHub to check that its PASS is for its head${head ? ` (${head.message})` : ""}. Try again.`);
+      }
+      const stale = head.sha !== verification.sha;
+      if (projects.setStale(project.id, number, verification.worker, stale, revision)) publishTasks(project.id);
+      if (stale) return refused(`Task #${number} is not done: its PASS is for ${at}, and ${url} has moved to ${head.sha.slice(0, 7)} since. Dispatch a verifier again.`);
+      return { verified: { pullRequest: url, sha: head.sha, revision } };
     },
 
-    // A push through the git proxy moved branches of `repo` (repos.ts): each
-    // verdict on one of them, at another commit, is stale.
-    pushed(repo: string, moved: Array<{ branch: string; sha: string }>) {
-      for (const projectId of projects.staleOnPush(repo, moved)) publishTasks(projectId);
+    // A push through the git proxy is about to move `branches` of `repo`
+    // (repos.ts): their push revisions count it in flight until it ends. Once it
+    // has, each verdict on a branch it moved, at another commit, is stale.
+    pushing(repo: string, branches: string[]) {
+      projects.pushStarted(repo, branches);
+      return (moved: Array<{ branch: string; sha: string }>) => {
+        for (const projectId of projects.pushEnded(repo, branches, moved)) publishTasks(projectId);
+      };
     },
 
     // For the git proxy: the worker's turn as a repo agent; a verifier's only fetches its project's repo.
@@ -1058,6 +1077,13 @@ export function taskWorkerHost({
     },
   };
 }
+
+// Why the project agent may not mark a task done (the done rule), as it reads it.
+const notDone = (why: string) => `${why} A member can still mark it done in the app.`;
+
+// The done rule's answer when task `number`'s pull request or its verdict moved while control checked it.
+export const movedWhileChecking = (number: number) =>
+  notDone(`Task #${number} is not done: its pull request moved while Chiefbot checked it. Verify it again.`);
 
 // Why a worker whose computer cannot do its kind of task (no ENGINEER_SETUP, or a
 // verifier's VERIFIER, in its hello) is blocked.

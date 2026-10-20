@@ -322,7 +322,7 @@ export function startControl({
       }
       return turn?.agent === "task-worker" ? taskWorkers.repoAgentOf(turn) : null;
     },
-    onPushed: (fullName, moved) => taskWorkers.pushed(fullName, moved),
+    onPush: (fullName, branches) => taskWorkers.pushing(fullName, branches),
   });
 
   // Who pays for each agent run's Copilot (copilotIdentity.ts).

@@ -44,7 +44,7 @@ import type { repoAccess } from "./repos.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
-import type { taskWorkerHost } from "./taskWorkers.ts";
+import { movedWhileChecking, type taskWorkerHost } from "./taskWorkers.ts";
 import { coordinatorTurn, heldTurn, type CoordinatorTurn } from "./turnKeys.ts";
 
 // What a project WebSocket is bound to: a project's coordinator, or one
@@ -134,7 +134,7 @@ const failure = (error: unknown) => {
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
 //   POST   /projects/:id/tasks/:number/done  → Task: the member marks it done, over the done rule
-//                                    (taskWorkers.ts doneRefusal), recorded in its `overrides`
+//                                    (taskWorkers.ts doneCheck), recorded in its `overrides`
 //                                    (404 not_found; 409 task_closed when it is done or abandoned)
 //   GET    /projects/:id/context     → ContextFile[]: the shared context's files
 //   GET    /projects/:id/context/file  ?path=<ContextPath> → ContextFileText (400 invalid_path; 404 not_found)
@@ -330,9 +330,13 @@ export function projectHost({
       case "update_task": {
         const owner = ownerLogin(call.owner);
         if (!owner) return notMember(String(call.owner));
-        const refusal = call.status === "done" ? await workers.doneRefusal(project, asker, call.number, call.links) : null;
-        if (refusal !== null) return apiError(400, "invalid_tool_call", refusal);
-        const task = projects.updateTask(projectId, { ...call, owner: owner.login });
+        const { status, ...change } = { ...call, owner: owner.login };
+        // Done goes through the done rule: checked against GitHub, then written
+        // only if what it checked is unchanged (projectStore.ts completeTask).
+        const check = status === "done" ? await workers.doneCheck(project, asker, call.number, call.links) : null;
+        if (check && "refused" in check) return apiError(400, "invalid_tool_call", check.refused);
+        const task = status === "done" ? projects.completeTask(projectId, change, check?.verified) : projects.updateTask(projectId, { ...change, status });
+        if (task === "moved") return apiError(400, "invalid_tool_call", movedWhileChecking(call.number));
         if (!task) return apiError(404, "not_found", `No task #${call.number} in this project`);
         publishTasks(projectId);
         if (task.status === "done" || task.status === "abandoned") workers.taskClosed(projectId, task.number);
