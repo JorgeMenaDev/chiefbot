@@ -194,10 +194,12 @@ Needs Docker running. Makes no Copilot calls.
 Needs Docker running. Makes no Copilot calls.
 
 1. Run `bun run computer:build`, then `bun run dev`, sign in and create a bot.
-2. When the bot is **online**, the **Computer** tab of its panel (right of its chat) shows its screen: Chromium on a 1280×800 desktop. The pane says **Watching. The bot drives.** Clicks and keys in the pane do nothing.
+2. While its computer starts, the **Computer** tab of its panel (right of its chat) shows the bot's face looking around under **Waking up…**. When the bot is **online**, the tab shows its screen: Chromium on a 1280×800 desktop. The pill under it says **Watching | Take control**. Clicks and keys in the pane do nothing.
 3. `docker ps` shows no published port for the bot's container.
-4. Click **Take over**. The pane turns green and says **You have control. The bot waits.** Click Chromium's address bar in the pane and type. The text appears. The chat box says **Hand the screen back to message …** and will not send.
-5. Click **Hand back**. Typing in the pane does nothing again, and the chat sends.
+4. Click **Take control**. The screen gets a green ring and the pill says **You're in control | Stop**. Click Chromium's address bar in the pane and type. The text appears. The chat box says **Hand the screen back to message …** and will not send.
+5. Click **Stop**. Typing in the pane does nothing again, and the chat sends.
+6. Click the expand button beside the pill. The screen fills the window, with the same pill under it, and stays connected. Press Esc: it goes back to the panel. Open it again, click **Take control**, click into the screen and press Esc: Esc goes to the bot's computer, and full screen stays. Click the collapse button at the top right to leave.
+7. Stop the bot on **Details**. The **Computer** tab shows its face with shut eyes, **Going to sleep…**, then **Asleep**. Click **Wake**: it shows **Waking up…**, then the screen.
 
 Take-over lives in control's memory, so restarting control hands the screen back to the agent. A chat turn already running when you take over pauses at its next tool call and goes on after hand-back. A `computer` call already running stops before its next action.
 

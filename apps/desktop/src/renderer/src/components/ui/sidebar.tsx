@@ -20,7 +20,7 @@ export function useSidebarOpen() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.repeat || event.shiftKey || event.altKey) return;
       if ((isMac ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === "b") {
-        // Claimed here, before anything else sees it: a live screen under Take over would send it on.
+        // Claimed here, before anything else sees it: a live screen under Take control would send it on.
         event.preventDefault();
         event.stopPropagation();
         toggle();
