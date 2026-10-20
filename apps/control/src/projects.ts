@@ -1,6 +1,7 @@
 import {
   AUTO_MODEL,
   AnswerApprovalRequest,
+  ContextImagePath,
   ContextPath,
   CoordinatorToControl,
   CoordinatorToolCall,
@@ -43,7 +44,7 @@ import type { repoAccess } from "./repos.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 import type { openStore } from "./store.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
-import type { taskWorkerHost } from "./taskWorkers.ts";
+import { movedWhileChecking, type taskWorkerHost } from "./taskWorkers.ts";
 import { coordinatorTurn, heldTurn, type CoordinatorTurn } from "./turnKeys.ts";
 
 // What a project WebSocket is bound to: a project's coordinator, or one
@@ -132,8 +133,12 @@ const failure = (error: unknown) => {
 //   DELETE /projects/:id/secrets/:name  → 204: its value goes
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
+//   POST   /projects/:id/tasks/:number/done  → Task: the member marks it done, over the done rule
+//                                    (taskWorkers.ts doneCheck), recorded in its `overrides`
+//                                    (404 not_found; 409 task_closed when it is done or abandoned)
 //   GET    /projects/:id/context     → ContextFile[]: the shared context's files
 //   GET    /projects/:id/context/file  ?path=<ContextPath> → ContextFileText (400 invalid_path; 404 not_found)
+//   GET    /projects/:id/context/image ?path=<ContextImagePath> → the PNG's bytes (400 invalid_path; 404 not_found)
 //   POST   /projects/:id/approvals/:approvalId  body AnswerApprovalRequest → 204: the member answers
 //                                    what control asked in their running turn (409 not_pending when it
 //                                    is answered, unknown, another member's or its turn ended)
@@ -325,7 +330,13 @@ export function projectHost({
       case "update_task": {
         const owner = ownerLogin(call.owner);
         if (!owner) return notMember(String(call.owner));
-        const task = projects.updateTask(projectId, { ...call, owner: owner.login });
+        const { status, ...change } = { ...call, owner: owner.login };
+        // Done goes through the done rule: checked against GitHub, then written
+        // only if what it checked is unchanged (projectStore.ts completeTask).
+        const check = status === "done" ? await workers.doneCheck(project, asker, call.number, call.links) : null;
+        if (check && "refused" in check) return apiError(400, "invalid_tool_call", check.refused);
+        const task = status === "done" ? projects.completeTask(projectId, change, check?.verified) : projects.updateTask(projectId, { ...change, status });
+        if (task === "moved") return apiError(400, "invalid_tool_call", movedWhileChecking(call.number));
         if (!task) return apiError(404, "not_found", `No task #${call.number} in this project`);
         publishTasks(projectId);
         if (task.status === "done" || task.status === "abandoned") workers.taskClosed(projectId, task.number);
@@ -342,6 +353,7 @@ export function projectHost({
       case "write_context":
         return Response.json((await context.write(projectId, call.path, call.content)) satisfies ContextFile);
       case "dispatch_worker":
+      case "dispatch_verifier":
       case "worker_status":
       case "worker_transcript":
       case "stop_worker":
@@ -475,6 +487,17 @@ export function projectHost({
         Response.json(projects.tasks(project.id) satisfies Task[]),
       ),
     },
+    "/projects/:id/tasks/:number/done": {
+      POST: member((user, { project }, req: Bun.BunRequest<"/projects/:id/tasks/:number/done">) => {
+        const number = Number(req.params.number);
+        const task = Number.isInteger(number) ? projects.markDone(project.id, number, user.login) : null;
+        if (task === null) return apiError(404, "not_found");
+        if (task === "closed") return apiError(409, "task_closed", `Task #${number} is already done or abandoned.`);
+        publishTasks(project.id);
+        workers.taskClosed(project.id, number);
+        return Response.json(task satisfies Task);
+      }),
+    },
     "/projects/:id/context": {
       GET: member(async (_user, { project }, _req: Bun.BunRequest<"/projects/:id/context">) =>
         Response.json((await context.list(project.id)) satisfies ContextFile[]),
@@ -487,6 +510,15 @@ export function projectHost({
         const content = await context.read(project.id, path.data);
         if (content === null) return apiError(404, "not_found");
         return Response.json({ path: path.data, content } satisfies ContextFileText);
+      }),
+    },
+    "/projects/:id/context/image": {
+      GET: member(async (_user, { project }, req: Bun.BunRequest<"/projects/:id/context/image">) => {
+        const path = ContextImagePath.safeParse(new URL(req.url).searchParams.get("path"));
+        if (!path.success) return apiError(400, "invalid_path");
+        const bytes = await context.readImage(project.id, path.data);
+        if (bytes === null) return apiError(404, "not_found");
+        return new Response(bytes, { headers: { "content-type": "image/png" } });
       }),
     },
     // The answer is stored first, then wakes the call control holds.

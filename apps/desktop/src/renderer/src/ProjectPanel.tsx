@@ -1,4 +1,4 @@
-import { engineerRuns, ProjectTasks, ProjectWorkers, Task, TaskWorker, type Project, type ProjectId, type TaskWorkerId } from "@chiefbot/contracts";
+import { engineerRuns, ProjectTasks, ProjectWorkers, Task, TaskWorker, type ContextPath, type Project, type ProjectId, type TaskWorkerId } from "@chiefbot/contracts";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { Engineers } from "./Engineers.tsx";
@@ -37,14 +37,16 @@ function useProjectWork(projectId: ProjectId) {
 type PanelTab = "tasks" | "engineers" | "context";
 
 // The work panel right of a project's conversation, in three tabs: Tasks (the
-// ledger, with what each engineer waits on), Engineers (each engineer's screen
-// and transcript) and Context (the shared notes). Open on a task's engineer
-// switches to Engineers with that engineer open. Closed (`hidden`), it stays
-// mounted, so an engineer's screen stays connected.
+// ledger, with what each engineer waits on), Engineers (each engineer's and
+// verifier's screen and transcript) and Context (the shared notes). Open on a
+// task's engineer switches to Engineers with that engineer open, and a task's
+// verification report to Context with that file open. Closed (`hidden`), it
+// stays mounted, so an engineer's screen stays connected.
 export function ProjectPanel({ project, login, hidden, onClose }: { project: Project; login: string; hidden: boolean; onClose: () => void }) {
   const { tasks, workers } = useProjectWork(project.id);
   const [tab, setTab] = useState<PanelTab>("tasks");
   const [watching, setWatching] = useState<TaskWorkerId | null>(null);
+  const [reading, setReading] = useState<ContextPath | null>(null);
   const ids = useTabIds<PanelTab>();
   const open = tasks.filter(({ status }) => status !== "done" && status !== "abandoned").length;
   const running = workers.filter(({ state }) => engineerRuns(state)).length;
@@ -73,13 +75,17 @@ export function ProjectPanel({ project, login, hidden, onClose }: { project: Pro
             setWatching(workerId);
             setTab("engineers");
           }}
+          onEvidence={(path) => {
+            setReading(path);
+            setTab("context");
+          }}
         />
       </TabPanel>
       <TabPanel ids={ids} tab="engineers" value={tab} className="flex min-h-0 flex-1 flex-col">
         <Engineers project={project} login={login} tasks={tasks} workers={workers} selected={watching} onSelect={setWatching} />
       </TabPanel>
       <TabPanel ids={ids} tab="context" value={tab}>
-        {tab === "context" && <ProjectContext project={project} />}
+        {tab === "context" && <ProjectContext project={project} open={reading} onOpen={setReading} />}
       </TabPanel>
     </SidePanel>
   );

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { HandoffId, ProjectId, WorkspaceId } from "./ids.ts";
 import { TaskLink, TaskStatus } from "./projects.ts";
 import { TaskWorker } from "./taskWorkers.ts";
+import { VerdictLine } from "./verification.ts";
 
 // A chief of staff is a person's own bot. It hands work to a project of one of
 // its owner's workspaces and watches it; it never manages the project's workers.
@@ -9,7 +10,8 @@ import { TaskWorker } from "./taskWorkers.ts";
 // coordinator gets as a message in the requester's own chat with it.
 
 // What the chief asked for. `title`, `status`, `question` and `links` are the
-// linked task's, read from the ledger, and `workers` its workers. `summary` is
+// linked task's, read from the ledger, and `workers` its workers. `verification`
+// is the task's verdict on its latest pull request, or null for none. `summary` is
 // the coordinator's last reply to a message of the handoff (its request or a
 // follow-up). `requestedBy` is the chief's owner's login. Times are epoch milliseconds.
 export const Handoff = z.object({
@@ -25,7 +27,8 @@ export const Handoff = z.object({
   status: TaskStatus,
   question: z.string().nullable().describe("What the project needs your owner to answer, while the task needs input"),
   links: z.array(TaskLink),
-  workers: z.array(TaskWorker.pick({ id: true, state: true, result: true, pullRequest: true })),
+  workers: z.array(TaskWorker.pick({ id: true, kind: true, state: true, result: true, pullRequest: true })),
+  verification: VerdictLine.nullable().describe("A verifier's verdict on the latest pull request: pass, issues or blocked at a commit, stale once the pull request moved"),
   summary: z.string().nullable().describe("The project coordinator's last reply about this work"),
   createdAt: z.number(),
 });

@@ -4,6 +4,7 @@ import { useState, type KeyboardEvent } from "react";
 import { Button } from "./components/ui/button.tsx";
 import { Textarea } from "./components/ui/input.tsx";
 import { cn } from "./lib/utils.ts";
+import { verdictColor, verdictText } from "./ProjectTasks.tsx";
 
 export type HandoffItem = Extract<ChatItem, { kind: "handoff" }>;
 
@@ -12,6 +13,7 @@ const stageLabel: Record<HandoffStage, string> = {
   working: "Working",
   needs_input: "Needs your input",
   pr_opened: "Pull request opened",
+  verified: "Verified",
   done: "Done",
   abandoned: "Abandoned",
 };
@@ -21,6 +23,7 @@ const stageColor: Record<HandoffStage, string> = {
   working: "text-info-foreground",
   needs_input: "text-warning-foreground",
   pr_opened: "text-info-foreground",
+  verified: "text-success-foreground",
   done: "text-success-foreground",
   abandoned: "text-muted-foreground",
 };
@@ -40,7 +43,8 @@ export const replyFor = (unanswered: ReplyToHandoffRequest | null, text: string,
 
 // Work the chief of staff handed to a project, in the chief's chat: one card per
 // handoff that control keeps up to date (ApprovalCard's look). It names the
-// project's task and where it stands, with its pull requests. While the project
+// project's task and where it stands, with its pull requests and a verifier's
+// verdict on the latest (stale once it moved). While the project
 // needs input, it shows the question and a box to answer it: the answer goes to
 // the same task in the project's chat (`onReply`). Each answer carries the
 // question it was started for: when the project asks something else by the
@@ -121,6 +125,12 @@ export function HandoffCard({
               {pullRequestName(url)}
             </a>
           ))}
+        </p>
+      )}
+      {item.verification && (
+        <p className={cn("mt-1 text-xs", verdictColor(item.verification))}>
+          {verdictText(item.verification)}
+          {item.verification.result !== "pass" && `: ${item.verification.summary}`}
         </p>
       )}
       {asking && (

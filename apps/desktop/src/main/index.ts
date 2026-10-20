@@ -12,6 +12,7 @@ import {
   ConnectorInput,
   ConnectorName,
   ConnectorTokenRequest,
+  ContextImagePath,
   ContextPath,
   CreateBotRequest,
   CreateProjectRequest,
@@ -36,6 +37,7 @@ import {
   SetProjectSecretRequest,
   SubscriptionId,
   SubscriptionInput,
+  Task,
   TaskWorkerId,
   Theme,
   UserId,
@@ -242,6 +244,8 @@ ipcMain.handle(
 );
 ipcMain.handle("projects:context", (_event, id: unknown) => projects.context(ProjectId.parse(id)));
 ipcMain.handle("projects:context-file", (_event, id: unknown, path: unknown) => projects.contextFile(ProjectId.parse(id), ContextPath.parse(path)));
+ipcMain.handle("projects:context-image", (_event, id: unknown, path: unknown) => projects.contextImage(ProjectId.parse(id), ContextImagePath.parse(path)));
+ipcMain.handle("projects:mark-done", (_event, id: unknown, number: unknown) => projects.markDone(ProjectId.parse(id), Task.shape.number.parse(number)));
 ipcMain.handle("projects:answer-chat", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   projects.answerChat(ProjectId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
 );

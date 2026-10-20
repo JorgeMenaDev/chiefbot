@@ -5,6 +5,7 @@ import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from ".
 import { ModelReport, ReasoningEffort } from "./models.ts";
 import { RepoFullName } from "./repos.ts";
 import type { TaskWorker, TaskWorkerState } from "./taskWorkers.ts";
+import { VerdictLine } from "./verification.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // A file or folder inside the repo, relative to its root: no leading slash and no "." or ".." part.
@@ -191,6 +192,16 @@ export const ContextPath = z
   .brand<"ContextPath">();
 export type ContextPath = z.infer<typeof ContextPath>;
 
+// A PNG file in the project's context, beside the Markdown that shows it (a
+// verifier's screenshots beside its report). Not a ContextPath: agents read and
+// write Markdown only, and the context's list holds only that.
+export const ContextImagePath = z
+  .string()
+  .max(200)
+  .regex(/^(?:[\w-][\w.-]*\/)*[\w-][\w.-]*\.png$/, "expected a relative PNG path like verify/shot.png")
+  .brand<"ContextImagePath">();
+export type ContextImagePath = z.infer<typeof ContextImagePath>;
+
 // One shared context file. updatedAt is epoch milliseconds.
 export const ContextFile = z.object({ path: ContextPath, size: z.number().int(), updatedAt: z.number() });
 export type ContextFile = z.infer<typeof ContextFile>;
@@ -215,10 +226,30 @@ export const TaskLink = z.discriminatedUnion("kind", [
 ]);
 export type TaskLink = z.infer<typeof TaskLink>;
 
+// A task's latest verdict from a verifier (VerdictLine), on the pull request
+// and branch it checked: its report in the project's context (`evidence`), the
+// verifier that gave it, and when. `stale` once the pull request's head moves.
+export const Verification = VerdictLine.extend({
+  pullRequest: z.url(),
+  branch: z.string(),
+  evidence: ContextPath,
+  worker: TaskWorkerId,
+  at: z.number(),
+});
+export type Verification = z.infer<typeof Verification>;
+
+// A member marked the task done in the app, which the done rule does not stop
+// (only the project agent needs a PASS for the head): who (a login), when, and
+// the verification the task had then.
+export const DoneOverride = z.object({ by: z.string(), at: z.number(), verification: Verification.nullable() });
+export type DoneOverride = z.infer<typeof DoneOverride>;
+
 // One task of a project's ledger in control: the only record of its state.
 // `number` counts from 1 per project. `owner` is the GitHub login of the member
 // who owns it, or null. `requestedBy` is the login of the member whose chat
 // created it. `question` is what it waits on while it needs input, else null.
+// `verification` is its latest verdict, or null before any; `overrides` each
+// time a member marked it done in the app.
 // Times are epoch milliseconds.
 export const Task = z.object({
   projectId: ProjectId,
@@ -230,10 +261,25 @@ export const Task = z.object({
   owner: z.string().nullable(),
   requestedBy: z.string(),
   links: z.array(TaskLink),
+  verification: Verification.nullable().default(null),
+  overrides: z.array(DoneOverride).default([]),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
 export type Task = z.infer<typeof Task>;
+
+// The URL of the latest pull request among `links`: the one a verifier checks.
+export const latestPullRequest = (links: TaskLink[]) => links.flatMap((link) => (link.kind === "pull-request" ? [link.url] : [])).at(-1);
+
+// The task's verification when it is about its latest pull request, else null:
+// a verdict on an older one says nothing of the newest.
+export function currentVerification({ links, verification }: Pick<Task, "links" | "verification">): Verification | null {
+  return verification !== null && verification.pullRequest === latestPullRequest(links) ? verification : null;
+}
+
+// What control answers a verifier's verdict: where its report is in the project's context.
+export const RecordedVerdict = z.object({ evidence: ContextPath });
+export type RecordedVerdict = z.infer<typeof RecordedVerdict>;
 
 // A project's whole task ledger: what /events sends on every change (a `tasks`
 // ClientEvent), and what Electron main hands the renderer.
@@ -304,6 +350,11 @@ export const WriteContextArgs = z.object({
   content: z.string().max(200_000).describe("The file's whole new content, in Markdown"),
 });
 
+export const DispatchVerifierArgs = z.object({
+  task: z.number().int().min(1).describe("The number of the task whose pull request the verifier checks"),
+  pullRequest: z.url().optional().describe("The task's pull request to check; left out, the latest it links"),
+  instructions: z.string().max(20_000).default("").describe("What the verifier should check beyond what the task asks"),
+});
 export const DispatchWorkerArgs = z.object({
   task: z.number().int().min(1).describe("The number of the task the worker does"),
   instructions: z.string().max(20_000).default("").describe("Anything the worker needs beyond the task's title and detail"),
@@ -332,9 +383,9 @@ export const RepoSearchArgs = z.object({
 // Body of POST /coordinator/:projectId/tools: one tool call of the running coordinator turn.
 // Its answer, as JSON: create_task and update_task → Task; list_tasks → Task[];
 // read_context → ContextFile[] without a path, { path, content } with one; write_context → ContextFile;
-// dispatch_worker, stop_worker and worker_status with a worker → TaskWorker; worker_status
+// dispatch_worker, dispatch_verifier, stop_worker and worker_status with a worker → TaskWorker; worker_status
 // without one → TaskWorker[]; worker_transcript → WorkerTranscript (taskWorkers.ts).
-// dispatch_worker's `creationId` is not the model's: the coordinator sets it from the
+// A dispatch's `creationId` is not the model's: the coordinator sets it from the
 // tool call's id, so a resent call starts no second worker.
 export const CoordinatorToolCall = z.discriminatedUnion("tool", [
   CreateTaskArgs.extend({ tool: z.literal("create_task") }),
@@ -343,6 +394,7 @@ export const CoordinatorToolCall = z.discriminatedUnion("tool", [
   ReadContextArgs.extend({ tool: z.literal("read_context") }),
   WriteContextArgs.extend({ tool: z.literal("write_context") }),
   DispatchWorkerArgs.extend({ tool: z.literal("dispatch_worker"), creationId: z.string().min(1).max(300) }),
+  DispatchVerifierArgs.extend({ tool: z.literal("dispatch_verifier"), creationId: z.string().min(1).max(300) }),
   WorkerStatusArgs.extend({ tool: z.literal("worker_status") }),
   WorkerTranscriptArgs.extend({ tool: z.literal("worker_transcript") }),
   StopWorkerArgs.extend({ tool: z.literal("stop_worker") }),

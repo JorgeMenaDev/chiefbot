@@ -318,10 +318,11 @@ export function startControl({
       if (turn?.agent === "bot") return botAgent(turn);
       if (turn?.agent === "coordinator") {
         const repo = store.projects.project(turn.projectId)?.repo;
-        return repo ? { userId: turn.userId, repo } : null;
+        return repo ? { userId: turn.userId, repo, who: "A project's coordinator" } : null;
       }
-      return turn?.agent === "task-worker" ? taskWorkers.agentOf(turn) : null;
+      return turn?.agent === "task-worker" ? taskWorkers.repoAgentOf(turn) : null;
     },
+    onPush: (fullName, branches) => taskWorkers.pushing(fullName, branches),
   });
 
   // Who pays for each agent run's Copilot (copilotIdentity.ts).
@@ -350,7 +351,9 @@ export function startControl({
     approvals,
     approvalWaitMinutes,
     clock,
+    context,
     pullRequest: repos.pullRequest,
+    pullRequestHead: repos.pullRequestHead,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     onLedgerChange: watchHandoffs,

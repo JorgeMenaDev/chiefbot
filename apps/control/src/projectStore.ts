@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import {
   AUTO_MODEL,
   effectiveConfig,
+  latestPullRequest,
   Project,
   ProjectFile,
   ProjectFileState,
@@ -16,17 +17,27 @@ import {
   type AutoFallback,
   CopilotPayer,
   type CreateTaskArgs,
+  type DoneOverride,
   type ProjectMember,
   type ReasoningEffort,
   type TaskStatus,
   type TurnEvent,
   type UpdateTaskArgs,
+  type Verification,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { z } from "zod";
 import { addColumn } from "./addColumn.ts";
 import { issuesOf, parseProjectFile } from "./projectFile.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
+
+// A change to a task: UpdateTaskArgs but its status.
+type TaskChange = Omit<z.output<typeof UpdateTaskArgs>, "status">;
+
+// What the done rule saw before the project agent marks a task done
+// (taskWorkers.ts): its pull request's head on GitHub, and the revision of the
+// pushes through Chiefbot to its branch, read before GitHub was, none in flight then.
+export type VerifiedHead = { pullRequest: string; sha: string; revision: number };
 
 // Projects, their task ledgers and their members' chats with the coordinator,
 // in control's SQLite. openStore (store.ts) calls this once the users and
@@ -79,6 +90,22 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   )`);
   // What the task waits on while it needs input; NULL otherwise.
   addColumn(db, "project_tasks", "question", "TEXT");
+  // Its latest verdict from a verifier, a Verification as JSON; NULL before any.
+  // `overrides`: a JSON array of DoneOverrides, each time a member marked it done in the app.
+  addColumn(db, "project_tasks", "verification", "TEXT");
+  addColumn(db, "project_tasks", "overrides", "TEXT NOT NULL DEFAULT '[]'");
+  // Pushes through Chiefbot's git proxy to each branch of a repo: `revision`
+  // counts those that started, `active` those still in flight. A check that
+  // reads both before the branch's head on GitHub, and after finds none active
+  // and the same revision, knows no push through Chiefbot moved the branch in
+  // between (the done rule, a verifier's pinned commit).
+  db.run(`CREATE TABLE IF NOT EXISTS branch_pushes (
+    repo TEXT NOT NULL COLLATE NOCASE,
+    branch TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    active INTEGER NOT NULL,
+    PRIMARY KEY (repo, branch)
+  )`);
   // Each member's chat with the coordinator: turns and their events, as for a
   // bot's chat. A turn waits `queued` until the project's scheduler gives it
   // the coordinator; at most one turn per project is `running`.
@@ -165,6 +192,8 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     owner: string | null;
     requested_by: string;
     links: string;
+    verification: string | null;
+    overrides: string;
     created_at: number;
     updated_at: number;
   };
@@ -179,12 +208,76 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       owner: row.owner,
       requestedBy: row.requested_by,
       links: JSON.parse(row.links),
+      verification: row.verification === null ? null : JSON.parse(row.verification),
+      overrides: JSON.parse(row.overrides),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
   const task = (projectId: ProjectId, number: number) => {
     const row = db.query<TaskRow, [string, number]>("SELECT * FROM project_tasks WHERE project_id = ?1 AND number = ?2").get(projectId, number);
     return row ? toTask(row) : null;
+  };
+
+  // The pushes through Chiefbot to the repo's branch: how many started (`revision`) and how many are in flight (`active`).
+  const pushesTo = (repo: string, branch: string) =>
+    db.query<{ revision: number; active: number }, [string, string]>("SELECT revision, active FROM branch_pushes WHERE repo = ?1 AND branch = ?2").get(repo, branch) ?? {
+      revision: 0,
+      active: 0,
+    };
+  // Whether no push through Chiefbot to the repo's branch started after push
+  // `revision`, and none is in flight.
+  const noPushSince = (repo: string, branch: string, revision: number) => {
+    const pushes = pushesTo(repo, branch);
+    return pushes.active === 0 && pushes.revision === revision;
+  };
+  // Marks stale each verification of the repo's tasks a push may have made
+  // old (`touched`). The projects whose tasks changed.
+  const staleOn = (repo: string, touched: (verification: Verification) => boolean): ProjectId[] => {
+    const verified = db
+      .query<TaskRow, [string]>(
+        `SELECT project_tasks.* FROM project_tasks JOIN projects ON projects.id = project_tasks.project_id
+         WHERE projects.repo = ?1 COLLATE NOCASE AND project_tasks.verification IS NOT NULL`,
+      )
+      .all(repo)
+      .map(toTask);
+    const changed = new Set<ProjectId>();
+    for (const { projectId, number, verification } of verified) {
+      if (!verification || verification.stale || !touched(verification)) continue;
+      db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify({ ...verification, stale: true } satisfies Verification),
+        Date.now(),
+      );
+      changed.add(projectId);
+    }
+    return [...changed];
+  };
+  const repoOf = (projectId: ProjectId) => db.query<{ repo: string }, [string]>("SELECT repo FROM projects WHERE id = ?1").get(projectId)?.repo ?? "";
+
+  // Writes `change` to the task (the fields given, `links` added), at `status`:
+  // the one given, else as it was. A done task that gets a new latest pull
+  // request reopens (in progress): done then needs a PASS for it. The task as
+  // written, or null when the project has no such task.
+  const writeTask = (projectId: ProjectId, { number, links, ...change }: TaskChange & { status?: TaskStatus | undefined }) => {
+    const current = task(projectId, number);
+    if (!current) return null;
+    const allLinks = [...current.links, ...(links ?? [])];
+    const reopened = current.status === "done" && latestPullRequest(allLinks) !== latestPullRequest(current.links);
+    const status = change.status ?? (reopened ? "in_progress" : current.status);
+    const next = {
+      title: change.title ?? current.title,
+      detail: change.detail ?? current.detail,
+      status,
+      question: status === "needs_input" ? (change.question ?? current.question) : null,
+      owner: change.owner === undefined ? current.owner : change.owner,
+      links: allLinks,
+    };
+    db.query(
+      `UPDATE project_tasks SET title = ?3, detail = ?4, status = ?5, question = ?6, owner = ?7, links = ?8, updated_at = ?9
+       WHERE project_id = ?1 AND number = ?2`,
+    ).run(projectId, number, next.title, next.detail, next.status, next.question, next.owner, JSON.stringify(next.links), Date.now());
+    return task(projectId, number);
   };
 
   // Stores one event of a turn in its member's chat.
@@ -207,6 +300,16 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     if (!row) throw new Error(`no coordinator turn ${turnId}`);
     return UserId.parse(row.user_id);
   };
+
+  // A push in flight when control stopped ended without GitHub's answer: as
+  // for any push whose outcome is unknown (pushEnded), every verdict on its branch is stale.
+  db.transaction(() => {
+    const cut = db.query<{ repo: string; branch: string }, []>("SELECT repo, branch FROM branch_pushes WHERE active > 0").all();
+    for (const { repo, branch } of cut) {
+      db.query("UPDATE branch_pushes SET active = 0, revision = revision + 1 WHERE repo = ?1 AND branch = ?2").run(repo, branch);
+      staleOn(repo, (verification) => verification.branch === branch);
+    }
+  })();
 
   return {
     // A new project named after its repo, or "exists" when the workspace already
@@ -377,25 +480,111 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return toTask(row);
     }),
 
-    // Changes the fields given and adds `links`. A question stays while the task
-    // needs input, and goes once it does not. Null when the project has no such task.
-    updateTask: db.transaction((projectId: ProjectId, { number, links, ...change }: z.output<typeof UpdateTaskArgs>): Task | null => {
+    // Changes the fields given and adds `links`; a pull request added to a done
+    // task reopens it (writeTask). A question stays while the task needs input,
+    // and goes once it does not. Only completeTask marks a task done. Null when
+    // the project has no such task.
+    updateTask: db.transaction((projectId: ProjectId, change: TaskChange & { status?: Exclude<TaskStatus, "done"> | undefined }): Task | null => writeTask(projectId, change)),
+
+    // Marks the task done with `change`, as the project agent does, under the
+    // done rule. A task whose latest pull request is new to it, or that is not
+    // done yet, needs `verified`: what the done rule saw (taskWorkers.ts), found
+    // the same now, in this transaction. The pull request, its PASS for that head,
+    // not stale, and no push through Chiefbot to its branch since (its push
+    // revision) or in flight. "moved", writing nothing, when any of it changed meanwhile.
+    completeTask: db.transaction((projectId: ProjectId, change: TaskChange, verified: VerifiedHead | undefined): Task | "moved" | null => {
+      const current = task(projectId, change.number);
+      if (!current) return null;
+      const pullRequest = latestPullRequest([...current.links, ...(change.links ?? [])]);
+      const staysDone = current.status === "done" && pullRequest === latestPullRequest(current.links);
+      if (pullRequest !== undefined && !staysDone) {
+        const verification = current.verification;
+        const unchanged =
+          verified?.pullRequest === pullRequest &&
+          verification?.pullRequest === pullRequest &&
+          verification.result === "pass" &&
+          !verification.stale &&
+          verification.sha === verified.sha &&
+          noPushSince(repoOf(projectId), verification.branch, verified.revision);
+        if (!unchanged) return "moved";
+      }
+      return writeTask(projectId, { ...change, status: "done" });
+    }),
+
+    // A member (`by`, a login) marks the task done in the app: recorded on it
+    // with its verification then. "closed" when it is done or abandoned; null
+    // when the project has no such task.
+    markDone: db.transaction((projectId: ProjectId, number: number, by: string): Task | "closed" | null => {
       const current = task(projectId, number);
       if (!current) return null;
-      const status = change.status ?? current.status;
-      const next = {
-        title: change.title ?? current.title,
-        detail: change.detail ?? current.detail,
-        status,
-        question: status === "needs_input" ? (change.question ?? current.question) : null,
-        owner: change.owner === undefined ? current.owner : change.owner,
-        links: [...current.links, ...(links ?? [])],
-      };
-      db.query(
-        `UPDATE project_tasks SET title = ?3, detail = ?4, status = ?5, question = ?6, owner = ?7, links = ?8, updated_at = ?9
-         WHERE project_id = ?1 AND number = ?2`,
-      ).run(projectId, number, next.title, next.detail, next.status, next.question, next.owner, JSON.stringify(next.links), Date.now());
+      if (current.status === "done" || current.status === "abandoned") return "closed";
+      const now = Date.now();
+      const overrides = [...current.overrides, { by, at: now, verification: current.verification } satisfies DoneOverride];
+      db.query("UPDATE project_tasks SET status = 'done', question = NULL, overrides = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify(overrides),
+        now,
+      );
       return task(projectId, number);
+    }),
+
+    // Sets the verdict a verifier gave on the task. It is current only if no
+    // push through Chiefbot to its branch was in flight when control pinned its
+    // commit (at push `revision`; null when one was), none started since, and
+    // none is in flight now. Stale otherwise. Null when the project has no such task.
+    setVerdict: db.transaction((projectId: ProjectId, number: number, verification: Omit<Verification, "stale">, revision: number | null): Task | null => {
+      const stale = revision === null || !noPushSince(repoOf(projectId), verification.branch, revision);
+      db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify({ ...verification, stale } satisfies Verification),
+        Date.now(),
+      );
+      return task(projectId, number);
+    }),
+
+    // Marks the task's verification by verifier `worker` stale: its pull
+    // request's head on GitHub has moved. Only a new verdict makes a task's
+    // verification current again. Whether it changed the task.
+    markStale: db.transaction((projectId: ProjectId, number: number, worker: string): boolean => {
+      const verification = task(projectId, number)?.verification;
+      if (verification?.worker !== worker || verification.stale) return false;
+      db.query("UPDATE project_tasks SET verification = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify({ ...verification, stale: true } satisfies Verification),
+        Date.now(),
+      );
+      return true;
+    }),
+
+    // The pushes through Chiefbot to the repo's branch: `revision` counts those that started, `active` those in flight.
+    pushesTo,
+
+    // Chiefbot's git proxy is about to forward a push to `branches` of `repo`.
+    pushStarted: db.transaction((repo: string, branches: string[]) => {
+      for (const branch of branches) {
+        db.query(
+          `INSERT INTO branch_pushes (repo, branch, revision, active) VALUES (?1, ?2, 1, 1)
+           ON CONFLICT (repo, branch) DO UPDATE SET revision = revision + 1, active = active + 1`,
+        ).run(repo, branch);
+      }
+    }),
+
+    // That push is over. `moved` holds the branches GitHub took it for, each
+    // with the commit it moved to (none when GitHub refused it): each
+    // verification on one of them at another commit is stale. Null when its
+    // outcome is unknown (GitHub's answer was lost, or a server error): it may have landed,
+    // so its branches count a new revision and every verification on them is
+    // stale, until a new verifier's. The projects whose tasks changed.
+    pushEnded: db.transaction((repo: string, branches: string[], moved: Array<{ branch: string; sha: string }> | null): ProjectId[] => {
+      for (const branch of branches) {
+        db.query("UPDATE branch_pushes SET active = active - 1, revision = revision + ?3 WHERE repo = ?1 AND branch = ?2").run(repo, branch, moved === null ? 1 : 0);
+      }
+      return staleOn(repo, (verification) =>
+        moved === null ? branches.includes(verification.branch) : moved.some(({ branch, sha }) => branch === verification.branch && sha !== verification.sha),
+      );
     }),
 
     // Queues a member's message for the coordinator. Null, storing nothing, while

@@ -1,8 +1,15 @@
 import {
   ENGINEER_SETUP,
+  VERIFIER,
   AnswerApprovalRequest,
   type ApprovalId,
+  ContextImagePath,
+  ContextPath,
+  isPng,
+  latestPullRequest,
   PullRequestArgs,
+  SCREENSHOT_BYTES_MAX,
+  VerdictReport,
   WorkerToControl,
   type AgentConnector,
   type ApprovalKind,
@@ -14,10 +21,12 @@ import {
   type EngineerSetup,
   type OpenedPullRequest,
   type Project,
+  type RecordedVerdict,
   type ProjectId,
   type ProjectMember,
   type ScreenControl,
   type Task,
+  type TaskLink,
   type TaskWorker,
   type TaskWorkerId,
   type TurnId,
@@ -28,13 +37,18 @@ import {
 import type { controlApprovals } from "./approvals.ts";
 import type { Clock } from "@chiefbot/worker/clock";
 import type { ComputerProvider } from "./computers/computer.ts";
+import type { ContextStore } from "./contextStore.ts";
 import type { copilotIdentity, CopilotToken } from "./copilotIdentity.ts";
 import { apiError, bearer, unauthorized } from "./http.ts";
-import type { repoAccess, RepoAgent } from "./repos.ts";
+import type { PullRequestHead } from "./github.ts";
+import type { repoAccess, RepoAgent, RepoReader } from "./repos.ts";
 import { viewerBytes } from "./rfbViewer.ts";
 import { screenTunnel } from "./screens.ts";
+import type { VerifiedHead } from "./projectStore.ts";
 import type { openStore } from "./store.ts";
 import { heldTurn, taskWorkerTurn, type TaskWorkerTurn } from "./turnKeys.ts";
+import { queue } from "./queue.ts";
+import { z } from "zod";
 
 // A task worker's WebSocket: the worker of exactly one task worker, the turn it
 // runs and the member who asked for it.
@@ -50,7 +64,7 @@ export type WorkerWatchSocketData =
   | { kind: "worker-transcript"; workerId: TaskWorkerId; after: number; userId: UserId };
 
 // The coordinator's worker tools.
-export type WorkerToolCall = Extract<CoordinatorToolCall, { tool: "dispatch_worker" | "worker_status" | "worker_transcript" | "stop_worker" }>;
+export type WorkerToolCall = Extract<CoordinatorToolCall, { tool: "dispatch_worker" | "dispatch_verifier" | "worker_status" | "worker_transcript" | "stop_worker" }>;
 
 // The slice of a Bun ServerWebSocket this module uses.
 type Socket = { send(message: string | Buffer): unknown; close(code?: number, reason?: string): void };
@@ -72,8 +86,11 @@ export type TaskWorkerHostOptions = {
   approvalWaitMinutes: number;
   // Times those waits. A fake in tests.
   clock: Clock;
-  // Opens a pull request after the requester approves it (repos.ts).
+  // Where a verifier's report and screenshots go: the project's shared context.
+  context: ContextStore;
+  // Opens a pull request after the requester approves it, and reads one's head (repos.ts).
   pullRequest: ReturnType<typeof repoAccess>["pullRequest"];
+  pullRequestHead: ReturnType<typeof repoAccess>["pullRequestHead"];
   // Control's URL as a computer reaches it.
   controlUrlForComputers: () => string;
   // Sends a ClientEvent to every /events socket of the user.
@@ -109,6 +126,17 @@ export type TaskWorkerHostOptions = {
 // keeping its disk, and goes once the worker is stopped or its task is done or
 // abandoned; on start, control stops every computer of an ended turn, removes
 // every one that should be gone and launches what the queue has room for (`recover`).
+// A verifier (dispatch_verifier) is a worker of the same kind on a computer of
+// its own: it checks a task's pull request at the head control read on GitHub
+// when it was dispatched, which its setup checks out. Control refuses its
+// pushes and pull requests. It ends with a verdict (report_verdict), which
+// control keeps with its report and screenshots in the project's context and
+// sets on the task (recordVerdict), BLOCKED when it ends without one
+// (noVerdict). A push through the git proxy since its commit was pinned, or
+// GitHub's head when the coordinator marks the task done (doneCheck), makes a
+// verdict stale. Control counts the pushes through the proxy to each branch,
+// those started and those in flight (projectStore.ts branch_pushes), so a check
+// that reads GitHub can tell whether a push came in between.
 //
 // Member routes (a session; 404 to anyone outside the project's workspace):
 //   GET  /projects/:id/workers  → TaskWorker[]. Every change also reaches each member's
@@ -136,7 +164,11 @@ export type TaskWorkerHostOptions = {
 //   GET  /task-worker/:workerId/installation-token  → CopilotInstallationToken, when its task runs
 //                                on the organization's Copilot (404 otherwise; 502 copilot_token_failed)
 //   POST /task-worker/:workerId/pull-requests  body PullRequestArgs → 201 OpenedPullRequest, a draft,
-//                                once the member who asked approves (errors as a bot's)
+//                                once the member who asked approves (errors as a bot's; 403
+//                                verifier_read_only for a verifier)
+//   POST /task-worker/:workerId/verdict  body VerdictReport → RecordedVerdict: a verifier's verdict, kept
+//                                with its report and screenshots in the project's context (403
+//                                not_a_verifier; 400 invalid_verdict; 409 verdict_recorded: one per verifier)
 //   WS   /task-worker/:workerId/screen/:streamId  the worker's credential ↔ the VNC bytes for one
 //                                viewer, after screen-open (404 for a stream control did not open for it)
 // The git proxy (repos.ts) takes the turn's key through agentOf.
@@ -149,7 +181,9 @@ export function taskWorkerHost({
   approvals,
   approvalWaitMinutes,
   clock,
+  context,
   pullRequest,
+  pullRequestHead,
   controlUrlForComputers,
   publishToUser,
   onLedgerChange,
@@ -312,6 +346,7 @@ export function taskWorkerHost({
       if (stopped) return;
       if (failure !== null) {
         workers.launchFailed(workerId, `Its computer could not start: ${failure}`);
+        noVerdict(workerId);
         void reap();
       }
       publish(projectId);
@@ -334,12 +369,32 @@ export function taskWorkerHost({
   // Removes every worker computer that must go (settle).
   const reap = () => Promise.all(workers.toReap().map(settle));
 
-  // The worker's turn ended: its approvals stop waiting and its computer stops
-  // (settle).
+  // The worker's turn ended: its approvals stop waiting, its computer stops
+  // (settle), and a verifier that gave no verdict is BLOCKED (noVerdict).
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
     holders.delete(workerId);
     void settle(workerId);
+    noVerdict(workerId);
+  }
+
+  // A verifier that ended (its turn did, or its launch failed) without a verdict
+  // gets BLOCKED, so the task shows that nobody checked the pull request. Its
+  // summary says why: its error, or its last message. A failed setup step's log
+  // is its report. A stopped verifier gets none: someone chose to stop it.
+  function noVerdict(workerId: TaskWorkerId) {
+    const worker = workers.worker(workerId);
+    if (worker?.kind !== "verifier" || worker.verdict !== null || !["finished", "blocked", "failed"].includes(worker.state)) return;
+    const failed = worker.setup.find(({ exitCode }) => exitCode !== 0);
+    void recordVerdict(
+      workerId,
+      {
+        result: "blocked",
+        summary: worker.state === "finished" ? `It ended without a verdict. Its last message: ${worker.result ?? ""}` : (worker.result ?? "It ended without a verdict."),
+        report: failed ? [`\`${failed.command}\` exited with ${failed.exitCode}:`, "", "```", failed.log, "```"].join("\n") : "",
+      },
+      [],
+    );
   }
 
   // Brings the worker's computer to what its record wants: removed when it must
@@ -429,13 +484,52 @@ export function taskWorkerHost({
     ].join("\n");
   }
 
-  // What the engineer sets up: the project's config as it is now, and the values
-  // of its secrets. Null when the project is gone.
-  async function setupOf(projectId: ProjectId): Promise<EngineerSetup | null> {
+  // The verifier's brief, its first message: the task, the pull request at the
+  // commit it checks, and how to check it: the repo's verify skill, or the
+  // default playbook for a web app when the project sets none. The skill gets
+  // the project's dev command and URL too: the app's settings may set them,
+  // which the repo does not show. It ends with report_verdict.
+  function verifierPrompt({ name, repo, config }: Project, task: Task, pr: PullRequestHead & { url: string }, instructions: string) {
+    const { dev, devUrl } = config.commands;
+    const app = [...(dev ? [`Start the app with \`${dev}\` in the clone.`] : []), ...(devUrl ? [`It answers at ${devUrl}.`] : [])];
+    const playbook = config.verify
+      ? [`Check it as the repo's \`${config.verify}\` skill says: it is among your skills.`, ...(app.length > 0 ? [app.join(" ")] : [])]
+      : dev && devUrl
+        ? [
+            "The repo sets no verify skill, so check it this way:",
+            `1. Start the app: run \`${dev}\` in the background in the clone, and wait until ${devUrl} answers.`,
+            `2. Open ${devUrl} in Chromium and use the change the pull request describes, as a person would. Then try what it may break nearby.`,
+            "3. Save a screenshot of each thing you check: `scrot /tmp/verify-1.png`, then -2, -3 and so on.",
+          ]
+        : ["The repo sets no verify skill and no `commands.dev` and `commands.devUrl`, so you cannot run the app: check the change with its tests and by reading the code, and say so in your report."];
+    return [
+      `You are the verifier of the project ${name} (GitHub repo ${repo}). You have this computer to yourself to check one pull request with fresh eyes. You did not write it.`,
+      "",
+      `Task #${task.number}: ${task.title}`,
+      ...(task.detail ? [task.detail] : []),
+      "",
+      `Pull request: ${pr.url}`,
+      `Commit: ${pr.sha}`,
+      pr.title,
+      ...(pr.body ? [pr.body] : []),
+      ...(instructions ? ["", "From the project agent:", instructions] : []),
+      "",
+      "Chiefbot cloned the repo, checked that commit out and ran the repo's setup.",
+      ...playbook,
+      "Keep secrets out of your screenshots: no environment pages, and no developer tools that show tokens.",
+      "",
+      "Change nothing in the repo, and push nothing: Chiefbot refuses a verifier's pushes and pull requests.",
+      "End by calling report_verdict once, with your screenshots: pass when the change does what the task asks; issues when it does not, naming each issue; blocked when you could not check it, saying why.",
+    ].join("\n");
+  }
+
+  // What the worker sets up: the project's config as it is now, and the values
+  // of its secrets; a verifier also checks out `sha`. Null when the project is gone.
+  async function setupOf(projectId: ProjectId, sha: string | null): Promise<EngineerSetup | null> {
     const project = projects.project(projectId);
     if (!project) return null;
     const { repo, config } = project;
-    return { repo, command: config.commands.setup ?? null, instructions: config.instructions, skills: config.skills, mcp: config.mcp, secrets: await secretsFor(projectId) };
+    return { repo, sha, command: config.commands.setup ?? null, instructions: config.instructions, skills: config.skills, mcp: config.mcp, secrets: await secretsFor(projectId) };
   }
 
   const routes = {
@@ -521,6 +615,7 @@ export function taskWorkerHost({
       POST: async (req: Bun.BunRequest<"/task-worker/:workerId/pull-requests">, server: Bun.Server<unknown>) => {
         const turn = heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId));
         if (turn instanceof Response) return turn;
+        if (workers.worker(turn.workerId)?.kind === "verifier") return apiError(403, "verifier_read_only", "A verifier opens no pull request: it ends with report_verdict.");
         const args = PullRequestArgs.safeParse(await req.json().catch(() => null));
         if (!args.success) return apiError(400, "invalid_pull_request");
         server.timeout(req, 0);
@@ -539,7 +634,63 @@ export function taskWorkerHost({
         return Response.json(opened satisfies OpenedPullRequest, { status: 201 });
       },
     },
+    "/task-worker/:workerId/verdict": {
+      POST: async (req: Bun.BunRequest<"/task-worker/:workerId/verdict">) => {
+        const turn = heldTurn(store.turnKeys, req, taskWorkerTurn(req.params.workerId));
+        if (turn instanceof Response) return turn;
+        if (workers.worker(turn.workerId)?.kind !== "verifier") return apiError(403, "not_a_verifier", "Only a verifier reports a verdict.");
+        const body = VerdictReport.safeParse(await req.json().catch(() => null));
+        if (!body.success) return apiError(400, "invalid_verdict", z.prettifyError(body.error));
+        const screenshots = body.data.screenshots.map((base64) => Buffer.from(base64, "base64"));
+        if (!screenshots.every((bytes) => isPng(bytes) && bytes.byteLength <= SCREENSHOT_BYTES_MAX)) {
+          return apiError(400, "invalid_verdict", "Each screenshot must be a PNG of at most 2 MB.");
+        }
+        const evidence = await recordVerdict(turn.workerId, body.data, screenshots);
+        if (evidence === null) return apiError(409, "verdict_recorded", "A verifier reports one verdict, and yours is recorded.");
+        return Response.json({ evidence } satisfies RecordedVerdict);
+      },
+    },
   };
+
+  // Records a verifier's verdict, its first only, one at a time per verifier.
+  // Its report and screenshots go into the project's context first, so they
+  // outlive its computer: verify/task-<n>-<commit>-<verifier>.md, with its
+  // screenshots beside it as -1.png, -2.png… Then the verdict goes on the worker,
+  // and on its task as the task's verification. Null when it has a verdict.
+  const recording = queue<TaskWorkerId>();
+  function recordVerdict(workerId: TaskWorkerId, verdict: Omit<VerdictReport, "screenshots">, screenshots: Uint8Array[]) {
+    return recording(workerId, async (): Promise<ContextPath | null> => {
+      const worker = workers.worker(workerId);
+      if (worker?.verdict !== null || worker.sha === null || worker.branch === null || worker.pullRequest === null) return null;
+      const { projectId, taskNumber, sha, branch, pullRequest } = worker;
+      const name = `task-${taskNumber}-${sha.slice(0, 7)}-${workerId.replace(/^worker_/, "").slice(0, 8)}`;
+      const images = screenshots.map((_, at) => `${name}-${at + 1}.png`);
+      await Promise.all(screenshots.map((bytes, at) => context.writeImage(projectId, ContextImagePath.parse(`verify/${images[at]}`), bytes)));
+      const evidence = ContextPath.parse(`verify/${name}.md`);
+      const title = projects.tasks(projectId).find(({ number }) => number === taskNumber)?.title ?? "";
+      const at = Date.now();
+      await context.write(
+        projectId,
+        evidence,
+        [
+          `# Verification of task #${taskNumber}: ${title}`,
+          "",
+          `**${verdict.result.toUpperCase()}** for ${pullRequest} at ${sha} (branch ${branch}), by verifier ${workerId}, ${new Date(at).toISOString()}.`,
+          "",
+          verdict.summary,
+          ...(verdict.report ? ["", "## Report", "", verdict.report] : []),
+          ...(images.length > 0 ? ["", "## Screenshots", "", ...images.map((image, index) => `![Screenshot ${index + 1}](${image})`)] : []),
+          "",
+        ].join("\n"),
+      );
+      const pinned = workers.setVerdict(workerId, verdict.result);
+      if (pinned === null) return null;
+      projects.setVerdict(projectId, taskNumber, { result: verdict.result, sha, summary: verdict.summary, pullRequest, branch, evidence, worker: workerId, at }, pinned.revision);
+      publishTasks(projectId);
+      publish(projectId);
+      return evidence;
+    });
+  }
 
   // The token for the turn the request's key holds, if who pays for it is of `kind`; 404 otherwise.
   async function turnToken(req: Request & { params: { workerId: string } }, kind: CopilotPayer["kind"]) {
@@ -556,7 +707,7 @@ export function taskWorkerHost({
   // member who asked, with the connectors ready for them and its setup. On the
   // organization's Copilot the worker renews its one-hour token mid-task
   // (installationSession.ts). Secrets control cannot read block it: its setup cannot run.
-  async function startTask(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId) {
+  async function startTask({ id: workerId, projectId, kind, sha }: TaskWorker, userId: UserId) {
     // The connection whose hello started it: the task goes there or nowhere.
     const socket = sockets.get(workerId);
     const run = payerOf({ kind: "project", projectId, askerId: userId });
@@ -565,7 +716,7 @@ export function taskWorkerHost({
     const turnKey = store.turnKeys.issue({ agent: "task-worker", workerId, projectId, userId, turnId: started.turnId });
     publish(projectId);
     const connectors = await connectorsFor(projectId, userId).catch(() => []);
-    const setup = await setupOf(projectId).catch((error: unknown) => {
+    const setup = await setupOf(projectId, sha).catch((error: unknown) => {
       console.error(`could not read the secrets of ${projectId} for ${workerId}: ${error instanceof Error ? error.name : "unknown error"}`);
       return null;
     });
@@ -581,7 +732,55 @@ export function taskWorkerHost({
     // control read the secrets: then they, and the task, go nowhere.
     const live = socket && sockets.get(workerId) === socket && store.turnKeys.holder(turnKey) && store.projects.member(projectId, { userId });
     if (!live) return;
-    socket.send(JSON.stringify({ type: "run-task", turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors, setup } satisfies ControlToWorker));
+    socket.send(JSON.stringify({ type: "run-task", kind, turnId: started.turnId, turnKey, text: started.prompt, payer: run.payer, connectors, setup } satisfies ControlToWorker));
+  }
+
+  // Starts a verifier on the task's pull request (the one named, else the latest
+  // the task links), pinned to its head now, read on GitHub as `asker` may, and
+  // to the revision of the pushes through Chiefbot to its branch, read before
+  // that head (a first read names the branch). Its verdict is stale when a push
+  // was in flight then, or one started since.
+  // Like an engineer, it takes one of the project's workers.max places, and
+  // waits while another worker of the task is unended.
+  async function dispatchVerifier(project: Project, asker: ProjectMember, call: Extract<WorkerToolCall, { tool: "dispatch_verifier" }>) {
+    const task = projects.tasks(project.id).find(({ number }) => number === call.task);
+    if (!task) return refused(`No task #${call.task} in this project`, 404);
+    if (task.status === "done" || task.status === "abandoned") return refused(`Task #${task.number} is ${task.status}`);
+    const linked = task.links.flatMap((link) => (link.kind === "pull-request" ? [link.url] : []));
+    const url = call.pullRequest ?? linked.at(-1);
+    if (url === undefined) return refused(`Task #${task.number} links no pull request: an engineer opens one first, and a verifier checks it.`);
+    if (!linked.includes(url)) return refused(`Task #${task.number} does not link ${url}: add it with update_task first.`);
+    const number = pullRequestNumber(url, project.repo);
+    if (number === null) return refused(`${url} is not a pull request of ${project.repo}.`);
+    const first = await pullRequestHead(asker.userId, project.repo, number);
+    if ("error" in first) return refused(`Couldn't read ${url} on GitHub: ${first.message}`, 502);
+    const pushes = projects.pushesTo(project.repo, first.branch);
+    const head = await pullRequestHead(asker.userId, project.repo, number);
+    if ("error" in head) return refused(`Couldn't read ${url} on GitHub: ${head.message}`, 502);
+    const revision = pushes.active === 0 && head.branch === first.branch ? pushes.revision : null;
+    const token = newToken();
+    const record = workers.launch({
+      projectId: project.id,
+      taskNumber: task.number,
+      creationId: call.creationId,
+      userId: asker.userId,
+      prompt: verifierPrompt(project, task, { ...head, url }, call.instructions),
+      token,
+      max: project.config.workers.max,
+      verifies: { pullRequest: url, sha: head.sha, branch: head.branch, revision },
+    });
+    return launched(project, task, record, token);
+  }
+
+  // Answers a dispatch with its worker once its launch is under way: a new one
+  // launches now unless queued, and a resent call waits for the first one's launch.
+  async function launched(project: Project, task: Task, record: ReturnType<typeof workers.launch>, token: string) {
+    if ("busy" in record) return refused(`Worker ${record.busy.id} still works on task #${task.number}: stop it first, or wait for it`, 409);
+    const { id } = record.worker;
+    if (record.launched) publish(project.id);
+    if (record.launched && record.worker.state === "launching") await launch(project.id, id, token);
+    else await launches.get(id);
+    return Response.json(workers.worker(id) satisfies TaskWorker | null);
   }
 
   // The signed-in member and the project's worker :workerId; 401 or 404 otherwise.
@@ -627,8 +826,60 @@ export function taskWorkerHost({
     // (a connector call), as its pushes are asked.
     ask: (turn: TaskWorkerTurn, kind: ApprovalKind, detail: string, signal: AbortSignal) => agentOf(turn).ask(kind, detail, signal),
 
-    // For the git proxy: the worker's turn as a repo agent.
-    agentOf,
+    // The done rule: the project agent marks a task done only with a verifier's
+    // PASS for the head of its pull request (its latest, `links` added), read
+    // again on GitHub as `asker` may, so a push from anywhere counts: the
+    // verification's `stale` follows what it finds. A task that links no pull
+    // request has nothing to verify, and one already done stays so unless it
+    // gets a new pull request. Answers why not (`refused`), or what the done
+    // write must find unchanged (`verified`, projectStore.ts completeTask): the
+    // head GitHub showed, and the revision of the pushes through Chiefbot to its
+    // branch, read before GitHub, none in flight. A stale PASS stays stale: only
+    // a new verifier's verdict is current.
+    // A member may mark it done over this in the app (projects.ts).
+    async doneCheck(project: Project, asker: ProjectMember, number: number, links: TaskLink[] = []): Promise<{ refused: string } | { verified?: VerifiedHead }> {
+      const task = projects.tasks(project.id).find((candidate) => candidate.number === number);
+      const url = latestPullRequest([...(task?.links ?? []), ...links]);
+      if (!task || url === undefined || (task.status === "done" && url === latestPullRequest(task.links))) return {};
+      const refused = (why: string) => ({ refused: notDone(why) });
+      const { verification } = task;
+      if (verification?.pullRequest !== url) return refused(`Task #${number} needs a verifier's PASS for ${url} at its head before it is done: dispatch_verifier first.`);
+      const at = verification.sha.slice(0, 7);
+      if (verification.result === "issues") return refused(`Task #${number} is not done: its verifier found issues in ${url} at ${at}. ${verification.summary}`);
+      if (verification.result === "blocked") return refused(`Task #${number} is not done: its verifier could not check ${url} at ${at}. ${verification.summary}`);
+      if (verification.stale) return refused(`Task #${number} is not done: its PASS for ${at} is stale, as a push may have moved ${url} since. Dispatch a verifier again.`);
+      const pushes = projects.pushesTo(project.repo, verification.branch);
+      if (pushes.active > 0) return { refused: movedWhileChecking(number) };
+      const prNumber = pullRequestNumber(url, project.repo);
+      const head = prNumber === null ? null : await pullRequestHead(asker.userId, project.repo, prNumber);
+      if (head === null || "error" in head) {
+        return refused(`Task #${number} is not done: Chiefbot couldn't read ${url} on GitHub to check that its PASS is for its head${head ? ` (${head.message})` : ""}. Try again.`);
+      }
+      if (head.sha !== verification.sha) {
+        if (projects.markStale(project.id, number, verification.worker)) publishTasks(project.id);
+        return refused(`Task #${number} is not done: its PASS is for ${at}, and ${url} has moved to ${head.sha.slice(0, 7)} since. Dispatch a verifier again.`);
+      }
+      if (head.branch !== verification.branch) return { refused: movedWhileChecking(number) };
+      return { verified: { pullRequest: url, sha: head.sha, revision: pushes.revision } };
+    },
+
+    // A push through the git proxy is about to move `branches` of `repo`
+    // (repos.ts): they count it in flight until it ends. Then each verdict on a
+    // branch it moved, at another commit, is stale; when GitHub's answer was
+    // lost (`moved` null), each verdict on its branches (projectStore.ts pushEnded).
+    pushing(repo: string, branches: string[]) {
+      projects.pushStarted(repo, branches);
+      return (moved: Array<{ branch: string; sha: string }> | null) => {
+        for (const projectId of projects.pushEnded(repo, branches, moved)) publishTasks(projectId);
+      };
+    },
+
+    // For the git proxy: the worker's turn as a repo agent; a verifier's only fetches its project's repo.
+    repoAgentOf(turn: TaskWorkerTurn): RepoAgent | RepoReader | null {
+      if (workers.worker(turn.workerId)?.kind !== "verifier") return agentOf(turn);
+      const repo = projects.project(turn.projectId)?.repo;
+      return repo ? { userId: turn.userId, repo, who: "A verifier" } : null;
+    },
 
     // One of the coordinator's worker tools, in the turn of `asker`. Answers the
     // call's result as JSON, or a refusal the model sees.
@@ -647,14 +898,9 @@ export function taskWorkerHost({
           token,
           max: project.config.workers.max,
         });
-        if ("busy" in record) return refused(`Worker ${record.busy.id} still works on task #${task.number}: stop it first, or wait for it`, 409);
-        const { id } = record.worker;
-        if (record.launched) publish(project.id);
-        // A new worker launches now, unless it is queued. A resent call waits for the first one's launch.
-        if (record.launched && record.worker.state === "launching") await launch(project.id, id, token);
-        else await launches.get(id);
-        return Response.json(workers.worker(id) satisfies TaskWorker | null);
+        return launched(project, task, record, token);
       }
+      if (call.tool === "dispatch_verifier") return dispatchVerifier(project, asker, call);
       if (call.tool === "worker_status" && call.worker === undefined) return Response.json(workers.workersOf(project.id) satisfies TaskWorker[]);
       const worker = call.worker === undefined ? null : workers.workerIn(project.id, call.worker);
       if (!worker) return refused(`No worker ${call.worker} in this project`, 404);
@@ -716,7 +962,10 @@ export function taskWorkerHost({
       for (const workerId of workers.launching()) {
         const status = await computers.status(workerId);
         if (stopped) return;
-        if (status !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
+        if (status !== "running") {
+          workers.launchFailed(workerId, "Control restarted before its computer was ready.");
+          noVerdict(workerId);
+        }
       }
       for (const workerId of workers.ended()) {
         const status = await computers.status(workerId);
@@ -771,11 +1020,12 @@ export function taskWorkerHost({
       // that, the worker lost the task unless it says it still runs it, and may
       // have missed answers.
       const started = worker.state === "setting_up" || worker.state === "working";
-      if (worker.state === "launching" && !message.capabilities.includes(ENGINEER_SETUP)) {
-        if (workers.end(workerId, "blocked", outdatedImage).length > 0) turnOver(workerId, turnId);
+      const needs = worker.kind === "verifier" ? [ENGINEER_SETUP, VERIFIER] : [ENGINEER_SETUP];
+      if (worker.state === "launching" && !needs.every((capability) => message.capabilities.includes(capability))) {
+        if (workers.end(workerId, "blocked", outdatedImage(worker.kind)).length > 0) turnOver(workerId, turnId);
         publish(worker.projectId);
       } else if (worker.state === "launching") {
-        void startTask(workerId, worker.projectId, userId);
+        void startTask(worker, userId);
       } else if (started && message.activeTurnId !== turnId) {
         workers.end(workerId, "failed", "The worker's computer restarted before it finished the task.");
         turnOver(workerId, turnId);
@@ -836,12 +1086,28 @@ export function taskWorkerHost({
   };
 }
 
-// Why an engineer whose worker cannot set up (no ENGINEER_SETUP in its hello) is blocked.
-const outdatedImage =
-  "Its computer runs an older Chiefbot image, which cannot set up an engineer. Rebuild the computer image (`bun run computer:build`), then dispatch the task again.";
+// Why the project agent may not mark a task done (the done rule), as it reads it.
+const notDone = (why: string) => `${why} A member can still mark it done in the app.`;
+
+// The done rule's answer when task `number`'s pull request or its verdict moved while control checked it.
+export const movedWhileChecking = (number: number) =>
+  notDone(`Task #${number} is not done: its pull request moved while Chiefbot checked it. Verify it again.`);
+
+// Why a worker whose computer cannot do its kind of task (no ENGINEER_SETUP, or a
+// verifier's VERIFIER, in its hello) is blocked.
+const outdatedImage = (kind: TaskWorker["kind"]) =>
+  kind === "verifier"
+    ? "Its computer runs an older Chiefbot image, which cannot run a verifier. Rebuild the computer image (`bun run computer:build`), then dispatch the verifier again."
+    : "Its computer runs an older Chiefbot image, which cannot set up an engineer. Rebuild the computer image (`bun run computer:build`), then dispatch the task again.";
 
 // How long control waits to try again to stop or remove a worker's computer.
 const retryMs = 30_000;
+
+// The number of a pull request of `repo` from its page's URL (GitHub's html_url), or null.
+function pullRequestNumber(url: string, repo: string): number | null {
+  const [, fullName, number] = /^\/([^/]+\/[^/]+)\/pull\/(\d+)\/?$/.exec(new URL(url).pathname) ?? [];
+  return fullName?.toLowerCase() === repo.toLowerCase() && number ? Number(number) : null;
+}
 
 // A worker's turn as transcript lines for the coordinator: each setup step with
 // its exit code (and its log when it failed), each message whole, each tool call

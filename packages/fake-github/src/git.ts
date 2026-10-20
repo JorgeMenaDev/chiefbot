@@ -35,18 +35,22 @@ export function createBareRepo(root: string, fullName: string, files: Record<str
   }
 }
 
-// Adds a commit holding `files` (new or changed) to main of the bare repo at `bare`.
-export function commitFiles(bare: string, files: Record<string, string>) {
+// Adds a commit holding `files` (new or changed) to `branch` of the bare repo at
+// `bare` (main by default; a new branch starts from main), and returns its SHA.
+export function commitFiles(bare: string, files: Record<string, string>, branch = "main") {
   const work = mkdtempSync(join(tmpdir(), "fake-github-commit-"));
   try {
     git(work, ["clone", "-q", bare, "."]);
+    const exists = git(work, ["branch", "-r", "--list", `origin/${branch}`]) !== "";
+    git(work, ["checkout", "-q", "-B", branch, exists ? `origin/${branch}` : "origin/main"]);
     for (const [path, content] of Object.entries(files)) {
       mkdirSync(dirname(join(work, path)), { recursive: true });
       writeFileSync(join(work, path), content);
     }
     git(work, ["add", "."]);
     git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Change"]);
-    git(work, ["push", "-q", "origin", "HEAD:main"]);
+    git(work, ["push", "-q", "origin", `HEAD:${branch}`]);
+    return git(work, ["rev-parse", "HEAD"]);
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

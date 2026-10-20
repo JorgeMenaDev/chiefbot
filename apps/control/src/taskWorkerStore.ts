@@ -12,6 +12,7 @@ import {
   type ChatEvent,
   type TaskWorkerState,
   type TurnEvent,
+  type VerdictResult,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { addColumn } from "./addColumn.ts";
@@ -61,6 +62,16 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   db.run(create);
   // A table from before engineers set up (no 'setting_up' state) is made again.
   rebuildTable(db, "task_workers", create, "'kept'");
+  // Columns added after the table first shipped. `kind` is engineer or verifier.
+  // A verifier's `sha` is the commit it checks and `branch` the pull request's
+  // branch (in `pull_request`) then, at the `revision` of the pushes through
+  // Chiefbot to that branch (projectStore.ts branch_pushes; NULL when one was in
+  // flight then); `verdict` is the result it ended with, once it has one.
+  addColumn(db, "task_workers", "kind", "TEXT NOT NULL DEFAULT 'engineer'");
+  addColumn(db, "task_workers", "sha", "TEXT");
+  addColumn(db, "task_workers", "branch", "TEXT");
+  addColumn(db, "task_workers", "verdict", "TEXT");
+  addColumn(db, "task_workers", "revision", "INTEGER");
   // The worker's turn as control stores it: its transcript.
   db.run(`CREATE TABLE IF NOT EXISTS task_worker_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +106,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   type WorkerRow = {
     id: string;
     project_id: string;
+    kind: string;
     task_number: number;
     login: string;
     payer: string | null;
@@ -103,16 +115,21 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     computer: string;
     result: string | null;
     pull_request: string | null;
+    sha: string | null;
+    branch: string | null;
+    verdict: string | null;
     created_at: number;
     updated_at: number;
   };
-  const workerColumns = `task_workers.id, task_workers.project_id, task_workers.task_number, users.login, task_workers.payer, task_workers.state,
-    task_workers.setup, task_workers.computer, task_workers.result, task_workers.pull_request, task_workers.created_at, task_workers.updated_at
+  const workerColumns = `task_workers.id, task_workers.project_id, task_workers.kind, task_workers.task_number, users.login, task_workers.payer,
+    task_workers.state, task_workers.setup, task_workers.computer, task_workers.result, task_workers.pull_request, task_workers.sha,
+    task_workers.branch, task_workers.verdict, task_workers.created_at, task_workers.updated_at
     FROM task_workers JOIN users ON users.id = task_workers.user_id`;
   const toWorker = (row: WorkerRow): TaskWorker =>
     TaskWorker.parse({
       id: row.id,
       projectId: row.project_id,
+      kind: row.kind,
       taskNumber: row.task_number,
       requestedBy: row.login,
       payer: row.payer === null ? null : CopilotPayer.parse(JSON.parse(row.payer)),
@@ -120,6 +137,9 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       setup: SetupStep.array().parse(JSON.parse(row.setup)),
       result: row.result,
       pullRequest: row.pull_request,
+      sha: row.sha,
+      branch: row.branch,
+      verdict: row.verdict,
       pendingApprovals: approvals.pending(row.id),
       computerRemoved: row.computer === "removed",
       createdAt: row.created_at,
@@ -174,6 +194,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
     // starts it (`creationId`) wrote one already: then that worker, launched
     // false. `busy`, writing nothing, when another worker still works on the
     // task. While the project already runs `max` workers, the new one is queued.
+    // A verifier (`verifies`) checks a pull request at one commit, of a branch.
     launch: db.transaction(
       (launch: {
         projectId: ProjectId;
@@ -183,6 +204,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         prompt: string;
         token: string;
         max: number;
+        verifies?: { pullRequest: string; sha: string; branch: string; revision: number | null };
       }): { worker: TaskWorker; launched: boolean } | { busy: TaskWorker } => {
         const existing = db
           .query<{ id: string }, [string, string]>("SELECT id FROM task_workers WHERE project_id = ?1 AND creation_id = ?2")
@@ -199,10 +221,28 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
         const id = TaskWorkerId.parse(`worker_${crypto.randomUUID()}`);
         const now = Date.now();
         const state = runningCount(launch.projectId) < launch.max ? "launching" : "queued";
+        const { verifies } = launch;
         db.query(
-          `INSERT INTO task_workers (id, project_id, task_number, creation_id, user_id, turn_id, prompt, token_hash, state, computer, created_at, updated_at)
-           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'wanted', ?10, ?10)`,
-        ).run(id, launch.projectId, launch.taskNumber, launch.creationId, launch.userId, `turn_${crypto.randomUUID()}`, launch.prompt, hash(launch.token), state, now);
+          `INSERT INTO task_workers (id, project_id, task_number, creation_id, user_id, turn_id, prompt, token_hash, state, computer, created_at, updated_at,
+             kind, pull_request, sha, branch, revision)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'wanted', ?10, ?10, ?11, ?12, ?13, ?14, ?15)`,
+        ).run(
+          id,
+          launch.projectId,
+          launch.taskNumber,
+          launch.creationId,
+          launch.userId,
+          `turn_${crypto.randomUUID()}`,
+          launch.prompt,
+          hash(launch.token),
+          state,
+          now,
+          verifies ? "verifier" : "engineer",
+          verifies?.pullRequest ?? null,
+          verifies?.sha ?? null,
+          verifies?.branch ?? null,
+          verifies?.revision ?? null,
+        );
         const created = worker(id);
         if (!created) throw new Error("task worker insert returned no row");
         return { worker: created, launched: true };
@@ -300,6 +340,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
       }
       return stored;
     }),
+
+    // Records a verifier's verdict, the first only: the push `revision` of its
+    // branch when control pinned its commit, or null when it has one.
+    setVerdict(workerId: TaskWorkerId, verdict: VerdictResult): { revision: number | null } | null {
+      return db
+        .query<{ revision: number | null }, [string, string]>("UPDATE task_workers SET verdict = ?2 WHERE id = ?1 AND verdict IS NULL RETURNING revision")
+        .get(workerId, verdict);
+    },
 
     // Ends the worker's turn from control's side (it was stopped, or lost the
     // turn): the events that end it, none when it was not running.

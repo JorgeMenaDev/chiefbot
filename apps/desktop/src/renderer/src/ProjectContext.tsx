@@ -1,6 +1,6 @@
-import { ContextFile, ContextFileText, type ContextPath, type Project } from "@chiefbot/contracts";
+import { ContextFile, ContextFileText, ContextImagePath, type ContextPath, type Project } from "@chiefbot/contracts";
 import { ChevronLeftIcon, FileTextIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { z } from "zod";
 import { ago } from "./healthStatus.tsx";
 import { Markdown } from "./Markdown.tsx";
@@ -9,12 +9,12 @@ import { Button } from "./components/ui/button.tsx";
 
 const FileList = z.array(ContextFile);
 
-// The Context tab of a project's panel: the shared notes its project agent and
-// engineers keep, read-only. The list is fetched each time the tab opens, as
-// control sends no context events; a file opens as Markdown.
-export function ProjectContext({ project }: { project: Project }) {
+// The Context tab of a project's panel: the shared notes its project agent,
+// engineers and verifiers keep, read-only. The list is fetched each time the
+// tab opens, as control sends no context events; a file opens as Markdown
+// (`open`, kept by the panel, so a task's verification report can open here).
+export function ProjectContext({ project, open, onOpen }: { project: Project; open: ContextPath | null; onOpen: (path: ContextPath | null) => void }) {
   const [files, setFiles] = useState<ContextFile[] | null>(null);
-  const [open, setOpen] = useState<ContextPath | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     window.chiefbot.projects
@@ -23,7 +23,7 @@ export function ProjectContext({ project }: { project: Project }) {
       .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)));
   }, [project.id]);
 
-  if (open) return <ContextFileView project={project} path={open} onBack={() => setOpen(null)} />;
+  if (open) return <ContextFileView project={project} path={open} onBack={() => onOpen(null)} />;
   return (
     <div className="flex flex-col gap-0.5 p-2">
       <ErrorText message={error} />
@@ -35,7 +35,7 @@ export function ProjectContext({ project }: { project: Project }) {
             key={path}
             type="button"
             className="flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-start text-sm transition-colors hover:bg-accent"
-            onClick={() => setOpen(path)}
+            onClick={() => onOpen(path)}
           >
             <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 truncate font-mono text-xs">{path}</span>
@@ -48,10 +48,12 @@ export function ProjectContext({ project }: { project: Project }) {
   );
 }
 
-// One context file's Markdown, with the way back to the list.
+// One context file's Markdown, with the way back to the list. Its images are
+// the context's PNGs beside it (a verification report's screenshots).
 function ContextFileView({ project, path, onBack }: { project: Project; path: ContextPath; onBack: () => void }) {
   const [file, setFile] = useState<ContextFileText | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const image = useCallback((src: string, alt: string) => <ContextImage project={project} path={imagePathIn(path, src)} alt={alt} />, [project, path]);
   useEffect(() => {
     window.chiefbot.projects
       .contextFile(project.id, path)
@@ -68,8 +70,28 @@ function ContextFileView({ project, path, onBack }: { project: Project; path: Co
       </div>
       <div className="px-5 py-4">
         <ErrorText message={error} />
-        {file && <Markdown text={file.content} />}
+        {file && <Markdown text={file.content} image={image} />}
       </div>
     </div>
   );
+}
+
+// The context image a file at `from` links as `src`: a PNG in the file's folder
+// or below it, else null (one outside the context, or on the web).
+export function imagePathIn(from: ContextPath, src: string): ContextImagePath | null {
+  const path = ContextImagePath.safeParse(from.slice(0, from.lastIndexOf("/") + 1) + src);
+  return path.success ? path.data : null;
+}
+
+// One of the context's images, loaded through main; its alt text until then, or when there is none.
+function ContextImage({ project, path, alt }: { project: Project; path: ContextImagePath | null; alt: string }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (path === null) return;
+    window.chiefbot.projects
+      .contextImage(project.id, path)
+      .then(setUrl)
+      .catch(() => setUrl(null));
+  }, [project.id, path]);
+  return url ? <img src={url} alt={alt} className="my-2 max-w-full rounded-lg border" /> : <span className="text-muted-foreground">{alt}</span>;
 }

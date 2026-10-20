@@ -19,4 +19,5 @@ export * from "./screens.ts";
 export * from "./subscriptions.ts";
 export * from "./taskWorkers.ts";
 export * from "./theme.ts";
+export * from "./verification.ts";
 export * from "./workspaces.ts";

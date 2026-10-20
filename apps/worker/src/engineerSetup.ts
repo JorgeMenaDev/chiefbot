@@ -40,7 +40,8 @@ export type EngineerReady = {
 const instructionMax = 64 * 1024;
 
 // Sets an engineer's computer up for `setup`, before its agent starts: clones
-// the repo into <workspace>/<repo name> and runs the setup command there with
+// the repo into <workspace>/<repo name> (a verifier's then checks out the commit
+// it checks, `setup.sha`, detached) and runs the setup command there with
 // the project's secrets, each step reported as it ends. Its log is the end of its
 // output with every secret hidden (secretRedactor.ts) as it streams, before it
 // is cut to SETUP_LOG_MAX, so no cut leaves a piece of one. Then reads the
@@ -77,6 +78,10 @@ export async function setUpEngineer({
 
   const cloned = await run("clone", `git clone https://github.com/${setup.repo}.git ${name}`, workspace, {});
   if (cloned.exitCode !== 0) return { failed: cloned };
+  if (setup.sha !== null) {
+    const checkedOut = await run("checkout", `git fetch -q origin ${setup.sha} && git checkout -q --detach ${setup.sha}`, clone, {});
+    if (checkedOut.exitCode !== 0) return { failed: checkedOut };
+  }
   if (setup.command !== null) {
     const ran = await run("setup", setup.command, clone, setup.secrets);
     if (ran.exitCode !== 0) return { failed: ran };
@@ -106,7 +111,7 @@ export async function setUpEngineer({
 function engineerInstructions(setup: EngineerSetup, clone: string, files: Array<{ path: string; text: string }>) {
   const secretNames = Object.keys(setup.secrets);
   return [
-    `You work in ${clone}, a clone of the GitHub repo ${setup.repo} on its default branch.` +
+    `You work in ${clone}, a clone of the GitHub repo ${setup.repo} ${setup.sha === null ? "on its default branch" : `at commit ${setup.sha}`}.` +
       (setup.command === null ? "" : ` Chiefbot ran its setup there before you started: \`${setup.command}\`.`),
     ...(secretNames.length === 0
       ? []

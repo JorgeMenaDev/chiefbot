@@ -130,6 +130,10 @@ const api = {
     // The shared context: its files, and one file's Markdown.
     context: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:context", id),
     contextFile: (id: string, path: string): Promise<unknown> => ipcRenderer.invoke("projects:context-file", id, path),
+    // One of the context's images (a verifier's screenshot), as a data URL.
+    contextImage: (id: string, path: string): Promise<string> => ipcRenderer.invoke("projects:context-image", id, path),
+    // Marks a task done over the done rule; the task records who did.
+    markDone: (id: string, number: number): Promise<unknown> => ipcRenderer.invoke("projects:mark-done", id, number),
   },
   // The Theme setting: main sets Electron's native theme to match.
   theme: {

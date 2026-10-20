@@ -4,7 +4,16 @@ import { ConnectorName } from "./connectors.ts";
 import { ApprovalId, ProjectId, TaskWorkerId } from "./ids.ts";
 import { ProjectMcpServer, RepoPath, SecretName } from "./projects.ts";
 import { RepoFullName } from "./repos.ts";
+import { CommitSha, VerdictResult } from "./verification.ts";
 import { CopilotPayer } from "./workspaces.ts";
+
+// What a worker does for its task:
+//   engineer  does the task, ending in a draft pull request or a report
+//   verifier  checks the task's pull request at one commit with fresh eyes, on a
+//             computer that is never an engineer's, and ends in a verdict. It
+//             pushes nothing: control refuses its pushes and pull requests.
+export const TaskWorkerKind = z.enum(["engineer", "verifier"]);
+export type TaskWorkerKind = z.infer<typeof TaskWorkerKind>;
 
 // A worker's life. The UI and the agents' prompts call a task worker an engineer.
 //   queued      the project already runs as many as its workers.max: it launches once one of them ends
@@ -28,6 +37,7 @@ export type TaskWorkerState = z.infer<typeof TaskWorkerState>;
 export const TaskWorker = z.object({
   id: TaskWorkerId,
   projectId: ProjectId,
+  kind: TaskWorkerKind.default("engineer"),
   taskNumber: z.number().int().min(1),
   requestedBy: z.string(),
   // Who pays for its Copilot: set once its task starts.
@@ -36,7 +46,13 @@ export const TaskWorker = z.object({
   // Each step of its setup that ran, in order.
   setup: z.array(SetupStep),
   result: z.string().nullable(),
+  // The pull request an engineer opened, or the one a verifier checks.
   pullRequest: z.url().nullable(),
+  // A verifier's: the commit it checks and its branch, the pull request's head
+  // when it was dispatched, and the result of its verdict once it gave one.
+  sha: CommitSha.nullable().default(null),
+  branch: z.string().nullable().default(null),
+  verdict: VerdictResult.nullable().default(null),
   // What it waits on the requester to approve: a push, a pull request or a GitHub tool.
   pendingApprovals: z.array(z.object({ approvalId: ApprovalId, kind: ApprovalKind, detail: z.string() })),
   computerRemoved: z.boolean(),
@@ -57,8 +73,10 @@ export type TaskWorker = z.infer<typeof TaskWorker>;
 // its `skills` folders and its `mcp` servers, working in the clone. `secrets` are
 // the values of the project's secrets that are set, by name: they are in the
 // environment of the setup command and of the agent's runtime, for this task only.
+// A verifier's `sha` is the commit it checks out after the clone, before the setup command.
 export const EngineerSetup = z.object({
   repo: RepoFullName,
+  sha: CommitSha.nullable().default(null),
   command: z.string().nullable(),
   instructions: z.array(RepoPath),
   skills: z.array(RepoPath),

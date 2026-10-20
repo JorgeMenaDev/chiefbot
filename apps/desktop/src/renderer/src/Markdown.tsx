@@ -1,7 +1,7 @@
 // Adapted from T3 Code (https://github.com/pingdotgg/t3code, MIT), apps/web/src/components/ChatMarkdown.tsx
 // (the component map, MarkdownCodeBlock and its frame) and the .chat-markdown rules in apps/web/src/index.css.
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { Children, isValidElement, memo, useEffect, useState, type ReactNode } from "react";
+import { Children, isValidElement, memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Button } from "./components/ui/button.tsx";
@@ -86,10 +86,16 @@ const components: Components = {
 // A bot's reply as GitHub-flavoured markdown. Raw HTML in the text is dropped
 // (react-markdown's default). Memoised on its props: while a reply streams, only
 // that message re-renders. `streaming` fades in each new block (styles.css).
-export const Markdown = memo(function Markdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+// `image`, when given, shows each image by its src and alt text (keep it
+// stable: a new one re-renders the text).
+export const Markdown = memo(function Markdown({ text, streaming = false, image }: { text: string; streaming?: boolean; image?: (src: string, alt: string) => ReactNode }) {
+  const map = useMemo<Components>(
+    () => (image ? { ...components, img: ({ src, alt = "" }) => (typeof src === "string" ? image(src, alt) : alt) } : components),
+    [image],
+  );
   return (
     <div className="chat-markdown" data-streaming={streaming ? "" : undefined}>
-      <ReactMarkdown remarkPlugins={remarkPlugins} components={components}>
+      <ReactMarkdown remarkPlugins={remarkPlugins} components={map}>
         {text}
       </ReactMarkdown>
     </div>

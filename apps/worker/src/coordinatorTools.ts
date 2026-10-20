@@ -2,6 +2,7 @@ import type { Tool, ToolInvocation } from "@github/copilot-sdk";
 import {
   CoordinatorToolCall,
   CreateTaskArgs,
+  DispatchVerifierArgs,
   DispatchWorkerArgs,
   ListTasksArgs,
   ReadContextArgs,
@@ -55,11 +56,17 @@ export function coordinatorTools(call: (toolCall: CoordinatorToolCall) => Promis
       ({ sessionId, toolCallId }) => ({ creationId: `${sessionId}/${toolCallId}` }),
     ),
     tool(
+      "dispatch_verifier",
+      "Start a verifier on a task's pull request (its latest, unless you name one it links): a fresh computer, never an engineer's, that checks the pull request at its head now, as a person would, and pushes nothing. It ends with a verdict on the task (pass, issues or blocked), its report and screenshots in the context's verify/ folder. It returns at once with the verifier; check on it with worker_status.",
+      DispatchVerifierArgs,
+      ({ sessionId, toolCallId }) => ({ creationId: `${sessionId}/${toolCallId}` }),
+    ),
+    tool(
       "worker_status",
-      "One engineer's state (queued, launching, setting_up, working, finished, blocked, failed or stopped) with its setup steps, result and pull request, or every engineer of the project.",
+      "One worker's state, an engineer's or a verifier's (queued, launching, setting_up, working, finished, blocked, failed or stopped), with its setup steps, result, pull request and verdict, or every worker of the project.",
       WorkerStatusArgs,
     ),
-    tool("worker_transcript", "What an engineer did: its setup steps, messages, tool calls, approvals and errors, oldest first.", WorkerTranscriptArgs),
-    tool("stop_worker", "Stop an engineer and remove its computer.", StopWorkerArgs),
+    tool("worker_transcript", "What a worker did: its setup steps, messages, tool calls, approvals and errors, oldest first.", WorkerTranscriptArgs),
+    tool("stop_worker", "Stop a worker and remove its computer.", StopWorkerArgs),
   ];
 }

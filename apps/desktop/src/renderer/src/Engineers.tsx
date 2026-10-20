@@ -49,6 +49,7 @@ export function Engineers({
               <span className="text-muted-foreground">#{worker.taskNumber}</span> {titleOf(worker)}
             </span>
             <span className={cn("shrink-0 text-xs", worker.pendingApprovals.length > 0 ? "text-warning-foreground" : "text-muted-foreground")}>
+              {worker.kind === "verifier" && "verifier · "}
               {worker.pendingApprovals.length > 0 ? "waits on approval" : workerStateText[worker.state]}
             </span>
             <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
