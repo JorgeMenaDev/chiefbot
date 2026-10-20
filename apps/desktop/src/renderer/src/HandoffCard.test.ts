@@ -28,6 +28,7 @@ test("a handoff card names a verifier's verdict on its pull request, tests only 
     question: null,
     pullRequests: ["https://github.com/octo-org/shop/pull/7"],
     verification,
+    settingUp: null,
   });
   const sha = "abc1234def5678abc1234def5678abc1234def56";
   const render = (item: HandoffItem) => renderToStaticMarkup(createElement(HandoffCard, { item, onReply: async () => {}, onOpen: () => {} }));
@@ -37,4 +38,26 @@ test("a handoff card names a verifier's verdict on its pull request, tests only 
   expect(render(card("pr_opened", { result: "pass", sha, stale: true, testsOnly: false, summary: "Pays with a test card." }))).toContain("Verified PASS @abc1234 · stale");
   expect(render(card("pr_opened", { result: "issues", sha, stale: false, testsOnly: false, summary: "The card is declined." }))).toContain("ISSUES @abc1234: The card is declined.");
   expect(render(card("verified", { result: "pass", sha, stale: false, testsOnly: true, summary: "Its tests pass." }))).toContain("Verified PASS @abc1234 · tests only");
+});
+
+test("while the task's engineer sets up its stack, the handoff card shows the stage it is on, and nothing about setup otherwise", () => {
+  const card = (settingUp: string | null): HandoffItem => ({
+    kind: "handoff",
+    id: "handoff-1",
+    handoffId: HandoffId.parse("handoff-1"),
+    workspaceId: WorkspaceId.parse("workspace-1"),
+    projectId: ProjectId.parse("project-1"),
+    project: "shop",
+    title: "Checkout",
+    taskNumber: 1,
+    stage: "working",
+    question: null,
+    pullRequests: [],
+    verification: null,
+    settingUp,
+  });
+  const render = (item: HandoffItem) => renderToStaticMarkup(createElement(HandoffCard, { item, onReply: async () => {}, onOpen: () => {} }));
+
+  expect(render(card("Database"))).toContain("Setting up: Database");
+  expect(render(card(null))).not.toContain("Setting up");
 });
