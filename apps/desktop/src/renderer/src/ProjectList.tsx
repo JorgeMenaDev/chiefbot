@@ -2,6 +2,7 @@ import { CreateProjectRequest, Project, ProjectStates, type ProjectId, type Proj
 import { FolderPlusIcon, PlugIcon, SearchIcon, UsersIcon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { ErrorText } from "./Pane.tsx";
+import { followLatest } from "./lib/followLatest.ts";
 import { WorkspaceSwitcher, type useWorkspaces } from "./Workspaces.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input } from "./components/ui/input.tsx";
@@ -14,22 +15,15 @@ import { cn } from "./lib/utils.ts";
 // project that went loses its dot.
 export function useProjectStates() {
   const [states, setStates] = useState<ProjectStates>({});
-  useEffect(() => followProjectStates(window.chiefbot.projects, setStates), []);
+  useEffect(() => {
+    const main = window.chiefbot.projects;
+    return followLatest(
+      (listener) => main.onStates((next) => listener(ProjectStates.parse(next))),
+      async () => ProjectStates.parse(await main.states()),
+      setStates,
+    );
+  }, []);
   return states;
-}
-
-// Follows main's states into `set` until the returned unsubscribe. The kept
-// states apply only if no update came first: they may be older than it.
-export function followProjectStates(main: Pick<Window["chiefbot"]["projects"], "onStates" | "states">, set: (states: ProjectStates) => void) {
-  let updated = false;
-  const unsubscribe = main.onStates((next) => {
-    updated = true;
-    set(ProjectStates.parse(next));
-  });
-  void main.states().then((kept) => {
-    if (!updated) set(ProjectStates.parse(kept));
-  });
-  return unsubscribe;
 }
 
 // What the Projects tab shows in the main column: a project, or a screen of the workspace.

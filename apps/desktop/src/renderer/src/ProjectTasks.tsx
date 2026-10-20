@@ -121,8 +121,10 @@ function TaskVerification({ task, onEvidence }: { task: Task; onEvidence: (path:
 const verdictLabel: Record<VerdictResult, string> = { pass: "Verified PASS", issues: "ISSUES", blocked: "BLOCKED" };
 
 // A verdict in a line: "Verified PASS @abc1234", "ISSUES @abc1234" or
-// "BLOCKED @abc1234", then "· stale" once the pull request has moved since.
-export const verdictText = ({ result, sha, stale }: VerdictLine) => `${verdictLabel[result]} @${sha.slice(0, 7)}${stale ? " · stale" : ""}`;
+// "BLOCKED @abc1234", then "· tests only" when no screenshot backs it, and
+// "· stale" once the pull request has moved since.
+export const verdictText = ({ result, sha, stale, testsOnly }: VerdictLine) =>
+  `${verdictLabel[result]} @${sha.slice(0, 7)}${testsOnly ? " · tests only" : ""}${stale ? " · stale" : ""}`;
 
 // A verdict's colour: success for a PASS at the head, a warning for one gone stale or a check that was blocked.
 export const verdictColor = ({ result, stale }: VerdictLine) =>

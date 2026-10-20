@@ -37,13 +37,13 @@ export const botScreen = (bot: Bot): ScreenTarget => ({
   handBack: () => window.chiefbot.bots.handBack(bot.id),
 });
 
-// A running engineer's screen as `login` sees it: theirs to drive while they
-// hold it; another member's while that member does (`driver`).
+// A running engineer's or verifier's screen as `login` sees it: theirs to drive
+// while they hold it; another member's while that member does (`driver`).
 export function engineerScreen(projectId: ProjectId, worker: TaskWorker, login: string): ScreenTarget {
   const mine = worker.screenHolder === login;
   return {
     id: worker.id,
-    name: `Engineer on #${worker.taskNumber}`,
+    name: `${worker.kind === "verifier" ? "Verifier" : "Engineer"} on #${worker.taskNumber}`,
     face: <HardHatIcon className="size-4 text-muted-foreground" />,
     control: mine ? "human" : "agent",
     driver: mine ? null : worker.screenHolder,

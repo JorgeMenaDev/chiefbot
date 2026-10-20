@@ -1,4 +1,3 @@
-import type { Tool, ToolInvocation } from "@github/copilot-sdk";
 import {
   CoordinatorToolCall,
   CreateTaskArgs,
@@ -12,26 +11,14 @@ import {
   WorkerTranscriptArgs,
   WriteContextArgs,
 } from "@chiefbot/contracts";
-import type { z } from "zod";
+import { controlTool } from "./controlTool.ts";
 
-// The coordinator's only tools: the project's task ledger, shared context and
-// workers, all kept by control. `call` sends one call to control and resolves
-// with its JSON answer; it throws control's refusal, which the model sees as a
-// failed call. `extra` adds fields the model does not give, from the call itself.
+// The coordinator's tools that control keeps: the project's task ledger, shared
+// context and workers (coordinator.ts adds its read-only repo tools, repoCopy.ts).
+// `call` sends one call to control and resolves with its JSON answer; it throws
+// control's refusal, which the model sees as a failed call.
 export function coordinatorTools(call: (toolCall: CoordinatorToolCall) => Promise<string>) {
-  const tool = <Args extends z.ZodObject>(
-    name: CoordinatorToolCall["tool"],
-    description: string,
-    parameters: Args,
-    extra: (invocation: ToolInvocation) => object = () => ({}),
-  ) =>
-    ({
-      name,
-      description,
-      parameters,
-      handler: (args: unknown, invocation: ToolInvocation) =>
-        call(CoordinatorToolCall.parse({ tool: name, ...parameters.parse(args), ...extra(invocation) })),
-    }) satisfies Tool<unknown>;
+  const tool = controlTool(CoordinatorToolCall, call);
 
   return [
     tool(

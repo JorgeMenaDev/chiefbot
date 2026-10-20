@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { Handoff, Project, Task, TaskWorker, Workspace, type ChatEvent } from "@chiefbot/contracts";
+import { ContextFileText, Handoff, Project, Task, TaskWorker, Workspace, type ChatEvent } from "@chiefbot/contracts";
 import { setupShell } from "@chiefbot/worker/engineer-setup";
 import { fakeCopilot, sdk } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestUser } from "./testControl.ts";
@@ -12,7 +12,11 @@ import { atCleanUp, cleanUp, doneCount, eventually, startTestControl, type TestU
 // control, a fake GitHub, and fake computers whose chief, coordinator, engineer
 // and verifier all run on one fake Copilot. The engineer's and verifier's
 // setups and shells run real git, reaching the fake GitHub only through
-// control's git proxy, as in a real computer.
+// control's git proxy, as in a real computer. The project has a dev URL, so the
+// verifier checks in the browser: its PASS carries a screenshot.
+
+// A PNG's signature and a few bytes: the verifier's screenshot, as far as its tool can tell.
+const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
 
 afterEach(cleanUp);
 
@@ -64,7 +68,7 @@ async function workerWhen(member: TestUser, project: Project, id: string, matche
   return found;
 }
 
-test("a chief's request ends in a verified pull request with no member's nudge: request, follow-up, an engineer's draft PR, a verifier's PASS at its head, done, and the verdict on the chief's card", async () => {
+test("a chief's request ends in a verified pull request with no member's nudge: request, follow-up, an engineer's draft PR, a verifier's PASS at its head with a screenshot of the app, done, and the verdict on the chief's card", async () => {
   const control = await gitControl();
   const { owner, github, copilot, workspace } = control;
   // A repo with no project file: the app's settings configure the project.
@@ -104,10 +108,11 @@ test("a chief's request ends in a verified pull request with no member's nudge: 
       await runtime.tool("create_pull_request", { repository: "octo-org/shop", head: "fix-typo", base: "main", title: "Fix the README typo" });
       yield sdk.message("e-1", "Fixed the typo in a draft pull request.");
     }
-    // The verifier, in the clone its setup checked out at the pinned commit.
+    // The verifier, in the clone its setup checked out at the pinned commit: it saves a screenshot of the app, as scrot would.
     else if (prompt.startsWith("You are the verifier")) {
       checkedOut = (await runtime.shell(`cd ${clone} && git rev-parse HEAD`)).output.trim();
-      await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
+      writeFileSync(join(clone, "verify-1.png"), png);
+      await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop.", screenshots: ["verify-1.png"] });
     }
     yield sdk.idle();
   };
@@ -147,11 +152,18 @@ test("a chief's request ends in a verified pull request with no member's nudge: 
   const head = github.git("octo-org/shop", "rev-parse", "fix-typo");
 
   // 3. The engineer's ending wakes the coordinator, which dispatches a verifier. On a computer of its own, it checks
-  // the pull request at the head control pinned, and passes it.
+  // the pull request at the head control pinned in the browser, and passes it with a screenshot kept in the context.
   const verifierId = (await workerIds(owner, project, 2)).find((id) => id !== engineer.id) ?? "";
   const verifier = await workerWhen(owner, project, verifierId, ({ state }) => state === "finished");
   expect(verifier).toMatchObject({ kind: "verifier", state: "finished", verdict: "pass", sha: head, pullRequest });
   expect(checkedOut).toBe(head);
+  expect(copilot.sends.find(({ sessionId }) => sessionId === verifier.id)?.prompt).toContain("2. Open http://localhost:3000 in Chromium");
+  const [verified] = Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json());
+  expect(verified?.verification).toMatchObject({ result: "pass", testsOnly: false });
+  const report = ContextFileText.parse(await (await owner.api("GET", `/projects/${project.id}/context/file?path=${verified?.verification?.evidence}`)).json());
+  const screenshot = /!\[Screenshot 1\]\(([^)]+\.png)\)/.exec(report.content)?.[1] ?? "";
+  const image = await owner.api("GET", `/projects/${project.id}/context/image?path=verify/${screenshot}`);
+  expect(new Uint8Array(await image.arrayBuffer())).toEqual(png);
 
   // 4. The verifier's ending wakes the coordinator, which marks the task done: it has a PASS for its pull request's head.
   // Both wake-ups are system lines in the owner's chat with the coordinator, not their messages.
@@ -165,7 +177,7 @@ test("a chief's request ends in a verified pull request with no member's nudge: 
   expect(sentToCoordinator(woken)).toEqual(sent);
 
   // 5. The chief's card followed the task in place, and says the same after control restarts.
-  const passed = { result: "pass" as const, sha: head, stale: false, summary: "The README reads The shop." };
+  const passed = { result: "pass" as const, sha: head, stale: false, testsOnly: false, summary: "The README reads The shop." };
   expect(cards(chiefChat.events).map(({ stage, pullRequests, verification }) => [stage, pullRequests, verification])).toEqual([
     ["accepted", [], null],
     ["working", [], null],

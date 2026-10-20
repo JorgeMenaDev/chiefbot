@@ -230,6 +230,8 @@ export const ChatItem = z.discriminatedUnion("kind", [
   // Control's note: about a handoff, from before cards (HandoffUpdate), or the
   // start of a turn control queued in a project chat (SystemMessage).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
+  // One step of an engineer's or verifier's setup, before its agent starts.
+  z.object({ kind: z.literal("setup"), id: z.string(), step: SetupStep }),
   // Who pays for the turn that follows.
   z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) }),
   // expired: the turn ended before anyone answered (its worker restarted).

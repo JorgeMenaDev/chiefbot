@@ -20,6 +20,7 @@ const verified = (fields: Partial<Verification>): Verification => ({
   result: "pass",
   sha: "abc1234def5678abc1234def5678abc1234def56",
   stale: false,
+  testsOnly: false,
   summary: "The README reads The shop.",
   pullRequest: "https://github.com/octo-org/shop/pull/1",
   branch: "fix-typo",
@@ -33,19 +34,21 @@ const task = (number: number, fields: Partial<Task>) =>
 const render = (tasks: Task[]) =>
   renderToStaticMarkup(<TaskLedger project={project} login="octo-user" tasks={tasks} workers={[]} onWatch={() => {}} onEvidence={() => {}} />);
 
-test("a task shows its verifier's verdict on its latest pull request: PASS at its commit, stale once the pull request moved, or the issues", () => {
+test("a task shows its verifier's verdict on its latest pull request: PASS at its commit, tests only, stale once the pull request moved, or the issues", () => {
   const html = render([
     task(1, { verification: verified({}) }),
     task(2, { verification: verified({ stale: true }) }),
     task(3, { verification: verified({ result: "issues", summary: "The README still says Teh." }) }),
     task(4, { links: [pr(1), pr(2)], verification: verified({}) }),
+    task(5, { verification: verified({ testsOnly: true }) }),
   ]);
 
   expect(html).toContain("Verified PASS @abc1234<");
   expect(html).toContain("Verified PASS @abc1234 · stale");
   expect(html).toContain("ISSUES @abc1234: The README still says Teh.");
-  expect(html.match(/Verified PASS/g)).toHaveLength(2);
-  expect(html.match(/>Report</g)).toHaveLength(3);
+  expect(html).toContain("Verified PASS @abc1234 · tests only<");
+  expect(html.match(/Verified PASS/g)).toHaveLength(3);
+  expect(html.match(/>Report</g)).toHaveLength(4);
 });
 
 test("an open task with a pull request can be marked done by a member, and a task marked so says who did and its verdict then", () => {

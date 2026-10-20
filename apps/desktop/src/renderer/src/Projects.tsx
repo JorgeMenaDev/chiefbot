@@ -15,6 +15,7 @@ import { payerText } from "./ProjectTasks.tsx";
 import { ListeningTo } from "./Subscriptions.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
+import { followLatest } from "./lib/followLatest.ts";
 
 const ProjectList = z.array(Project);
 
@@ -137,14 +138,19 @@ function DeleteProject({ project, onDeleted }: { project: Project; onDeleted: ()
 // The user's own conversation with the project agent, as Electron main folds it.
 function useCoordinatorChat(projectId: ProjectId) {
   const [view, setView] = useState<ProjectChatView>({ projectId, items: [], working: null });
-  useEffect(() => {
-    const unsubscribe = window.chiefbot.projects.onChat((next) => {
-      const parsed = ProjectChatView.parse(next);
-      if (parsed.projectId === projectId) setView(parsed);
-    });
-    void window.chiefbot.projects.openChat(projectId).then((next) => setView(ProjectChatView.parse(next)));
-    return unsubscribe;
-  }, [projectId]);
+  useEffect(
+    () =>
+      followLatest<ProjectChatView>(
+        (listener) =>
+          window.chiefbot.projects.onChat((next) => {
+            const parsed = ProjectChatView.parse(next);
+            if (parsed.projectId === projectId) listener(parsed);
+          }),
+        async () => ProjectChatView.parse(await window.chiefbot.projects.openChat(projectId)),
+        setView,
+      ),
+    [projectId],
+  );
   return view;
 }
 
@@ -222,8 +228,9 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
         </p>
       );
     case "handoff":
-    // Only bots ask their user questions for now.
+    // Only bots ask their user questions for now, and only engineers and verifiers set up.
     case "question":
+    case "setup":
       return null;
   }
 }

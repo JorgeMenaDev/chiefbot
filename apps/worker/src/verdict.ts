@@ -36,8 +36,10 @@ export function verdictTool({ base, turnKey, cwd, redact }: { base: string; turn
         const error = ApiError.safeParse(await res.json().catch(() => null));
         throw new Error(error.success ? (error.data.message ?? error.data.error) : `Control answered ${res.status}`);
       }
-      const { evidence } = RecordedVerdict.parse(await res.json());
-      return `Recorded your verdict, ${result}. Your report is in the project's context at ${evidence}.`;
+      // Control records a pass with no browser evidence as blocked: then it says why.
+      const recorded = RecordedVerdict.parse(await res.json());
+      const as = recorded.result === result ? `${result}.` : `${recorded.result}: ${recorded.summary}`;
+      return `Recorded your verdict, ${as} Your report is in the project's context at ${recorded.evidence}.`;
     },
   } satisfies Tool<VerdictArgs>;
 }

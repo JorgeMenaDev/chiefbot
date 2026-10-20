@@ -258,7 +258,7 @@ ipcMain.handle("projects:delete", async (_event, id: unknown, name: unknown) => 
   const { response } = await dialog.showMessageBox(window, {
     type: "warning",
     message: `Delete the project ${String(name)}?`,
-    detail: "Its coordinator's and workers' computers, task ledger, chats, shared context, settings and secrets are deleted. The repo is not touched.",
+    detail: "The computers of its project agent, engineers and verifiers, its task ledger, chats, shared context, settings and secrets are deleted. The repo is not touched.",
     buttons: ["Delete", "Cancel"],
     defaultId: 1,
     cancelId: 1,

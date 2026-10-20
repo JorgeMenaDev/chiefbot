@@ -13,6 +13,14 @@ export type SecretStore = {
   delete(name: string): Promise<void>;
 };
 
+// What control logs of a SecretStore failure: the error's kind, if a known one,
+// and its numeric code. Never its message or any other name, which may quote the value.
+const knownErrors = new Set(["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError"]);
+export function secretFailure(error: unknown) {
+  const code = typeof error === "object" && error !== null && "code" in error && typeof error.code === "number" ? ` ${error.code}` : "";
+  return `${error instanceof Error && knownErrors.has(error.name) ? error.name : "other"}${code}`;
+}
+
 // Secrets encrypted with AES-256-GCM under `key` (32 bytes) in a `secrets` table
 // of the SQLite file at dbPath. The name is bound in as associated data, so a
 // value moved to another name does not decrypt.

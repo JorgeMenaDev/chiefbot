@@ -177,7 +177,9 @@ function Message({
         />
       );
     // A chief's chat has none: it always runs on its owner's seat, as its header says.
+    // Only engineers and verifiers set up.
     case "payer":
+    case "setup":
       return null;
   }
 }

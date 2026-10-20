@@ -5,7 +5,7 @@ import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from ".
 import { ModelReport, ReasoningEffort } from "./models.ts";
 import { RepoFullName } from "./repos.ts";
 import type { TaskWorker, TaskWorkerState } from "./taskWorkers.ts";
-import { VerdictLine } from "./verification.ts";
+import { VerdictLine, VerdictResult } from "./verification.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // A file or folder inside the repo, relative to its root: no leading slash and no "." or ".." part.
@@ -277,8 +277,10 @@ export function currentVerification({ links, verification }: Pick<Task, "links" 
   return verification !== null && verification.pullRequest === latestPullRequest(links) ? verification : null;
 }
 
-// What control answers a verifier's verdict: where its report is in the project's context.
-export const RecordedVerdict = z.object({ evidence: ContextPath });
+// What control answers a verifier's verdict: what it recorded, which differs
+// from what the verifier gave for a pass with no browser evidence (recorded as
+// blocked, its summary saying why), and where its report is in the project's context.
+export const RecordedVerdict = z.object({ result: VerdictResult, summary: z.string(), evidence: ContextPath });
 export type RecordedVerdict = z.infer<typeof RecordedVerdict>;
 
 // A project's whole task ledger: what /events sends on every change (a `tasks`

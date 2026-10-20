@@ -13,7 +13,8 @@ import { VerdictLine } from "./verification.ts";
 // linked task's, read from the ledger, and `workers` its workers. `verification`
 // is the task's verdict on its latest pull request, or null for none. `summary` is
 // the coordinator's last reply to a message of the handoff (its request or a
-// follow-up). `requestedBy` is the chief's owner's login. Times are epoch milliseconds.
+// follow-up) or in a turn that continued its task (a worker's ending).
+// `requestedBy` is the chief's owner's login. Times are epoch milliseconds.
 export const Handoff = z.object({
   id: HandoffId,
   workspaceId: WorkspaceId,

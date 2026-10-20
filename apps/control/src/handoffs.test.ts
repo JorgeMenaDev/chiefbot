@@ -261,7 +261,7 @@ test("a follow-up to a handoff whose task is done is refused: new work is a new 
   expect(task?.detail).not.toContain("PayPal");
 });
 
-test("handoff_status says what the project asks, its workers, its pull requests and the coordinator's last reply about it", async () => {
+test("handoff_status says what the project asks, its workers, its pull requests and the coordinator's last reply about it, in a turn its worker's ending started too", async () => {
   const { owner, project, chief, copilot } = await setup();
   const pullRequest = "https://github.com/octo-org/shop/pull/7";
   const answers: unknown[] = [];
@@ -272,7 +272,8 @@ test("handoff_status says what the project asks, its workers, its pull requests 
       await runtime.tool("dispatch_worker", { task: 1 });
       await runtime.tool("update_task", { number: 1, status: "needs_input", question: "Stripe or Adyen?", links: [{ kind: "pull-request", url: pullRequest }] });
       yield sdk.message("c-1", "A worker opened a pull request. Stripe or Adyen?");
-    } else if (prompt === "a question of my own") yield sdk.message("c-2", "About something else entirely.");
+    } else if (prompt.startsWith("Engineer for task #1 ended:")) yield sdk.message("c-3", "The engineer finished. I still need: Stripe or Adyen?");
+    else if (prompt === "a question of my own") yield sdk.message("c-2", "About something else entirely.");
     else if (prompt === "how is it going?") answers.push(await answer(runtime.tool("handoff_status", {})));
     yield sdk.idle();
   };
@@ -280,9 +281,10 @@ test("handoff_status says what the project asks, its workers, its pull requests 
   await owner.watchChat(chief.id).until(doneCount(1));
   await owner.watchProjectChat(project.id).until(doneCount(1));
   await eventually(async () => (await workersOf(owner, project)).some(({ state }) => state === "finished"));
-  // The coordinator's reply to a message of the member's own is not about the handoff.
-  await owner.api("POST", `/projects/${project.id}/messages`, { text: "a question of my own" });
+  // The worker's ending wakes the coordinator about the task. Its reply to a message of the member's own is not about it.
   await owner.watchProjectChat(project.id).until(doneCount(2));
+  await owner.api("POST", `/projects/${project.id}/messages`, { text: "a question of my own" });
+  await owner.watchProjectChat(project.id).until(doneCount(3));
 
   await owner.send(chief.id, "how is it going?");
   await owner.watchChat(chief.id).until(doneCount(2));
@@ -294,7 +296,7 @@ test("handoff_status says what the project asks, its workers, its pull requests 
       question: "Stripe or Adyen?",
       links: [{ kind: "pull-request", url: pullRequest }],
       workers: [{ id: worker?.id, state: "finished", result: "Opened the pull request.", pullRequest: null }],
-      summary: "A worker opened a pull request. Stripe or Adyen?",
+      summary: "The engineer finished. I still need: Stripe or Adyen?",
     },
   ]);
 });
@@ -378,7 +380,7 @@ test("a handoff's card and handoff_status show its task's verdict: Verified PASS
   await owner.send(chief.id, "how is it going?");
   await chiefChat.until(doneCount(2));
 
-  const verdict = { result: "pass" as const, sha: head, summary: "The checkout takes a test card." };
+  const verdict = { result: "pass" as const, sha: head, testsOnly: true, summary: "The checkout takes a test card." };
   expect(cards(chiefChat.events).map(({ stage, verification }) => [stage, verification])).toEqual([
     ["accepted", null],
     ["pr_opened", null],
@@ -387,6 +389,35 @@ test("a handoff's card and handoff_status show its task's verdict: Verified PASS
   ]);
   expect(answers[0]).toMatchObject({ refused: expect.stringContaining(`has moved to ${moved.slice(0, 7)}`) });
   expect(Handoff.array().parse(answers[1])).toMatchObject([{ status: "in_progress", verification: { ...verdict, stale: true } }]);
+});
+
+test("handoff_status re-reads the pull request on GitHub: a push from outside Chiefbot makes the PASS stale, and the card says so", async () => {
+  const { owner, project, chief, copilot, github } = await setup();
+  const head = github.commit("octo-org/shop", { "checkout.html": "<form></form>\n" }, "checkout");
+  const pullRequest = github.openPullRequest("octo-org/shop", { head: "checkout", title: "Add a checkout page" });
+  const answers: unknown[] = [];
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt.startsWith("You are the verifier")) await runtime.tool("report_verdict", { result: "pass", summary: "The checkout takes a test card." });
+    else if (prompt === "hand off the checkout") await runtime.tool("send_to_project", checkout(project));
+    else if (prompt.includes("task #1 in the ledger")) {
+      await runtime.tool("update_task", { number: 1, status: "in_progress", links: [{ kind: "pull-request", url: pullRequest }] });
+      await runtime.tool("dispatch_verifier", { task: 1 });
+    } else if (prompt === "how is it going?") answers.push(await answer(runtime.tool("handoff_status", {})));
+    yield sdk.idle();
+  };
+  const chiefChat = owner.watchChat(chief.id);
+  await owner.send(chief.id, "hand off the checkout");
+  await chiefChat.until(doneCount(1));
+  await eventually(() => cards(chiefChat.events).at(-1)?.stage === "verified");
+
+  github.commit("octo-org/shop", { "checkout.html": "<form>pay</form>\n" }, "checkout");
+  await owner.send(chief.id, "how is it going?");
+  await chiefChat.until(doneCount(2));
+
+  const stale = { result: "pass" as const, sha: head, stale: true, testsOnly: true, summary: "The checkout takes a test card." };
+  expect(Handoff.array().parse(answers[0])).toMatchObject([{ status: "in_progress", verification: stale }]);
+  await eventually(() => cards(chiefChat.events).at(-1)?.stage === "pr_opened");
+  expect(cards(chiefChat.events).at(-1)?.verification).toEqual(stale);
 });
 
 test("a card change a crash kept from the chief reaches it when control starts again", async () => {

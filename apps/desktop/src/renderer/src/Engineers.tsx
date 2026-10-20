@@ -2,6 +2,7 @@ import { engineerRuns, WorkerChatView, type Project, type Task, type TaskWorker,
 import { ChevronLeftIcon, ChevronRightIcon, RotateCwIcon } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
+import { SetupLog } from "./EngineerDetails.tsx";
 import { AssistantMessage, ChatTimeline, ErrorMessage, UserMessage } from "./Chat.tsx";
 import type { LaneItem } from "./chatRows.ts";
 import { LiveScreen } from "./LiveScreen.tsx";
@@ -9,6 +10,7 @@ import { engineerScreen } from "./screenTargets.tsx";
 import { payerText, workerStateText } from "./ProjectTasks.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Spinner } from "./components/ui/spinner.tsx";
+import { followLatest } from "./lib/followLatest.ts";
 import { cn } from "./lib/utils.ts";
 
 // The Engineers tab of a project's panel: the engineers its project agent
@@ -119,11 +121,15 @@ function EngineerDetail({ project, login, title, worker, onBack }: { project: Pr
 function useWorkerChat(project: Project, workerId: TaskWorkerId) {
   const [view, setView] = useState<WorkerChatView>({ workerId, items: [], working: null });
   useEffect(() => {
-    const unsubscribe = window.chiefbot.projects.onWorkerChat((next) => {
-      const parsed = WorkerChatView.parse(next);
-      if (parsed.workerId === workerId) setView(parsed);
-    });
-    void window.chiefbot.projects.openWorkerChat(project.id, workerId).then((next) => setView(WorkerChatView.parse(next)));
+    const unsubscribe = followLatest<WorkerChatView>(
+      (listener) =>
+        window.chiefbot.projects.onWorkerChat((next) => {
+          const parsed = WorkerChatView.parse(next);
+          if (parsed.workerId === workerId) listener(parsed);
+        }),
+      async () => WorkerChatView.parse(await window.chiefbot.projects.openWorkerChat(project.id, workerId)),
+      setView,
+    );
     return () => {
       unsubscribe();
       void window.chiefbot.projects.closeWorkerChat(workerId);
@@ -158,8 +164,9 @@ function ScreenNote({ children }: { children: ReactNode }) {
   return <p className="flex items-center justify-center gap-2 py-2 text-center text-muted-foreground text-xs">{children}</p>;
 }
 
-// What the engineer did, as the bot chat draws it. Only the member who asked for
-// the work answers its approvals; the others see who must.
+// What the engineer did, as the bot chat draws it, its setup steps first as its
+// task shows them. Only the member who asked for the work answers its
+// approvals; the others see who must.
 function TranscriptRow({ project, login, worker, item, streaming }: { project: Project; login: string; worker: TaskWorker; item: LaneItem; streaming: boolean }) {
   switch (item.kind) {
     case "user":
@@ -170,6 +177,8 @@ function TranscriptRow({ project, login, worker, item, streaming }: { project: P
       return <ErrorMessage message={item.message} />;
     case "payer":
       return <p className="text-muted-foreground text-xs">{payerText(item.payer)}</p>;
+    case "setup":
+      return <SetupLog step={item.step} />;
     case "approval":
       return item.state !== "pending" || worker.requestedBy === login ? (
         <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answer(project.id, worker.id, item.approvalId, approved)} />

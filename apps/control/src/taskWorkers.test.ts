@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, TurnId, User, WorkerTranscript, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
@@ -400,6 +400,30 @@ test("an engineer whose turn ends while control reads its secrets never gets the
 
   expect(received.join("\n")).not.toContain("run-task");
   expect(setup.runs).toEqual([]);
+});
+
+test("an engineer whose secrets cannot be read is blocked, and control logs the error's known kind and code only, so a crafted error name cannot carry a value", async () => {
+  const values = new Map<string, string>();
+  const secrets = {
+    get: async (name: string) => {
+      throw Object.assign(new Error("refused"), { name: `Leak ${values.get(name)}`, code: 14 });
+    },
+    put: async (name: string, value: string) => void values.set(name, value),
+    delete: async (name: string) => void values.delete(name),
+  };
+  const control = await teamProject({ secrets }, "secrets: [API_KEY]\n");
+  const { owner, project } = control;
+  await owner.api("PUT", `/projects/${project.id}/secrets/API_KEY`, { value: "sk-crafted" });
+  const log = spyOn(console, "error");
+  atCleanUp(() => log.mockRestore());
+  const { tool } = await heldTurn(control);
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  await workerWhen(owner, project, id, ({ state }) => state === "blocked");
+  const logged = log.mock.calls.map((args) => args.map(String).join(" "));
+  expect(logged.filter((text) => text.includes("sk-crafted"))).toEqual([]);
+  expect(logged).toContain(`could not read the secrets of ${project.id} for ${id}: other 14`);
 });
 
 test("an engineer whose computer runs an image without setup is blocked at once, told to rebuild the image, and gets no task", async () => {
@@ -1235,6 +1259,35 @@ test("a verifier ends with its verdict on the task, its report and screenshots k
   expect(new Uint8Array(await image.arrayBuffer())).toEqual(png);
 });
 
+test("a verifier's PASS needs browser evidence when the project has a devUrl: one with no screenshot is BLOCKED, and one on a project without a devUrl is tests only", async () => {
+  const control = await teamProject();
+  const { owner, project, copilot } = control;
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "commands:\n  dev: bun run dev\n  devUrl: http://localhost:3000\n" });
+  const said: unknown[] = [];
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) said.push((await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." })).result);
+    yield sdk.idle();
+  });
+  const { head } = await pullRequestOnTask(control, tool);
+  const verificationOf = async () => Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification;
+  const briefOf = (id: string) => copilot.sends.find(({ sessionId }) => sessionId === id)?.prompt ?? "";
+
+  const browser = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(await workerWhen(owner, project, browser.id, ({ state }) => state === "finished")).toMatchObject({ verdict: "blocked" });
+  const noEvidence = "No browser evidence: a PASS needs a screenshot of the app at http://localhost:3000. The verifier said: The README reads The shop.";
+  expect(await verificationOf()).toMatchObject({ result: "blocked", sha: head, testsOnly: false, summary: noEvidence });
+  expect(said[0]).toStartWith(`Recorded your verdict, blocked: ${noEvidence}`);
+  expect(briefOf(browser.id)).toContain("A pass needs at least one screenshot of the app: Chiefbot records a pass with none as blocked.");
+
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "" });
+  const testsOnly = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-2" })).body);
+
+  expect(await workerWhen(owner, project, testsOnly.id, ({ state }) => state === "finished")).toMatchObject({ verdict: "pass" });
+  expect(await verificationOf()).toMatchObject({ result: "pass", testsOnly: true, summary: "The README reads The shop." });
+  expect(briefOf(testsOnly.id)).toContain("The project sets no `commands.devUrl`, so there is no app to open: check the change by its tests and by reading the code. Your verdict shows as tests only.");
+});
+
 test("a verifier that gives no verdict is BLOCKED on the task: its setup failed, with its log as the report, or it ended without one", async () => {
   let installs = 0;
   const setup = fakeSetup((command) => (command === "bun install" && ++installs === 1 ? { exitCode: 1, output: "error: lockfile is frozen\n" } : { exitCode: 0, output: "" }));
@@ -1360,6 +1413,37 @@ test("the project agent marks a task done only with a PASS for its pull request'
   await verify("v-3");
 
   expect(Task.parse((await done(1)).body)).toMatchObject({ status: "done", verification: { result: "pass", sha: moved, stale: false } });
+});
+
+test("the task list re-reads a current verdict's pull request on GitHub, at most once a minute: a push from outside Chiefbot makes it stale, and a done task keeps its verdict", async () => {
+  const time = fakeClock(Date.now());
+  const control = await teamProject({ clock: time.clock });
+  const { owner, project, github } = control;
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "pass", summary: "The README reads The shop." });
+    yield sdk.idle();
+  });
+  const verify = async (creationId: string) => {
+    const { id } = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId })).body);
+    await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  };
+  const verificationOf = async () => Task.array().parse(await (await owner.api("GET", `/projects/${project.id}/tasks`)).json())[0]?.verification;
+  const { head } = await pullRequestOnTask(control, tool);
+  await verify("v-1");
+  expect(await verificationOf()).toMatchObject({ result: "pass", sha: head, stale: false });
+
+  const moved = github.commit("octo-org/shop", { "CHANGELOG.md": "Fixed a typo.\n" }, "fix-typo");
+
+  expect(await verificationOf()).toMatchObject({ sha: head, stale: false });
+  time.advance(60_000);
+  expect(await verificationOf()).toMatchObject({ sha: head, stale: true });
+
+  // A new PASS at the new head, and the task is done: its verdict stays, naming the commit it checked.
+  await verify("v-2");
+  expect(Task.parse((await tool({ tool: "update_task", number: 1, status: "done" })).body).status).toBe("done");
+  github.commit("octo-org/shop", { "NOTES.md": "Later.\n" }, "fix-typo");
+  time.advance(60_000);
+  expect(await verificationOf()).toMatchObject({ sha: moved, stale: false });
 });
 
 test("a member marks a task done in the app over the done rule, and the task records who did, when and its verdict then", async () => {
@@ -1629,6 +1713,21 @@ test("a verifier that follows the repo's verify skill still gets the project's d
   const brief = copilot.sends.find(({ sessionId }) => sessionId === verifier.id)?.prompt ?? "";
   expect(brief).toContain("Check it as the repo's `check-ui` skill says: it is among your skills.");
   expect(brief).toContain("Start the app with `bun run dev` in the clone. It answers at http://localhost:3000.");
+});
+
+test("a verifier gets the project's effective test command: one the app's settings set over the repo's file", async () => {
+  const control = await teamProject();
+  const { owner, project, copilot } = control;
+  await owner.api("PUT", `/projects/${project.id}/settings`, { text: "commands:\n  test: bun run test:unit\n" });
+  const { tool } = await heldTurn(control);
+  await pullRequestOnTask(control, tool);
+
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  await eventually(() => copilot.sends.some(({ sessionId }) => sessionId === verifier.id));
+  const brief = copilot.sends.find(({ sessionId }) => sessionId === verifier.id)?.prompt ?? "";
+  expect(brief).toContain("Run its tests with `bun run test:unit` in the clone.");
+  expect(brief).not.toContain("`bun test`");
 });
 
 test("a verifier takes one of the project's workers.max places, as an engineer does: beyond it, it is queued, and checks its pinned commit once one ends", async () => {

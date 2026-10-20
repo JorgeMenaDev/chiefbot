@@ -14,7 +14,7 @@ test("an answer sent again unchanged keeps its delivery id, and an edited one or
   expect(replyFor(first, "Stripe.", "Which payment provider?").deliveryId).not.toBe(first.deliveryId);
 });
 
-test("a handoff card names a verifier's verdict on its pull request, and a PASS at its head is the Verified stage", () => {
+test("a handoff card names a verifier's verdict on its pull request, tests only when no screenshot backs it, and a PASS at its head is the Verified stage", () => {
   const card = (stage: HandoffItem["stage"], verification: HandoffItem["verification"]): HandoffItem => ({
     kind: "handoff",
     id: "handoff-1",
@@ -32,8 +32,9 @@ test("a handoff card names a verifier's verdict on its pull request, and a PASS 
   const sha = "abc1234def5678abc1234def5678abc1234def56";
   const render = (item: HandoffItem) => renderToStaticMarkup(createElement(HandoffCard, { item, onReply: async () => {}, onOpen: () => {} }));
 
-  expect(render(card("verified", { result: "pass", sha, stale: false, summary: "Pays with a test card." }))).toContain(">Verified<");
-  expect(render(card("verified", { result: "pass", sha, stale: false, summary: "Pays with a test card." }))).toContain("Verified PASS @abc1234");
-  expect(render(card("pr_opened", { result: "pass", sha, stale: true, summary: "Pays with a test card." }))).toContain("Verified PASS @abc1234 · stale");
-  expect(render(card("pr_opened", { result: "issues", sha, stale: false, summary: "The card is declined." }))).toContain("ISSUES @abc1234: The card is declined.");
+  expect(render(card("verified", { result: "pass", sha, stale: false, testsOnly: false, summary: "Pays with a test card." }))).toContain(">Verified<");
+  expect(render(card("verified", { result: "pass", sha, stale: false, testsOnly: false, summary: "Pays with a test card." }))).toContain("Verified PASS @abc1234");
+  expect(render(card("pr_opened", { result: "pass", sha, stale: true, testsOnly: false, summary: "Pays with a test card." }))).toContain("Verified PASS @abc1234 · stale");
+  expect(render(card("pr_opened", { result: "issues", sha, stale: false, testsOnly: false, summary: "The card is declined." }))).toContain("ISSUES @abc1234: The card is declined.");
+  expect(render(card("verified", { result: "pass", sha, stale: false, testsOnly: true, summary: "Its tests pass." }))).toContain("Verified PASS @abc1234 · tests only");
 });

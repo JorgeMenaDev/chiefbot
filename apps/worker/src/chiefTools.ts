@@ -1,12 +1,10 @@
-import type { Tool, ToolInvocation } from "@github/copilot-sdk";
 import { ApiError, ChiefToolCall, HandoffStatusArgs, ListProjectsArgs, MessageProjectArgs, SendToProjectArgs } from "@chiefbot/contracts";
-import type { z } from "zod";
+import { controlTool } from "./controlTool.ts";
 
 // A bot's tools as its owner's chief of staff: it hands work to a project of
 // one of its owner's workspaces and follows it. Control keeps the handoffs and
 // answers each call as JSON; a refusal throws, which the model sees as a failed call.
 // Each call carries the key of the turn its session was opened for, from `turnKey`.
-// `extra` adds fields the model does not give, from the call itself.
 export function chiefTools({ controlUrl, botId, turnKey }: { controlUrl: string; botId: string; turnKey: () => string }) {
   async function call(toolCall: ChiefToolCall) {
     const res = await fetch(`${controlUrl}/worker/${botId}/chief-tools`, {
@@ -19,19 +17,7 @@ export function chiefTools({ controlUrl, botId, turnKey }: { controlUrl: string;
     throw new Error(refusal.success ? (refusal.data.message ?? refusal.data.error) : `Control answered ${res.status}`);
   }
 
-  const tool = <Args extends z.ZodObject>(
-    name: ChiefToolCall["tool"],
-    description: string,
-    parameters: Args,
-    extra: (invocation: ToolInvocation) => object = () => ({}),
-  ) =>
-    ({
-      name,
-      description,
-      parameters,
-      handler: (args: unknown, invocation: ToolInvocation) =>
-        call(ChiefToolCall.parse({ tool: name, ...parameters.parse(args), ...extra(invocation) })),
-    }) satisfies Tool<unknown>;
+  const tool = controlTool(ChiefToolCall, call);
 
   return [
     tool("list_projects", "List the team projects you can hand work to: those of every workspace your owner belongs to.", ListProjectsArgs),

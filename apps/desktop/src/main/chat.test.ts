@@ -352,3 +352,26 @@ test("a turn control queued in a project chat shows as a notice, not as the memb
   expect(view.items).toEqual([{ kind: "notice", id: "turn-1", text }]);
   expect(view.working).toBeNull();
 });
+
+test("an engineer's or verifier's transcript shows each setup step, with the row its task shows, before its agent's first message", () => {
+  const turnId = TurnId.parse("turn-1");
+  const clone = { step: "clone" as const, command: "git clone https://github.com/octo-org/shop.git shop", exitCode: 0, log: "" };
+  const checkout = { step: "checkout" as const, command: "git fetch -q origin abc && git checkout -q --detach abc", exitCode: 0, log: "" };
+  const events: ChatEvent["event"][] = [
+    { type: "user-message", text: "You are the verifier of the project shop." },
+    { type: "setup-step", step: clone },
+    { type: "setup-step", step: checkout },
+    { type: "setup-done", instructions: ["AGENTS.md"], skills: [] },
+    { type: "text-delta", messageId: "m1", text: "Checking the pull request." },
+  ];
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+
+  const view = events.reduce<ChatView>((view, event, seq) => foldChat(view, { seq, turnId, event }), empty);
+
+  expect(view.items.map((item) => (item.kind === "setup" ? [item.kind, item.step] : [item.kind]))).toEqual([
+    ["user"],
+    ["setup", clone],
+    ["setup", checkout],
+    ["assistant"],
+  ]);
+});
