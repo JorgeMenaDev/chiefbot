@@ -1378,6 +1378,7 @@ test("a member marks a task done in the app over the done rule, and the task rec
   expect(task).toMatchObject({ status: "done", overrides: [{ by: "octo-friend", verification: { result: "issues", sha: head } }] });
   expect(task.overrides[0]?.at).toBeGreaterThanOrEqual(before);
   expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]).toEqual(task);
+  expect(Task.parse((await tool({ tool: "update_task", number: 1, status: "done" })).body).status).toBe("done");
   const again = await owner.api("POST", `/projects/${project.id}/tasks/1/done`);
   expect([again.status, ApiError.parse(await again.json()).error]).toEqual([409, "task_closed"]);
   expect((await owner.api("POST", `/projects/${project.id}/tasks/9/done`)).status).toBe(404);

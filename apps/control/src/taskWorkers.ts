@@ -813,12 +813,13 @@ export function taskWorkerHost({
     // PASS for the head of its pull request (its latest, `links` added), read
     // again on GitHub as `asker` may, so a push from anywhere counts: the
     // verification's `stale` follows what it finds. A task that links no pull
-    // request has nothing to verify. Null when the task may be done, else why
-    // not. A member may mark it done over this in the app (projects.ts).
+    // request has nothing to verify, and one already done stays so. Null when
+    // the task may be done, else why not. A member may mark it done over this
+    // in the app (projects.ts).
     async doneRefusal(project: Project, asker: ProjectMember, number: number, links: TaskLink[] = []): Promise<string | null> {
       const task = projects.tasks(project.id).find((candidate) => candidate.number === number);
       const url = [...(task?.links ?? []), ...links].flatMap((link) => (link.kind === "pull-request" ? [link.url] : [])).at(-1);
-      if (!task || url === undefined) return null;
+      if (!task || task.status === "done" || url === undefined) return null;
       const why = await (async () => {
         const { verification } = task;
         if (verification?.pullRequest !== url) return `Task #${number} needs a verifier's PASS for ${url} at its head before it is done: dispatch_verifier first.`;
