@@ -103,6 +103,13 @@ test("a project file's template is checked when the project is made: a name the 
       `${template}services: { meta: { repo: octo-org/hidden, ref: main } }\n`,
       { status: "invalid", error: "chiefbot.project.yaml: services.meta: octo-org/hidden was not found, or your GitHub account cannot see it." },
     ],
+    [
+      "template: java-react-enterprise\nservice: auth\n",
+      {
+        status: "invalid",
+        error: "chiefbot.project.yaml: service: auth is needed by seed, so it cannot run from the engineer's code. Pick a service the rest of the stack does not need, such as ui.",
+      },
+    ],
   ];
   for (const [yaml, file] of cases) {
     const { createProject, github } = await team({ "chiefbot.project.yaml": yaml });
@@ -497,6 +504,15 @@ test("a member picks a template in the settings and maps its services to repos; 
     [
       "template: java-react-enterprise\nservice: ui\nservices: { auth: { repo: octo-org/legacy-gateway, ref: main } }\n",
       "Settings: services.auth: octo-org/legacy-gateway was not found, or your GitHub account cannot see it.",
+    ],
+    // The rest of the stack starts before the engineer runs the project's own service, so nothing in it may need that one.
+    [
+      "template: java-react-enterprise\nservice: meta\n",
+      "Settings: service: meta is needed by auth, so it cannot run from the engineer's code. Pick a service the rest of the stack does not need, such as ui.",
+    ],
+    [
+      "template: java-react-enterprise\nservice: auth\nservices: { meta: stand-in }\n",
+      "Settings: service: auth is needed by seed, so it cannot run from the engineer's code. Pick a service the rest of the stack does not need, such as ui.",
     ],
   ];
   for (const [wrong, message] of refusals) {

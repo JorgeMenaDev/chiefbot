@@ -31,11 +31,12 @@ services:                                        # where each other service runs
 - Each entry of `services` is `{ repo, ref }` or `stand-in`. A repo's image builds from the service's `context` in that repo, at `ref`, a branch or tag. `ref` follows git's ref-name rules (`git check-ref-format`) and cannot start with `-`. Both keys are required, and no other key is allowed. A service that `services` leaves out runs its stand-in.
 - The settings override the file key by key, as for the other keys. `template`, `service` and `services` are each taken whole, so the settings' `services` replaces the file's. Settings without `template` take the file's. `template: null` in the settings turns templates off, and the file's `service` and `services` with them.
 
-Control checks the keys against the catalog when it reads the file, as the project is made, and when settings are saved. It refuses:
+Control checks the keys against the catalog when it reads the file, as the project is made, when settings are saved, and when a stack starts (**An engineer's stack**). It refuses:
 
 - a template that is not in the catalog;
 - a service the template does not have, in `service` or in `services`. Only the template's `services` count: a compose service such as `postgres` does not;
 - `services` naming the project's own service, or pointing another service at the project's own repo;
+- a `service` the rest of the stack needs, since the engineer runs it only once the rest is up. That is a service the stack starts (every stage's, the seed, and what they need in compose) that needs it through `depends_on` or `network_mode: service:<name>`, or a stage that waits for it with other services. The error names what needs it and the services nothing needs: `service: meta is needed by auth, so it cannot run from the engineer's code. Pick a service the rest of the stack does not need, such as ui.` In `java-react-enterprise`, only `ui` qualifies;
 - a template without `service`, or `service` or `services` without a template;
 - a repo the member cannot read, checked as for the project's own repo: through the repo app, or as a public repo where the app is not installed. A save checks the repos its settings name, as the member who saves.
 
@@ -80,18 +81,19 @@ After the computer starts, and before its setup clones the repo and runs `comman
 2. **Build**: for each service that runs from a repo, finds the commit its `ref` names now, then fetches that commit and builds the service's image from its `context`, tagged `chiefbot-stack-<template>:<service>-<commit>-<repo hash>`. An image that exists is reused, so a later engineer on the same commit skips the fetch and the build. Each stand-in builds from the template's folder, from Docker's build cache once it has built.
 3. Starts the services of each of the template's `stages`, in order, as compose project `chiefbot-<id>-stack`, and waits until they are healthy, and the `seed` until it has finished. The seed runs once.
 
-The project's own `service` never starts as a container, and nothing in the stack waits for it: the engineer runs it in its computer. A stage that waits only for it is left out. Pick as the project's service one the rest of the stack does not need to start, such as the UI: a seed that calls the project's own API would fail, since that API runs only once the engineer starts it.
+The project's own `service` never starts as a container: the engineer runs it in its computer, after the stack is up. So nothing in the stack may need it (**Use one in a project** refuses such a `service`), and a stage that waits for it is left out. A seed that calls the project's own API without a `depends_on` on it still fails at its stage: compose cannot tell control about that need.
 
-Each stage goes into the worker's transcript as it starts, then as it passes or fails, with the end of its log: its commands' output and what its services said, with the project's secrets hidden. The coordinator's `worker_transcript` shows each stage that ended. The engineer's and the verifier's brief say what runs and how to run the project's service, and give the template's `notes`.
+Each stage goes into the worker's transcript as it starts, then as it passes or fails, with the end of its log: its commands' output and what its services said. The project's secrets and the repos' tokens are hidden as the output comes, before it is cut to its end, so no cut leaves a piece of one. The coordinator's `worker_transcript` shows each stage that ended. The engineer's and the verifier's brief say what runs and how to run the project's service, and give the template's `notes`.
 
 A stage that fails ends the job **blocked** (`Its stack did not start: its API stage failed.`), and its agent never starts. So does a check that fails, with a reason that names the key to fix in **Settings**:
 
 - a template or service the catalog no longer has: `Its stack cannot start: services.meta: java-react-enterprise has no service meta. Its services are ui, auth. Fix it in the project's Settings.`;
+- a project's own service that a new version of the template needs: `Its stack cannot start: service: ui is needed by the Gateway stage, so it cannot run from the engineer's code. …`;
 - a repo the member cannot read: `Its stack cannot start: services.meta: octo-org/meta-api was not found, or your GitHub account cannot see it.`;
 - GitHub failing while control checks a repo, which a new dispatch may clear: `… GitHub failed while control checked octo-org/meta-api (…). Try again.`
 
 A verifier blocked this way gets a BLOCKED verdict, with the failed stage's log as its report.
 
-The stack goes when its computer stops, at the end of the worker's turn, and when the computer goes: its containers, volumes and networks, found by the compose project's label. Images stay, for the next engineer.
+The stack goes when its computer stops, at the end of the worker's turn, and when the computer goes: its containers, volumes and networks, found by the compose project's label. Images stay, for the next engineer. A stack control could not remove, as when Docker did not answer or control stopped first, it removes on its next try or when it starts again, also when the computer has stopped on its own. Only then does it count the computer as stopped.
 
-Control runs stacks with the `docker` CLI and its compose plugin, on the local Docker provider's Engine. The control image that `compose.yaml` runs has no `docker` CLI yet, so stacks need control run on the host (`bun run dev`). On the GCE provider, a job of a project with a template ends blocked with `templates need the local Docker provider`. `apps/control/src/templates/stacks.ts` has the stack runner, and `stacks.live.test.ts` beside it runs two stacks of `java-react-enterprise` side by side on real Docker (`CHIEFBOT_DOCKER_TESTS=1 bun test stacks.live`).
+Control runs stacks with the `docker` CLI and its compose and buildx plugins, on the local Docker provider's Engine (`CHIEFBOT_DOCKER_SOCKET`), and fetches repos with `git`. The control image that `compose.yaml` runs has all three (`infra/control/Dockerfile`). Control run on the host uses the machine's. On the GCE provider, a job of a project with a template ends blocked with `templates need the local Docker provider`. `apps/control/src/templates/stacks.ts` has the stack runner, and `stacks.live.test.ts` beside it runs two stacks of `java-react-enterprise` side by side on real Docker (`CHIEFBOT_DOCKER_TESTS=1 bun test stacks.live`).

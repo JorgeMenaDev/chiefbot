@@ -9,7 +9,6 @@ import {
   latestPullRequest,
   PullRequestArgs,
   SCREENSHOT_BYTES_MAX,
-  SETUP_LOG_MAX,
   VerdictReport,
   WorkerToControl,
   type AgentConnector,
@@ -46,7 +45,6 @@ import { apiError, bearer, unauthorized } from "./http.ts";
 import type { PullRequestHead } from "./github.ts";
 import type { repoAccess, RepoAgent, RepoReader } from "./repos.ts";
 import { viewerBytes } from "./rfbViewer.ts";
-import { secretRedactor } from "@chiefbot/worker/secret-redactor";
 import { screenTunnel } from "./screens.ts";
 import { secretFailure } from "./secrets/secretStore.ts";
 import { templateProblem } from "./templates/projectTemplate.ts";
@@ -474,7 +472,9 @@ export function taskWorkerHost({
     return chore;
   }
 
-  // One step of settle: the provider call the computer needs, if any, after its stack goes.
+  // One step of settle: the provider call the computer needs, if any, after its
+  // stack goes. A computer to stop that is gone already needs none. The record
+  // says the computer stopped or went only once both are done.
   async function settleStep(workerId: TaskWorkerId) {
     const goes = workers.mustGo(workerId);
     if (!goes && !workers.stopPending(workerId)) return;
@@ -487,7 +487,8 @@ export function taskWorkerHost({
     try {
       // Its stack lives in the computer's network namespace: it goes first.
       await stacks?.stop(workerId);
-      await (goes ? computers.destroy(workerId, { deleteData: true }) : computers.stop(workerId));
+      if (goes) await computers.destroy(workerId, { deleteData: true });
+      else if ((await computers.status(workerId)) !== "absent") await computers.stop(workerId);
     } catch (error) {
       console.error(`could not ${goes ? "remove" : "stop"} the computer of ${workerId}:`, error);
       if (!stopped) retryLater(workerId);
@@ -617,11 +618,11 @@ export function taskWorkerHost({
 
   // Starts the worker's own copy of its project's template stack, when the
   // project has a template, before its setup: each stage goes into its
-  // transcript as the stack reports it, its log with the project's `secrets`
-  // and the repo tokens hidden. The project's template keys are checked against
-  // the catalog as it is now, and each service's repo against the member who
-  // asked (`userId`), on every start: the member who saved the settings being
-  // able to read it is not enough, and a cached image is no exception. Null
+  // transcript as the stack reports it, the stack runner hiding the project's
+  // `secrets` and the repo tokens in its log. The project's template keys are
+  // checked against the catalog as it is now, and each service's repo against
+  // the member who asked (`userId`), on every start: the member who saved the
+  // settings being able to read it is not enough, and a cached image is no exception. Null
   // once the stack is ready, or when the project has none; else why the worker
   // is blocked. A stack that started for a worker that ended meanwhile goes again.
   async function startStack(workerId: TaskWorkerId, projectId: ProjectId, userId: UserId, secrets: Record<string, string>): Promise<string | null> {
@@ -643,12 +644,11 @@ export function taskWorkerHost({
       repos[service] = { ...source, token: access.token };
     }
     if (workers.worker(workerId)?.state !== "setting_up") return null;
-    const hide = secretRedactor([...Object.values(secrets), ...Object.values(repos).flatMap(({ token }) => (token === null ? [] : [token]))]);
     let last = "";
     const outcome = await stacks
-      .start(workerId, { template, own: config.service, repos }, (stage) => {
+      .start(workerId, { template, own: config.service, repos, secrets: Object.values(secrets) }, (stage) => {
         last = stage.label;
-        const event = workers.stackStage(workerId, { ...stage, log: hide.redact(stage.log).slice(-SETUP_LOG_MAX), at: clock.now() });
+        const event = workers.stackStage(workerId, { ...stage, at: clock.now() });
         if (event) publish(projectId);
       })
       .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
@@ -656,7 +656,7 @@ export function taskWorkerHost({
       await stacks.stop(workerId).catch((error: unknown) => console.error(`could not remove the stack of ${workerId}:`, error));
       return null;
     }
-    if (outcome instanceof Error) return `Its stack did not start: ${hide.redact(outcome.message)}`;
+    if (outcome instanceof Error) return `Its stack did not start: ${outcome.message}`;
     return outcome === "ready" ? null : `Its stack did not start: its ${last} stage failed.`;
   }
 
@@ -1095,9 +1095,11 @@ export function taskWorkerHost({
     // On control's start: every approval a worker waits on gets its wait limit
     // again. A worker still launching whose computer is not running lost its
     // launch to the restart, so it fails. Each worker that ended and has not
-    // continued its task does. A computer whose turn ended but still
-    // runs stops. Then every worker computer that should be gone is removed, and
-    // queued workers launch where there is room.
+    // continued its task does. Each worker whose turn ended but whose computer
+    // was not recorded stopped settles, whatever the computer's state: one that
+    // stopped on its own, as at a host restart, may have left its stack. Then
+    // every worker computer that should be gone is removed, and queued workers
+    // launch where there is room.
     async recover() {
       for (const { workerId, approvalId, requestedAt } of workers.waitingApprovals()) limitWait(workerId, approvalId, requestedAt);
       for (const workerId of workers.launching()) {
@@ -1107,10 +1109,8 @@ export function taskWorkerHost({
       }
       for (const workerId of workers.uncontinued()) void workerEnded(workerId);
       for (const workerId of workers.ended()) {
-        const status = await computers.status(workerId);
         if (stopped) return;
-        if (status === "running") await settle(workerId);
-        else workers.computerStopped(workerId);
+        await settle(workerId);
       }
       await reap();
       for (const projectId of workers.queuedProjects()) promote(projectId);

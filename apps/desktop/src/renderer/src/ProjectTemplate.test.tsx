@@ -12,6 +12,7 @@ const template: Template = {
   stages: [{ label: "Database", waitsFor: ["db"] }],
   seed: "seed",
   notes: ["The app: http://localhost:3000"],
+  needs: {},
 };
 
 // A project of octo-org/shop with `file` as its project file and `settings` as its settings.

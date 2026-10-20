@@ -51,5 +51,7 @@ export const TemplateManifest = z.strictObject({
 export type TemplateManifest = z.infer<typeof TemplateManifest>;
 
 // One row of GET /templates: a template the repo ships, by its folder's name.
-export const Template = TemplateManifest.extend({ name: TemplateName });
+//   needs  each compose service's services it cannot start without, from the compose
+//          file: its depends_on, and the service whose network it joins (network_mode: service:<name>)
+export const Template = TemplateManifest.extend({ name: TemplateName, needs: z.record(TemplateServiceName, z.array(TemplateServiceName)) });
 export type Template = z.infer<typeof Template>;

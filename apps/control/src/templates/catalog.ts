@@ -19,6 +19,8 @@ const ComposeFile = z.object({
       build: z.unknown().optional(),
       ports: z.array(PortEntry).default([]),
       expose: z.array(Port).default([]),
+      depends_on: z.union([z.array(z.string()), z.record(z.string(), z.unknown())]).default([]),
+      network_mode: z.string().optional(),
     }),
   ),
 });
@@ -71,7 +73,13 @@ export function loadTemplates(dir: string): Template[] {
         if (clash) throw new Error(`${composeFile}: service ${service} binds port ${clash.port}/${clash.protocol}, which the engineer computer uses for ${clash.use}`);
       }
     }
-    return { ...manifest.data, name };
+    const needs = Object.fromEntries(
+      Object.entries(composed).map(([service, { depends_on, network_mode }]) => [
+        service,
+        [...(Array.isArray(depends_on) ? depends_on : Object.keys(depends_on)), ...(network_mode?.startsWith("service:") ? [network_mode.slice("service:".length)] : [])],
+      ]),
+    );
+    return { ...manifest.data, name, needs };
   });
 }
 

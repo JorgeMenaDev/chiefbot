@@ -2026,6 +2026,23 @@ test("every stack start checks each service's repo as the member who asked: one 
   expect(stacks.started).toHaveLength(1);
 });
 
+test("a member who cannot read a service's repo gets no stack on a project another member set it up on: the engineer they start and the verifier they dispatch are blocked, naming the repo", async () => {
+  // The friend saved the settings, and only they may read octo-org/meta-api.
+  const control = await templateProject({}, undefined, templateSettings, "guest");
+  const { owner, project, github, stacks } = control;
+  github.setAccess("octo-org/meta-api", "octo-user", null);
+  const { tool } = await heldTurn(control);
+  const refused = "Its stack cannot start: services.meta: octo-org/meta-api was not found, or your GitHub account cannot see it.";
+
+  const engineer = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  expect((await workerWhen(owner, project, engineer.id, ({ state }) => state === "blocked")).result).toBe(refused);
+  await pullRequestOnTask(control, tool);
+  const verifier = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(await workerWhen(owner, project, verifier.id, ({ verdict }) => verdict !== null)).toMatchObject({ state: "blocked", verdict: "blocked", result: refused });
+  expect(stacks.started).toEqual([]);
+});
+
 test("a stack start checks the project's template choices against the catalog as it is now: a template or service it no longer has blocks the engineer, naming the key to fix in Settings", async () => {
   const control = await templateProject({ persistent: true });
   const { owner, project, stacks } = control;
@@ -2047,6 +2064,53 @@ test("a stack start checks the project's template choices against the catalog as
     "Its stack cannot start: template: no template is named java-react-enterprise. The catalog has none. Fix it in the project's Settings.",
   );
   expect(stacks.started).toEqual([]);
+});
+
+test("a stack start refuses a project's own service that the template's new version needs before the engineer can run it, naming the key to fix in Settings", async () => {
+  const control = await templateProject({ persistent: true });
+  const { owner, project, stacks } = control;
+  const [template] = loadTemplates(repoTemplates);
+  if (!template) throw new Error("the repo ships no template");
+  // A new version of the template whose gateway stage waits for the UI too.
+  const stages = template.stages.map((stage) => (stage.label === "Gateway" ? { ...stage, waitsFor: ["auth", "ui"] } : stage));
+  control.stopControl();
+  control.startControl({ templates: [{ ...template, stages }] });
+  const { tool } = await heldTurn(control);
+
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+
+  expect((await workerWhen(owner, project, id, ({ state }) => state === "blocked")).result).toBe(
+    "Its stack cannot start: service: ui is needed by the Gateway stage, so it cannot run from the engineer's code. Pick a service the rest of the stack does not need. Fix it in the project's Settings.",
+  );
+  expect(stacks.started).toEqual([]);
+});
+
+test("on restart control removes the stack of an ended engineer whose computer stopped while control was down, and records its computer stopped only once its stack is gone", async () => {
+  const control = await templateProject({ persistent: true });
+  const { owner, project, computers, stacks } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "Done.");
+    yield sdk.idle();
+  });
+  stacks.failStops(true);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_worker", task: 1, creationId: "c-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  await Bun.sleep(20);
+  // Its stack could not go, so its computer still runs. Control goes down, and the computer stops on its own, as at a host restart.
+  expect([stacks.running.has(id), await computers.provider.status(id)]).toEqual([true, "running"]);
+  control.stopControl();
+  await computers.provider.stop(id);
+
+  // Its stack still cannot go: control keeps trying.
+  control.startControl();
+  await Bun.sleep(20);
+  expect(stacks.running.has(id)).toBe(true);
+  stacks.failStops(false);
+  control.restart();
+
+  await eventually(() => !stacks.running.has(id));
+  expect(stacks.stopped).toEqual([id]);
+  expect(computers.destroyed).toEqual([]);
 });
 
 test("template: null in the settings turns the file's template off: the engineer gets no stack, and its brief says none", async () => {

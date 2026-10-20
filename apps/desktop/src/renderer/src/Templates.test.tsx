@@ -16,6 +16,7 @@ const template: Template = {
   ],
   seed: "seed",
   notes: ["The app: http://localhost:3000"],
+  needs: {},
 };
 
 // The row's text as a person reads it, one space between words.

@@ -41,7 +41,7 @@ const compose = (podPorts = 'expose: ["8080", "5432"]') => `services:
   seed: { build: ./seed, network_mode: service:pod }
 `;
 
-test("the template the repo ships loads, with the services a repo may replace and its stages", () => {
+test("the template the repo ships loads, with the services a repo may replace, its stages and what each service needs", () => {
   const catalog = loadTemplates(repoTemplates);
 
   expect(catalog.map(({ name }) => name)).toEqual(["java-react-enterprise"]);
@@ -55,6 +55,8 @@ test("the template the repo ships loads, with the services a repo may replace an
     { label: "App", waitsFor: ["ui"] },
   ]);
   expect(template?.seed).toBe("seed");
+  // What each service cannot start without: its depends_on, and pod, whose network it joins.
+  expect(template?.needs).toEqual({ pod: [], postgres: ["pod"], meta: ["postgres", "pod"], auth: ["meta", "pod"], seed: ["auth", "pod"], ui: ["seed", "pod"], probe: ["pod"] });
 });
 
 test("a template that breaks the rules stops control, naming its file and what is wrong", () => {

@@ -39,7 +39,7 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
     if (!template) throw new Error("no java-react-enterprise template");
     // A read token for the repo, as control mints one (repos.ts readToken).
     const token = await installationToken(github.url, github.app, "octo-org/acme-auth", "read");
-    const plan = { template, own: "ui", repos: { auth: { repo: "octo-org/acme-auth", ref: "main", token } } };
+    const plan = { template, own: "ui", repos: { auth: { repo: "octo-org/acme-auth", ref: "main", token } }, secrets: [] };
     const stacks = dockerStacks({ socketPath, githubUrl: github.url, templatesDir: repoTemplates, prefix });
     const [first, second] = [TaskWorkerId.parse("worker_a"), TaskWorkerId.parse("worker_b")];
     const computers: string[] = [];

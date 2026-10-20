@@ -1,8 +1,10 @@
 import type { TaskWorkerId } from "@chiefbot/contracts";
+import { secretRedactor } from "@chiefbot/worker/secret-redactor";
 import { BUILD_STAGE, stackStages, type StackPlan, type StackRunner } from "./stacks.ts";
 
 // A StackRunner for tests: it starts nothing. Each stage it reports passes at
-// once with a one-line log, unless the test fails it (`failAt`). Tests read what
+// once with a one-line log, unless the test fails it (`failAt`), its log with
+// the plan's secrets and tokens hidden, as a runner must. Tests read what
 // started and stopped, and which stacks run.
 export function fakeStacks() {
   const started: Array<{ id: TaskWorkerId; plan: StackPlan }> = [];
@@ -10,6 +12,7 @@ export function fakeStacks() {
   const running = new Set<TaskWorkerId>();
   // The stage that fails next, with its log.
   let failure: { label: string; log: string } | null = null;
+  let stopsFail = false;
 
   const runner: StackRunner = {
     async start(id, plan, onStage) {
@@ -18,7 +21,8 @@ export function fakeStacks() {
       for (const label of [BUILD_STAGE, ...stackStages(plan.template, plan.own).map(({ label }) => label)]) {
         onStage({ label, state: "running", log: "" });
         if (failure?.label === label) {
-          onStage({ label, state: "failed", log: failure.log });
+          const tokens = Object.values(plan.repos).flatMap(({ token }) => (token === null ? [] : [token]));
+          onStage({ label, state: "failed", log: secretRedactor([...plan.secrets, ...tokens]).redact(failure.log) });
           failure = null;
           return "failed";
         }
@@ -27,6 +31,7 @@ export function fakeStacks() {
       return "ready";
     },
     async stop(id) {
+      if (stopsFail) throw new Error("Docker is not answering");
       stopped.push(id);
       running.delete(id);
     },
@@ -39,6 +44,8 @@ export function fakeStacks() {
     running,
     // The next stack's stage `label` fails with `log`.
     failAt: (label: string, log: string) => void (failure = { label, log }),
+    // While `failing`, every stop fails, as when Docker does not answer.
+    failStops: (failing: boolean) => void (stopsFail = failing),
   };
 }
 
