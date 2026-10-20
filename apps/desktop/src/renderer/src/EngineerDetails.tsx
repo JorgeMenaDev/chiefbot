@@ -37,7 +37,7 @@ const stepLabel: Record<SetupStep["step"], string> = { clone: "Clone", checkout:
 // card: each stage of its template stack (`stack`), then each step of its
 // computer's setup (`steps`), with its state, how long it took (ticking while
 // it runs) and its log, folded away unless it failed. While it sets up (`live`)
-// the list is open; once its agent works it folds into one line, unless
+// the list is open, its first line naming the stage that runs; once its agent works it folds into one line, unless
 // something failed, which stays open with its log. Its task and its transcript
 // (Engineers.tsx) both show it.
 export function SetupProgress({ stack, steps, live }: { stack: StackRow[]; steps: SetupStep[]; live: boolean }) {
@@ -54,11 +54,12 @@ export function SetupProgress({ stack, steps, live }: { stack: StackRow[]; steps
     })),
   ];
   const failed = rows.find(({ state }) => state === "failed");
+  const running = rows.find(({ state }) => state === "running");
   const [unfolded, setUnfolded] = useState<boolean | null>(null);
   const open = unfolded ?? (live || failed !== undefined);
-  const now = useNow(live && rows.some(({ state }) => state === "running"));
+  const now = useNow(live && running !== undefined);
   const header: { icon: ReactNode; text: ReactNode } = live
-    ? { icon: <Spinner className="size-3" />, text: <span className="animate-working">Setting up</span> }
+    ? { icon: <Spinner className="size-3" />, text: <span className="animate-working">{running ? `Setting up: ${running.label}` : "Setting up"}</span> }
     : failed
       ? { icon: stateIcon.failed, text: <span className="text-destructive-foreground">{failed.label} failed</span> }
       : rows.some(({ state }) => state === "waiting" || state === "running")

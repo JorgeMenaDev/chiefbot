@@ -44,7 +44,7 @@ test("an engineer that sets up lists its stack's stages, then its setup steps, a
     }),
   );
 
-  expect(text(html)).toContain("Setting up");
+  expect(text(html)).toContain("Setting up: API");
   expect(rows(html)).toEqual(["Build passed", "Database passed", "API running", "Gateway waiting"]);
   expect(text(html)).toContain("Build 1m");
   expect(text(html)).toContain("Database 3.5s");
