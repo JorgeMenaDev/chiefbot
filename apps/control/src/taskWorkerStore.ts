@@ -10,6 +10,7 @@ import {
   type ApprovalId,
   type ApprovalKind,
   type ChatEvent,
+  type StackStage,
   type TaskWorkerState,
   type TurnEvent,
   type VerdictResult,
@@ -376,6 +377,14 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
       }
       return stored;
     }),
+
+    // A stage of the worker's stack, which control adds while the worker sets up.
+    // Null, storing nothing, once it no longer does.
+    stackStage(workerId: TaskWorkerId, stage: StackStage): ChatEvent | null {
+      if (!db.query("SELECT 1 FROM task_workers WHERE id = ?1 AND state = 'setting_up'").get(workerId)) return null;
+      touch(workerId);
+      return append(workerId, { type: "stack-stage", stage });
+    },
 
     // Records a verifier's verdict, the first only: the push `revision` of its
     // branch when control pinned its commit, or null when it has one.

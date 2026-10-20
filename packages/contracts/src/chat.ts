@@ -32,6 +32,21 @@ export const SetupStep = z.object({
 });
 export type SetupStep = z.infer<typeof SetupStep>;
 
+// One stage of an engineer's or verifier's own copy of its project's template
+// stack (docs/templates.md), which control starts before the computer's setup:
+// Build (it clones the services' repos and builds their images), then each of
+// the template's stages that waits for a service the stack starts. Control
+// reports each stage as it starts (running), then once as it passes or fails, at
+// `at` (epoch milliseconds). `log` is the end of its commands' and services'
+// output, with the project's secrets hidden.
+export const StackStage = z.object({
+  label: z.string(),
+  state: z.enum(["running", "passed", "failed"]),
+  log: z.string().max(SETUP_LOG_MAX),
+  at: z.number(),
+});
+export type StackStage = z.infer<typeof StackStage>;
+
 // What happens during one turn, as the worker reports it. The worker turns
 // Copilot SDK session events into these; a turn always ends with `done`.
 //   text-delta  a chunk of an assistant message; chunks of one message share messageId
@@ -133,6 +148,10 @@ export type AutoFallback = z.infer<typeof AutoFallback>;
 // null when the turn runs on the project's model.
 export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer, fallback: AutoFallback.nullable().default(null) });
 
+// A stage of a task worker's stack (StackStage). Control adds it while the worker
+// sets up, outside the runtime's numbering.
+export const StackStageEvent = z.object({ type: z.literal("stack-stage"), stage: StackStage });
+
 // Body of POST /bots/:id/approvals/:approvalId (204; 409 when it is not pending).
 export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
 export type AnswerApprovalRequest = z.infer<typeof AnswerApprovalRequest>;
@@ -186,7 +205,7 @@ export const HandoffUpdate = z.object({
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, SystemMessage, ApprovalAnswer, QuestionAnswer, HandoffCardEvent, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, SystemMessage, ApprovalAnswer, QuestionAnswer, HandoffCardEvent, HandoffUpdate, TurnPayer, StackStageEvent, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 

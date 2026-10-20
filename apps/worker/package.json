@@ -9,7 +9,8 @@
     "./engineer-setup": "./src/engineerSetup.ts",
     "./fake-copilot": "./src/fakeCopilot.ts",
     "./fake-display": "./src/fakeDisplay.ts",
-    "./git-proxy": "./src/gitProxy.ts"
+    "./git-proxy": "./src/gitProxy.ts",
+    "./secret-redactor": "./src/secretRedactor.ts"
   },
   "scripts": {
     "typecheck": "tsc -p ."

@@ -16,13 +16,11 @@ export type DockerProviderOptions = {
 
 const ContainerInspect = z.object({ State: z.object({ Running: z.boolean() }) });
 
-export function dockerProvider({ socketPath, image }: DockerProviderOptions): ComputerProvider {
-  const container = (id: ComputerId) => `chiefbot-${id}`;
-  const volume = (id: ComputerId) => `chiefbot-${id}-home`;
-  const network = (id: ComputerId) => `chiefbot-${id}-net`;
-
-  // One Engine API call. Statuses in `ok` count as success besides 2xx.
-  async function engine(method: string, path: string, body?: unknown, ok: number[] = []) {
+// One Engine API call over the socket at `socketPath`. Statuses in `ok` count as
+// success besides 2xx. The template stacks use it too (templates/stacks.ts).
+export const dockerEngine =
+  (socketPath: string) =>
+  async (method: string, path: string, body?: unknown, ok: number[] = []) => {
     const res = await fetch(`http://docker${path}`, {
       method,
       unix: socketPath,
@@ -32,7 +30,13 @@ export function dockerProvider({ socketPath, image }: DockerProviderOptions): Co
       throw new Error(`Docker ${method} ${path} failed: ${res.status} ${await res.text()}`);
     }
     return res;
-  }
+  };
+
+export function dockerProvider({ socketPath, image }: DockerProviderOptions): ComputerProvider {
+  const container = (id: ComputerId) => `chiefbot-${id}`;
+  const volume = (id: ComputerId) => `chiefbot-${id}-home`;
+  const network = (id: ComputerId) => `chiefbot-${id}-net`;
+  const engine = dockerEngine(socketPath);
 
   return {
     async create({ id, env }) {

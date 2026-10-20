@@ -9,6 +9,7 @@ import { dockerProvider } from "./computers/docker.ts";
 import { gceProvider } from "./computers/gce.ts";
 import { startControl } from "./control.ts";
 import { loadTemplates, repoTemplates } from "./templates/catalog.ts";
+import { dockerStacks } from "./templates/stacks.ts";
 import { googleSecretManager, restoreSetup, secretManagerStore } from "./secrets/secretManager.ts";
 import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 
@@ -38,6 +39,8 @@ import { localSecretStore, secretKeyFile } from "./secrets/secretStore.ts";
 //                                A folder that breaks a rule stops control here, naming the file.
 //   CHIEFBOT_TEMPLATES_DIR       default the repo's templates/: the template catalog (docs/templates.md).
 //                                A template that breaks a rule stops control here, naming the file.
+//                                With docker computers, engineers' stacks run from it (templates/stacks.ts),
+//                                through the docker CLI and its compose plugin.
 const port = Number(process.env.CHIEFBOT_CONTROL_PORT ?? 7410);
 const idleStopMinutes = Number(process.env.CHIEFBOT_IDLE_STOP_MINUTES ?? 30);
 if (!(idleStopMinutes > 0)) throw new Error("CHIEFBOT_IDLE_STOP_MINUTES must be a positive number of minutes");
@@ -52,7 +55,9 @@ if (signIn === null || githubApp === null) {
   process.exit(1);
 }
 const connections = loadConnections(process.env.CHIEFBOT_CONNECTIONS_DIR ?? repoConnections);
-const templates = loadTemplates(process.env.CHIEFBOT_TEMPLATES_DIR ?? repoTemplates);
+const templatesDir = process.env.CHIEFBOT_TEMPLATES_DIR ?? repoTemplates;
+const templates = loadTemplates(templatesDir);
+const githubUrl = process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com";
 const dbPath = process.env.CHIEFBOT_DB_PATH ?? ".data/control.sqlite";
 mkdirSync(dirname(dbPath), { recursive: true });
 
@@ -61,7 +66,7 @@ const control = startControl({
   hostname: process.env.CHIEFBOT_CONTROL_HOSTNAME ?? "127.0.0.1",
   dbPath,
   githubApiUrl: process.env.CHIEFBOT_GITHUB_API_URL ?? "https://api.github.com",
-  githubUrl: process.env.CHIEFBOT_GITHUB_URL ?? "https://github.com",
+  githubUrl,
   githubClientId: signIn.clientId,
   githubApp,
   secrets:
@@ -82,5 +87,6 @@ const control = startControl({
   firstBot: "Chief of Staff",
   connections,
   templates,
+  stacks: config.provider === "gce" ? null : dockerStacks({ socketPath: config.socketPath, githubUrl, templatesDir }),
 });
 console.log(`control listening on ${control.url} with ${config.provider} computers`);

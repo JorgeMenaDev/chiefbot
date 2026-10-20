@@ -52,6 +52,7 @@ import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
 import type { CatalogConnection } from "./connections/catalog.ts";
 import { connectionHost } from "./connections/connections.ts";
+import type { StackRunner } from "./templates/stacks.ts";
 import { templateRoutes } from "./templates/templates.ts";
 import { connectorHost } from "./connectors/connectors.ts";
 import { defaultProbes, healthHost } from "./health/health.ts";
@@ -121,6 +122,10 @@ export type ControlOptions = {
   connections?: CatalogConnection[];
   // The template catalog (templates/catalog.ts loadTemplates). Default: none.
   templates?: Template[];
+  // Where engineers' and verifiers' template stacks run (templates/stacks.ts): the
+  // local Docker Engine; a fake in tests. Null (the default) where computers have
+  // none, as on GCE: a task of a project with a template ends blocked.
+  stacks?: StackRunner | null;
   // Where connections mint Google access tokens (connections/googleToken.ts). Default: Google's.
   googleTokenUrl?: string;
   // The health probe of each connection that has one (health/health.ts). Default: the
@@ -252,6 +257,7 @@ export function startControl({
   firstBot,
   connections: catalog = [],
   templates = [],
+  stacks = null,
   googleTokenUrl,
   probes = defaultProbes({ ...googleUrls, ...(googleTokenUrl === undefined ? {} : { token: googleTokenUrl }) }),
   serviceNet = systemNet,
@@ -354,6 +360,10 @@ export function startControl({
     connectorsFor: connectors.agentConnectors,
     secretsFor: (projectId) => projects.secretValues(projectId),
     computers,
+    templates,
+    stacks,
+    repoReadable: repos.readable,
+    repoReadToken: repos.readToken,
     approvals,
     approvalWaitMinutes,
     clock,

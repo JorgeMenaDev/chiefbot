@@ -10,6 +10,7 @@ import {
   type CoordinatorToControl,
   type ModelReport,
   type ProjectId,
+  type Template,
   type TurnEvent,
   type TurnId,
 } from "@chiefbot/contracts";
@@ -28,6 +29,7 @@ import { fakeComputers } from "./computers/fakeComputers.ts";
 import { loadConnections, repoConnections } from "./connections/catalog.ts";
 import { startControl } from "./control.ts";
 import { loadTemplates, repoTemplates } from "./templates/catalog.ts";
+import { fakeStacks } from "./templates/fakeStacks.ts";
 import type { SecretStore } from "./secrets/secretStore.ts";
 
 // Shared fixtures for control's tests: control with a fake GitHub and fake bot
@@ -62,6 +64,8 @@ export type TestControlOptions = {
   setupShell?: SetupShell;
   // Wraps the fake provider, e.g. to make start fail.
   provider?: (fake: ComputerProvider) => ComputerProvider;
+  // null: no template stacks, as on the GCE provider. Default: the fake stacks control returns.
+  stacks?: null;
   // The bot a new user gets at their first sign-in. Default: none.
   firstBot?: string;
   clock?: Clock;
@@ -91,6 +95,7 @@ export async function startTestControl({
   connectionsRoot,
   setupShell,
   provider,
+  stacks: stacksOption,
   firstBot,
   clock,
   idleStopMinutes,
@@ -110,6 +115,7 @@ export async function startTestControl({
     ...(clock === undefined ? {} : { clock }),
     ...(setupShell === undefined ? {} : { setupShell }),
   });
+  const stacks = fakeStacks();
   const options = {
     port: 0,
     dbPath: persistent ? join(mkdtempSync(join(tmpdir(), "chiefbot-control-")), "control.sqlite") : ":memory:",
@@ -121,6 +127,7 @@ export async function startTestControl({
     // The templates the repo ships.
     templates: loadTemplates(repoTemplates),
     computers: provider ? provider(computers.provider) : computers.provider,
+    stacks: stacksOption === null ? null : stacks.runner,
     ...(firstBot === undefined ? {} : { firstBot }),
     ...(clock === undefined ? {} : { clock }),
     ...(idleStopMinutes === undefined ? {} : { idleStopMinutes }),
@@ -149,11 +156,14 @@ export async function startTestControl({
   };
 
   const stopControl = () => control.stop();
-  const startAgain = () => void (control = startControl({ ...options, port: Number(new URL(url).port) }));
+  // Starts control again; `templates` changes its catalog, as a new version of the repo would.
+  const startAgain = ({ templates = options.templates }: { templates?: Template[] } = {}) =>
+    void (control = startControl({ ...options, templates, port: Number(new URL(url).port) }));
 
   return {
     github,
     computers,
+    stacks,
     copilot,
     url,
     // Control's SQLite file, for a test that changes it while control is stopped.
