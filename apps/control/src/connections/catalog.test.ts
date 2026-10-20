@@ -31,6 +31,7 @@ test("every connection the repo ships loads, in folder order, with its skill", (
     ["gcloud", "gcloud"],
     ["harness", "harness"],
     ["jira", "acli"],
+    ["looker", "looker"],
   ]);
   for (const connection of catalog) expect(connection.skill).toStartWith(`---\nname: ${connection.name}\n`);
 });

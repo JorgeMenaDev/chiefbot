@@ -18,6 +18,7 @@ Connections differ from connectors (`docs/connectors.md`): a connector is an MCP
 | Dynatrace | Environment URL (like `https://abc12345.apps.dynatrace.com`) and a platform token (myaccount.dynatrace.com, **Platform tokens**; with an expiry date). Health checks need `storage:buckets:read`, `storage:events:read`, `storage:logs:read`, `storage:metrics:read` and `slo:slos:read`; dtctl's `docs/TOKEN_SCOPES.md` lists the rest. |
 | Google Cloud | A service account key JSON (IAM, **Service accounts**, **Keys**), or an `authorized_user` credentials JSON (what `gcloud auth application-default login` writes), with only the roles your bots need (like Viewer), and a default project ID. The key never leaves control: each turn gets a one-hour access token minted from it (below). |
 | Harness | Account ID, a default organization and project (the CLI refuses to run without them; `--org` and `--project` still choose another per command), and a personal access token or service account token with only the roles it needs. |
+| Looker | Instance URL, and an API client ID and secret (Admin, **Users**, **Edit keys**; or your own **Account** page on Looker (Google Cloud core)) of a user with only the permissions it needs. Its CLI, `looker`, is a small API client the folder ships (`connections/looker/looker.ts`). |
 
 ## What happens in a turn
 

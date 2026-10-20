@@ -53,6 +53,7 @@ test("a person turns a connection on with their own fields; its secrets stay in 
     ["gcloud", false],
     ["harness", true],
     ["jira", false],
+    ["looker", false],
   ]);
   expect(rows.find(({ name }) => name === "harness")?.fields.token).toEqual({ label: expect.any(String), secret: true });
   expect(JSON.stringify(rows)).not.toContain(harness.token);

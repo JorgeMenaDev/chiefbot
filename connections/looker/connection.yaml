@@ -1,0 +1,25 @@
+# Looker through its API 4.0 (docs/connections.md). No official CLI fits, so the
+# folder ships one: looker.ts, a small client that signs in with the API client ID
+# and secret (POST /api/4.0/login) and makes one request per run. It reads them
+# from the variables the Looker SDKs use and writes nothing to disk.
+# The reads the globs below let run have their own commands, and looker.ts checks
+# each can do no more: get takes only a list of paths that never run a query (a
+# query run can build derived tables in the database), activity only System
+# Activity queries, test-connection only that test. `looker request` (any method,
+# path and body) always asks.
+title: Looker
+description: Looker queries, schedules and database connections through its API, as you.
+cli: looker
+fields:
+  url: { label: "Instance URL, like https://mycompany.cloud.looker.com" }
+  clientid: { label: "API client ID (Admin, Users, Edit keys; or your Account page)" }
+  secret: { label: "API client secret, of a user with only the permissions it needs", secret: true }
+env:
+  LOOKERSDK_BASE_URL: "{url}"
+  LOOKERSDK_CLIENT_ID: "{clientid}"
+  LOOKERSDK_CLIENT_SECRET: "{secret}"
+readOnly:
+  - "looker --help"
+  - "looker get *"
+  - "looker activity *"
+  - "looker test-connection *"
