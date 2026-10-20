@@ -12,9 +12,9 @@ description: Looker queries, schedules and database connections through its API,
 cli: looker
 setup:
   - "Ask a Looker admin for a user whose role grants only access_data, see_looks, see_user_dashboards, see_lookml_dashboards, see_schedules, see_system_activity, see_users and see_queries, plus see_admin if the bot should check database connections."
-  - "Ask the admin to turn on API keys for that user ([API keys](https://cloud.google.com/looker/docs/user-account))."
-  - "Signed in as that user, open your Account page. Under API Keys, click Manage, then Create New API Key."
-  - "Copy the client ID, then click Show secret and copy the client secret."
+  - "Looker (original). The admin opens Admin, Users, edits that user and clicks Edit Keys to create an API key ([API authentication](https://docs.cloud.google.com/looker/docs/api-auth))."
+  - "Looker (Google Cloud core). The admin turns on API keys for that user. Signed in as that user, open your Account page. Under API Keys, click Manage, then Create New API Key."
+  - "Copy the client ID and the client secret of the new key."
 withoutAsking: "Read the instance, users, connections, schedules, dashboards, Looks, models and folders, run System Activity queries and test database connections."
 asksFirst: "Run a Look or a query on your own models, any other read, and every change."
 fields:
@@ -28,6 +28,7 @@ fields:
     help: "From step 4."
   secret:
     label: "API client secret"
+    placeholder: "aBcD1234eFgH5678iJkL9012"
     secret: true
     help: "From step 4. It acts as that user, so the user's role decides what your bots can read."
 env:
