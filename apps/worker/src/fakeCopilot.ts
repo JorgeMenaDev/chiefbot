@@ -24,10 +24,10 @@ export type FakeRuntime = {
   // POSTed to its url with its headers. Resolves with the HTTP status and JSON
   // answer (null for a local server, which it does not start).
   callMcp(serverName: string, toolName: string, readOnly?: boolean): Promise<{ approved: boolean; status: number | null; body: unknown }>;
-  // Asks the user an ask_user form as the runtime does: the session's onQuestion
-  // gets it with its request id (question-1, question-2… per session), then
-  // elicitation.requested goes out, and elicitation.completed once it is
-  // answered. Null when the session has no onQuestion, so no ask_user tool.
+  // Asks the user an ask_user form as the runtime does: the session's
+  // questions.ask gets it with its request id (question-1, question-2… per
+  // session), then elicitation.requested goes out, and elicitation.completed once
+  // it is answered. Null when the session has no `questions`, so no ask_user tool.
   ask(message: string, requestedSchema?: ElicitationSchema, mode?: "form" | "url"): Promise<ElicitationResult | null>;
   // The runtime resolved request `requestId` without the session's answer (it gave
   // up, or another client answered): elicitation.completed goes out.
@@ -74,7 +74,7 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       mcpServers: servers = {},
       onMcpCall,
       skillDirectories: skills = [],
-      onQuestion,
+      questions,
     }) {
       if (auth.kind === "installation") tokens.push(auth.token);
       else {
@@ -91,9 +91,16 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       const publish = (event: SessionEvent) => {
         for (const handler of handlers) handler(event);
       };
+      // As the SDK's config.onEvent: questions.ended hears each resolved request before any subscriber.
+      if (questions) {
+        const { ended } = questions;
+        handlers.add((event) => {
+          if (event.type === "elicitation.completed") ended(event.data.requestId);
+        });
+      }
       let shellCalls = 0;
       let toolCalls = 0;
-      let questions = 0;
+      let asked = 0;
       const runtime: FakeRuntime = {
         async shell(command) {
           const toolCallId = `shell-${++shellCalls}`;
@@ -124,9 +131,9 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           return { approved: true, status: res.status, body: await res.json().catch(() => null) };
         },
         async ask(message, requestedSchema, mode = "form") {
-          if (!onQuestion) return null;
-          const requestId = `question-${++questions}`;
-          const answer = onQuestion({ sessionId, requestId, message, mode, ...(requestedSchema === undefined ? {} : { requestedSchema }) });
+          if (!questions) return null;
+          const requestId = `question-${++asked}`;
+          const answer = questions.ask({ sessionId, requestId, message, mode, ...(requestedSchema === undefined ? {} : { requestedSchema }) });
           publish(sdk.elicitationRequested(requestId, message, requestedSchema));
           const result = await answer;
           publish(sdk.elicitationCompleted(requestId, result.action));

@@ -52,6 +52,21 @@ test("a number or yes/no answer goes as its type when it reads as one, and as wr
   expect(answerOf(replicas, typeAnswer(emptyAnswer, "2.5"))).toBe("2.5");
   expect(answerOf(budget, typeAnswer(emptyAnswer, "-2.5"))).toBe(-2.5);
   expect(answerOf(budget, typeAnswer(emptyAnswer, "about 40"))).toBe("about 40");
+  // Any number as JSON writes it, exponents included; text when it is not one, or not finite.
+  expect(["1e-3", "-2.5E+2", "0", "1e400", "0x10", "007", "1."].map((typed) => answerOf(budget, typeAnswer(emptyAnswer, typed)))).toEqual([
+    0.001,
+    -250,
+    0,
+    "1e400",
+    "0x10",
+    "007",
+    "1.",
+  ]);
+  expect(["1e3", "1e-3", "9007199254740993"].map((typed) => answerOf(replicas, typeAnswer(emptyAnswer, typed)))).toEqual([
+    1000,
+    "1e-3",
+    "9007199254740993",
+  ]);
   expect(answerOf(yesNo, togglePick(yesNo, emptyAnswer, "false"))).toBe(false);
   expect(answerOf(yesNo, typeAnswer(emptyAnswer, "only on Fridays"))).toBe("only on Fridays");
   expect(answerOf(yesNo, { ...togglePick(yesNo, emptyAnswer, "true"), comment: "for now" })).toBe("true — for now");

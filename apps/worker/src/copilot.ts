@@ -19,6 +19,12 @@ import type {
 // elicitation.requested event (the elicitation.completed that ends it names the same id).
 export type QuestionRequest = ElicitationContext & { requestId: string };
 
+// A session's answers to the agent's ask_user forms (the SDK's elicitation):
+// `ask` answers each request, and `ended` hears that the runtime resolved
+// request `requestId` itself (elicitation.completed). Both hear the session from
+// before it opens, so nothing said while it opens is missed.
+export type Questions = { ask: (request: QuestionRequest) => Promise<ElicitationResult>; ended: (requestId: string) => void };
+
 export type CopilotAuth = { kind: "seat"; gitHubTokenProvider: GitHubTokenProvider } | { kind: "installation"; token: string };
 
 // The slice of the Copilot SDK the worker uses: one long-lived session per bot,
@@ -32,7 +38,7 @@ export type Copilot = {
   // runs before each of their tool calls (the SDK's onPreMcpToolCall hook).
   // `skillDirectories` are the roots of the skills it may load (a bot's turn's
   // connections); every session names them, so none carry over from an earlier one.
-  // `onQuestion` answers the agent's ask_user forms (the SDK's elicitation); a
+  // `questions` answers the agent's ask_user forms (the SDK's elicitation); a
   // session without it has no ask_user tool, so the agent asks in plain text.
   openSession(options: {
     sessionId: string;
@@ -43,7 +49,7 @@ export type Copilot = {
     mcpServers?: Record<string, MCPServerConfig>;
     onMcpCall?: (serverName: string, toolName: string) => Promise<void>;
     skillDirectories?: string[];
-    onQuestion?: (request: QuestionRequest) => Promise<ElicitationResult>;
+    questions?: Questions;
   }): Promise<BotSession>;
 };
 

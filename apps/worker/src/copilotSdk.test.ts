@@ -111,9 +111,12 @@ test("a worker session gets its instructions after the SDK's own system message"
 
 test("ask_user forms: each SDK call gets the request id of the elicitation.requested event it was dispatched with, and close cancels the rest", async () => {
   const asked: QuestionRequest[] = [];
-  const asks = askUser(async (request) => {
-    asked.push(request);
-    return { action: "decline" };
+  const asks = askUser({
+    async ask(request) {
+      asked.push(request);
+      return { action: "decline" };
+    },
+    ended: () => {},
   });
   const { onElicitationRequest, onEvent } = asks.config;
   const call = () => onElicitationRequest({ sessionId: "bot_1", message: "Same form", mode: "form" });
@@ -137,4 +140,15 @@ test("ask_user forms: each SDK call gets the request id of the elicitation.reque
     { sessionId: "bot_1", message: "Same form", mode: "form", requestId: "request-1" },
     { sessionId: "bot_1", message: "Same form", mode: "form", requestId: "request-2" },
   ]);
+});
+
+test("ask_user forms: the config's onEvent, which the SDK subscribes before the session opens, reports each resolved request", () => {
+  const ended: string[] = [];
+  const { onEvent } = askUser({ ask: async () => ({ action: "cancel" }), ended: (requestId) => ended.push(requestId) }).config;
+
+  onEvent(sdk.elicitationCompleted("request-1"));
+  onEvent(sdk.idle());
+  onEvent(sdk.elicitationCompleted("request-2", "accept"));
+
+  expect(ended).toEqual(["request-1", "request-2"]);
 });

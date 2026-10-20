@@ -25,7 +25,7 @@ import { connectionsRoot as defaultConnectionsRoot, stageConnections } from "./c
 import { connectorServers } from "./connectorServers.ts";
 import type { Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
-import type { BotSession, Copilot, FileAttachment, QuestionRequest } from "./copilot.ts";
+import type { BotSession, Copilot, FileAttachment, QuestionRequest, Questions } from "./copilot.ts";
 import { modelReport } from "./models.ts";
 import { pullRequestTool } from "./pullRequest.ts";
 import { elicitationResult, questionForm } from "./questions.ts";
@@ -268,17 +268,18 @@ export function startWorker({
       ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : []),
     ];
     const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, instructions: computerInstructions, skillDirectories };
-    // Only a bot's turn asks its user questions; a task worker's runs alone.
-    const asks = route === "worker" && turn ? { onQuestion: (request: QuestionRequest) => askQuestion(turn, request) } : {};
-    // A chief always runs on its owner's own Copilot seat. Once the SDK says a
-    // request is resolved (elicitation.completed), its card goes, unless answered.
+    // Only a bot's turn asks its user questions; a task worker's runs alone. Once
+    // the SDK says a request is resolved (elicitation.completed), its card goes,
+    // unless answered: `ended` hears it from before the session opens.
+    const questions: Questions | null =
+      route === "worker" && turn
+        ? { ask: (request) => askQuestion(turn, request), ended: (requestId) => withdrawQuestions((question) => question.requestId === requestId) }
+        : null;
+    const asks = questions ? { questions } : {};
+    // A chief always runs on its owner's own Copilot seat.
     const session = (task && turn ? taskSession(options, task, turn) : link.openSession(copilot, "seat", { ...options, ...asks }, () => token)).then(
       (opened) => {
-        if (turn)
-          opened.on((event: SessionEvent) => {
-            if (event.type === "elicitation.completed") withdrawQuestions(({ requestId }) => requestId === event.data.requestId);
-            link.sessionEvent(turn, event);
-          });
+        if (turn) opened.on((event: SessionEvent) => link.sessionEvent(turn, event));
         return opened;
       },
     );

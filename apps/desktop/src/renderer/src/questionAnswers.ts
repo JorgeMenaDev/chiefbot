@@ -38,12 +38,17 @@ export function typeAnswer(draft: AnswerDraft, text: string): AnswerDraft {
   return { ...draft, text, picks: text.trim() === "" ? draft.picks : [] };
 }
 
+// A number as JSON writes it: an optional minus, digits (no leading zero), then
+// an optional fraction and exponent ("3", "-2.5", "1e-3").
+const jsonNumber = /^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$/;
+
 // A single or text answer as the type its question's schema asks for, when it
-// reads as one ("3" for a number, "false" for a yes/no); otherwise as written.
+// reads as one ("1e-3" for a number, "false" for a yes/no); otherwise as written.
 function typed(type: Question["type"], text: string): Answer {
   if (type === "boolean" && (text === "true" || text === "false")) return text === "true";
-  if (type === "number" && /^-?\d+(\.\d+)?$/.test(text)) return Number(text);
-  if (type === "integer" && /^-?\d+$/.test(text) && Number.isSafeInteger(Number(text))) return Number(text);
+  const number = jsonNumber.test(text) ? Number(text) : Number.NaN;
+  if (type === "number" && Number.isFinite(number)) return number;
+  if (type === "integer" && Number.isSafeInteger(number)) return number;
   return text;
 }
 

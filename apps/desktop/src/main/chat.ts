@@ -130,8 +130,8 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
 const waitingForApproval = "Waiting for your approval";
 const waitingForAnswer = "Waiting for your answer";
 
-// The status once a card settles: it waits on as long as another card is still
-// pending (a question first), and otherwise the turn goes on.
+// What the bot's status says while a card is still pending (a question first),
+// whatever else the turn reports; "" once none is.
 function stillWaiting(items: ChatItem[]) {
   const pending = (kind: "approval" | "question") => items.some((item) => item.kind === kind && item.state === "pending");
   return pending("question") ? waitingForAnswer : pending("approval") ? waitingForApproval : "";
@@ -166,7 +166,7 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       return { ...view, items: upsert(id, () => ({ kind: "tool", id, name: event.name, status: event.status })) };
     }
     case "status":
-      return { ...view, working: event.text };
+      return { ...view, working: stillWaiting(view.items) || event.text };
     case "error":
       return { ...view, items: [...view.items, { kind: "error", id: `${turnId}:error`, message: event.message }] };
     case "approval-request": {

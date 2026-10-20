@@ -249,21 +249,33 @@ test("a question settles once, answered or withdrawn; one still pending when its
   ]);
 });
 
-test("the bot waits for your answer while any of its questions is still pending", () => {
+test("the bot waits for your answer while any of its questions is still pending, whatever status the turn reports", () => {
   const turnId = TurnId.parse("turn-1");
   const form: QuestionForm = { message: "Name?", questions: [{ key: "name", title: "Name", description: "", kind: "text", type: "string", options: [] }] };
   const steps: ChatEvent["event"][] = [
     { type: "user-message", text: "go" },
+    { type: "status", text: "Planning" },
     { type: "question-request", questionId: QuestionId.parse("first"), form },
+    { type: "status", text: "Reading files" },
     { type: "question-request", questionId: QuestionId.parse("second"), form },
     { type: "question-answer", questionId: QuestionId.parse("first"), result: { action: "decline" } },
     { type: "question-withdrawn", questionId: QuestionId.parse("second") },
+    { type: "status", text: "Scaffolding" },
   ];
 
   const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
   const views = steps.reduce<ChatView[]>((views, event, seq) => [...views, foldChat(views.at(-1) ?? empty, { seq, turnId, event })], []);
 
-  expect(views.map((view) => view.working)).toEqual(["", "Waiting for your answer", "Waiting for your answer", "Waiting for your answer", ""]);
+  expect(views.map((view) => view.working)).toEqual([
+    "",
+    "Planning",
+    "Waiting for your answer",
+    "Waiting for your answer",
+    "Waiting for your answer",
+    "Waiting for your answer",
+    "",
+    "Scaffolding",
+  ]);
 });
 
 test("control's handoff notice shows in the chief's chat as a notice, even in the middle of a reply", () => {
