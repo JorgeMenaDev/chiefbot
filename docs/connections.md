@@ -28,7 +28,7 @@ Before a shell command runs, the worker checks each command of a connection's CL
 
 ## Health
 
-**Health**, at the top of the sidebar, shows whether the apps behind your connections are well, without asking a bot. For each connection that is on and has a probe, control runs fixed read-only API calls with your saved fields within a minute of you turning it on, then every 5 minutes, and when you click **Refresh**. No AI runs, and nothing reaches a bot's computer.
+**Health**, the heartbeat icon beside the gear at the bottom left of the sidebar, shows whether the apps behind your connections are well, without asking a bot. For each connection that is on and has a probe, control runs fixed read-only API calls with your saved fields within a minute of you turning it on, then every 5 minutes, and when you click **Refresh**. No AI runs, and nothing reaches a bot's computer.
 
 - Google Cloud: the project's Cloud Run services and GKE clusters, and the open incidents on Google's status page in the regions they run in. The setup's viewer roles cover it.
 - Dynatrace: open problems, from a DQL query on `dt.davis.problems` through the Grail query API, with the setup's `storage:events:read` and `storage:buckets:read` scopes.

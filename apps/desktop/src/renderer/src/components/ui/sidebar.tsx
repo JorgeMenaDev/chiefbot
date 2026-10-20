@@ -112,14 +112,17 @@ export function SidebarSearch({ icon, className, ...props }: ComponentProps<"inp
 }
 
 // An icon action in the sidebar (search row, footer), after T3 Code's `SidebarHeaderIconButton`.
-export function SidebarIconButton({ label, className, ...props }: ComponentProps<"button"> & { label: string }) {
+// `active` highlights it, like a selected row, while the screen it opens is shown.
+export function SidebarIconButton({ label, active = false, className, ...props }: ComponentProps<"button"> & { label: string; active?: boolean }) {
   return (
     <button
       type="button"
       aria-label={label}
       title={label}
+      data-active={active}
+      aria-current={active ? "page" : undefined}
       className={cn(
-        "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-[var(--control-radius)] outline-hidden ring-ring hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset active:bg-sidebar-row-active disabled:pointer-events-none disabled:opacity-64 [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-(--sidebar-icon-color) hover:[&>svg]:text-sidebar-foreground",
+        "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-[var(--control-radius)] outline-hidden ring-ring hover:bg-sidebar-row-hover focus-visible:ring-2 focus-visible:ring-inset active:bg-sidebar-row-active disabled:pointer-events-none disabled:opacity-64 data-[active=true]:bg-sidebar-row-selected [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-(--sidebar-icon-color) hover:[&>svg]:text-sidebar-foreground data-[active=true]:[&>svg]:text-sidebar-foreground",
         className,
       )}
       {...props}
