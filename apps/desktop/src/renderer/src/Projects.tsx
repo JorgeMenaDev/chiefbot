@@ -228,7 +228,7 @@ function CoordinatorChat({ project, hidden }: { project: Project; hidden: boolea
   );
 }
 
-// The coordinator gets no handoff notices, so those never show. Its approvals
+// The coordinator gets no handoff cards or notices, so those never show. Its approvals
 // are control's, for connector calls that may write. Each turn starts with who
 // pays for its Copilot.
 function ChatRow({ project, item, streaming }: { project: Project; item: LaneItem; streaming: boolean }) {
@@ -243,6 +243,7 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
       return <p className="text-muted-foreground text-xs">{payerText(item.payer)}</p>;
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
+    case "handoff":
     case "notice":
       return null;
   }
@@ -294,6 +295,7 @@ function TaskLedger({ project, login }: { project: Project; login: string }) {
                 <Badge variant={statusBadge[task.status]}>{statusText[task.status]}</Badge>
                 {task.owner && `owner ${task.owner} ·`} asked by {task.requestedBy}
               </span>
+              {task.question && <span className="text-warning-foreground text-xs">Asks: {task.question}</span>}
             </div>
             {workers
               .filter(({ taskNumber }) => taskNumber === task.number)

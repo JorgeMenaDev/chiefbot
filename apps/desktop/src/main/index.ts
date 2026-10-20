@@ -14,10 +14,12 @@ import {
   CreateProjectRequest,
   CreateWorkspaceRequest,
   EnvironmentInput,
+  HandoffId,
   InviteId,
   InviteRequest,
   ProjectId,
   ProjectSettingsRequest,
+  ReplyToHandoffRequest,
   RoutineId,
   RoutineInput,
   SecretName,
@@ -170,6 +172,9 @@ ipcMain.handle("chat:send", (_event, id: unknown, text: unknown, attachments: un
 ipcMain.handle("chat:attachment", (_event, id: unknown, attachmentId: unknown) => chats.attachment(BotId.parse(id), AttachmentId.parse(attachmentId)));
 ipcMain.handle("chat:answer", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   chats.answer(BotId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
+);
+ipcMain.handle("chat:reply-to-handoff", (_event, id: unknown, handoffId: unknown, reply: unknown) =>
+  chats.replyToHandoff(BotId.parse(id), HandoffId.parse(handoffId), ReplyToHandoffRequest.parse(reply)),
 );
 ipcMain.handle("routines:list", (_event, botId: unknown) => routines.list(BotId.parse(botId)));
 ipcMain.handle("routines:create", (_event, botId: unknown, input: unknown) =>

@@ -3,6 +3,7 @@ import { PanelRightIcon, PowerIcon, PowerOffIcon, Trash2Icon } from "lucide-reac
 import { useId, useState, type KeyboardEvent } from "react";
 import { Avatar } from "./Avatar.tsx";
 import { Chat } from "./Chat.tsx";
+import type { HandoffItem } from "./HandoffCard.tsx";
 import { ConnectionCalls } from "./ConnectApps.tsx";
 import { ScreenPane } from "./LiveScreen.tsx";
 import { Column, ErrorText, PaneHeader, PanelSection, SidePanel } from "./Pane.tsx";
@@ -15,7 +16,16 @@ const detailsKey = "chiefbot.botDetails";
 
 // The selected bot: its chat in the middle, its details panel on the right.
 // `draft` starts the composer with a message (Health's Ask my bot).
-export function BotPane({ bot, draft }: { bot: Bot; draft?: string | undefined }) {
+// `onOpenProject` opens the project of a handoff's card.
+export function BotPane({
+  bot,
+  draft,
+  onOpenProject,
+}: {
+  bot: Bot;
+  draft?: string | undefined;
+  onOpenProject: (handoff: HandoffItem) => void;
+}) {
   const [details, setDetails] = useState(() => localStorage.getItem(detailsKey) !== "closed");
   const showDetails = (open: boolean) => {
     setDetails(open);
@@ -27,7 +37,7 @@ export function BotPane({ bot, draft }: { bot: Bot; draft?: string | undefined }
         <PaneHeader icon={<BotFace bot={bot} className="size-6" dotClassName="-end-1 -bottom-1 bg-background" />} title={bot.name} note={`${statusText[bot.status]} · runs on your Copilot seat`}>
           {!details && <DetailsToggle open={false} onClick={() => showDetails(true)} />}
         </PaneHeader>
-        <Chat bot={bot} initialDraft={draft} />
+        <Chat bot={bot} initialDraft={draft} onOpenProject={onOpenProject} />
       </Column>
       {/* Closed, the panel stays mounted but hidden, so the bot's screen stays open. */}
       <BotDetails bot={bot} hidden={!details} onClose={() => showDetails(false)} />

@@ -19,7 +19,7 @@ import {
   type AttachmentUpload,
   type BotToken,
   type ChatEvent,
-  type HandoffUpdate,
+  type HandoffCardEvent,
   type TurnEvent,
   type GitHubTokens,
   type RoutineInput,
@@ -249,14 +249,14 @@ export function openStore(path: string) {
   const health = healthStore(db);
   const services = serviceStore(db);
   const subscriptions = subscriptionStore(db, projects);
-  // A note from control in a bot's chat, in a turn of its own that is done already.
-  const postNotice = (botId: BotId, notice: HandoffUpdate) => {
+  // A handoff's card from control in a bot's chat, in a turn of its own that is done already.
+  const postCard = (botId: BotId, card: HandoffCardEvent) => {
     const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
     db.query("INSERT INTO turns (id, bot_id, done, created_at) VALUES (?1, ?2, 1, ?3)").run(turnId, botId, Date.now());
-    return append(botId, turnId, notice);
+    return append(botId, turnId, card);
   };
-  const handoffs = handoffStore(db, projects, postNotice);
   const taskWorkers = taskWorkerStore(db, hash);
+  const handoffs = handoffStore(db, projects, taskWorkers, postCard);
   const turnKeys = turnKeyStore(db, hash);
 
   return {

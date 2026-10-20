@@ -42,6 +42,11 @@ import { z } from "zod";
 //   invalid_secret        a project secret's name is not one its config declares, or its value failed
 //                         its schema; `message` says which (400)
 //   project_exists        the workspace already has a project for that repo (409)
+//   delivery_reused       a handoff's delivery id came again with another message (409)
+//   handoff_closed        a follow-up to a handoff whose task is done or abandoned: new work is a new
+//                         handoff; `message` says so (409)
+//   question_changed      an answer from a handoff's card to a question the project no longer asks;
+//                         `message` says what it asks now (409)
 //   invalid_tool_call     a coordinator's or chief's tool call failed its schema or its rules; `message`
 //                         says why (400), or no coordinator turn is running (409)
 //   copilot_token_failed  GitHub would not mint the organization's Copilot token, e.g. the repo app
@@ -103,6 +108,9 @@ export const ApiErrorCode = z.enum([
   "invalid_settings",
   "invalid_secret",
   "project_exists",
+  "delivery_reused",
+  "handoff_closed",
+  "question_changed",
   "invalid_tool_call",
   "requester_only",
   "copilot_token_failed",
