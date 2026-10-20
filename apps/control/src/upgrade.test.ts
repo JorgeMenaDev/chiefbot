@@ -9,7 +9,7 @@ import { atCleanUp, cleanUp } from "./testControl.ts";
 
 afterEach(cleanUp);
 
-test("a database the first v0.2 build made opens and keeps working: new columns are added, stale project file keys dropped, its users get no first bot, its bots get the default face", async () => {
+test("a database the first v0.2 build made opens and keeps working: new columns are added, stale project file keys dropped, an old project file reads as found, its users get no first bot, its bots get the default face", async () => {
   const dir = mkdtempSync(join(tmpdir(), "chiefbot-upgrade-"));
   atCleanUp(() => rmSync(dir, { recursive: true, force: true }));
   const path = join(dir, "control.sqlite");
@@ -23,7 +23,13 @@ test("a database the first v0.2 build made opens and keeps working: new columns 
   const workspaceId = WorkspaceId.parse("workspace_1");
   const workerId = TaskWorkerId.parse("worker_1");
 
-  expect(store.projects.project(projectId)?.file).toEqual({ connectors: ["tracker"], commands: {} });
+  // Its project file, stored before a missing file was allowed, still reads, and it has no settings yet.
+  expect(store.projects.project(projectId)).toMatchObject({
+    file: { status: "found", file: { connectors: ["tracker"], commands: {} } },
+    settings: "",
+    config: { connectors: ["tracker"] },
+  });
+  expect(store.projects.secretNames(projectId)).toEqual([]);
   expect(store.connectors.get(workspaceId, "tracker")?.writesWithoutApproval).toBe(false);
   store.connectors.setWritesWithoutApproval(workspaceId, "tracker", true);
   expect(store.connectors.get(workspaceId, "tracker")?.writesWithoutApproval).toBe(true);

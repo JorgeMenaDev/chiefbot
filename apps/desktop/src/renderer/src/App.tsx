@@ -417,6 +417,7 @@ function Workspace({ user }: { user: User }) {
               setSelectedId(null);
               void reloadProjects();
             }}
+            onChanged={() => void reloadProjects()}
           />
         ) : selected ? (
           <BotPane

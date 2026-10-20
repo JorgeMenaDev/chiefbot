@@ -13,6 +13,7 @@ import {
 import type { Clock } from "@chiefbot/worker/clock";
 import { z } from "zod";
 import { apiError, bearer, jsonWithin, unauthorized } from "../http.ts";
+import { queue } from "../queue.ts";
 import type { SecretStore } from "../secrets/secretStore.ts";
 import type { openStore } from "../store.ts";
 import { checkEnvironment, SERVICE_TIMEOUT_MS, type Net } from "./serviceCheck.ts";
@@ -60,7 +61,7 @@ export function serviceHost({ store, clock, secrets, net }: { store: ReturnType<
   const tests = new Set<AbortController>();
   const inTurn = slots(SERVICE_CONCURRENCY);
   // A person's saves and removes run one at a time, each on what the last one left.
-  const inOrder = queue();
+  const inOrder = queue<UserId>();
 
   // The saved secret `name`, or null when the store refuses, has none (it was
   // replaced or removed), or gives none within SERVICE_TIMEOUT_MS.
@@ -290,23 +291,5 @@ function slots(max: number) {
       if (next) next();
       else if (--person.active === 0) people.delete(userId);
     }
-  };
-}
-
-// Runs each person's jobs one after another, in the order they came; another
-// person's do not wait. A job that fails does not stop the next.
-function queue() {
-  const last = new Map<UserId, Promise<void>>();
-  return <T>(userId: UserId, job: () => Promise<T>): Promise<T> => {
-    const run = (last.get(userId) ?? Promise.resolve()).then(job);
-    const settled = run.then(
-      () => {},
-      () => {},
-    );
-    last.set(userId, settled);
-    void settled.then(() => {
-      if (last.get(userId) === settled) last.delete(userId);
-    });
-    return run;
   };
 }

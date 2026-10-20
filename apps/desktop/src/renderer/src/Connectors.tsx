@@ -78,7 +78,7 @@ export function Connectors({ workspace }: { workspace: Workspace }) {
       <PaneBody>
         <Section
           title="Your checklist"
-          description={`The tools ${workspace.name}'s projects declare in chiefbot.project.yaml. Agents get a connector once it is ready for the member they work for.`}
+          description={`The tools ${workspace.name}'s projects declare in their config. Agents get a connector once it is ready for the member they work for.`}
         >
           {items.length === 0 && <Muted>No project in this workspace declares a connector.</Muted>}
           {items.length > 0 && open.length === 0 && <Muted>All set: every connector your projects need is ready.</Muted>}

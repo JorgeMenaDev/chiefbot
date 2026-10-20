@@ -83,6 +83,12 @@ const api = {
     list: (workspaceId: string): Promise<unknown> => ipcRenderer.invoke("projects:list", workspaceId),
     create: (workspaceId: string, repo: string): Promise<unknown> => ipcRenderer.invoke("projects:create", workspaceId, repo),
     tasks: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:tasks", id),
+    // Saves the settings (YAML, the project file's keys); resolves with the project.
+    saveSettings: (id: string, text: string): Promise<unknown> => ipcRenderer.invoke("projects:save-settings", id, text),
+    // The project's secrets: names and whether each is set, never a value.
+    secrets: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:secrets", id),
+    setSecret: (id: string, name: string, value: string): Promise<void> => ipcRenderer.invoke("projects:set-secret", id, name, value),
+    clearSecret: (id: string, name: string): Promise<void> => ipcRenderer.invoke("projects:clear-secret", id, name),
     // Asks first; resolves true once deleted.
     remove: (id: string, name: string): Promise<boolean> => ipcRenderer.invoke("projects:delete", id, name),
     // The user's own chat with the project's coordinator.

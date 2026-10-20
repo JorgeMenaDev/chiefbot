@@ -25,19 +25,22 @@ import { z } from "zod";
 //   not_pending           the approval is answered, unknown, or its turn ended (409)
 //   message_too_large     a message's body is over what its files can make on the wire (413)
 //   uploads_busy          control is reading as many messages with files as it takes at once (503)
-//   repo_not_found        the bot owner's GitHub account cannot see the repo (404)
+//   repo_not_found        the bot owner's (or the member making a project's) GitHub account cannot see the repo (404)
 //   repo_read_only        the bot owner may not push to the repo (403)
 //   app_not_installed     the deployer's repo app is not installed on the repo (403)
 //   no_turn               a push or pull request outside a turn: nobody can approve it, or a
 //                         connector call outside a turn of the member it runs for (409)
 //   declined              the user declined the push or pull request (403)
-//   github_failed         GitHub refused what control forwarded; `message` says why (502)
+//   github_failed         GitHub refused what control forwarded, or failed when control read a repo's
+//                         chiefbot.project.yaml; `message` says why (502)
 //   owner_only            only the workspace's owner may do that (403)
 //   already_member        the invited login is a member already (409)
 //   owner_cannot_leave    the workspace's owner cannot leave or be removed (409)
 //   invalid_project       the body of POST /workspaces/:id/projects failed its schema (400)
-//   invalid_project_file  the repo's chiefbot.project.yaml is missing, unreadable, not YAML or
-//                         not a valid project file; `message` says which and where (400)
+//   invalid_settings      a project's settings are not YAML or not valid project file keys; `message`
+//                         says what is wrong and where (400)
+//   invalid_secret        a project secret's name is not one its config declares, or its value failed
+//                         its schema; `message` says which (400)
 //   project_exists        the workspace already has a project for that repo (409)
 //   delivery_reused       a handoff's delivery id came again with another message (409)
 //   handoff_closed        a follow-up to a handoff whose task is done or abandoned: new work is a new
@@ -54,7 +57,7 @@ import { z } from "zod";
 //   invalid_connection    a connection's fields are missing, unknown or empty; `message` says which (400)
 //   invalid_service       a service failed its schema, names an environment it does not have, or
 //                         lacks a secret its authentication needs; `message` says which (400)
-//   secrets_unavailable   control's secret store did not save a service's secret, so nothing was saved (503)
+//   secrets_unavailable   control's secret store did not save a service's or a project's secret, so nothing was saved (503)
 //   connector_not_ready   a connector call has no credential: the workspace secret is unset, or the
 //                         member has not connected (403)
 //   invalid_subscription  a subscription failed its schema, or names a connector that is not a remote
@@ -102,7 +105,8 @@ export const ApiErrorCode = z.enum([
   "already_member",
   "owner_cannot_leave",
   "invalid_project",
-  "invalid_project_file",
+  "invalid_settings",
+  "invalid_secret",
   "project_exists",
   "delivery_reused",
   "handoff_closed",

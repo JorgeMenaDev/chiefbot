@@ -12,7 +12,7 @@ import {
   type TaskWorkerState,
   type Workspace,
 } from "@chiefbot/contracts";
-import { FolderGit2Icon, ListChecksIcon, PlugIcon, RadioIcon, Trash2Icon } from "lucide-react";
+import { FolderGit2Icon, ListChecksIcon, PlugIcon, RadioIcon, Settings2Icon, Trash2Icon } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { z } from "zod";
 import { ApprovalCard } from "./ApprovalCard.tsx";
@@ -21,6 +21,7 @@ import type { LaneItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
 import { Column, ErrorText, PaneHeader, SidePanel } from "./Pane.tsx";
+import { fileNote, ProjectSettings } from "./ProjectSettings.tsx";
 import { ListeningTo } from "./Subscriptions.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
@@ -45,8 +46,8 @@ export function useProjects(workspace: Workspace | null) {
 }
 
 // The sidebar's new-project form: a repo as owner/name. Control reads the repo's
-// chiefbot.project.yaml, and its refusal (what is wrong with the file) shows here.
-// Escape or a made project closes it (`onClose`).
+// chiefbot.project.yaml if it has one; its refusal (a repo the user's GitHub
+// account cannot see) shows here. Escape or a made project closes it (`onClose`).
 export function NewProject({ workspace, onCreated, onClose }: { workspace: Workspace; onCreated: (project: Project) => void; onClose: () => void }) {
   const [repo, setRepo] = useState("");
   const [busy, setBusy] = useState(false);
@@ -90,23 +91,28 @@ export function NewProject({ workspace, onCreated, onClose }: { workspace: Works
   );
 }
 
-// A project: the user's chat with its coordinator, and the task ledger beside it.
-// The workspace owner can delete it; `onDeleted` runs once it is gone. `login` is the signed-in user's.
+// A project: the user's chat with its coordinator (or its settings view in its
+// place), and the task ledger beside it. The workspace owner can delete it;
+// `onDeleted` runs once it is gone, and `onChanged` once its settings are saved.
+// `login` is the signed-in user's.
 export function ProjectPane({
   project,
   workspace,
   login,
   onDeleted,
+  onChanged,
 }: {
   project: Project;
   workspace: Workspace;
   login: string;
   onDeleted: () => void;
+  onChanged: () => void;
 }) {
-  const { commands } = project.file;
+  const { commands } = project.config;
   const [error, setError] = useState<string | null>(null);
   const [showCalls, setShowCalls] = useState(false);
   const [showListening, setShowListening] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   async function remove() {
     setError(null);
     try {
@@ -120,9 +126,22 @@ export function ProjectPane({
       <Column>
         <PaneHeader
           icon={<FolderGit2Icon className="size-4 text-muted-foreground" />}
-          title={project.name}
+          title={
+            <span className="flex items-center gap-2">
+              {project.name}
+              {project.file.status !== "found" && (
+                <Badge variant={project.file.status === "invalid" ? "warning" : "outline"} title={fileNote(project)}>
+                  {project.file.status === "invalid" ? "Invalid project file" : "No project file"}
+                </Badge>
+              )}
+            </span>
+          }
           note={`${project.repo}${commands.build ? ` · build: ${commands.build}` : ""}${commands.test ? ` · test: ${commands.test}` : ""}`}
         >
+          <Button size="xs" variant="outline" pressed={showSettings} onClick={() => setShowSettings(!showSettings)}>
+            <Settings2Icon />
+            Settings
+          </Button>
           <Button size="xs" variant="outline" pressed={showListening} onClick={() => setShowListening(!showListening)}>
             <RadioIcon />
             Listening to
@@ -145,7 +164,8 @@ export function ProjectPane({
         )}
         {showListening && <ListeningTo project={project} />}
         {showCalls && <ConnectorCalls project={project} />}
-        <CoordinatorChat project={project} />
+        {showSettings && <ProjectSettings project={project} onSaved={onChanged} />}
+        <CoordinatorChat project={project} hidden={showSettings} />
       </Column>
       <TaskLedger project={project} login={login} />
     </>
@@ -168,7 +188,8 @@ function useCoordinatorChat(projectId: ProjectId) {
 
 // The bot chat's shape (Chat.tsx). Every member has their own chat; the
 // coordinator answers one member at a time, so a message may wait its turn.
-function CoordinatorChat({ project }: { project: Project }) {
+// `hidden` keeps the draft while the settings view takes its place.
+function CoordinatorChat({ project, hidden }: { project: Project; hidden: boolean }) {
   const view = useCoordinatorChat(project.id);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -187,7 +208,7 @@ function CoordinatorChat({ project }: { project: Project }) {
   }
 
   return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <section hidden={hidden} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <ChatTimeline
         chatKey={project.id}
         items={view.items}

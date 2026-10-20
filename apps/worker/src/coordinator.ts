@@ -149,8 +149,8 @@ export function startCoordinator({ controlUrl, projectId, projectToken, copilot,
 }
 
 // What the coordinator is told about its job, the project and who it talks with.
-function instructions({ name, repo, file }: Project, member: ProjectMember) {
-  const commands = Object.entries(file.commands).map(([command, line]) => `- ${command}: ${line}`);
+function instructions({ name, repo, config }: Project, member: ProjectMember) {
+  const commands = Object.entries(config.commands).map(([command, line]) => `- ${command}: ${line}`);
   return [
     `You are the coordinator of the project ${name} (GitHub repo ${repo}). You plan and track its work; you never write code yourself.`,
     `You are talking with ${member.login}, a member of the project. Every member has their own chat with you, and all of them share one task ledger and one set of context files.`,

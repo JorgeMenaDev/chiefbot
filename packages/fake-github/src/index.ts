@@ -251,6 +251,14 @@ export function startFakeGitHub({
           }
         },
       },
+      // The repo itself. Like GitHub, 404 for a repo the token cannot read.
+      "/repos/:owner/:repo": {
+        GET: (req) => {
+          const repository = `${req.params.owner}/${req.params.repo}`;
+          if (!reader(bearerToken(req), repository)) return Response.json({ message: "Not Found" }, { status: 404 });
+          return Response.json({ id: repos.get(repository)?.id, full_name: repository, private: true, default_branch: "main" });
+        },
+      },
       // A user's permission on the repo, read with an installation token for it.
       "/repos/:owner/:repo/collaborators/:username/permission": {
         GET: (req) => {

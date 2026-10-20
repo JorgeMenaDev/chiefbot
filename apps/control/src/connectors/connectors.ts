@@ -143,7 +143,7 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks, turnSignal
     const linked = connectors.linkedNames(workspaceId, userId);
     const needed = new Map<string, string[]>();
     for (const project of projects.projectsIn(workspaceId)) {
-      for (const name of project.file.connectors) needed.set(name, [...(needed.get(name) ?? []), project.name]);
+      for (const name of project.config.connectors) needed.set(name, [...(needed.get(name) ?? []), project.name]);
     }
     return [...needed].map(([name, projectNames]) => {
       const connector = connectors.get(workspaceId, name);
@@ -170,15 +170,15 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks, turnSignal
     return { identity: "personal", token: credential.accessToken };
   }
 
-  // The connectors a member's agent session gets in a project: those its project
-  // file declares that the workspace defines and that are ready for the member.
+  // The connectors a member's agent session gets in a project: those its config
+  // declares that the workspace defines and that are ready for the member.
   // None carries a credential: a remote one is reached through control's proxy,
   // and a command one has none (ConnectorInput).
   async function agentConnectors(projectId: ProjectId, userId: UserId): Promise<AgentConnector[]> {
     const project = projects.project(projectId);
     if (!project) return [];
     const linked = connectors.linkedNames(project.workspaceId, userId);
-    return [...new Set(project.file.connectors)].flatMap((name): AgentConnector[] => {
+    return [...new Set(project.config.connectors)].flatMap((name): AgentConnector[] => {
       const connector = connectors.get(project.workspaceId, name);
       if (!connector || !ready(connector, linked)) return [];
       const { server } = connector;
@@ -189,7 +189,7 @@ export function connectorHost({ store, secrets, publicUrl, ask: asks, turnSignal
   // A connector the project declares and its workspace defines; null for any other.
   const declared = (projectId: ProjectId, name: string) => {
     const project = projects.project(projectId);
-    return project?.file.connectors.includes(name) ? connectors.get(project.workspaceId, name) : null;
+    return project?.config.connectors.includes(name) ? connectors.get(project.workspaceId, name) : null;
   };
 
   // Who calls a connector through control: the turn whose key the request

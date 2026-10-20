@@ -112,8 +112,8 @@ export function subscriptionHost({
       return apiError(400, "invalid_schedule");
     }
     const connector = store.connectors.get(project.workspaceId, source.connector);
-    if (!project.file.connectors.includes(source.connector) || connector?.server.kind !== "remote") {
-      return apiError(400, "invalid_subscription", `${source.connector} must be a remote connector of the workspace that ${project.name}'s chiefbot.project.yaml declares`);
+    if (!project.config.connectors.includes(source.connector) || connector?.server.kind !== "remote") {
+      return apiError(400, "invalid_subscription", `${source.connector} must be a remote connector of the workspace that ${project.name}'s config declares`);
     }
     return clock.now();
   }

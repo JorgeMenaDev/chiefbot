@@ -18,9 +18,11 @@ import {
   InviteId,
   InviteRequest,
   ProjectId,
+  ProjectSettingsRequest,
   ReplyToHandoffRequest,
   RoutineId,
   RoutineInput,
+  SecretName,
   SendBotMessageRequest,
   SendMessageRequest,
   ServiceId,
@@ -28,6 +30,7 @@ import {
   SetCopilotModeRequest,
   SetBotAccessRequest,
   SetBotModelRequest,
+  SetProjectSecretRequest,
   SubscriptionId,
   SubscriptionInput,
   TaskWorkerId,
@@ -204,6 +207,14 @@ ipcMain.handle("projects:list", (_event, workspaceId: unknown) => projects.list(
 ipcMain.handle("projects:create", (_event, workspaceId: unknown, repo: unknown) =>
   projects.create(WorkspaceId.parse(workspaceId), CreateProjectRequest.parse({ repo }).repo),
 );
+ipcMain.handle("projects:save-settings", (_event, id: unknown, text: unknown) =>
+  projects.saveSettings(ProjectId.parse(id), ProjectSettingsRequest.parse({ text }).text),
+);
+ipcMain.handle("projects:secrets", (_event, id: unknown) => projects.secrets(ProjectId.parse(id)));
+ipcMain.handle("projects:set-secret", (_event, id: unknown, name: unknown, value: unknown) =>
+  projects.setSecret(ProjectId.parse(id), SecretName.parse(name), SetProjectSecretRequest.parse({ value }).value),
+);
+ipcMain.handle("projects:clear-secret", (_event, id: unknown, name: unknown) => projects.clearSecret(ProjectId.parse(id), SecretName.parse(name)));
 ipcMain.handle("projects:tasks", (_event, id: unknown) => projects.tasks(ProjectId.parse(id)));
 ipcMain.handle("projects:workers", (_event, id: unknown) => projects.workers(ProjectId.parse(id)));
 ipcMain.handle("projects:answer-chat", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
@@ -218,7 +229,7 @@ ipcMain.handle("projects:delete", async (_event, id: unknown, name: unknown) => 
   const { response } = await dialog.showMessageBox(window, {
     type: "warning",
     message: `Delete the project ${String(name)}?`,
-    detail: "Its coordinator's and workers' computers, task ledger, chats and shared context are deleted. The repo is not touched.",
+    detail: "Its coordinator's and workers' computers, task ledger, chats, shared context, settings and secrets are deleted. The repo is not touched.",
     buttons: ["Delete", "Cancel"],
     defaultId: 1,
     cancelId: 1,

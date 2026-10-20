@@ -1,7 +1,11 @@
 import type { Database } from "bun:sqlite";
 import {
+  effectiveConfig,
   Project,
+  ProjectFile,
+  ProjectFileState,
   ProjectId,
+  projectFileName,
   Task,
   TurnId,
   UserId,
@@ -10,7 +14,6 @@ import {
   type ChatEvent,
   type CopilotPayer,
   type CreateTaskArgs,
-  ProjectFile,
   type ProjectMember,
   type TaskStatus,
   type TurnEvent,
@@ -19,6 +22,7 @@ import {
 } from "@chiefbot/contracts";
 import { z } from "zod";
 import { addColumn } from "./addColumn.ts";
+import { issuesOf, parseProjectFile } from "./projectFile.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 
 // Projects, their task ledgers and their members' chats with the coordinator,
@@ -26,8 +30,9 @@ import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./
 // workspaces tables exist. Methods that take an id from a URL accept a plain
 // string: an unknown one reads as missing.
 export function projectStore(db: Database, hash: (token: string) => string) {
-  // A project binds one repo of a workspace. `file` is its chiefbot.project.yaml
-  // as JSON. The coordinator's credential is stored as a SHA-256.
+  // A project binds one repo of a workspace. `file` is what control found of its
+  // chiefbot.project.yaml (a ProjectFileState) as JSON, and `settings` the YAML
+  // members saved in the app. The coordinator's credential is stored as a SHA-256.
   db.run(`CREATE TABLE IF NOT EXISTS projects (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -38,6 +43,19 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     created_at INTEGER NOT NULL,
     UNIQUE (workspace_id, repo)
   )`);
+  addColumn(db, "projects", "settings", "TEXT NOT NULL DEFAULT ''");
+  // The project's secrets that control holds a value for, each with the
+  // SecretStore name its value is under. Each value written gets a new one.
+  db.run(`CREATE TABLE IF NOT EXISTS project_secrets (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    secret_name TEXT NOT NULL,
+    PRIMARY KEY (project_id, name)
+  )`);
+  // SecretStore names that may hold a value no project secret uses: a value
+  // being written, one whose write failed, a replaced or cleared one, a deleted
+  // project's. Each stays until the SecretStore deleted it, even past its project.
+  db.run("CREATE TABLE IF NOT EXISTS project_secret_leftovers (secret_name TEXT PRIMARY KEY)");
   // The task ledger: the only record of task state. `links` is a JSON array of TaskLinks.
   db.run(`CREATE TABLE IF NOT EXISTS project_tasks (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -91,13 +109,40 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     liveTurns: "SELECT id FROM coordinator_turns WHERE state = 'running'",
   });
 
-  type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string };
-  // A stored project file. Projects created before `environments` left the
-  // project file (it was never used) still carry it: it is dropped.
-  const StoredProjectFile = ProjectFile.extend({ environments: z.unknown().optional() }).transform(({ environments: _, ...file }) => file);
-  const toProject = (row: ProjectRow): Project =>
-    Project.parse({ id: row.id, workspaceId: row.workspace_id, name: row.name, repo: row.repo, file: StoredProjectFile.parse(JSON.parse(row.file)) });
-  const projectColumns = "projects.id, projects.workspace_id, projects.name, projects.repo, projects.file";
+  // Records the SecretStore names `select` finds as leftovers, and returns them.
+  const retire = (select: string, ...params: string[]) => {
+    const names = db
+      .query<{ secret_name: string }, string[]>(select)
+      .all(...params)
+      .map(({ secret_name }) => secret_name);
+    for (const name of names) db.query("INSERT OR IGNORE INTO project_secret_leftovers (secret_name) VALUES (?1)").run(name);
+    return names;
+  };
+
+  type ProjectRow = { id: string; workspace_id: string; name: string; repo: string; file: string; settings: string };
+  // What control stored of the project file. Projects made before a missing
+  // file was allowed store the file itself, and those made before `environments`
+  // left the project file (it was never used) still carry it: it is dropped.
+  const LegacyFile = ProjectFile.extend({ environments: z.unknown().optional() }).transform(({ environments: _, ...file }) => ({ status: "found" as const, file }));
+  // A file stored before the project file's rules changed may no longer fit
+  // them: it reads as invalid, so the project still opens and its settings take over.
+  const storedFile = (json: string): ProjectFileState => {
+    const stored: unknown = JSON.parse(json);
+    const file = (typeof stored === "object" && stored !== null && "status" in stored ? ProjectFileState : LegacyFile).safeParse(stored);
+    return file.success ? file.data : { status: "invalid", error: `${projectFileName}, as read when the project was made: ${issuesOf(file.error)}` };
+  };
+  // Settings are checked when saved (PUT /projects/:id/settings), so they parse here.
+  const storedSettings = (text: string) => {
+    const settings = parseProjectFile(text);
+    if ("error" in settings) throw new Error(`stored project settings no longer parse: ${settings.error}`);
+    return settings;
+  };
+  const toProject = (row: ProjectRow): Project => {
+    const file = storedFile(row.file);
+    const { config, sources } = effectiveConfig(file.status === "found" ? file.file : null, storedSettings(row.settings));
+    return Project.parse({ id: row.id, workspaceId: row.workspace_id, name: row.name, repo: row.repo, file, settings: row.settings, config, sources });
+  };
+  const projectColumns = "projects.id, projects.workspace_id, projects.name, projects.repo, projects.file, projects.settings";
 
   type TaskRow = {
     project_id: string;
@@ -155,11 +200,11 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   return {
     // A new project named after its repo, or "exists" when the workspace already
     // has one for the repo. `token` is the coordinator's credential.
-    create(workspaceId: WorkspaceId, repo: string, file: ProjectFile, token: string): Project | "exists" {
+    create(workspaceId: WorkspaceId, repo: string, file: ProjectFileState, token: string): Project | "exists" {
       const row = db
         .query<ProjectRow, [string, string, string, string, string, string, number]>(
           `INSERT INTO projects (id, workspace_id, name, repo, file, token_hash, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-           ON CONFLICT (workspace_id, repo) DO NOTHING RETURNING id, workspace_id, name, repo, file`,
+           ON CONFLICT (workspace_id, repo) DO NOTHING RETURNING id, workspace_id, name, repo, file, settings`,
         )
         .get(`project_${crypto.randomUUID()}`, workspaceId, repo.split("/")[1] ?? repo, repo, JSON.stringify(file), hash(token), Date.now());
       return row ? toProject(row) : "exists";
@@ -195,8 +240,67 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return row ? ProjectId.parse(row.id) : null;
     },
 
-    delete(projectId: ProjectId) {
-      db.query("DELETE FROM projects WHERE id = ?1").run(projectId);
+    // Deletes the project; returns the SecretStore names of its secrets' values, now leftovers.
+    delete(projectId: ProjectId): string[] {
+      return db.transaction(() => {
+        const held = retire("SELECT secret_name FROM project_secrets WHERE project_id = ?1", projectId);
+        db.query("DELETE FROM projects WHERE id = ?1").run(projectId);
+        return held;
+      })();
+    },
+
+    // The names of the project's secrets control holds a value for, oldest first.
+    secretNames(projectId: ProjectId): string[] {
+      return db
+        .query<{ name: string }, [string]>("SELECT name FROM project_secrets WHERE project_id = ?1 ORDER BY rowid")
+        .all(projectId)
+        .map(({ name }) => name);
+    },
+
+    // A value is about to be written under `secretName`: a leftover until it is published.
+    stageSecret(secretName: string) {
+      db.query("INSERT OR IGNORE INTO project_secret_leftovers (secret_name) VALUES (?1)").run(secretName);
+    },
+
+    // The project's secret `name` now has the value written under
+    // `secretName`; returns the SecretStore name of the value it replaced, now a leftover.
+    publishSecret(projectId: ProjectId, name: string, secretName: string): string[] {
+      return db.transaction(() => {
+        const replaced = retire("SELECT secret_name FROM project_secrets WHERE project_id = ?1 AND name = ?2", projectId, name);
+        db.query(
+          `INSERT INTO project_secrets (project_id, name, secret_name) VALUES (?1, ?2, ?3)
+           ON CONFLICT (project_id, name) DO UPDATE SET secret_name = excluded.secret_name`,
+        ).run(projectId, name, secretName);
+        db.query("DELETE FROM project_secret_leftovers WHERE secret_name = ?1").run(secretName);
+        return replaced;
+      })();
+    },
+
+    // The project's secret `name` has no value any more; returns the SecretStore name of the one it had, now a leftover.
+    clearSecret(projectId: ProjectId, name: string): string[] {
+      return db.transaction(() => {
+        const cleared = retire("SELECT secret_name FROM project_secrets WHERE project_id = ?1 AND name = ?2", projectId, name);
+        db.query("DELETE FROM project_secrets WHERE project_id = ?1 AND name = ?2").run(projectId, name);
+        return cleared;
+      })();
+    },
+
+    // Every leftover SecretStore name, and the end of one the SecretStore deleted.
+    secretLeftovers: () =>
+      db
+        .query<{ secret_name: string }, []>("SELECT secret_name FROM project_secret_leftovers")
+        .all()
+        .map(({ secret_name }) => secret_name),
+    secretDeleted(secretName: string) {
+      db.query("DELETE FROM project_secret_leftovers WHERE secret_name = ?1").run(secretName);
+    },
+
+    // Saves the project's settings, YAML its caller has checked (parseProjectFile).
+    setSettings(projectId: ProjectId, text: string): Project | null {
+      const row = db
+        .query<ProjectRow, [string, string]>("UPDATE projects SET settings = ?2 WHERE id = ?1 RETURNING id, workspace_id, name, repo, file, settings")
+        .get(projectId, text);
+      return row ? toProject(row) : null;
     },
 
     // The project's workspace members: who sees its ledger.
