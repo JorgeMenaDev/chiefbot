@@ -2,7 +2,7 @@
 
 Three ways to run Chiefbot, from a laptop to a team's cloud:
 
-| | Control runs | Computers (bots, coordinators, task workers) | HTTPS | Cost |
+| | Control runs | Computers (bots, coordinators, engineers, verifiers) | HTTPS | Cost |
 | --- | --- | --- | --- | --- |
 | **Local** | on your Mac (`bun run dev`) | Docker containers on your Mac | none: `http://127.0.0.1:7410` | your Mac |
 | **Docker compose** | a container on one Linux machine (`compose.yaml`) | sibling containers on the same machine | Caddy, Let's Encrypt | one machine, flat |
@@ -90,12 +90,12 @@ docker compose start control
 - **Service accounts:** `chiefbot-control` (manages computer VMs and disks; keeps refresh tokens and connector credentials in Secret Manager) and `chiefbot-computer` (pulls its image and writes logs, nothing else).
 - **Secrets** `chiefbot-config` and `chiefbot-github-app-secrets`, empty: you add setup's two files as their versions (step 4), so the repo app's key never enters Terraform state. Control reads them on every start into a tmpfs, never onto a disk.
 - **Control VM** `chiefbot-control` (e2-medium, Container-Optimized OS) with a static public IP for your domain. It runs the control image and Caddy, with SQLite, context files and Caddy's certificates on its own 10 GB disk.
-- **Instance template** `chiefbot-computer`. Control makes one VM from it per bot, project coordinator and task worker (`GceProvider`): e2-standard-2, Container-Optimized OS running the computer image, and a 50 GB home disk each.
+- **Instance template** `chiefbot-computer`. Control makes one VM from it per bot, project coordinator, engineer and verifier (`GceProvider`): e2-standard-2, Container-Optimized OS running the computer image, and a 50 GB home disk each.
 - **Budget alert** on the project at 100 a month (50%, 90%, 100% emails to billing admins).
 
 **Why Caddy on the control VM, not a Google load balancer.** An external HTTPS load balancer needs a forwarding rule ($0.025 an hour, about $18 a month), a backend service, an instance group, a health check, a URL map, a target proxy and a managed certificate, and its backend timeout (30 s by default) also cuts WebSockets, which every computer and desktop holds open. Caddy is one container on the VM control already runs on, gets and renews its certificate itself and keeps WebSockets open, for the price of a static IP ($0.005 an hour, about $3.65 a month). The cost: TLS ends on the control VM, which now has a public IP (only 80 and 443 open), and there is no Cloud Armor in front.
 
-**Lifecycle on GCP:** a bot's VM stops after 30 idle minutes, a coordinator's too; a task worker's VM stops as soon as its turn ends and is deleted with its disk when the task is done or abandoned. A stopped VM costs only its disks.
+**Lifecycle on GCP:** a bot's VM stops after 30 idle minutes, a coordinator's too; an engineer's or verifier's VM stops as soon as its turn ends and is deleted with its disk when the task is done or abandoned. A stopped VM costs only its disks.
 
 ### Steps
 
@@ -121,7 +121,7 @@ You need the `gcloud` CLI, Terraform, Docker with buildx, a billing account ID a
    monthly_budget     = 100
    ```
 
-3. **Review the plan.** It costs nothing and makes no bot, coordinator or worker VMs.
+3. **Review the plan.** It costs nothing and makes no bot, coordinator, engineer or verifier VMs.
 
    ```bash
    terraform -chdir=infra/gcp init
@@ -185,17 +185,17 @@ Monthly, on-demand, USD, no discounts, 730 hours a month. GCP prices are London 
 | GCP: a computer's disks (50 GB home + 10 GB boot), while it exists, stopped or not | $0.12/GB | $7.20 ($0.24 a day) |
 | GCP: NAT data processing, Artifact Registry, Secret Manager | | ≈ $2 |
 
-A team on GCP for a month: 3 members with a bot each, active 3 hours a working day (22 days); 2 projects whose coordinators are awake 2 hours a working day; 60 tasks, each worker running 45 minutes, each task open 2 days.
+A team on GCP for a month: 3 members with a bot each, active 3 hours a working day (22 days); 2 projects whose coordinators are awake 2 hours a working day; 60 tasks, each engineer running 45 minutes, each task open 2 days.
 
 | | Hours | Compute | Disks | Total |
 | --- | --- | --- | --- | --- |
 | 3 bots | 3 × 66 h | $17.36 | 3 × $7.20 | $38.96 |
 | 2 coordinators | 2 × 44 h | $7.72 | 2 × $7.20 | $22.12 |
-| 60 task workers | 60 × 0.75 h | $3.95 | 60 × 2 days × $0.24 | $32.75 |
+| 60 engineers | 60 × 0.75 h | $3.95 | 60 × 2 days × $0.24 | $32.75 |
 | Control and the rest | | | | $40 |
 | **Month** | | | | **≈ $134** |
 
-What the stops save: if each worker's VM ran until its task closed (48 hours) instead of stopping when its turn ends, the workers' compute would be $252.58 instead of $3.95. A coordinator never stopped would cost $64 a month instead of $3.86. Workers' disks are now their largest cost: close tasks once their pull requests are merged.
+What the stops save: if each engineer's VM ran until its task closed (48 hours) instead of stopping when its turn ends, the engineers' compute would be $252.58 instead of $3.95. A coordinator never stopped would cost $64 a month instead of $3.86. Engineers' disks are now their largest cost: close tasks once their pull requests are merged.
 
 Compose costs the same whatever runs: idle stops free the machine's memory and CPU for other computers, not money. It is cheaper than GCP for a busy team and dearer for a quiet one, and on a provider with cheaper machines than Compute Engine it is cheaper still.
 
@@ -207,6 +207,6 @@ Run after a compose or GCP deploy, with `https://<domain>` as the public URL. St
 2. `curl -s -o /dev/null -w '%{http_code}\n' "https://<domain>/connectors/oauth/callback?state=x"` prints `400` (control's "This sign-in did not work or has expired" page), not `502`: connector OAuth sign-ins can come back to control.
 3. On your Mac: `CHIEFBOT_CONTROL_URL=https://<domain> bun run --cwd apps/desktop dev` and sign in with GitHub. Click **New bot** (the pen icon beside **Search bots** in the sidebar). Within a minute or two it turns **online**: its computer reached control through the public URL. `docker ps` on the server (compose) lists `chiefbot-bot_…`. Click **Stop**, then **Delete** with **Also delete its files**.
 4. Create a workspace and a project from a repo (README, Projects). `docker ps` lists `chiefbot-project_…`. Leave it alone for 31 minutes (or set `CHIEFBOT_IDLE_STOP_MINUTES=2` for the check): `docker ps -a` shows it **Exited**. Send the coordinator a message: the container is **Up** again within seconds and the coordinator answers.
-5. Ask the coordinator to create a small task and dispatch a worker on it. While it works, `docker ps` lists `chiefbot-worker_…`. Once the worker shows **finished**, its container is **Exited** but still listed by `docker ps -a`, with its volume in `docker volume ls`. Mark the task done: the container and its volume are gone.
+5. Ask the coordinator to create a small task and dispatch an engineer on it. While it works, `docker ps` lists `chiefbot-worker_…`. Once the engineer shows **finished**, its container is **Exited** but still listed by `docker ps -a`, with its volume in `docker volume ls`. Click **Mark done** under the task: the container and its volume are gone.
 6. In the project, open **Listening to** and add a CI subscription on a branch. Within 5 minutes **Connector calls** lists an `actions_list` call: polling works with no inbound route.
 7. Clean up: delete the project.
