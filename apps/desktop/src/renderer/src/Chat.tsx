@@ -27,10 +27,11 @@ function useChat(botId: BotId) {
 
 // T3 Code's chat shape: a centred lane of messages (user on the right, the bot's
 // replies as markdown, tool calls as one-line rows), the bot's status, and the
-// composer at the bottom. Enter sends, Shift+Enter adds a line.
-export function Chat({ bot }: { bot: Bot }) {
+// composer at the bottom. Enter sends, Shift+Enter adds a line. `initialDraft`
+// starts the composer with a message to send (Health's Ask my bot).
+export function Chat({ bot, initialDraft = "" }: { bot: Bot; initialDraft?: string | undefined }) {
   const view = useChat(bot.id);
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(initialDraft);
   const [error, setError] = useState<string | null>(null);
   const working = view.working !== null;
   // The agent waits while the user has its screen.

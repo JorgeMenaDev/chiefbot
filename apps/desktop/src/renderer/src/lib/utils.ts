@@ -6,3 +6,6 @@ import { twMerge } from "tailwind-merge";
 export function cn(...inputs: CxOptions) {
   return twMerge(cx(inputs));
 }
+
+// "A", "A and B", "A, B and C".
+export const listOf = (names: string[]) => (names.length <= 1 ? (names[0] ?? "") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`);

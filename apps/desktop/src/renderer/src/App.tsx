@@ -1,5 +1,6 @@
 import { AuthState, Bot, type User } from "@chiefbot/contracts";
 import {
+  ActivityIcon,
   BlocksIcon,
   BotIcon,
   CheckIcon,
@@ -23,6 +24,7 @@ import { z } from "zod";
 import { BotFace, BotPane } from "./BotPane.tsx";
 import { ConnectApps } from "./ConnectApps.tsx";
 import { Connectors } from "./Connectors.tsx";
+import { Health } from "./Health.tsx";
 import { Settings } from "./Settings.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
@@ -175,8 +177,8 @@ function Workspace({ user }: { user: User }) {
   const sidebar = useSidebarOpen();
   const [workspaceId, setWorkspaceId] = useState(() => localStorage.getItem(currentWorkspaceKey));
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  // Bumped by each click on Members, Connectors or Connect apps, which remounts
-  // (reloads) the screen: control sends no member or connector events.
+  // Bumped by each click on Members, Connectors, Connect apps or Health, which remounts
+  // (reloads) the screen: control sends no member, connector or health events.
   const [membersVisit, setMembersVisit] = useState(0);
   // Whether the new-bot dialog and the sidebar's new-project form are open. Each is
   // its own, so one finishing never closes the other.
@@ -195,8 +197,9 @@ function Workspace({ user }: { user: User }) {
   const { projects, reload: reloadProjects } = useProjects(current);
   const showMembers = current !== null && selectedId === "members";
   const showConnectors = current !== null && selectedId === "connectors";
-  // Connect apps (from the gear menu) is the person's own, in any workspace.
+  // Connect apps (from the gear menu) and Health are the person's own, in any workspace.
   const showConnectApps = selectedId === "connect-apps";
+  const showHealth = selectedId === "health";
   const showSettings = selectedId === "settings";
   const project = projects.find(({ id }) => id === selectedId);
   const selected = bots.find((bot) => bot.id === selectedId) ?? bots[0];
@@ -204,6 +207,20 @@ function Workspace({ user }: { user: User }) {
   const matches = (...names: string[]) => names.some((name) => name.toLowerCase().includes(query.trim().toLowerCase()));
   const shownProjects = projects.filter(({ name, repo }) => matches(name, repo));
   const shownBots = bots.filter(({ name }) => matches(name));
+
+  // Ask my bot (Health): the bot the user last opened, or the first, opens with the
+  // problem in its composer. The draft goes once the user moves elsewhere.
+  const lastBot = useRef<string | null>(null);
+  const [askDraft, setAskDraft] = useState<{ botId: string; text: string } | null>(null);
+  useEffect(() => {
+    if (askDraft && selectedId !== askDraft.botId) setAskDraft(null);
+  }, [selectedId]);
+  const askBot = (text: string) => {
+    const bot = bots.find(({ id }) => id === lastBot.current) ?? bots[0];
+    if (!bot) return;
+    setAskDraft({ botId: bot.id, text });
+    setSelectedId(bot.id);
+  };
 
   const selectWorkspace = (id: string | null) => {
     setWorkspaceId(id);
@@ -234,6 +251,18 @@ function Workspace({ user }: { user: User }) {
           </div>
         </div>
         <nav className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pb-2">
+          {!searching && (
+            <SidebarRow
+              active={showHealth}
+              onClick={() => {
+                setSelectedId("health");
+                setMembersVisit(membersVisit + 1);
+              }}
+            >
+              <ActivityIcon />
+              <span className="min-w-0 flex-1 truncate">Health</span>
+            </SidebarRow>
+          )}
           {current && !searching && (
             <>
               <SidebarGroupLabel>Workspace</SidebarGroupLabel>
@@ -291,8 +320,11 @@ function Workspace({ user }: { user: User }) {
               {shownBots.map((bot) => (
                 <SidebarRow
                   key={bot.id}
-                  active={!showMembers && !showConnectors && !showConnectApps && !showSettings && !project && bot.id === selected?.id}
-                  onClick={() => setSelectedId(bot.id)}
+                  active={!showMembers && !showConnectors && !showConnectApps && !showHealth && !showSettings && !project && bot.id === selected?.id}
+                  onClick={() => {
+                    lastBot.current = bot.id;
+                    setSelectedId(bot.id);
+                  }}
                 >
                   <BotFace bot={bot} className="size-4.5" dotClassName="-end-1 -bottom-1 scale-75 bg-sidebar" />
                   <span className="min-w-0 flex-1 truncate">{bot.name}</span>
@@ -340,6 +372,17 @@ function Workspace({ user }: { user: User }) {
           <Column>
             <ConnectApps key={membersVisit} />
           </Column>
+        ) : showHealth ? (
+          <Column>
+            <Health
+              key={membersVisit}
+              onConnectApps={() => {
+                setSelectedId("connect-apps");
+                setMembersVisit(membersVisit + 1);
+              }}
+              onAsk={bots.length > 0 ? askBot : null}
+            />
+          </Column>
         ) : showSettings ? (
           <Column>
             <Settings />
@@ -372,7 +415,7 @@ function Workspace({ user }: { user: User }) {
             }}
           />
         ) : selected ? (
-          <BotPane key={selected.id} bot={selected} />
+          <BotPane key={selected.id} bot={selected} draft={askDraft?.botId === selected.id ? askDraft.text : undefined} />
         ) : (
           <Column>
             <PaneHeader title="Chiefbot" />

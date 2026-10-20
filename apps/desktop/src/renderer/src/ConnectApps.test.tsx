@@ -1,7 +1,7 @@
 import type { Connection } from "@chiefbot/contracts";
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { FieldsForm } from "./ConnectApps.tsx";
+import { FieldsForm, noCallsText } from "./ConnectApps.tsx";
 
 const connection: Connection = {
   name: "tool",
@@ -26,4 +26,9 @@ test("the Connect form shows the steps above the fields, their links, help under
   expect(html).toContain("Change things.");
   expect(html).toContain('placeholder="tool.example"');
   expect(html.indexOf("From step 1, read-only.")).toBeGreaterThan(html.indexOf('type="password"'));
+});
+
+test("an empty call log points to Connect apps only while no connection is on", () => {
+  expect(noCallsText([])).toBe("No connection calls yet. Turn an app on under Connect apps in the gear menu.");
+  expect(noCallsText(["Google Cloud", "Looker"])).toBe("No connection calls yet. Google Cloud and Looker are on. Commands your bot runs with them show here when each turn ends.");
 });
