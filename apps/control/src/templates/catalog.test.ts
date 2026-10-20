@@ -65,20 +65,40 @@ test("a template that breaks the rules stops control, naming its file and what i
   expect(withManifest(`${manifest}extra: 1\n`)).toThrow(/shop\/template\.yaml[\s\S]*extra/);
   expect(withManifest(manifest.replace("waitsFor: [api]", "waitsFor: [api, cache]"))).toThrow(/shop\/template\.yaml: stage API waits for cache, which compose\.yaml has no service for/);
   expect(withManifest(manifest.replace("api: { context: . }", "web: { context: . }"))).toThrow(/shop\/template\.yaml: service web is not in compose\.yaml/);
-  expect(withManifest(manifest.replace("api: { context: . }", "db: { context: . }"))).toThrow(/shop\/template\.yaml: service db has no build in compose\.yaml/);
+  expect(withManifest(manifest.replace("api: { context: . }", "db: { context: . }"))).toThrow(/shop\/template\.yaml: service db needs a build in compose\.yaml/);
   expect(withManifest(manifest.replace("seed: seed", "seed: fixtures"))).toThrow(/shop\/template\.yaml: seed fixtures is not in compose\.yaml/);
   expect(load({ "template.yaml": manifest })).toThrow(/shop\/compose\.yaml: missing/);
+  expect(withManifest(`${manifest}# ${"x".repeat(256 * 1024)}\n`)).toThrow(/shop\/template\.yaml: over 256 KB/);
   expect(() => loadTemplates(templatesDir({ "Not Valid": { "template.yaml": manifest, "compose.yaml": compose() } }))).toThrow(/Not Valid[\s\S]*lower-case/);
 });
 
-test("a template that binds or publishes the engineer computer's screen port (5900) is refused", () => {
-  const load = (podPorts: string) => () => loadTemplates(templatesDir({ shop: { "template.yaml": manifest, "compose.yaml": compose(podPorts) } }));
+test("a service a repo may replace needs a build that is a folder or has a context", () => {
+  const withApiBuild = (build: string) => () =>
+    loadTemplates(templatesDir({ shop: { "template.yaml": manifest, "compose.yaml": compose().replace("build: ./api", `build: ${build}`) } }));
 
-  expect(load('expose: ["5900"]')).toThrow(/shop\/compose\.yaml: service pod binds port 5900, which the engineer computer uses for its screen \(VNC\)/);
-  expect(load('expose: ["5800-6000/tcp"]')).toThrow(/shop\/compose\.yaml: service pod binds port 5900/);
-  expect(load('ports: ["127.0.0.1:8080:5900"]')).toThrow(/shop\/compose\.yaml: service pod binds port 5900/);
-  expect(load('ports: ["5900:8080"]')).toThrow(/shop\/compose\.yaml: service pod binds port 5900/);
-  expect(load('ports: [{ target: 8080, published: "5900" }]')).toThrow(/shop\/compose\.yaml: service pod binds port 5900/);
-  expect(load('ports: ["${PORT}:8080"]')).toThrow(/shop\/compose\.yaml: service pod: cannot read the port \$\{PORT\}:8080/);
-  expect(load('ports: ["127.0.0.1:8080:8080", 5432, { target: 3000 }], expose: [5901]')).not.toThrow();
+  expect(withApiBuild("{ context: ./api, dockerfile: Dockerfile }")).not.toThrow();
+  for (const build of ["null", "false", '""', "{ dockerfile: Dockerfile }", "[./api]"]) {
+    expect(withApiBuild(build)).toThrow(/shop\/template\.yaml: service api needs a build in compose\.yaml/);
+  }
+});
+
+test("a name the compose file inherits from Object, such as toString, is not one of its services", () => {
+  const withManifest = (text: string) => () => loadTemplates(templatesDir({ shop: { "template.yaml": text, "compose.yaml": compose() } }));
+
+  expect(withManifest(manifest.replace("waitsFor: [api]", "waitsFor: [toString]"))).toThrow(/stage API waits for toString, which compose\.yaml has no service for/);
+  expect(withManifest(manifest.replace("seed: seed", "seed: constructor"))).toThrow(/seed constructor is not in compose\.yaml/);
+  expect(withManifest(manifest.replace("api: { context: . }", "toString: { context: . }"))).toThrow(/service toString is not in compose\.yaml/);
+});
+
+test("a template that binds the engineer computer's own TCP port (5900) inside its namespace is refused", () => {
+  const load = (podPorts: string) => () => loadTemplates(templatesDir({ shop: { "template.yaml": manifest, "compose.yaml": compose(podPorts) } }));
+  const clash = /shop\/compose\.yaml: service pod binds port 5900\/tcp, which the engineer computer uses for its screen \(VNC\)/;
+
+  expect(load('expose: ["5900"]')).toThrow(clash);
+  expect(load('expose: ["5800-6000/tcp"]')).toThrow(clash);
+  expect(load('ports: ["127.0.0.1:8080:5900"]')).toThrow(clash);
+  expect(load('ports: [{ target: 5900, published: "8080" }]')).toThrow(clash);
+  expect(load('ports: ["8080:${PORT}"]')).toThrow(/shop\/compose\.yaml: service pod: cannot read the port 8080:\$\{PORT\}/);
+  // Another protocol, or 5900 only on the Docker host's side, is no clash.
+  expect(load('expose: ["5900/udp", 5901], ports: ["5900:8080", { target: 8080, published: "5900" }, { target: 5900, protocol: udp }, "127.0.0.1:8081:8081", 5432]')).not.toThrow();
 });

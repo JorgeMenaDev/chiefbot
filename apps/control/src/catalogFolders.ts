@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 
@@ -27,7 +27,11 @@ export function readText(path: string) {
   }
 }
 
+// The most a catalog's YAML file may hold, checked before it is read.
+const maxYamlBytes = 256 * 1024;
+
 export function readYaml(path: string): unknown {
+  if ((statSync(path, { throwIfNoEntry: false })?.size ?? 0) > maxYamlBytes) throw new Error(`${path}: over ${maxYamlBytes / 1024} KB`);
   const text = readText(path);
   try {
     return Bun.YAML.parse(text);
