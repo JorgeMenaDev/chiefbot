@@ -83,8 +83,8 @@ esac
 
     expect(outcome).toBe("failed");
     expect(reports.map(({ label, state }) => `${label} ${state}`)).toEqual(["Build running", "Build failed"]);
-    const gitEnv = readFileSync(join(bin, "git-env"), "utf8");
-    for (const [name, value] of Object.entries(proxy)) expect(gitEnv).toContain(`\n${name}=${value}\n`);
+    const gitEnv = readFileSync(join(bin, "git-env"), "utf8").split("\n");
+    for (const [name, value] of Object.entries(proxy)) expect(gitEnv).toContain(`${name}=${value}`);
     expect(readFileSync(join(bin, "git-ca"), "utf8").endsWith(`\n${ca}`)).toBe(true);
     const built = z.object({ secrets: z.object({ "chiefbot-ca": z.object({ file: z.string() }) }) }).parse(JSON.parse(readFileSync(join(bin, "work", "compose.json"), "utf8")));
     expect(readFileSync(join(bin, "work", basename(built.secrets["chiefbot-ca"].file)), "utf8")).toBe(ca);
