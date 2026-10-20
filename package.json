@@ -12,7 +12,8 @@
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun test",
     "check": "bun run typecheck && bun test && bash scripts/check-public.sh",
-    "computer:build": "bun infra/computer/build.ts"
+    "computer:build": "bun infra/computer/build.ts",
+    "mock:services": "bun apps/control/src/health/mockServices.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

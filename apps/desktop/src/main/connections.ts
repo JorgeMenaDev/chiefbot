@@ -1,4 +1,16 @@
-import { Connection, ConnectionCall, HealthReport, type BotId, type ConnectionName } from "@chiefbot/contracts";
+import {
+  Connection,
+  ConnectionCall,
+  HealthReport,
+  Service,
+  ServiceHealth,
+  ServiceResult,
+  type BotId,
+  type ConnectionName,
+  type EnvironmentInput,
+  type ServiceId,
+  type ServiceInput,
+} from "@chiefbot/contracts";
 import { controlCaller } from "./controlApi.ts";
 
 export type ConnectionsOptions = {
@@ -20,7 +32,15 @@ export function createConnections({ controlUrl, session }: ConnectionsOptions) {
     disconnect: async (name: ConnectionName) => void (await call("DELETE", `/connections/${name}`)),
     calls: async (botId: BotId) => ConnectionCall.array().parse(await (await call("GET", `/bots/${botId}/connection-calls`)).json()),
     health: async () => HealthReport.parse(await (await call("GET", "/health")).json()),
-    // Checks every connection again now; resolves once they are all checked.
+    // Checks every connection and service again now; resolves once they are all checked.
     refreshHealth: async () => HealthReport.parse(await (await call("POST", "/health/refresh")).json()),
+    // The user's own services on Health: each check resolves with every service once done.
+    checkServices: async () => ServiceHealth.array().parse(await (await call("POST", "/health/services/check")).json()),
+    checkService: async (id: ServiceId) => ServiceHealth.array().parse(await (await call("POST", `/health/services/${id}/check`)).json()),
+    addService: async (input: ServiceInput) => Service.parse(await (await call("POST", "/health/services", input)).json()),
+    updateService: async (id: ServiceId, input: ServiceInput) => Service.parse(await (await call("PUT", `/health/services/${id}`, input)).json()),
+    removeService: async (id: ServiceId) => void (await call("DELETE", `/health/services/${id}`)),
+    // Checks one environment of the Add/Edit dialog's unsaved form, keeping nothing.
+    testEnvironment: async (input: EnvironmentInput) => ServiceResult.parse(await (await call("POST", "/health/services/test", input)).json()),
   };
 }

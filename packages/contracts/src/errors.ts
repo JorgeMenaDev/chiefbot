@@ -47,6 +47,9 @@ import { z } from "zod";
 //                         connector's auth type; `message` says why (400)
 //   connector_exists      the workspace already has a connector of that name (409)
 //   invalid_connection    a connection's fields are missing, unknown or empty; `message` says which (400)
+//   invalid_service       a service failed its schema, names an environment it does not have, or
+//                         lacks a secret its authentication needs; `message` says which (400)
+//   secrets_unavailable   control's secret store did not save a service's secret, so nothing was saved (503)
 //   connector_not_ready   a connector call has no credential: the workspace secret is unset, or the
 //                         member has not connected (403)
 //   invalid_subscription  a subscription failed its schema, or names a connector that is not a remote
@@ -102,6 +105,8 @@ export const ApiErrorCode = z.enum([
   "invalid_connector",
   "connector_exists",
   "invalid_connection",
+  "invalid_service",
+  "secrets_unavailable",
   "connector_not_ready",
   "invalid_subscription",
   "invalid_turn_key",

@@ -54,3 +54,11 @@ export type SubscriptionId = z.infer<typeof SubscriptionId>;
 // A file a user sent with a message to their bot.
 export const AttachmentId = z.string().min(1).brand<"AttachmentId">();
 export type AttachmentId = z.infer<typeof AttachmentId>;
+
+// One of a person's own services on Health: something they run that answers a health URL.
+export const ServiceId = z.string().min(1).brand<"ServiceId">();
+export type ServiceId = z.infer<typeof ServiceId>;
+
+// One environment of a service (prod, preprod, int), with its own URL and secret.
+export const EnvironmentId = z.string().min(1).brand<"EnvironmentId">();
+export type EnvironmentId = z.infer<typeof EnvironmentId>;

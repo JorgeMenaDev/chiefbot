@@ -9,7 +9,8 @@ import { Spinner } from "./components/ui/spinner.tsx";
 import { cn } from "./lib/utils.ts";
 
 // A picked option's ring (checked) and the keyboard's (focus-visible) differ, so both can show at once.
-const option =
+// Health's service icon picker (Services.tsx) uses it too.
+export const option =
   "flex cursor-pointer items-center justify-center rounded-full outline-ring outline-offset-2 transition-shadow has-checked:ring-2 has-checked:ring-foreground/24 has-focus-visible:outline-2";
 
 // The Create New Bot dialog, after Grok's: a live preview of the bot's face over its

@@ -13,6 +13,7 @@ import {
   CreateBotRequest,
   CreateProjectRequest,
   CreateWorkspaceRequest,
+  EnvironmentInput,
   InviteId,
   InviteRequest,
   ProjectId,
@@ -20,6 +21,8 @@ import {
   RoutineInput,
   SendBotMessageRequest,
   SendMessageRequest,
+  ServiceId,
+  ServiceInput,
   SetCopilotModeRequest,
   SetBotAccessRequest,
   SetBotModelRequest,
@@ -243,6 +246,26 @@ ipcMain.handle("connections:disconnect", (_event, name: unknown) => connections.
 ipcMain.handle("connections:calls", (_event, botId: unknown) => connections.calls(BotId.parse(botId)));
 ipcMain.handle("health:get", () => connections.health());
 ipcMain.handle("health:refresh", () => connections.refreshHealth());
+ipcMain.handle("health:check-services", () => connections.checkServices());
+ipcMain.handle("health:check-service", (_event, id: unknown) => connections.checkService(ServiceId.parse(id)));
+ipcMain.handle("health:add-service", (_event, input: unknown) => connections.addService(ServiceInput.parse(input)));
+ipcMain.handle("health:update-service", (_event, id: unknown, input: unknown) => connections.updateService(ServiceId.parse(id), ServiceInput.parse(input)));
+ipcMain.handle("health:test-environment", (_event, input: unknown) => connections.testEnvironment(EnvironmentInput.parse(input)));
+// Asks first: its environments' secrets and checks go too. Resolves true once removed.
+ipcMain.handle("health:remove-service", async (_event, id: unknown, name: unknown) => {
+  if (!window) return false;
+  const { response } = await dialog.showMessageBox(window, {
+    type: "warning",
+    message: `Remove the service ${String(name)}?`,
+    detail: "Its environments, their saved secrets and their checks are deleted. The service itself is not touched.",
+    buttons: ["Remove", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+  });
+  if (response !== 0) return false;
+  await connections.removeService(ServiceId.parse(id));
+  return true;
+});
 ipcMain.handle("connectors:list", (_event, workspaceId: unknown) => connectors.list(WorkspaceId.parse(workspaceId)));
 ipcMain.handle("connectors:define", (_event, workspaceId: unknown, input: unknown) =>
   connectors.define(WorkspaceId.parse(workspaceId), ConnectorInput.parse(input)),

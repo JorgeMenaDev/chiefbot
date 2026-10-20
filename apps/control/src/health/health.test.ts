@@ -38,7 +38,7 @@ test("control checks a connection with a probe within a minute of it going on, t
   await user.api("PUT", "/connections/looker", { fields: looker });
   await user.api("PUT", "/connections/jira", { fields: { site: "example.atlassian.net", email: "octo@example.com", token: "jira-token" } });
 
-  expect(await report(user)).toEqual({ checkable: ["Looker"], connections: [{ name: "looker", title: "Looker", latest: null, history: [] }] });
+  expect(await report(user)).toEqual({ checkable: ["Looker"], connections: [{ name: "looker", title: "Looker", latest: null, history: [] }], services: [] });
   time.advance(HEALTH_TICK_MS);
   await eventually(async () => (await checks(user)).length === 1);
   time.advance(4 * minute);
