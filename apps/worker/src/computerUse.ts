@@ -110,28 +110,52 @@ export const computerInstructions = `You have your own Linux computer with a ${S
 const buttons = { left: "1", middle: "2", right: "3" } as const;
 const wheel = { up: "4", down: "5", left: "6", right: "7" } as const;
 
-// The xdotool commands that do `action`: one, a text's chunks, or none for one that only looks.
-function commandsFor(action: ComputerAction): string[][] {
+// Releases, for a command cut short while it holds a mouse button or keys down.
+const mouseup = (button: string) => ["xdotool", "mouseup", button];
+const keyup = (keys: string[]) => ["xdotool", "keyup", "--delay", "0", ...keys];
+// The modifiers xdotool may hold to type a character: Shift for a capital,
+// ISO_Level3_Shift for an AltGr one, and so on.
+const typingModifiers = ["Shift_L", "Shift_R", "Control_L", "Alt_L", "Super_L", "ISO_Level3_Shift"];
+// The X key name xdotool types a character with: Return and Tab for a newline
+// and a tab, and U+hex (as XStringToKeysym reads it) for any other.
+const typedKey = (character: string) =>
+  character === "\n" ? "Return" : character === "\t" ? "Tab" : `U${(character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}`;
+
+// The xdotool commands that do `action` (one, a text's chunks, or none for one
+// that only looks), each with the command that releases what it presses.
+function commandsFor(action: ComputerAction): Array<{ command: string[]; release?: string[] }> {
   const at = (point: z.infer<typeof Point>) => [String(point.x), String(point.y)];
   switch (action.kind) {
-    case "click":
-      return [["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.count ?? 1), buttons[action.button ?? "left"]]];
+    case "click": {
+      const button = buttons[action.button ?? "left"];
+      return [{ command: ["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.count ?? 1), button], release: mouseup(button) }];
+    }
     case "move":
-      return [["xdotool", "mousemove", ...at(action.at)]];
+      return [{ command: ["xdotool", "mousemove", ...at(action.at)] }];
     case "drag":
-      return [["xdotool", "mousemove", ...at(action.from), "mousedown", "1", "sleep", "0.1", "mousemove", ...at(action.to), "sleep", "0.1", "mouseup", "1"]];
-    case "scroll":
-      return [["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.amount ?? 5), wheel[action.direction]]];
+      return [
+        {
+          command: ["xdotool", "mousemove", ...at(action.from), "mousedown", "1", "sleep", "0.1", "mousemove", ...at(action.to), "sleep", "0.1", "mouseup", "1"],
+          release: mouseup("1"),
+        },
+      ];
+    case "scroll": {
+      const button = wheel[action.direction];
+      return [{ command: ["xdotool", "mousemove", ...at(action.at), "click", "--repeat", String(action.amount ?? 5), button], release: mouseup(button) }];
+    }
     case "type": {
       // By code point, so no character is split.
       const characters = Array.from(action.text);
       const chunks = Array.from({ length: Math.ceil(characters.length / TEXT_CHUNK) }, (_, i) => characters.slice(i * TEXT_CHUNK, (i + 1) * TEXT_CHUNK).join(""));
-      return chunks.map((chunk) => ["xdotool", "type", "--", chunk]);
+      return chunks.map((chunk) => ({
+        command: ["xdotool", "type", "--", chunk],
+        release: keyup([...typingModifiers, ...new Set(Array.from(chunk, typedKey))]),
+      }));
     }
     case "key":
-      return [["xdotool", "key", action.keys]];
+      return [{ command: ["xdotool", "key", action.keys], release: keyup(action.keys.split("+")) }];
     case "wait":
-      return [["xdotool", "sleep", String(action.ms / 1000)]];
+      return [{ command: ["xdotool", "sleep", String(action.ms / 1000)] }];
     case "screenshot":
       return [];
   }
@@ -151,38 +175,22 @@ function cursorFrom(output: Uint8Array) {
   return { x: X, y: Y };
 }
 
-// The mouse button `action` presses, to release if its command is cut short
-// (a drag holds it down between its mousedown and mouseup).
-function heldButton(action: ComputerAction) {
-  switch (action.kind) {
-    case "click":
-      return buttons[action.button ?? "left"];
-    case "drag":
-      return "1";
-    case "scroll":
-      return wheel[action.direction];
-    default:
-      return null;
-  }
-}
-
 // Runs `actions` in order through `run`, checking before each command that the
-// agent has the screen. A command that fails or is cut short has its action's
-// button released by `release`; then a call no longer wanted throws (`run`
+// agent has the screen. A command that fails or is cut short has what it
+// pressed released through `cleanUp`; then a call no longer wanted throws (`run`
 // does, and so does `stopIfAbandoned`). How many actions went through, and why
 // it stopped early.
 async function act(
   actions: ComputerAction[],
-  { run, release, agentHasScreen, stopIfAbandoned }: { run: (command: string[]) => Promise<unknown>; release: (button: string) => Promise<void>; agentHasScreen: () => boolean; stopIfAbandoned: () => void },
+  { run, cleanUp, agentHasScreen, stopIfAbandoned }: { run: (command: string[]) => Promise<unknown>; cleanUp: (command: string[]) => Promise<void>; agentHasScreen: () => boolean; stopIfAbandoned: () => void },
 ) {
   for (const [ran, action] of actions.entries()) {
-    for (const command of commandsFor(action)) {
+    for (const { command, release } of commandsFor(action)) {
       if (!agentHasScreen()) return { ran, error: "the person has the screen" };
       try {
         await run(command);
       } catch (failure) {
-        const button = heldButton(action);
-        if (button) await release(button);
+        if (release) await cleanUp(release);
         stopIfAbandoned();
         return { ran, error: `${action.kind} failed: ${failure instanceof Error ? failure.message : String(failure)}` };
       }
@@ -200,7 +208,7 @@ async function act(
 // folder), and the tool reads and deletes it. Invalid actions throw before
 // anything runs, so the model reads why. Every command gets a signal that
 // aborts when the runtime cancels the call or `turnEnded` aborts: the command
-// running stops, its button is released, and the call throws without running another.
+// running stops, the button or keys it held are released, and the call throws without running another.
 export function computerTool({
   run,
   agentHasScreen,
@@ -239,8 +247,8 @@ export function computerTool({
         }
       };
       // On its own short deadline, as the call's signal may have aborted already. A failure leaves nothing more to do.
-      const release = (button: string) => run(["xdotool", "mouseup", button], AbortSignal.timeout(2000)).then(() => undefined, () => undefined);
-      const { ran, error } = await act(parsed.data.actions, { run: runHere, release, agentHasScreen, stopIfAbandoned });
+      const cleanUp = (release: string[]) => run(release, AbortSignal.timeout(2000)).then(() => undefined, () => undefined);
+      const { ran, error } = await act(parsed.data.actions, { run: runHere, cleanUp, agentHasScreen, stopIfAbandoned });
       await runHere(["xdotool", "sleep", "0.3"]);
       const cursor = cursorFrom(await runHere(["xdotool", "getmouselocation", "--shell"]));
       const path = join(screenshotDir, `${crypto.randomUUID()}.png`);

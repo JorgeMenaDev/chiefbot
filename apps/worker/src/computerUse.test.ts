@@ -87,10 +87,12 @@ test("a failed action stops the batch: ran says how many went through, and the s
   expect(display.commands.map(step)).toEqual([
     "xdotool mousemove",
     "xdotool key",
+    "xdotool keyup",
     "xdotool sleep",
     "xdotool getmouselocation",
     "scrot --overwrite",
   ]);
+  expect(display.commands[2]).toEqual(["xdotool", "keyup", "--delay", "0", "ctrl", "nope"]);
   expect(JSON.parse(result.textResultForLlm)).toEqual({ ran: 1, cursor: display.cursor, error: "key failed: Invalid key sequence 'ctrl+nope'" });
   expect(result.binaryResultsForLlm).toHaveLength(1);
 });
@@ -262,4 +264,40 @@ test("the real runner stops a command when its call is cancelled, and fails one 
   await expect(displayCommands()(["sleep", "5"], cancel.signal)).rejects.toThrow("cancelled");
   await expect(displayCommands()(["sh", "-c", "echo No such key name >&2"])).rejects.toThrow("No such key name");
   expect(new TextDecoder().decode(await displayCommands()(["printf", "X=1"]))).toBe("X=1");
+});
+
+test("a key cut short releases every part of its chord with a command of its own", async () => {
+  const { display, call, endTurn } = setup();
+  let release: AbortSignal | undefined;
+  display.hold = async (command, signal) => {
+    if (command[1] === "key") endTurn();
+    if (command[1] === "keyup") release = signal;
+  };
+
+  await expect(call({ actions: [{ kind: "key", keys: "ctrl+shift+Tab" }, { kind: "key", keys: "Return" }] })).rejects.toThrow("turn has ended");
+
+  expect(display.commands).toEqual([
+    ["xdotool", "key", "ctrl+shift+Tab"],
+    ["xdotool", "keyup", "--delay", "0", "ctrl", "shift", "Tab"],
+  ]);
+  expect(release?.aborted).toBe(false);
+});
+
+test("typing cut short releases the modifiers xdotool adds and every character of the chunk it was typing", async () => {
+  const cancel = new AbortController();
+  const { display, call } = setup();
+  display.hold = async (command) => {
+    if (command[3]?.startsWith("Ab")) cancel.abort();
+  };
+
+  const text = `${"a".repeat(100)}AbA b\n\té😀`;
+  await expect(call({ actions: [{ kind: "type", text }] }, cancel.signal)).rejects.toThrow("cancelled");
+
+  expect(display.commands.map(step)).toEqual(["xdotool type", "xdotool type", "xdotool keyup"]);
+  expect(display.commands[2]).toEqual([
+    "xdotool", "keyup", "--delay", "0",
+    "Shift_L", "Shift_R", "Control_L", "Alt_L", "Super_L", "ISO_Level3_Shift",
+    // A, b, space, newline, tab, é, 😀: the X key names xdotool types them with.
+    "U0041", "U0062", "U0020", "Return", "Tab", "U00E9", "U1F600",
+  ]);
 });
