@@ -5,6 +5,7 @@ import {
   Service,
   ServiceHealth,
   ServiceResult,
+  Template,
   type BotId,
   type ConnectionName,
   type EnvironmentInput,
@@ -19,8 +20,9 @@ export type ConnectionsOptions = {
   session: () => string | null;
 };
 
-// The user's own connections (Connect apps), their bots' connection calls and
-// control's health checks of them (Health), owned by Electron main: plain HTTP calls to control.
+// The user's own connections and the template catalog (Connect apps), their bots'
+// connection calls and control's health checks of them (Health), owned by Electron
+// main: plain HTTP calls to control.
 export function createConnections({ controlUrl, session }: ConnectionsOptions) {
   const call = controlCaller({ controlUrl, session });
   return {
@@ -31,6 +33,7 @@ export function createConnections({ controlUrl, session }: ConnectionsOptions) {
     // Turns it off: control deletes its fields.
     disconnect: async (name: ConnectionName) => void (await call("DELETE", `/connections/${name}`)),
     calls: async (botId: BotId) => ConnectionCall.array().parse(await (await call("GET", `/bots/${botId}/connection-calls`)).json()),
+    templates: async () => Template.array().parse(await (await call("GET", "/templates")).json()),
     health: async () => HealthReport.parse(await (await call("GET", "/health")).json()),
     // Checks every connection and service again now; resolves once they are all checked.
     refreshHealth: async () => HealthReport.parse(await (await call("POST", "/health/refresh")).json()),

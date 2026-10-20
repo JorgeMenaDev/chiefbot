@@ -289,6 +289,7 @@ ipcMain.handle("connections:connect", (_event, name: unknown, fields: unknown) =
 );
 ipcMain.handle("connections:disconnect", (_event, name: unknown) => connections.disconnect(ConnectionName.parse(name)));
 ipcMain.handle("connections:calls", (_event, botId: unknown) => connections.calls(BotId.parse(botId)));
+ipcMain.handle("templates:list", () => connections.templates());
 ipcMain.handle("health:get", () => connections.health());
 ipcMain.handle("health:refresh", () => connections.refreshHealth());
 ipcMain.handle("health:check-services", () => connections.checkServices());
