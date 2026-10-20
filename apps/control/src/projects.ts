@@ -133,6 +133,9 @@ const failure = (error: unknown) => {
 //   DELETE /projects/:id/secrets/:name  → 204: its value goes
 //   GET    /projects/:id/tasks       → Task[]: the ledger. Every change also reaches each member's /events
 //                                    as a `tasks` ClientEvent.
+//   POST   /projects/:id/tasks/:number/done  → Task: the member marks it done, over the done rule
+//                                    (taskWorkers.ts doneRefusal), recorded in its `overrides`
+//                                    (404 not_found; 409 task_closed when it is done or abandoned)
 //   GET    /projects/:id/context     → ContextFile[]: the shared context's files
 //   GET    /projects/:id/context/file  ?path=<ContextPath> → ContextFileText (400 invalid_path; 404 not_found)
 //   GET    /projects/:id/context/image ?path=<ContextImagePath> → the PNG's bytes (400 invalid_path; 404 not_found)
@@ -327,6 +330,8 @@ export function projectHost({
       case "update_task": {
         const owner = ownerLogin(call.owner);
         if (!owner) return notMember(String(call.owner));
+        const refusal = call.status === "done" ? await workers.doneRefusal(project, asker, call.number, call.links) : null;
+        if (refusal !== null) return apiError(400, "invalid_tool_call", refusal);
         const task = projects.updateTask(projectId, { ...call, owner: owner.login });
         if (!task) return apiError(404, "not_found", `No task #${call.number} in this project`);
         publishTasks(projectId);
@@ -477,6 +482,17 @@ export function projectHost({
       GET: member((_user, { project }, _req: Bun.BunRequest<"/projects/:id/tasks">) =>
         Response.json(projects.tasks(project.id) satisfies Task[]),
       ),
+    },
+    "/projects/:id/tasks/:number/done": {
+      POST: member((user, { project }, req: Bun.BunRequest<"/projects/:id/tasks/:number/done">) => {
+        const number = Number(req.params.number);
+        const task = Number.isInteger(number) ? projects.markDone(project.id, number, user.login) : null;
+        if (task === null) return apiError(404, "not_found");
+        if (task === "closed") return apiError(409, "task_closed", `Task #${number} is already done or abandoned.`);
+        publishTasks(project.id);
+        workers.taskClosed(project.id, number);
+        return Response.json(task satisfies Task);
+      }),
     },
     "/projects/:id/context": {
       GET: member(async (_user, { project }, _req: Bun.BunRequest<"/projects/:id/context">) =>

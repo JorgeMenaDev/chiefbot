@@ -314,7 +314,6 @@ test("the chief's chat has one card per handoff that follows its task, posted on
     ],
     [{ number: 2, status: "needs_input", question: "Which footer?" }],
     [{ number: 1, status: "in_progress", links: [{ kind: "pull-request", url: pullRequest }] }],
-    [{ number: 1, status: "done" }, { number: 1, status: "done" }],
   ];
   copilot.script = async function* (prompt, runtime) {
     if (prompt === "hand off the checkout") await runtime.tool("send_to_project", checkout(project));
@@ -334,6 +333,8 @@ test("the chief's chat has one card per handoff that follows its task, posted on
     await owner.api("POST", `/projects/${project.id}/messages`, { text: `move ${index}` });
     await owner.watchProjectChat(project.id).until(doneCount(index + 2));
   }
+  // Nobody verified the pull request, so a member marks the task done in the app; a second time changes nothing.
+  for (const status of [200, 409]) expect((await owner.api("POST", `/projects/${project.id}/tasks/1/done`)).status).toBe(status);
 
   await eventually(() => cards(chiefChat.events).length >= 5);
   await Bun.sleep(50);

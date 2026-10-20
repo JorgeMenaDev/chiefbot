@@ -25,6 +25,7 @@ import {
   type ProjectMember,
   type ScreenControl,
   type Task,
+  type TaskLink,
   type TaskWorker,
   type TaskWorkerId,
   type TurnId,
@@ -799,6 +800,37 @@ export function taskWorkerHost({
     // Asks the member who asked for the worker to approve `detail` in its turn
     // (a connector call), as its pushes are asked.
     ask: (turn: TaskWorkerTurn, kind: ApprovalKind, detail: string, signal: AbortSignal) => agentOf(turn).ask(kind, detail, signal),
+
+    // The done rule: the project agent marks a task done only with a verifier's
+    // PASS for the head of its pull request (its latest, `links` added), read
+    // again on GitHub as `asker` may, so a push from anywhere counts: the
+    // verification's `stale` follows what it finds. A task that links no pull
+    // request has nothing to verify. Null when the task may be done, else why
+    // not. A member may mark it done over this in the app (projects.ts).
+    async doneRefusal(project: Project, asker: ProjectMember, number: number, links: TaskLink[] = []): Promise<string | null> {
+      const task = projects.tasks(project.id).find((candidate) => candidate.number === number);
+      const url = [...(task?.links ?? []), ...links].flatMap((link) => (link.kind === "pull-request" ? [link.url] : [])).at(-1);
+      if (!task || url === undefined) return null;
+      const why = await (async () => {
+        const { verification } = task;
+        if (verification?.pullRequest !== url) return `Task #${number} needs a verifier's PASS for ${url} at its head before it is done: dispatch_verifier first.`;
+        const at = verification.sha.slice(0, 7);
+        if (verification.result === "issues") return `Task #${number} is not done: its verifier found issues in ${url} at ${at}. ${verification.summary}`;
+        if (verification.result === "blocked") return `Task #${number} is not done: its verifier could not check ${url} at ${at}. ${verification.summary}`;
+        const prNumber = pullRequestNumber(url, project.repo);
+        const head = prNumber === null ? null : await pullRequestHead(asker.userId, project.repo, prNumber);
+        if (head === null || "error" in head) {
+          return `Task #${number} is not done: Chiefbot couldn't read ${url} on GitHub to check that its PASS is for its head${head ? ` (${head.message})` : ""}. Try again.`;
+        }
+        const stale = head.sha !== verification.sha;
+        if (stale !== verification.stale) {
+          projects.setVerification(project.id, number, { ...verification, stale });
+          publishTasks(project.id);
+        }
+        return stale ? `Task #${number} is not done: its PASS is for ${at}, and ${url} has moved to ${head.sha.slice(0, 7)} since. Dispatch a verifier again.` : null;
+      })();
+      return why === null ? null : `${why} A member can still mark it done in the app.`;
+    },
 
     // A push through the git proxy moved branches of `repo` (repos.ts): each
     // verdict on one of them, at another commit, is stale.

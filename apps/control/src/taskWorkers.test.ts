@@ -1321,3 +1321,62 @@ test("a push through Chiefbot that moves the pull request's branch makes its ver
   expect(pushes).toEqual([0, 0]);
   expect(await verificationOf()).toMatchObject({ result: "pass", stale: true });
 });
+
+test("the project agent marks a task done only with a PASS for its pull request's head: not with none, with ISSUES, or once the head moved, even outside Chiefbot", async () => {
+  const control = await teamProject();
+  const { owner, project, github } = control;
+  const verdicts = [
+    { result: "issues", summary: "The README still says Teh." },
+    { result: "pass", summary: "The README reads The shop." },
+    { result: "pass", summary: "Still reads The shop." },
+  ];
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", verdicts.shift() ?? {});
+    yield sdk.idle();
+  });
+  const verify = async (creationId: string) => {
+    const { id } = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId })).body);
+    await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  };
+  const done = (number: number) => tool({ tool: "update_task", number, status: "done" });
+  const refusal = (message: string) => ({ status: 400, body: { error: "invalid_tool_call", message: `${message} A member can still mark it done in the app.` } });
+  await tool({ tool: "create_task", title: "Write the changelog" });
+  expect(Task.parse((await done(2)).body).status).toBe("done");
+  const { url, head } = await pullRequestOnTask(control, tool);
+
+  expect(await done(1)).toEqual(refusal(`Task #1 needs a verifier's PASS for ${url} at its head before it is done: dispatch_verifier first.`));
+  await verify("v-1");
+  expect(await done(1)).toEqual(refusal(`Task #1 is not done: its verifier found issues in ${url} at ${head.slice(0, 7)}. The README still says Teh.`));
+  await verify("v-2");
+  const moved = github.commit("octo-org/shop", { "CHANGELOG.md": "Fixed a typo.\n" }, "fix-typo");
+  expect(await done(1)).toEqual(
+    refusal(`Task #1 is not done: its PASS is for ${head.slice(0, 7)}, and ${url} has moved to ${moved.slice(0, 7)} since. Dispatch a verifier again.`),
+  );
+  expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification).toMatchObject({ result: "pass", sha: head, stale: true });
+  await verify("v-3");
+
+  expect(Task.parse((await done(1)).body)).toMatchObject({ status: "done", verification: { result: "pass", sha: moved, stale: false } });
+});
+
+test("a member marks a task done in the app over the done rule, and the task records who did, when and its verdict then", async () => {
+  const control = await teamProject();
+  const { owner, guest, project } = control;
+  const { tool } = await heldTurn(control, async function* (prompt, runtime) {
+    if (isVerifier(prompt)) await runtime.tool("report_verdict", { result: "issues", summary: "The README still says Teh." });
+    yield sdk.idle();
+  });
+  const { head } = await pullRequestOnTask(control, tool);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+  await workerWhen(owner, project, id, ({ state }) => state === "finished");
+  const before = Date.now();
+
+  const res = await guest.api("POST", `/projects/${project.id}/tasks/1/done`);
+
+  const task = Task.parse(await res.json());
+  expect(task).toMatchObject({ status: "done", overrides: [{ by: "octo-friend", verification: { result: "issues", sha: head } }] });
+  expect(task.overrides[0]?.at).toBeGreaterThanOrEqual(before);
+  expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]).toEqual(task);
+  const again = await owner.api("POST", `/projects/${project.id}/tasks/1/done`);
+  expect([again.status, ApiError.parse(await again.json()).error]).toEqual([409, "task_closed"]);
+  expect((await owner.api("POST", `/projects/${project.id}/tasks/9/done`)).status).toBe(404);
+});

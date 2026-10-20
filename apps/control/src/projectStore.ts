@@ -16,6 +16,7 @@ import {
   type AutoFallback,
   CopilotPayer,
   type CreateTaskArgs,
+  type DoneOverride,
   type ProjectMember,
   type ReasoningEffort,
   type TaskStatus,
@@ -81,7 +82,9 @@ export function projectStore(db: Database, hash: (token: string) => string) {
   // What the task waits on while it needs input; NULL otherwise.
   addColumn(db, "project_tasks", "question", "TEXT");
   // Its latest verdict from a verifier, a Verification as JSON; NULL before any.
+  // `overrides`: a JSON array of DoneOverrides, each time a member marked it done in the app.
   addColumn(db, "project_tasks", "verification", "TEXT");
+  addColumn(db, "project_tasks", "overrides", "TEXT NOT NULL DEFAULT '[]'");
   // Each member's chat with the coordinator: turns and their events, as for a
   // bot's chat. A turn waits `queued` until the project's scheduler gives it
   // the coordinator; at most one turn per project is `running`.
@@ -169,6 +172,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     requested_by: string;
     links: string;
     verification: string | null;
+    overrides: string;
     created_at: number;
     updated_at: number;
   };
@@ -184,6 +188,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       requestedBy: row.requested_by,
       links: JSON.parse(row.links),
       verification: row.verification === null ? null : JSON.parse(row.verification),
+      overrides: JSON.parse(row.overrides),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     });
@@ -400,6 +405,24 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         `UPDATE project_tasks SET title = ?3, detail = ?4, status = ?5, question = ?6, owner = ?7, links = ?8, updated_at = ?9
          WHERE project_id = ?1 AND number = ?2`,
       ).run(projectId, number, next.title, next.detail, next.status, next.question, next.owner, JSON.stringify(next.links), Date.now());
+      return task(projectId, number);
+    }),
+
+    // A member (`by`, a login) marks the task done in the app: recorded on it
+    // with its verification then. "closed" when it is done or abandoned; null
+    // when the project has no such task.
+    markDone: db.transaction((projectId: ProjectId, number: number, by: string): Task | "closed" | null => {
+      const current = task(projectId, number);
+      if (!current) return null;
+      if (current.status === "done" || current.status === "abandoned") return "closed";
+      const now = Date.now();
+      const overrides = [...current.overrides, { by, at: now, verification: current.verification } satisfies DoneOverride];
+      db.query("UPDATE project_tasks SET status = 'done', question = NULL, overrides = ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+        projectId,
+        number,
+        JSON.stringify(overrides),
+        now,
+      );
       return task(projectId, number);
     }),
 

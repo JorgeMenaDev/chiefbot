@@ -124,6 +124,7 @@ export const ApiErrorCode = z.enum([
   "not_a_verifier",
   "invalid_verdict",
   "verdict_recorded",
+  "task_closed",
   "copilot_token_failed",
   "invalid_connector",
   "connector_exists",

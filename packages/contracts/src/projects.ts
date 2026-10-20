@@ -238,11 +238,18 @@ export const Verification = VerdictLine.extend({
 });
 export type Verification = z.infer<typeof Verification>;
 
+// A member marked the task done in the app, which the done rule does not stop
+// (only the project agent needs a PASS for the head): who (a login), when, and
+// the verification the task had then.
+export const DoneOverride = z.object({ by: z.string(), at: z.number(), verification: Verification.nullable() });
+export type DoneOverride = z.infer<typeof DoneOverride>;
+
 // One task of a project's ledger in control: the only record of its state.
 // `number` counts from 1 per project. `owner` is the GitHub login of the member
 // who owns it, or null. `requestedBy` is the login of the member whose chat
 // created it. `question` is what it waits on while it needs input, else null.
-// `verification` is its latest verdict, or null before any.
+// `verification` is its latest verdict, or null before any; `overrides` each
+// time a member marked it done in the app.
 // Times are epoch milliseconds.
 export const Task = z.object({
   projectId: ProjectId,
@@ -255,6 +262,7 @@ export const Task = z.object({
   requestedBy: z.string(),
   links: z.array(TaskLink),
   verification: Verification.nullable().default(null),
+  overrides: z.array(DoneOverride).default([]),
   createdAt: z.number(),
   updatedAt: z.number(),
 });
