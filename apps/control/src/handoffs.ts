@@ -16,7 +16,10 @@ import { botTurn, heldTurn } from "./turnKeys.ts";
 //                                    workspaces its owner is a member of: 404 not_found for any other.
 //   POST /bots/:id/handoffs/:handoffId/messages  a session of the bot's owner (404 for anyone else),
 //                                    body ReplyToHandoffRequest → 204: the owner's answer from the
-//                                    handoff's card, delivered as the chief's message_project is
+//                                    handoff's card, delivered as the chief's message_project is.
+//                                    409 question_changed when the project asks something else now.
+// A follow-up to a handoff whose task is done or abandoned gets 409 handoff_closed, and one
+// under a delivery id that carried another message 409 delivery_reused.
 export function chiefHost({
   store,
   projects,
@@ -26,10 +29,18 @@ export function chiefHost({
 }) {
   // Sends a follow-up to the bot's handoff (handoffStore.ts followUp): the
   // owner's chat with the coordinator shows it, and the members the task's new
-  // detail. The handoff, or null when the bot has none by that id.
-  function followUp(botId: BotId, owner: User, handoffId: HandoffId, from: "chief" | "owner", deliveryId: string, message: string) {
+  // detail. The handoff, or the refusal to answer with.
+  function followUp(
+    botId: BotId,
+    owner: User,
+    handoffId: HandoffId,
+    from: "chief" | { answering: string | null },
+    deliveryId: string,
+    message: string,
+  ): Handoff | Response {
     const sent = store.handoffs.followUp(botId, handoffId, from, deliveryId, message);
-    if (!sent) return null;
+    if (!sent) return apiError(404, "not_found", `No handoff ${handoffId}`);
+    if ("refused" in sent) return apiError(409, sent.refused, sent.message);
     if (sent.queued) {
       projects.ledgerChanged(sent.handoff.projectId);
       projects.queued(sent.handoff.projectId, owner.id, sent.queued);
@@ -54,7 +65,7 @@ export function chiefHost({
       }
       case "message_project": {
         const sent = followUp(botId, owner, call.handoff, "chief", call.deliveryId, call.message);
-        return sent ? Response.json(sent satisfies Handoff) : apiError(404, "not_found", `No handoff ${call.handoff}`);
+        return sent instanceof Response ? sent : Response.json(sent satisfies Handoff);
       }
       case "handoff_status": {
         const handoffs = store.handoffs.of(botId, call.handoff);
@@ -75,8 +86,9 @@ export function chiefHost({
         if (!bot || !handoffId.success) return apiError(404, "not_found");
         const body = ReplyToHandoffRequest.safeParse(await req.json().catch(() => null));
         if (!body.success) return apiError(400, "invalid_message");
-        const sent = followUp(bot.id, user, handoffId.data, "owner", body.data.deliveryId, body.data.text);
-        return sent ? new Response(null, { status: 204 }) : apiError(404, "not_found");
+        const { text, question, deliveryId } = body.data;
+        const sent = followUp(bot.id, user, handoffId.data, { answering: question }, deliveryId, text);
+        return sent instanceof Response ? sent : new Response(null, { status: 204 });
       },
     },
     "/worker/:botId/chief-tools": {

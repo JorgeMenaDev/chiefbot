@@ -1,4 +1,4 @@
-import type { ChatItem, HandoffStage } from "@chiefbot/contracts";
+import type { ChatItem, HandoffStage, ReplyToHandoffRequest } from "@chiefbot/contracts";
 import { FolderGit2Icon, SendIcon } from "lucide-react";
 import { useState, type KeyboardEvent } from "react";
 import { Button } from "./components/ui/button.tsx";
@@ -31,24 +31,34 @@ const pullRequestName = (url: string) => {
   return number ? `Pull request #${number}` : url;
 };
 
+// The reply that sends `text` as the answer to `question`, when `unanswered` was
+// sent and got no reply (control may have it): that same reply for the same
+// answer to the same question, so control delivers it once; else one with a new
+// delivery id, since control refuses another message under the old one.
+export const replyFor = (unanswered: ReplyToHandoffRequest | null, text: string, question: string | null): ReplyToHandoffRequest =>
+  unanswered?.text === text && unanswered.question === question ? unanswered : { text, question, deliveryId: crypto.randomUUID() };
+
 // Work the chief of staff handed to a project, in the chief's chat: one card per
 // handoff that control keeps up to date (ApprovalCard's look). It names the
 // project's task and where it stands, with its pull requests. While the project
 // needs input, it shows the question and a box to answer it: the answer goes to
-// the same task in the project's chat (`onReply`, with the answer's own delivery
-// id, so sending it again delivers it once). Enter sends, Shift+Enter adds a
-// line. `onOpen` opens the project.
+// the same task in the project's chat (`onReply`). Each answer carries the
+// question it was started for: when the project asks something else by the
+// time it is sent, the card keeps it and shows the new question to check it
+// against. Enter sends, Shift+Enter adds a line. `onOpen` opens the project.
 export function HandoffCard({
   item,
   onReply,
   onOpen,
 }: {
   item: HandoffItem;
-  onReply: (text: string, deliveryId: string) => Promise<void>;
+  onReply: (reply: ReplyToHandoffRequest) => Promise<void>;
   onOpen: () => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [deliveryId, setDeliveryId] = useState(() => crypto.randomUUID());
+  // The question shown when the draft was started.
+  const [answering, setAnswering] = useState(item.question);
+  const [unanswered, setUnanswered] = useState<ReplyToHandoffRequest | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
@@ -57,12 +67,19 @@ export function HandoffCard({
 
   async function send() {
     if (!canSend) return;
+    if (answering !== item.question) {
+      setAnswering(item.question);
+      setError("The question changed. Check your answer, then send it again.");
+      return;
+    }
+    const reply = replyFor(unanswered, draft, answering);
+    setUnanswered(reply);
     setBusy(true);
     setError(null);
     try {
-      await onReply(draft, deliveryId);
+      await onReply(reply);
       setDraft("");
-      setDeliveryId(crypto.randomUUID());
+      setUnanswered(null);
       setSent(true);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -115,6 +132,7 @@ export function HandoffCard({
           value={draft}
           disabled={busy}
           onChange={(event) => {
+            if (draft === "") setAnswering(item.question);
             setDraft(event.target.value);
             setSent(false);
           }}

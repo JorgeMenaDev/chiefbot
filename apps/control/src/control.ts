@@ -211,7 +211,8 @@ type SocketData =
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
 //                             turn's key: handing work to projects and watching it (handoffs.ts)
 //   POST   /bots/:id/handoffs/:handoffId/messages  bearer session: the owner's answer from a
-//                             handoff's card in the bot's chat (handoffs.ts)
+//                             handoff's card in the bot's chat (handoffs.ts); 409 when the project
+//                             asks another question now, or the handoff's task is done or abandoned
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //

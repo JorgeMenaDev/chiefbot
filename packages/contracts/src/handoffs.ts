@@ -48,16 +48,25 @@ export const HandoffStatusArgs = z.object({
 });
 
 // Body of POST /bots/:id/handoffs/:handoffId/messages: the owner's answer from
-// the handoff's card in their chief's chat. The desktop picks `deliveryId` once
-// per answer, so sending it again delivers it once.
-export const ReplyToHandoffRequest = z.object({ text: z.string().trim().min(1).max(20_000), deliveryId: z.uuid() });
+// the handoff's card in their chief's chat. `question` is the one the card showed
+// when the answer was started (null for none): control refuses the answer (409
+// question_changed) when the project asks something else by then. The desktop
+// picks `deliveryId` for the answer's exact text and question: sent again
+// unchanged it is delivered once, and control refuses other text under it (409
+// delivery_reused).
+export const ReplyToHandoffRequest = z.object({
+  text: z.string().trim().min(1).max(20_000),
+  question: z.string().max(2_000).nullable(),
+  deliveryId: z.uuid(),
+});
 export type ReplyToHandoffRequest = z.infer<typeof ReplyToHandoffRequest>;
 
 // Body of POST /worker/:botId/chief-tools: one tool call of the bot's running turn.
 // Its answer, as JSON: list_projects → Project[]; send_to_project and message_project → Handoff;
 // handoff_status → Handoff[] (oldest first), or one Handoff when it names one.
 // message_project's `deliveryId` is not the model's: the chief sets it from the
-// tool call's id, so a resent call delivers its message once.
+// tool call's id, so a resent call delivers its message once. A handoff whose
+// task is done or abandoned takes no follow-up (409 handoff_closed).
 export const ChiefToolCall = z.discriminatedUnion("tool", [
   ListProjectsArgs.extend({ tool: z.literal("list_projects") }),
   SendToProjectArgs.extend({ tool: z.literal("send_to_project") }),

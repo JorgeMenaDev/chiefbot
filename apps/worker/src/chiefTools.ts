@@ -44,7 +44,8 @@ export function chiefTools({ controlUrl, botId, turnKey }: { controlUrl: string;
     tool(
       "message_project",
       "Send a follow-up about work you already handed to a project, or your owner's answer to its question. " +
-        "It reaches the same task and the same chat with the project's coordinator, never a new task.",
+        "It reaches the same task and the same chat with the project's coordinator, never a new task. " +
+        "Once that task is done or abandoned it is refused: hand over new work with send_to_project.",
       MessageProjectArgs,
       // The tool call's own id: control delivers one message per call, however often it arrives.
       ({ sessionId, toolCallId }) => ({ deliveryId: `${sessionId}/${toolCallId}` }),

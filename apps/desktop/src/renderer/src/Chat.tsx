@@ -141,7 +141,7 @@ function Message({
       return (
         <HandoffCard
           item={item}
-          onReply={(text, deliveryId) => window.chiefbot.chat.replyToHandoff(botId, item.handoffId, text, deliveryId)}
+          onReply={(reply) => window.chiefbot.chat.replyToHandoff(botId, item.handoffId, reply)}
           onOpen={() => onOpenProject(item)}
         />
       );

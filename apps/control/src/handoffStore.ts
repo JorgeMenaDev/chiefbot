@@ -51,10 +51,11 @@ export function handoffStore(
   }
   // Each message a handoff delivered to the coordinator: the request ('request')
   // and every follow-up, by its delivery id, with the coordinator turn it queued.
-  // A delivery id seen before delivers nothing.
+  // A delivery id seen before delivers nothing, and takes no other message.
   db.run(`CREATE TABLE IF NOT EXISTS handoff_messages (
     handoff_id TEXT NOT NULL REFERENCES handoffs(id) ON DELETE CASCADE,
     delivery_id TEXT NOT NULL,
+    message TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     PRIMARY KEY (handoff_id, delivery_id)
@@ -133,18 +134,20 @@ export function handoffStore(
   };
 
   // Queues `text` for the coordinator in the requester's chat, behind their own
-  // unanswered message if there is one, as the handoff's delivery `deliveryId`.
-  const deliver = (handoff: Handoff, userId: UserId, deliveryId: string, text: string) => {
+  // unanswered message if there is one, as the handoff's delivery `deliveryId` of `message`.
+  const deliver = (handoff: Handoff, userId: UserId, deliveryId: string, message: string, text: string) => {
     const queued = projects.queueTurn(handoff.projectId, userId, text, true);
     if (!queued) throw new Error("a handoff's message was not queued");
-    db.query("INSERT INTO handoff_messages (handoff_id, delivery_id, turn_id, created_at) VALUES (?1, ?2, ?3, ?4)").run(
+    db.query("INSERT INTO handoff_messages (handoff_id, delivery_id, message, turn_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)").run(
       handoff.id,
       deliveryId,
+      message,
       queued.turnId,
       Date.now(),
     );
     return queued;
   };
+  const refused = (code: "delivery_reused" | "handoff_closed" | "question_changed", message: string) => ({ refused: code, message });
 
   return {
     // The bot's handoff to the project: a new open task in its ledger, requested
@@ -161,39 +164,52 @@ export function handoffStore(
         ).run(id, botId, owner.userId, projectId, task.number, args.request, args.acceptance, Date.now());
         const handoff = byId(id);
         if (!handoff) throw new Error("handoff insert returned no row");
-        return { handoff, queued: deliver(handoff, owner.userId, "request", requestMessage(handoff, args.title)) };
+        return { handoff, queued: deliver(handoff, owner.userId, "request", args.request, requestMessage(handoff, args.title)) };
       },
     ),
 
     // A follow-up to the bot's handoff, from the bot (`chief`) or from its owner
-    // on the handoff's card (`owner`): added to the task's detail (an answer
-    // with the question it answers), and queued for the coordinator in the
-    // owner's chat. A delivery id seen before changes nothing (`queued` is
-    // null). Null when the bot has no such handoff or its owner left the
-    // project's workspace.
-    followUp: db.transaction((botId: BotId, handoffId: HandoffId, from: "chief" | "owner", deliveryId: string, message: string) => {
-      const row = db.query<{ user_id: string }, [string, string]>("SELECT user_id FROM handoffs WHERE id = ?1 AND bot_id = ?2").get(handoffId, botId);
-      const handoff = row && byId(handoffId);
-      if (!row || !handoff) return null;
-      if (db.query("SELECT 1 FROM handoff_messages WHERE handoff_id = ?1 AND delivery_id = ?2").get(handoffId, deliveryId)) {
-        return { handoff, queued: null };
-      }
-      const { requestedBy, question, taskNumber } = handoff;
-      const added =
-        from === "chief"
-          ? `Follow-up from ${requestedBy}'s chief of staff: ${message}`
-          : question
-            ? `${requestedBy} answered "${question}": ${message}`
-            : `Follow-up from ${requestedBy}: ${message}`;
-      db.query("UPDATE project_tasks SET detail = detail || ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
-        handoff.projectId,
-        taskNumber,
-        `\n\n${added}`,
-        Date.now(),
-      );
-      const header = from === "chief" ? "from your chief of staff" : "your answer from your chief of staff's chat";
-      return { handoff, queued: deliver(handoff, UserId.parse(row.user_id), deliveryId, `About task #${taskNumber}, ${header}:\n\n${message}`) };
-    }),
+    // on the handoff's card, answering the question the card showed: added to
+    // the task's detail (an answer with the question it answers), and queued for
+    // the coordinator in the owner's chat. A delivery id seen before with the
+    // same message changes nothing (`queued` is null). Refused for a delivery id
+    // seen with another message, a task that is done or abandoned (new work is
+    // a new handoff), or an answer to a question the project no longer asks.
+    // Null when the bot has no such handoff or its owner left the project's workspace.
+    followUp: db.transaction(
+      (botId: BotId, handoffId: HandoffId, from: "chief" | { answering: string | null }, deliveryId: string, message: string) => {
+        const row = db.query<{ user_id: string }, [string, string]>("SELECT user_id FROM handoffs WHERE id = ?1 AND bot_id = ?2").get(handoffId, botId);
+        const handoff = row && byId(handoffId);
+        if (!row || !handoff) return null;
+        const { requestedBy, project, status, question, taskNumber } = handoff;
+        const delivered = db
+          .query<{ message: string }, [string, string]>("SELECT message FROM handoff_messages WHERE handoff_id = ?1 AND delivery_id = ?2")
+          .get(handoffId, deliveryId);
+        if (delivered?.message === message) return { handoff, queued: null };
+        if (delivered) return refused("delivery_reused", `Delivery ${deliveryId} already carried another message: send this one under a new id`);
+        if (status === "done" || status === "abandoned") {
+          return refused("handoff_closed", `Task #${taskNumber} in ${project} is ${status}: hand over new work with send_to_project`);
+        }
+        if (from !== "chief" && from.answering !== question) {
+          return refused("question_changed", question ? `${project} now asks: ${question}` : `${project} asks no question now`);
+        }
+        const added =
+          from === "chief"
+            ? `Follow-up from ${requestedBy}'s chief of staff: ${message}`
+            : question
+              ? `${requestedBy} answered "${question}": ${message}`
+              : `Follow-up from ${requestedBy}: ${message}`;
+        db.query("UPDATE project_tasks SET detail = detail || ?3, updated_at = ?4 WHERE project_id = ?1 AND number = ?2").run(
+          handoff.projectId,
+          taskNumber,
+          `\n\n${added}`,
+          Date.now(),
+        );
+        const header = from === "chief" ? "from your chief of staff" : "your answer from your chief of staff's chat";
+        const text = `About task #${taskNumber}, ${header}:\n\n${message}`;
+        return { handoff, queued: deliver(handoff, UserId.parse(row.user_id), deliveryId, message, text) };
+      },
+    ),
 
     // The watcher, run after every change to the project's ledger, and for every
     // project (no `projectId`) when control starts, for a change whose watch a

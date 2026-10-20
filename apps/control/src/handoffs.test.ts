@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Handoff, Project, Task, TaskWorker, User, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
+import { ApiError, Handoff, Project, Task, TaskWorker, User, Workspace, WorkspaceInvite, type ChatEvent } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { sdk } from "@chiefbot/worker/fake-copilot";
 import { Database } from "bun:sqlite";
@@ -133,7 +133,7 @@ test("a chief's follow-up lands on the same task and in the same chat, once howe
   expect(sentToCoordinator(coordinatorChat)).toEqual(sent);
 });
 
-test("the owner answers the project's question from the chief's card: it reaches the same task and chat, once", async () => {
+test("the owner answers the project's question from the chief's card: it reaches the same task and chat once, and its delivery id carries no other answer", async () => {
   const { owner, guest, project, chief, copilot } = await setup();
   copilot.script = async function* (prompt, runtime) {
     if (prompt === "hand off the checkout") await runtime.tool("send_to_project", checkout(project));
@@ -147,24 +147,82 @@ test("the owner answers the project's question from the chief's card: it reaches
   if (!card) throw new Error("no card");
   await owner.watchProjectChat(project.id).until(doneCount(1));
 
-  const reply = { text: "Stripe.", deliveryId: crypto.randomUUID() };
-  const statuses = [
-    (await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, reply)).status,
-    (await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, reply)).status,
-    (await owner.api("POST", `/bots/${otherBot.id}/handoffs/${card.handoffId}/messages`, { ...reply, deliveryId: crypto.randomUUID() })).status,
-    (await guest.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, { ...reply, deliveryId: crypto.randomUUID() })).status,
+  const reply = { text: "Stripe.", question: "Stripe or Adyen?", deliveryId: crypto.randomUUID() };
+  const replies = [
+    await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, reply),
+    await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, reply),
+    // An edited answer under the delivery id of one control already has.
+    await owner.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, { ...reply, text: "Adyen instead." }),
+    await owner.api("POST", `/bots/${otherBot.id}/handoffs/${card.handoffId}/messages`, { ...reply, deliveryId: crypto.randomUUID() }),
+    await guest.api("POST", `/bots/${chief.id}/handoffs/${card.handoffId}/messages`, { ...reply, deliveryId: crypto.randomUUID() }),
   ];
   const projectChat = await owner.watchProjectChat(project.id).until(doneCount(2));
   await Bun.sleep(50);
 
   expect(card).toMatchObject({ stage: "needs_input", question: "Stripe or Adyen?" });
-  expect(statuses).toEqual([204, 204, 404, 404]);
+  expect(replies.map(({ status }) => status)).toEqual([204, 204, 409, 404, 404]);
+  expect(ApiError.parse(await replies[2]?.json()).error).toBe("delivery_reused");
   const sent = sentToCoordinator(projectChat);
   expect(sent).toHaveLength(2);
   expect(sent[1]).toBe("About task #1, your answer from your chief of staff's chat:\n\nStripe.");
   const [task, ...others] = await tasksOf(owner, project);
   expect(others).toEqual([]);
   expect(task?.detail).toEndWith('octo-user answered "Stripe or Adyen?": Stripe.');
+});
+
+test("an answer to a question the project no longer asks is refused, and reaches nothing", async () => {
+  const { owner, project, chief, copilot } = await setup();
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "hand off the checkout") await runtime.tool("send_to_project", checkout(project));
+    else if (prompt.includes("task #1 in the ledger")) {
+      await runtime.tool("update_task", { number: 1, status: "needs_input", question: "Stripe or Adyen?" });
+      await runtime.tool("update_task", { number: 1, status: "needs_input", question: "Which production region?" });
+    }
+    yield sdk.idle();
+  };
+  await owner.send(chief.id, "hand off the checkout");
+  await owner.watchChat(chief.id).until(doneCount(1));
+  await owner.watchProjectChat(project.id).until(doneCount(1));
+  const handoffId = cards(await owner.watchChat(chief.id).settled()).at(-1)?.handoffId;
+
+  const messages = `/bots/${chief.id}/handoffs/${handoffId}/messages`;
+  // The owner answers the question their card showed before the project changed it.
+  const stale = await owner.api("POST", messages, { text: "Stripe.", question: "Stripe or Adyen?", deliveryId: crypto.randomUUID() });
+  const current = await owner.api("POST", messages, { text: "eu-west.", question: "Which production region?", deliveryId: crypto.randomUUID() });
+  const projectChat = await owner.watchProjectChat(project.id).until(doneCount(2));
+
+  expect(stale.status).toBe(409);
+  expect(ApiError.parse(await stale.json())).toEqual({ error: "question_changed", message: "shop now asks: Which production region?" });
+  expect(current.status).toBe(204);
+  expect(sentToCoordinator(projectChat).slice(1)).toEqual(["About task #1, your answer from your chief of staff's chat:\n\neu-west."]);
+  const [task] = await tasksOf(owner, project);
+  expect(task?.detail).not.toContain("Stripe.");
+  expect(task?.detail).toEndWith('octo-user answered "Which production region?": eu-west.');
+});
+
+test("a follow-up to a handoff whose task is done is refused: new work is a new handoff", async () => {
+  const { owner, project, chief, copilot } = await setup();
+  const answers: unknown[] = [];
+  const handoffs: Handoff[] = [];
+  copilot.script = async function* (prompt, runtime) {
+    if (prompt === "hand off the checkout") handoffs.push(Handoff.parse(await answer(runtime.tool("send_to_project", checkout(project)))));
+    else if (prompt.includes("task #1 in the ledger")) await runtime.tool("update_task", { number: 1, status: "done" });
+    else if (prompt === "also take PayPal") answers.push(await answer(runtime.tool("message_project", { handoff: handoffs[0]?.id ?? null, message: "Also take PayPal." })));
+    yield sdk.idle();
+  };
+  await owner.send(chief.id, "hand off the checkout");
+  await owner.watchChat(chief.id).until((events) => cards(events).some(({ stage }) => stage === "done"));
+  await owner.send(chief.id, "also take PayPal");
+  await owner.watchChat(chief.id).until(doneCount(2));
+  const fromCard = await owner.api("POST", `/bots/${chief.id}/handoffs/${handoffs[0]?.id}/messages`, { text: "PayPal too.", question: null, deliveryId: crypto.randomUUID() });
+  await Bun.sleep(50);
+
+  expect(answers).toEqual([{ refused: "Task #1 in shop is done: hand over new work with send_to_project" }]);
+  expect(fromCard.status).toBe(409);
+  expect(ApiError.parse(await fromCard.json()).error).toBe("handoff_closed");
+  expect(sentToCoordinator(await owner.watchProjectChat(project.id).settled())).toHaveLength(1);
+  const [task] = await tasksOf(owner, project);
+  expect(task?.detail).not.toContain("PayPal");
 });
 
 test("handoff_status says what the project asks, its workers, its pull requests and the coordinator's last reply about it", async () => {

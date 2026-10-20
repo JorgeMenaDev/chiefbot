@@ -8,6 +8,7 @@ import {
   type ChatItem,
   type ChatView,
   type HandoffId,
+  type ReplyToHandoffRequest,
 } from "@chiefbot/contracts";
 import { controlCaller } from "./controlApi.ts";
 
@@ -112,9 +113,9 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
     },
 
     // The owner's answer to a handoff's question, from its card in the bot's chat.
-    // `deliveryId` is the answer's own: sent again, it is delivered once.
-    async replyToHandoff(botId: BotId, handoffId: HandoffId, text: string, deliveryId: string) {
-      await call("POST", `/bots/${botId}/handoffs/${handoffId}/messages`, { text, deliveryId });
+    // Throws with control's refusal, e.g. 409 question_changed.
+    async replyToHandoff(botId: BotId, handoffId: HandoffId, reply: ReplyToHandoffRequest) {
+      await call("POST", `/bots/${botId}/handoffs/${handoffId}/messages`, reply);
     },
 
     // Call on sign-out.
