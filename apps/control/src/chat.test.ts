@@ -157,6 +157,55 @@ test("files sent with a message are kept for the chat, and its turn's session ge
   expect([read.headers.get("content-type"), await read.bytes()]).toEqual(["image/png", png]);
 });
 
+// The status line control answers a message with whose headers declare `length` bytes, before any of them is sent.
+function statusForDeclared(url: string, path: string, auth: Record<string, string>, length: number) {
+  const { hostname, port } = new URL(url);
+  return new Promise<string>((resolve, reject) => {
+    void Bun.connect({
+      hostname,
+      port: Number(port),
+      socket: {
+        open: (socket) =>
+          void socket.write(`POST ${path} HTTP/1.1\r\nHost: ${hostname}\r\nAuthorization: ${auth.authorization}\r\nContent-Length: ${length}\r\n\r\n`),
+        data: (socket, data) => {
+          resolve(data.toString().split("\r\n")[0] ?? "");
+          socket.end();
+        },
+        error: (_socket, error) => reject(error),
+      },
+    });
+  });
+}
+
+test("control refuses a message bigger than its files allow before reading it, and reads only four with files at once", async () => {
+  const { url, api, auth, onlineBot } = await setup();
+  const bot = await onlineBot("Ada");
+  const path = `${url}/bots/${bot.id}/messages`;
+  const tooLarge = await statusForDeclared(url, `/bots/${bot.id}/messages`, auth, 80_000_000);
+
+  // Four bodies still arriving; one that does not say its length counts as one with files.
+  let release = () => {};
+  const arriving = new Promise<void>((resolve) => (release = resolve));
+  const stream = (text: string, until?: Promise<void>) =>
+    new ReadableStream({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode(text));
+        await until;
+        controller.close();
+      },
+    });
+  const held = Array.from({ length: 4 }, () => fetch(path, { method: "POST", headers: auth, body: stream("{", arriving) }));
+  await Bun.sleep(100);
+  const fifth = await fetch(path, { method: "POST", headers: auth, body: stream(JSON.stringify({ text: "hi" })) });
+  const textOnly = await api("POST", `/bots/${bot.id}/messages`, { text: "hi" });
+  release();
+
+  expect(tooLarge).toStartWith("HTTP/1.1 413");
+  expect([fifth.status, ApiError.parse(await fifth.json()).error]).toEqual([503, "uploads_busy"]);
+  expect(textOnly.status).toBe(202);
+  expect((await Promise.all(held)).map(({ status }) => status)).toEqual([400, 400, 400, 400]);
+});
+
 test("the agent waits while the human has the screen: a message is refused until hand-back", async () => {
   const { api, onlineBot } = await setup();
   const bot = await onlineBot("Ada");
@@ -258,7 +307,7 @@ test("a bot's access mode reaches its worker: supervised asks before a command",
   expect(ran).toEqual(["checked\n"]);
 });
 
-test("a computer from before access modes runs only Auto turns: control refuses the others with how to update it", async () => {
+test("a computer from before access modes and files runs only Auto turns without files: control refuses the others with how to update it", async () => {
   const { url, api, computers, botToken, onlineBot } = await setup();
   const bot = await onlineBot("Ada");
   await api("PUT", `/bots/${bot.id}/access`, { access: "supervised" });
@@ -272,11 +321,14 @@ test("a computer from before access modes runs only Auto turns: control refuses 
 
   const supervised = await api("POST", `/bots/${bot.id}/messages`, { text: "check" });
   await api("PUT", `/bots/${bot.id}/access`, { access: "auto" });
+  const withFiles = await api("POST", `/bots/${bot.id}/messages`, { text: "read [a.txt]", attachments: [{ name: "a.txt", mimeType: "text/plain", data: btoa("hi") }] });
   const auto = await api("POST", `/bots/${bot.id}/messages`, { text: "check" });
   await eventually(() => received.includes("run-turn"));
   socket.close();
 
-  expect([supervised.status, ApiError.parse(await supervised.json())]).toEqual([409, { error: "computer_outdated", message: computerOutdated }]);
+  const refused: ApiError = { error: "computer_outdated", message: computerOutdated };
+  expect([supervised.status, ApiError.parse(await supervised.json())]).toEqual([409, refused]);
+  expect([withFiles.status, ApiError.parse(await withFiles.json())]).toEqual([409, refused]);
   expect(auto.status).toBe(202);
 });
 

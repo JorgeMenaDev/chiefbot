@@ -1,5 +1,6 @@
 import {
   ACCESS_MODES,
+  ATTACHMENTS,
   AUTO_MODEL,
   DEFAULT_ACCESS,
   type AttachmentUpload,
@@ -15,9 +16,10 @@ import {
 import { currentEffort } from "./models.ts";
 import type { openStore } from "./store.ts";
 
-// Why a turn in another mode than Auto is refused on a worker without ACCESS_MODES.
+// Why a turn is refused on a worker without the capability it needs: one in
+// another mode than Auto needs ACCESS_MODES, one with files ATTACHMENTS.
 export const computerOutdated =
-  "This bot's computer is out of date, so it can only run in Auto. Update its computer (docs/deploy.md) or switch the bot to Auto.";
+  "This bot's computer is out of date: it runs only Auto turns without files. Update its computer (docs/deploy.md), or switch the bot to Auto and send no files.";
 
 // Chat turns between the bots' chats and their workers. Starts a turn (a user's
 // message or a routine's prompt) on the bot's worker, publishes every stored
@@ -71,8 +73,8 @@ export function chatTurns({
 
   // Starts a chat turn with `text` and the files sent with it on the bot's worker,
   // on the bot's model, effort (null once the model no longer supports it) and
-  // access mode as they are now. A mode other than Auto needs a worker that runs
-  // it. The turn is recorded at once; it goes to the worker with the owner's
+  // access mode as they are now. A mode other than Auto, and files, need a worker
+  // that runs them. The turn is recorded at once; it goes to the worker with the owner's
   // connections once they are read.
   // A worker that reconnects meanwhile has ended the turn as lost, so it goes
   // only to the connection it was started on, and a turn that ended meanwhile
@@ -89,7 +91,8 @@ export function chatTurns({
     const model = bot?.model ?? AUTO_MODEL;
     const effort = currentEffort(store.modelReport(userId), model, bot?.effort ?? null);
     const access = bot?.access ?? DEFAULT_ACCESS;
-    if (access !== "auto" && !capabilities.get(botId)?.includes(ACCESS_MODES)) return { error: "computer_outdated" };
+    const can = capabilities.get(botId) ?? [];
+    if ((access !== "auto" && !can.includes(ACCESS_MODES)) || (uploads.length > 0 && !can.includes(ATTACHMENTS))) return { error: "computer_outdated" };
     const started = store.startTurn(botId, text, uploads);
     const attachments = started.event.attachments ?? [];
     const turnKey = store.turnKeys.issue({ agent: "bot", botId, userId, turnId: started.turnId });

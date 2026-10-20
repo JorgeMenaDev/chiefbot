@@ -3,9 +3,10 @@
 // apps/web/src/components/chat/ChatComposer.tsx, and a sent message's images and files in MessagesTimeline.tsx.
 import type { SentAttachment } from "@chiefbot/contracts";
 import { FileTextIcon, XIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { chipFor, isImage, sizeLabel, type DraftAttachment } from "./composerAttachments.ts";
 import { Button } from "./components/ui/button.tsx";
+import { Spinner } from "./components/ui/spinner.tsx";
 import { cn } from "./lib/utils.ts";
 
 type Named = Pick<SentAttachment, "name" | "mimeType">;
@@ -40,31 +41,36 @@ export function ChipText({ text, attachments }: { text: string; attachments: rea
   });
 }
 
-// The composer's files above its prompt: images as thumbnails, other files as a
-// row each unless the prompt shows their chip, every one with a remove button.
-export function AttachmentTray({ attachments, draft, onRemove }: { attachments: DraftAttachment[]; draft: string; onRemove: (id: string) => void }) {
+// The composer's files above its prompt: images as thumbnails (a spinner while
+// read), other files as a row each, every one with a remove button. A file with a
+// chip in the prompt keeps its row too: the chip is text, with no button of its own.
+export function AttachmentTray({ attachments, onRemove }: { attachments: DraftAttachment[]; onRemove: (file: DraftAttachment) => void }) {
   const images = attachments.filter(({ mimeType }) => isImage(mimeType));
-  const files = attachments.filter(({ mimeType, name }) => !isImage(mimeType) && !draft.includes(chipFor(name)));
+  const files = attachments.filter(({ mimeType }) => !isImage(mimeType));
   return (
     <>
       {images.length > 0 && (
         <div className="mb-3 flex flex-wrap gap-2">
-          {images.map(({ id, name, mimeType, data }) => (
-            <div key={id} className="relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background">
-              <img src={`data:${mimeType};base64,${data}`} alt={name} className="h-full w-full object-cover" />
-              <RemoveButton name={name} variant="media-close" className="absolute top-1 right-1" onClick={() => onRemove(id)} />
+          {images.map((image) => (
+            <div key={image.id} className="relative flex h-16 w-16 items-center justify-center overflow-hidden rounded-lg border border-border/80 bg-background">
+              {image.data === null ? (
+                <Spinner className="size-4 text-muted-foreground" />
+              ) : (
+                <img src={`data:${image.mimeType};base64,${image.data}`} alt={image.name} className="h-full w-full object-cover" />
+              )}
+              <RemoveButton name={image.name} variant="media-close" className="absolute top-1 right-1" onClick={() => onRemove(image)} />
             </div>
           ))}
         </div>
       )}
       {files.length > 0 && (
         <div className="mb-3 flex flex-col gap-1">
-          {files.map(({ id, name, size }) => (
-            <div key={id} className="flex min-w-0 items-center gap-2 py-1 text-foreground text-sm">
-              <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 truncate">{name}</span>
-              <span className="shrink-0 text-muted-foreground text-xs">{sizeLabel(size)}</span>
-              <RemoveButton name={name} variant="ghost" onClick={() => onRemove(id)} />
+          {files.map((file) => (
+            <div key={file.id} className="flex min-w-0 items-center gap-2 py-1 text-foreground text-sm">
+              {file.data === null ? <Spinner className="size-4 shrink-0 text-muted-foreground" /> : <FileTextIcon className="size-4 shrink-0 text-muted-foreground" />}
+              <span className="min-w-0 flex-1 truncate">{file.name}</span>
+              <span className="shrink-0 text-muted-foreground text-xs">{sizeLabel(file.size)}</span>
+              <RemoveButton name={file.name} variant="ghost" onClick={() => onRemove(file)} />
             </div>
           ))}
         </div>
@@ -112,24 +118,58 @@ export function SentAttachments({ text, attachments, read }: { text: string; att
   );
 }
 
-// Each sent image's data: URL, read once per window.
-const imageUrls = new Map<string, Promise<unknown>>();
+// `read`, keeping its last `limit` answers, newest last: a chat's sent images as
+// data: URLs, so one that scrolls back into view is not read again. The chat makes
+// one per bot, so leaving the chat (or deleting the bot) lets them all go.
+export function recentReads<Id, Value>(read: (id: Id) => Promise<Value>, limit: number) {
+  const recent = new Map<Id, Promise<Value>>();
+  return (id: Id) => {
+    const value = recent.get(id) ?? read(id);
+    recent.delete(id);
+    recent.set(id, value);
+    for (const oldest of recent.keys()) {
+      if (recent.size <= limit) break;
+      recent.delete(oldest);
+    }
+    value.catch(() => recent.get(id) === value && recent.delete(id));
+    return value;
+  };
+}
 
-// The image once read; its name until then, or if it cannot be read.
+// The image while it is in view, read when it comes into view; its name
+// otherwise, or if it cannot be read. Out of view it lets the image go, so a
+// long chat holds only the images in view and `read`'s recent ones.
 function SentImage({ image, read }: { image: SentAttachment; read: (id: SentAttachment["id"]) => Promise<unknown> }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [inView, setInView] = useState(false);
   const [src, setSrc] = useState<string | null>(null);
   useEffect(() => {
+    if (!box.current) return;
+    const observer = new IntersectionObserver(([entry]) => setInView(entry?.isIntersecting ?? false));
+    observer.observe(box.current);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (!inView) {
+      setSrc(null);
+      return;
+    }
     let current = true;
-    const url = imageUrls.get(image.id) ?? read(image.id);
-    imageUrls.set(image.id, url);
-    url.then(
+    read(image.id).then(
       (value) => current && typeof value === "string" && setSrc(value),
-      () => imageUrls.delete(image.id),
+      () => {},
     );
     return () => {
       current = false;
     };
-  }, [image.id, read]);
-  if (!src) return <div className="flex h-full items-center justify-center px-2 text-center text-muted-foreground text-xs">{image.name}</div>;
-  return <img src={src} alt={image.name} decoding="async" className="block size-full object-cover" />;
+  }, [inView, image.id, read]);
+  return (
+    <div ref={box} className="size-full">
+      {src ? (
+        <img src={src} alt={image.name} decoding="async" className="block size-full object-cover" />
+      ) : (
+        <div className="flex h-full items-center justify-center px-2 text-center text-muted-foreground text-xs">{image.name}</div>
+      )}
+    </div>
+  );
 }

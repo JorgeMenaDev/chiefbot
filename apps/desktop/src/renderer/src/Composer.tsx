@@ -2,9 +2,9 @@
 // and ComposerSurface.tsx: the composer card, its prompt, its footer of controls and its send button, and its
 // attachments (paste, drop or the paperclip; the tray; a chip in the prompt).
 import { PaperclipIcon } from "lucide-react";
-import { useRef, useState, type ClipboardEvent, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
+import { useLayoutEffect, useRef, useState, type ClipboardEvent, type Dispatch, type KeyboardEvent, type ReactNode, type SetStateAction } from "react";
 import { AttachmentTray, ChipText } from "./Attachments.tsx";
-import { admit, chipFor, isImage, readAttachments, typeOf, type DraftAttachment } from "./composerAttachments.ts";
+import { base64Of, chipFor, isImage, reserve, typeOf, type DraftAttachment } from "./composerAttachments.ts";
 import { Button } from "./components/ui/button.tsx";
 import { cn } from "./lib/utils.ts";
 
@@ -22,7 +22,9 @@ const promptBox = "block max-h-52 min-h-12 w-full text-sm leading-relaxed";
 // picked with the paperclip, up to the limits (composerAttachments.ts). Images show
 // as thumbnails above the prompt, other files as rows. A file's chip ([name]) goes
 // where the cursor is: always for a document, and for an image when the prompt
-// already has text. The prompt draws each chip as a chip.
+// already has text. The prompt draws each chip as a chip. A file is in the
+// composer (counted, named, chipped) as soon as it is picked, and read after;
+// the owner keeps send off until every one is read (composerAttachments uploads).
 export function Composer({
   placeholder,
   draft,
@@ -36,7 +38,7 @@ export function Composer({
 }: {
   placeholder: string;
   draft: string;
-  onDraft: (draft: string) => void;
+  onDraft: Dispatch<SetStateAction<string>>;
   onSend: () => void;
   canSend: boolean;
   error: string | null;
@@ -50,6 +52,11 @@ export function Composer({
   const [attachError, setAttachError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const files = attachments?.items ?? [];
+  // The files as of the last attach, before React shows them: what the next attach counts.
+  const latest = useRef(files);
+  useLayoutEffect(() => {
+    latest.current = files;
+  });
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
@@ -62,13 +69,25 @@ export function Composer({
     onSend();
   }
 
-  async function attach(picked: File[]) {
+  // Adds the files that fit at once, then reads each into its place. A read that
+  // ends after its file was removed (or sent) finds no place and is dropped.
+  function attach(picked: File[]) {
     if (!attachments || picked.length === 0) return;
-    const admitted = admit(picked, files.length);
-    setAttachError(admitted.error);
-    const added = await readAttachments(admitted.files, new Set(files.map(({ name }) => name)));
-    if (added.length === 0) return;
+    const { reserved, error } = reserve(picked, latest.current);
+    setAttachError(error);
+    if (reserved.length === 0) return;
+    const added = reserved.map(({ attachment }) => attachment);
+    latest.current = [...latest.current, ...added];
     attachments.onChange((items) => [...items, ...added]);
+    for (const { file, attachment } of reserved) {
+      base64Of(file).then(
+        (data) => attachments.onChange((items) => items.map((item) => (item.id === attachment.id ? { ...item, data } : item))),
+        () => {
+          setAttachError(`'${attachment.name}' is empty or could not be read.`);
+          remove(attachment);
+        },
+      );
+    }
     const element = prompt.current;
     if (!element) return;
     const { value, selectionStart, selectionEnd } = element;
@@ -85,13 +104,10 @@ export function Composer({
   }
 
   // Removing a file takes its chip out of the prompt too.
-  function remove(id: string) {
-    const file = files.find((item) => item.id === id);
-    if (!file || !attachments) return;
-    setAttachError(null);
-    attachments.onChange((items) => items.filter((item) => item.id !== id));
+  function remove(file: DraftAttachment) {
+    attachments?.onChange((items) => items.filter((item) => item.id !== file.id));
     const chip = chipFor(file.name);
-    onDraft(draft.replaceAll(`${chip} `, "").replaceAll(chip, ""));
+    onDraft((text) => text.replaceAll(`${chip} `, "").replaceAll(chip, ""));
   }
 
   // T3 Code's rule: a paste is files when one is an image or nothing came as text.
@@ -100,7 +116,7 @@ export function Composer({
     if (pasted.length === 0) return;
     if (!pasted.some((file) => isImage(typeOf(file))) && event.clipboardData.getData("text/plain") !== "") return;
     event.preventDefault();
-    void attach(pasted);
+    attach(pasted);
   }
 
   const shown = attachError ?? error;
@@ -127,11 +143,17 @@ export function Composer({
           if (!attachments) return;
           event.preventDefault();
           setDragOver(false);
-          void attach(Array.from(event.dataTransfer.files));
+          attach(Array.from(event.dataTransfer.files));
         }}
       >
         <div className="px-4 pt-4 pb-2">
-          <AttachmentTray attachments={files} draft={draft} onRemove={remove} />
+          <AttachmentTray
+            attachments={files}
+            onRemove={(file) => {
+              setAttachError(null);
+              remove(file);
+            }}
+          />
           <div className="relative">
             {/* With files, the textarea's letters turn transparent and this layer draws them, chips and all. */}
             {files.length > 0 && (
@@ -184,7 +206,7 @@ export function Composer({
                   onChange={(event) => {
                     const picked = Array.from(event.currentTarget.files ?? []);
                     event.currentTarget.value = "";
-                    void attach(picked);
+                    attach(picked);
                   }}
                 />
                 <Button variant="ghost" size="icon-sm" aria-label="Attach files" title="Attach files" onClick={() => picker.current?.click()}>

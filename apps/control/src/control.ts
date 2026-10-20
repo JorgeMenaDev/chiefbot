@@ -9,6 +9,8 @@ import {
   CreateBotRequest,
   DEFAULT_AVATAR,
   GitHubTokens,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS,
   PullRequestArgs,
   RoutineInput,
   SendBotMessageRequest,
@@ -35,7 +37,7 @@ import type { ComputerProvider } from "./computers/computer.ts";
 import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
 import { chiefHost } from "./handoffs.ts";
 import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
-import { apiError, bearer, unauthorized } from "./http.ts";
+import { apiError, bearer, jsonWithin, unauthorized } from "./http.ts";
 import { startIdleStop } from "./idle.ts";
 import { modelOptions, pickModel } from "./models.ts";
 import { repoAccess, type RepoAgent } from "./repos.ts";
@@ -55,6 +57,14 @@ import { tokenBroker } from "./tokens.ts";
 import { botTurn, heldTurn, type BotTurn } from "./turnKeys.ts";
 import { chatTurns, computerOutdated } from "./turns.ts";
 import { workspaceRoutes } from "./workspaces.ts";
+
+// The most a message's body can be on the wire: its files in base64 (4 bytes for
+// each 3) and a megabyte for its text and the JSON around them. A body over a
+// megabyte carries files: control reads at most MAX_UPLOADS of those at once, so
+// it holds only so many of them in memory.
+const MAX_MESSAGE_BODY = MAX_ATTACHMENTS * Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 1024 * 1024;
+const FILES_BODY = 1024 * 1024;
+const MAX_UPLOADS = 4;
 
 export type ControlOptions = {
   port: number;
@@ -139,8 +149,10 @@ type SocketData =
 //                             (400 invalid_access)
 //   POST   /bots/:id/messages bearer session, body SendBotMessageRequest → 202 SendMessageResponse
 //                             (400 invalid_message, its message saying why, as when a file is over the limits;
+//                             413 message_too_large past the body those limits allow; 503 uploads_busy while
+//                             control reads MAX_UPLOADS others with files;
 //                             409 when the bot is not online, is stopping, is still on a turn or the human has its
-//                             screen; computer_outdated when its worker cannot run its access mode)
+//                             screen; computer_outdated when its worker cannot run its access mode or take files)
 //   GET    /bots/:id/attachments/:attachmentId  bearer session → the bytes of a file sent with one of the
 //                             bot's messages, as its own type (404 not_found)
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
@@ -230,6 +242,8 @@ export function startControl({
   const screens = screenTunnel({ onStreamEnd: (botId) => idle.touch(botId) });
   // People's connections, which their bots' turns carry (connections/connections.ts).
   const connections = connectionHost({ store, secrets, catalog, ...(googleTokenUrl === undefined ? {} : { googleTokenUrl }) });
+  // Messages with files being read now (MAX_UPLOADS).
+  let uploads = 0;
   // Starting turns, the chat topics and worker hellos (turns.ts).
   const turns = chatTurns({
     store,
@@ -564,11 +578,24 @@ export function startControl({
       },
       "/bots/:id/messages": {
         POST: ownBot(async (user, botId, req) => {
-          const body = SendBotMessageRequest.safeParse(await req.json().catch(() => null));
-          if (!body.success) return apiError(400, "invalid_message", body.error.issues[0]?.message);
-          const sent = turns.sendTurn(user.id, botId, body.data.text, body.data.attachments);
-          if ("error" in sent) return apiError(409, sent.error, sent.error === "computer_outdated" ? computerOutdated : undefined);
-          return Response.json(sent satisfies SendMessageResponse, { status: 202 });
+          // A body that does not say its length counts as one with files.
+          const declared = Number(req.headers.get("content-length") ?? MAX_MESSAGE_BODY);
+          const tooLarge = () => apiError(413, "message_too_large", `A message with its files can be at most ${MAX_ATTACHMENTS} files of 10 MB.`);
+          if (declared > MAX_MESSAGE_BODY) return tooLarge();
+          const withFiles = declared > FILES_BODY;
+          if (withFiles && uploads >= MAX_UPLOADS) return apiError(503, "uploads_busy", "Control is taking other files. Send again in a moment.");
+          if (withFiles) uploads++;
+          try {
+            const read = await jsonWithin(req, MAX_MESSAGE_BODY);
+            if (!read) return tooLarge();
+            const body = SendBotMessageRequest.safeParse(read.json);
+            if (!body.success) return apiError(400, "invalid_message", body.error.issues[0]?.message);
+            const sent = turns.sendTurn(user.id, botId, body.data.text, body.data.attachments);
+            if ("error" in sent) return apiError(409, sent.error, sent.error === "computer_outdated" ? computerOutdated : undefined);
+            return Response.json(sent satisfies SendMessageResponse, { status: 202 });
+          } finally {
+            if (withFiles) uploads--;
+          }
         }),
       },
       "/bots/:id/attachments/:attachmentId": {

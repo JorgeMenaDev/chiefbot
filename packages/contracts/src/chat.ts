@@ -176,13 +176,16 @@ export type ChatView = z.infer<typeof ChatView>;
 //               after it has resent every event of its latest turn. Control stores
 //               each index once, so resends are harmless, then ends every other
 //               unfinished turn: the runtime lost it. `capabilities` name what the
-//               runtime does beyond the first protocol (ACCESS_MODES); an older one sends none.
+//               runtime does beyond the first protocol (ACCESS_MODES, ATTACHMENTS); an older one sends none.
 export const TurnEventMessage = z.object({ type: z.literal("turn-event"), turnId: TurnId, index: z.number().int().min(0), event: TurnEvent });
 export const TurnHello = z.object({ type: z.literal("hello"), activeTurnId: TurnId.nullable(), capabilities: z.array(z.string()).default([]) });
 
 // A bot's worker that asks as the turn's access mode says. One without it drops
 // the mode and asks as Auto does, so control sends it only Auto turns.
 export const ACCESS_MODES = "access-modes";
+// A bot's worker that gives a turn's files to its session. One without it drops
+// them, so control sends it only turns without files.
+export const ATTACHMENTS = "attachments";
 
 // Control → an agent's runtime, after a hello naming a turn that still runs whose
 // key control no longer has (control restarted, which revokes every key): the

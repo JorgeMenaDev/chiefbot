@@ -1,12 +1,12 @@
-import { ChatView, type Bot, type BotId, type ChatItem, type SentAttachment } from "@chiefbot/contracts";
+import { ChatView, type AttachmentId, type Bot, type BotId, type ChatItem, type SentAttachment } from "@chiefbot/contracts";
 import { CheckIcon, ChevronRightIcon, CircleAlertIcon, InfoIcon, WrenchIcon, XIcon } from "lucide-react";
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ApprovalCard } from "./ApprovalCard.tsx";
-import { ChipText, SentAttachments } from "./Attachments.tsx";
+import { ChipText, recentReads, SentAttachments } from "./Attachments.tsx";
 import { BotComposerControls, useModels } from "./BotComposerControls.tsx";
 import { chatRows, type LaneItem, type ToolItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
-import { chipFor, isImage, type DraftAttachment } from "./composerAttachments.ts";
+import { chipFor, isImage, uploads, type DraftAttachment } from "./composerAttachments.ts";
 import { Markdown } from "./Markdown.tsx";
 import { Alert, AlertDescription } from "./components/ui/alert.tsx";
 import { Empty, EmptyDescription } from "./components/ui/empty.tsx";
@@ -38,10 +38,14 @@ export function Chat({ bot }: { bot: Bot }) {
   const [draft, setDraft] = useState("");
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // The chat's sent images, read as they come into view; the last few kept.
+  const [readImage] = useState(() => recentReads((id: AttachmentId) => window.chiefbot.chat.attachment(bot.id, id), 8));
   const working = view.working !== null;
   // The agent waits while the user has its screen.
   const humanHasScreen = bot.screenControl === "human";
-  const canSend = bot.status === "online" && !humanHasScreen && !working && (draft.trim() !== "" || attachments.length > 0);
+  // Null while a file is still being read: the message waits for it.
+  const files = uploads(attachments);
+  const canSend = bot.status === "online" && !humanHasScreen && !working && files !== null && (draft.trim() !== "" || attachments.length > 0);
   // Images reach only a model that sees them; another finds them on disk.
   const model = models.models.find(({ id }) => id === bot.model);
   const notice =
@@ -50,11 +54,11 @@ export function Chat({ bot }: { bot: Bot }) {
       : null;
 
   async function submit() {
-    if (!canSend) return;
+    if (!canSend || !files) return;
     setError(null);
     try {
-      const text = draft.trim() === "" ? attachments.map(({ name }) => chipFor(name)).join(" ") : draft;
-      await window.chiefbot.chat.send(bot.id, text, attachments);
+      const text = draft.trim() === "" ? files.map(({ name }) => chipFor(name)).join(" ") : draft;
+      await window.chiefbot.chat.send(bot.id, text, files);
       setDraft("");
       setAttachments([]);
     } catch (caught) {
@@ -69,7 +73,7 @@ export function Chat({ bot }: { bot: Bot }) {
         items={view.items}
         status={working ? view.working || "Working" : null}
         empty={`Send ${bot.name} a message to start.`}
-        renderItem={(item, streaming) => <Message botId={bot.id} item={item} streaming={streaming} />}
+        renderItem={(item, streaming) => <Message botId={bot.id} item={item} streaming={streaming} readImage={readImage} />}
       />
       <Composer
         placeholder={
@@ -93,10 +97,20 @@ export function Chat({ bot }: { bot: Bot }) {
   );
 }
 
-function Message({ botId, item, streaming }: { botId: BotId; item: LaneItem; streaming: boolean }) {
+function Message({
+  botId,
+  item,
+  streaming,
+  readImage,
+}: {
+  botId: BotId;
+  item: LaneItem;
+  streaming: boolean;
+  readImage: (id: AttachmentId) => Promise<unknown>;
+}) {
   switch (item.kind) {
     case "user":
-      return <UserMessage text={item.text} attachments={item.attachments} read={(id) => window.chiefbot.chat.attachment(botId, id)} />;
+      return <UserMessage text={item.text} attachments={item.attachments} read={readImage} />;
     case "assistant":
       return <AssistantMessage text={item.text} streaming={streaming} />;
     case "error":

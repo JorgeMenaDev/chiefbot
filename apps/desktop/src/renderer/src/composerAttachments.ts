@@ -2,8 +2,9 @@
 // and ChatComposer.tsx's addComposerAttachments: which files the composer takes, their types, and its messages.
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, MimeType, type AttachmentUpload } from "@chiefbot/contracts";
 
-// A file in the composer, waiting to be sent. `data` is its bytes in base64.
-export type DraftAttachment = AttachmentUpload & { id: string; size: number };
+// A file in the composer, waiting to be sent. `data` is its bytes in base64, or
+// null while the composer still reads it.
+export type DraftAttachment = Omit<AttachmentUpload, "data"> & { id: string; size: number; data: string | null };
 
 // The image types the composer shows as thumbnails (T3 Code's), by extension.
 const imageTypes: Record<string, string> = { gif: "image/gif", jpeg: "image/jpeg", jpg: "image/jpeg", png: "image/png", webp: "image/webp" };
@@ -45,20 +46,30 @@ export function admit(files: File[], attached: number): { files: File[]; error: 
   return { files: admitted, error };
 }
 
-// Reads admitted files into the composer, each named apart from the `taken` names.
-export function readAttachments(files: File[], taken: ReadonlySet<string>): Promise<DraftAttachment[]> {
-  const names = new Set(taken);
-  return Promise.all(
-    files.map(async (file) => {
-      const name = uniqueName(file.name || "file", names);
-      names.add(name);
-      return { id: crypto.randomUUID(), name, mimeType: typeOf(file), size: file.size, data: await base64Of(file) };
-    }),
-  );
+// Places for the `picked` files that fit beside the `attached` ones, each named
+// apart from them and with no data yet. The composer adds them at once and reads
+// them after (base64Of), so files picked meanwhile count against the same limits
+// and names. `error` as admit's.
+export function reserve(picked: File[], attached: readonly DraftAttachment[]) {
+  const { files, error } = admit(picked, attached.length);
+  const names = new Set(attached.map(({ name }) => name));
+  const reserved = files.map((file) => {
+    const name = uniqueName(file.name || "file", names);
+    names.add(name);
+    const attachment: DraftAttachment = { id: crypto.randomUUID(), name, mimeType: typeOf(file), size: file.size, data: null };
+    return { file, attachment };
+  });
+  return { reserved, error };
+}
+
+// The composer's files as its message sends them, or null while one is still being read.
+export function uploads(attachments: readonly DraftAttachment[]): AttachmentUpload[] | null {
+  const read = attachments.flatMap(({ name, mimeType, data }) => (data === null ? [] : [{ name, mimeType, data }]));
+  return read.length === attachments.length ? read : null;
 }
 
 // The browser's own base64 encoder: the part of a data: URL after its comma.
-function base64Of(file: Blob) {
+export function base64Of(file: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");

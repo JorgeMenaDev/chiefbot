@@ -1,6 +1,6 @@
 import { MAX_ATTACHMENT_BYTES } from "@chiefbot/contracts";
 import { expect, test } from "bun:test";
-import { admit, typeOf, uniqueName } from "./composerAttachments.ts";
+import { admit, reserve, typeOf, uniqueName, uploads, type DraftAttachment } from "./composerAttachments.ts";
 
 const file = (name: string, bytes = 1) => new File([new Uint8Array(bytes)], name);
 
@@ -26,4 +26,21 @@ test("a file without a type is an image by its extension, or plain bytes", () =>
   expect(typeOf({ name: "shot.PNG", type: "" })).toBe("image/png");
   expect(typeOf({ name: "notes.md", type: "" })).toBe("application/octet-stream");
   expect(typeOf({ name: "notes.txt", type: "text/plain" })).toBe("text/plain");
+});
+
+test("files picked while others are still read count against the same limits and names", () => {
+  const first = reserve([file("image.png"), file("a.txt"), file("b.txt")], []);
+  const held = first.reserved.map(({ attachment }) => attachment);
+  const second = reserve([file("image.png"), file("c.txt"), file("d.txt")], held);
+
+  expect(held.every(({ data }) => data === null)).toBe(true);
+  expect(second.reserved.map(({ attachment }) => attachment.name)).toEqual(["image-2.png", "c.txt"]);
+  expect(second.error).toBe("You can attach up to 5 files per message.");
+});
+
+test("a message sends its files only once every one is read", () => {
+  const draft = (data: string | null): DraftAttachment => ({ id: "1", name: "a.txt", mimeType: "text/plain", size: 2, data });
+  expect(uploads([draft("aGk="), draft(null)])).toBeNull();
+  expect(uploads([draft("aGk=")])).toEqual([{ name: "a.txt", mimeType: "text/plain", data: "aGk=" }]);
+  expect(uploads([])).toEqual([]);
 });
