@@ -135,8 +135,10 @@ export function openStore(path: string) {
   // The bot's face (contracts BotAvatar). Bots from before faces wear the default.
   addColumn(db, "bots", "avatar_shape", `TEXT NOT NULL DEFAULT '${DEFAULT_AVATAR.shape}'`);
   addColumn(db, "bots", "avatar_color", `TEXT NOT NULL DEFAULT '${DEFAULT_AVATAR.color}'`);
-  // The latest ModelReport (JSON) a worker of the user's bots sent: control's cache of their plan's models.
+  // The latest ModelReport (JSON) a worker of the user's bots, or a project turn on their seat, sent: control's cache of their plan's models.
   addColumn(db, "users", "copilot_models", "TEXT");
+  // The same for an organization that pays for project turns, by its account: what the latest such turn listed.
+  db.run(`CREATE TABLE IF NOT EXISTS org_model_reports (account TEXT PRIMARY KEY, copilot_models TEXT NOT NULL)`);
   // 0 until the user's first bot is claimed (claimFirstBot). Users from before first bots count as claimed.
   addColumn(db, "users", "first_bot_claimed", "INTEGER NOT NULL DEFAULT 1");
   // What each approval asked and when, as for task workers and coordinators.
@@ -407,10 +409,23 @@ export function openStore(path: string) {
       db.query("UPDATE users SET copilot_models = ?2 WHERE id = ?1").run(userId, JSON.stringify(report));
     },
 
-    // Null until a worker of the user's bots has listed their plan's models.
+    // Null until a worker of the user's bots, or a project turn on their seat, has listed their plan's models.
     modelReport(userId: UserId): ModelReport | null {
       const row = db.query<{ copilot_models: string | null }, [string]>("SELECT copilot_models FROM users WHERE id = ?1").get(userId);
       return row?.copilot_models ? ModelReport.parse(JSON.parse(row.copilot_models)) : null;
+    },
+
+    setOrgModelReport(account: string, report: ModelReport) {
+      db.query("INSERT INTO org_model_reports (account, copilot_models) VALUES (?1, ?2) ON CONFLICT (account) DO UPDATE SET copilot_models = excluded.copilot_models").run(
+        account,
+        JSON.stringify(report),
+      );
+    },
+
+    // Null until a project turn the organization paid for has listed its plan's models.
+    orgModelReport(account: string): ModelReport | null {
+      const row = db.query<{ copilot_models: string }, [string]>("SELECT copilot_models FROM org_model_reports WHERE account = ?1").get(account);
+      return row ? ModelReport.parse(JSON.parse(row.copilot_models)) : null;
     },
 
     deleteBot(botId: BotId) {

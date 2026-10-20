@@ -35,6 +35,23 @@ export function createBareRepo(root: string, fullName: string, files: Record<str
   }
 }
 
+// Adds a commit holding `files` (new or changed) to main of the bare repo at `bare`.
+export function commitFiles(bare: string, files: Record<string, string>) {
+  const work = mkdtempSync(join(tmpdir(), "fake-github-commit-"));
+  try {
+    git(work, ["clone", "-q", bare, "."]);
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(work, path)), { recursive: true });
+      writeFileSync(join(work, path), content);
+    }
+    git(work, ["add", "."]);
+    git(work, ["-c", "user.name=Octo", "-c", "user.email=octo@example.com", "commit", "-q", "-m", "Change"]);
+    git(work, ["push", "-q", "origin", "HEAD:main"]);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
 // Answers one smart-HTTP request (clone, fetch or push) with git http-backend, a CGI program.
 export async function gitHttpBackend(req: Request, root: string) {
   const url = new URL(req.url);

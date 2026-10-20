@@ -1,4 +1,4 @@
-import { Project, ProjectChatView, type ProjectId, type Workspace } from "@chiefbot/contracts";
+import { type AutoFallback, type CopilotPayer, Project, ProjectChatView, type ProjectId, type Workspace } from "@chiefbot/contracts";
 import { FolderGit2Icon, PlugIcon, RadioIcon, SettingsIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
@@ -8,6 +8,7 @@ import type { LaneItem } from "./chatRows.ts";
 import { Composer } from "./Composer.tsx";
 import { ConnectorCalls } from "./Connectors.tsx";
 import { Column, ErrorText, PaneHeader, PanelToggle, Section } from "./Pane.tsx";
+import { ProjectComposerControls } from "./ProjectComposerControls.tsx";
 import { ProjectPanel } from "./ProjectPanel.tsx";
 import { fileNote, ProjectSettings } from "./ProjectSettings.tsx";
 import { payerText } from "./ProjectTasks.tsx";
@@ -35,7 +36,7 @@ const panelKey = "chiefbot.projectPanel";
 // A project: the user's conversation with its project agent, and the work panel
 // beside it (ProjectPanel.tsx). The gear opens its settings in the conversation's
 // place, where the workspace owner can also delete it; `onDeleted` runs once it
-// is gone, and `onChanged` once its settings are saved. `login` is the signed-in user's.
+// is gone, and `onChanged` once its settings or model are saved. `login` is the signed-in user's.
 export function ProjectPane({
   project,
   workspace,
@@ -102,7 +103,7 @@ export function ProjectPane({
             {workspace.role === "owner" && <DeleteProject project={project} onDeleted={onDeleted} />}
           </ProjectSettings>
         )}
-        <CoordinatorChat project={project} hidden={showSettings} />
+        <CoordinatorChat project={project} hidden={showSettings} onChanged={onChanged} />
       </Column>
       <ProjectPanel project={project} login={login} hidden={!panel} onClose={() => showPanel(false)} />
     </>
@@ -149,8 +150,9 @@ function useCoordinatorChat(projectId: ProjectId) {
 
 // The bot chat's shape (Chat.tsx). Every member has their own chat; the
 // coordinator answers one member at a time, so a message may wait its turn.
-// `hidden` keeps the draft while the settings view takes its place.
-function CoordinatorChat({ project, hidden }: { project: Project; hidden: boolean }) {
+// `hidden` keeps the draft while the settings view takes its place. The
+// composer picks the project's model; `onChanged` runs once one is saved.
+function CoordinatorChat({ project, hidden, onChanged }: { project: Project; hidden: boolean; onChanged: () => void }) {
   const view = useCoordinatorChat(project.id);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -184,7 +186,9 @@ function CoordinatorChat({ project, hidden }: { project: Project; hidden: boolea
         onSend={() => void submit()}
         canSend={canSend}
         error={error}
-      />
+      >
+        <ProjectComposerControls project={project} onSaved={onChanged} onError={setError} />
+      </Composer>
     </section>
   );
 }
@@ -201,7 +205,12 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
     case "error":
       return <ErrorMessage message={item.message} />;
     case "payer":
-      return <p className="text-muted-foreground text-xs">{payerText(item.payer)}</p>;
+      return (
+        <p className="text-muted-foreground text-xs">
+          {payerText(item.payer)}
+          {item.fallback && <span className="block">{fellBack(item.payer, item.fallback)}</span>}
+        </p>
+      );
     case "approval":
       return <ApprovalCard item={item} onAnswer={(approved) => window.chiefbot.projects.answerChat(project.id, item.approvalId, approved)} />;
     case "handoff":
@@ -210,4 +219,11 @@ function ChatRow({ project, item, streaming }: { project: Project; item: LaneIte
     case "question":
       return null;
   }
+}
+
+// Why a turn ran on Auto: the plan of who paid does not offer the project's
+// model, or no turn on it has listed its models yet.
+function fellBack(payer: CopilotPayer, { model, reason }: AutoFallback) {
+  const who = payer.kind === "seat" ? payer.login : payer.account;
+  return reason === "plan_unknown" ? `${who}'s plan isn't known yet; this turn ran on Auto.` : `${model} isn't on ${who}'s plan; this turn ran on Auto.`;
 }

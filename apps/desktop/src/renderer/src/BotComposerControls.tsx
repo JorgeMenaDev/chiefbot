@@ -76,7 +76,7 @@ export function BotComposerControls({
 
   return (
     <>
-      <ModelPicker bot={bot} models={models} onOpen={refresh} onPick={({ id }) => void setModel({ model: id })} />
+      <ModelPicker model={bot.model} models={models} onOpen={refresh} onPick={({ id }) => void setModel({ model: id })} />
       <span className="contents @max-[34rem]/composer:hidden">
         {efforts.length > 0 && (
           <>

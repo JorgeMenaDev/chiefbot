@@ -1,4 +1,4 @@
-import { SETUP_LOG_MAX, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
+import { instructionPaths, SETUP_LOG_MAX, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
 import { closeSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { secretRedactor } from "./secretRedactor.ts";
@@ -36,8 +36,6 @@ export type EngineerReady = {
   found: { instructions: string[]; skills: string[] };
 };
 
-// Instruction files every engineer reads when the repo has them, before the config's own.
-const defaultInstructions = ["AGENTS.md", ".github/copilot-instructions.md"];
 // The most of one instruction file the agent is given.
 const instructionMax = 64 * 1024;
 
@@ -87,7 +85,7 @@ export async function setUpEngineer({
   // Where the clone really is: a file or folder counts only when it resolves
   // inside it, so no link (or a clone that is one) leads the agent elsewhere.
   const root = join(realpathSync(workspace), name);
-  const files = [...new Set([...defaultInstructions, ...setup.instructions])].flatMap((path) => {
+  const files = instructionPaths(setup.instructions).flatMap((path) => {
     const real = within(root, join(clone, path));
     const text = real === null ? null : readFileStart(real, instructionMax);
     return text === null ? [] : [{ path, text }];

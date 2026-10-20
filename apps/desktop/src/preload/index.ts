@@ -89,6 +89,8 @@ const api = {
     tasks: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:tasks", id),
     // Saves the settings (YAML, the project file's keys); resolves with the project.
     saveSettings: (id: string, text: string): Promise<unknown> => ipcRenderer.invoke("projects:save-settings", id, text),
+    // The coordinator's model and effort; resolves with the project.
+    setModel: (id: string, request: SetBotModelRequest): Promise<unknown> => ipcRenderer.invoke("projects:set-model", id, request),
     // The project's secrets: names and whether each is set, never a value.
     secrets: (id: string): Promise<unknown> => ipcRenderer.invoke("projects:secrets", id),
     setSecret: (id: string, name: string, value: string): Promise<void> => ipcRenderer.invoke("projects:set-secret", id, name, value),

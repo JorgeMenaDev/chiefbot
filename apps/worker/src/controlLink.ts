@@ -6,6 +6,7 @@ import {
   BrokerRefusal,
   CopilotInstallationToken,
   type AgentConnector,
+  type CoordinatorToControl,
   type CopilotPayer,
   type ReportedConnectorCall,
   type TurnEvent,
@@ -90,8 +91,8 @@ export function controlLink<Message>({
   // it while it has time left for a turn, so a turn costs no new token.
   let orgToken: CopilotInstallationToken | null = null;
 
-  // Turn events and hellos: what a bot's worker and a coordinator both send.
-  function send(message: WorkerToControl) {
+  // A message to control, while connected: a bot's worker's or a coordinator's.
+  function send(message: WorkerToControl | CoordinatorToControl) {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
   }
 

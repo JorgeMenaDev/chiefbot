@@ -18,7 +18,8 @@ import { createPullRequest, installationToken, repoPermission, type GitHubAppKey
 // are opened by control, also after approval. Each request first checks that the
 // owner is still signed in and, through the repo app, that they may do it themselves.
 // A project's task worker reaches repos the same way, with its turn's key: for
-// it, the "owner" is the member who asked for it.
+// it, the "owner" is the member who asked for it. A project's coordinator only
+// fetches its own project's repo, into the copy it reads, as the turn's member.
 
 // Who a turn key acts for: whose GitHub account bounds its repo access, and
 // how to ask that person to approve, in that turn of the bot or task worker.
@@ -27,6 +28,10 @@ export type RepoAgent = {
   ask: (kind: ApprovalKind, detail: string, signal: AbortSignal) => Promise<ApprovalOutcome>;
 };
 
+// A project's coordinator in its turn: it may fetch `repo`, its project's, as
+// the turn's member, and nothing else.
+export type RepoReader = { userId: UserId; repo: string };
+
 export type RepoAccessOptions = {
   // github.com (git) and api.github.com; fakes in tests.
   githubUrl: string;
@@ -34,8 +39,8 @@ export type RepoAccessOptions = {
   app: GitHubAppKey;
   // The bot owner's GitHub login, or null when they must sign in again.
   ownerLogin: (userId: UserId) => Promise<string | null>;
-  // The agent whose running turn a key is (a bot's or task worker's), if any.
-  agentFor: (key: string) => RepoAgent | null;
+  // The agent whose running turn a key is (a bot's, task worker's or coordinator's), if any.
+  agentFor: (key: string) => RepoAgent | RepoReader | null;
 };
 
 type Refusal = { error: ApiErrorCode; status: number; message: string };
@@ -102,6 +107,9 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
         return text(403, "Chiefbot's git proxy speaks only git's smart HTTP protocol.");
       }
       const push = service === "git-receive-pack";
+      if ("repo" in bot && (push || bot.repo.toLowerCase() !== fullName.toLowerCase())) {
+        return text(403, `A project's coordinator may only fetch ${bot.repo}.`);
+      }
       const access = await grant(bot.userId, fullName, push ? "write" : "read");
       if ("error" in access) return text(access.status, access.message);
       const body = req.method === "POST" ? new Uint8Array(await req.arrayBuffer()) : undefined;
@@ -111,6 +119,8 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor 
       // takes, and control forwards exactly the bytes they approved. Only git's
       // probe before a large push (a bare flush packet) updates nothing and passes.
       if (push && body && !isProbe(body)) {
+        // Refused above already: nobody could approve a coordinator's push.
+        if (!("ask" in bot)) return text(403, "Only a bot or a worker may push.");
         const request = pushRequest(body, req.headers.get("content-encoding"));
         if (request === null) return text(415, "Chiefbot's git proxy reads only plain or gzip push requests.");
         server.timeout(req, 0);
