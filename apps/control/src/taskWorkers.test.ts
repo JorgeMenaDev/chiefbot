@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ACCESS_MODES, ATTACHMENTS, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
+import { ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP, ApiError, ConnectorCall, ContextFileText, Project, Task, TaskWorker, User, WorkerTranscript, Workspace, WorkspaceInvite } from "@chiefbot/contracts";
 import type { FakeGitHubUser } from "@chiefbot/fake-github";
 import { fakeCopilot, sdk, type FakeCopilot, type FakeScript } from "@chiefbot/worker/fake-copilot";
 import { gitProxyConfig } from "@chiefbot/worker/git-proxy";
@@ -1229,4 +1229,59 @@ test("a verifier ends with its verdict on the task, its report and screenshots k
   const image = await owner.api("GET", `/projects/${project.id}/context/image?path=verify/${screenshot}`);
   expect(image.headers.get("content-type")).toBe("image/png");
   expect(new Uint8Array(await image.arrayBuffer())).toEqual(png);
+});
+
+test("a verifier that gives no verdict is BLOCKED on the task: its setup failed, with its log as the report, or it ended without one", async () => {
+  let installs = 0;
+  const setup = fakeSetup((command) => (command === "bun install" && ++installs === 1 ? { exitCode: 1, output: "error: lockfile is frozen\n" } : { exitCode: 0, output: "" }));
+  const control = await teamProject({ setupShell: setup.run }, "commands:\n  setup: bun install\n");
+  const { owner, project } = control;
+  const { tool } = await heldTurn(control, async function* () {
+    yield sdk.message("msg-1", "I looked around.");
+    yield sdk.idle();
+  });
+  const { head } = await pullRequestOnTask(control, tool);
+  const verificationOf = async () => Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification;
+
+  const first = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  expect(await workerWhen(owner, project, first.id, ({ verdict }) => verdict !== null)).toMatchObject({ state: "blocked", verdict: "blocked" });
+  const blocked = await verificationOf();
+  expect(blocked).toMatchObject({ result: "blocked", sha: head, worker: first.id, summary: "Its setup failed: `bun install` exited with 1." });
+  const file = ContextFileText.parse(await (await owner.api("GET", `/projects/${project.id}/context/file?path=${blocked?.evidence}`)).json());
+  expect(file.content).toContain("`bun install` exited with 1:\n\n```\nerror: lockfile is frozen\n\n```");
+
+  const second = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-2" })).body);
+
+  expect(await workerWhen(owner, project, second.id, ({ verdict }) => verdict !== null)).toMatchObject({ state: "finished", verdict: "blocked" });
+  expect(await verificationOf()).toMatchObject({ result: "blocked", worker: second.id, summary: "It ended without a verdict. Its last message: I looked around." });
+});
+
+test("a verifier whose computer runs an image that cannot verify is blocked at once, told to rebuild the image, and BLOCKED on the task", async () => {
+  const tokens = new Map<string, string>();
+  const control = await teamProject({
+    provider: (fake) => ({
+      ...fake,
+      async create(spec) {
+        tokens.set(spec.id, spec.env.CHIEFBOT_TASK_WORKER_TOKEN ?? "");
+        await fake.create(spec);
+      },
+      // The verifier's computer starts no worker of ours: the test speaks for an older one, which can set up an engineer.
+      async start(id) {
+        if (!id.startsWith("worker_")) await fake.start(id);
+      },
+    }),
+  });
+  const { owner, project, url } = control;
+  const { tool } = await heldTurn(control);
+  await pullRequestOnTask(control, tool);
+  const { id } = TaskWorker.parse((await tool({ tool: "dispatch_verifier", task: 1, creationId: "v-1" })).body);
+
+  const { received } = await connectAsWorker(url, id, tokens.get(id) ?? "", [ACCESS_MODES, ATTACHMENTS, ENGINEER_SETUP]);
+
+  const blocked = await workerWhen(owner, project, id, ({ verdict }) => verdict !== null);
+  const rebuild = "Its computer runs an older Chiefbot image, which cannot run a verifier. Rebuild the computer image (`bun run computer:build`), then dispatch the verifier again.";
+  expect(blocked).toMatchObject({ state: "blocked", result: rebuild, verdict: "blocked" });
+  expect(received.join("\n")).not.toContain("run-task");
+  expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification).toMatchObject({ result: "blocked", summary: rebuild });
 });

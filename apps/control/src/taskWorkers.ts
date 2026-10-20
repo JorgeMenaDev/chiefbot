@@ -332,6 +332,7 @@ export function taskWorkerHost({
       if (stopped) return;
       if (failure !== null) {
         workers.launchFailed(workerId, `Its computer could not start: ${failure}`);
+        noVerdict(workerId);
         void reap();
       }
       publish(projectId);
@@ -354,12 +355,32 @@ export function taskWorkerHost({
   // Removes every worker computer that must go (settle).
   const reap = () => Promise.all(workers.toReap().map(settle));
 
-  // The worker's turn ended: its approvals stop waiting and its computer stops
-  // (settle).
+  // The worker's turn ended: its approvals stop waiting, its computer stops
+  // (settle), and a verifier that gave no verdict is BLOCKED (noVerdict).
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
     holders.delete(workerId);
     void settle(workerId);
+    noVerdict(workerId);
+  }
+
+  // A verifier that ended (its turn did, or its launch failed) without a verdict
+  // gets BLOCKED, so the task shows that nobody checked the pull request. Its
+  // summary says why: its error, or its last message. A failed setup step's log
+  // is its report. A stopped verifier gets none: someone chose to stop it.
+  function noVerdict(workerId: TaskWorkerId) {
+    const worker = workers.worker(workerId);
+    if (worker?.kind !== "verifier" || worker.verdict !== null || !["finished", "blocked", "failed"].includes(worker.state)) return;
+    const failed = worker.setup.find(({ exitCode }) => exitCode !== 0);
+    void recordVerdict(
+      workerId,
+      {
+        result: "blocked",
+        summary: worker.state === "finished" ? `It ended without a verdict. Its last message: ${worker.result ?? ""}` : (worker.result ?? "It ended without a verdict."),
+        report: failed ? [`\`${failed.command}\` exited with ${failed.exitCode}:`, "", "```", failed.log, "```"].join("\n") : "",
+      },
+      [],
+    );
   }
 
   // Brings the worker's computer to what its record wants: removed when it must
@@ -867,7 +888,10 @@ export function taskWorkerHost({
       for (const workerId of workers.launching()) {
         const status = await computers.status(workerId);
         if (stopped) return;
-        if (status !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
+        if (status !== "running") {
+          workers.launchFailed(workerId, "Control restarted before its computer was ready.");
+          noVerdict(workerId);
+        }
       }
       for (const workerId of workers.ended()) {
         const status = await computers.status(workerId);
