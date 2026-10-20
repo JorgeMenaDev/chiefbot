@@ -97,9 +97,13 @@ mcp:                             # stdio MCP servers that run in engineers and v
   playwright: { command: npx, args: ["-y", "@playwright/mcp"] }
 secrets: [API_KEY]               # names only: members set the values in the app
 workers: { max: 2 }              # engineers and verifiers at once (default 2); more are queued
+template: java-react-enterprise  # the service stack engineers get (docs/templates.md)
+service: ui                      # the template service this repo is
+services:                        # each other service: { repo, ref } or stand-in
+  meta: { repo: octo-org/meta-api, ref: main }
 ```
 
-Each project also has **settings** in the app: the same keys, as YAML. They are how you configure a repo you cannot commit to. The gear in the project's header opens them in place of the conversation, and any member edits them (`PUT /projects/:id/settings`). The project's config takes each key from the settings when they set it, else from the file, else its default. `commands` and `workers` merge key by key, so a file's `test` and the settings' `setup` both apply. Any other key replaces the file's: `connectors: []` in the settings clears the file's list. **Settings** lists every key with its value and where it comes from: file, settings or default. With no file, the project's header shows a **No project file** badge and **Settings** says "No project file, using app settings". With an invalid file, the badge says **Invalid project file**, and **Settings** shows the file's error and uses the settings alone. A file over 64 KB counts as invalid. Control reads the file once, when the project is made, so change a running project in its settings. Who uses each key of the config:
+Each project also has **settings** in the app: the same keys, as YAML. They are how you configure a repo you cannot commit to. The gear in the project's header opens them in place of the conversation, and any member edits them (`PUT /projects/:id/settings`). The project's config takes each key from the settings when they set it, else from the file, else its default. `commands` and `workers` merge key by key, so a file's `test` and the settings' `setup` both apply. Any other key replaces the file's: `connectors: []` in the settings clears the file's list. Control checks `template`, `service` and `services` against the template catalog and the member's repo access, when it reads the file and when settings are saved (`docs/templates.md`, **Use one in a project**). The settings' **Template** section picks them without typing YAML. **Settings** lists every key with its value and where it comes from: file, settings or default. With no file, the project's header shows a **No project file** badge and **Settings** says "No project file, using app settings". With an invalid file, the badge says **Invalid project file**, and **Settings** shows the file's error and uses the settings alone. A file over 64 KB counts as invalid. Control reads the file once, when the project is made, so change a running project in its settings. Who uses each key of the config:
 
 | Key | Used by |
 | --- | --- |
@@ -110,6 +114,7 @@ Each project also has **settings** in the app: the same keys, as YAML. They are 
 | `mcp` | Engineers and verifiers, in their clone |
 | `secrets` | Names only. Members set the values (**Secrets**, next), which reach engineers and verifiers only, one task each |
 | `workers.max` | Control: how many engineers and verifiers run at once (**Engineers**, below) |
+| `template`, `service`, `services` | Nobody yet: control checks them, and engineers do not get the stack yet (`docs/templates.md`) |
 
 **Secrets** are values for the names `secrets` declares. Any member sets, replaces or clears one in **Settings** (`PUT` and `DELETE /projects/:id/secrets/:name`). Control keeps the value in its `SecretStore`, scoped to the project, under a new name each time it is written. The secret points at the new value only once it is saved, and the old value is deleted after that. A write that fails leaves the secret's last value. A project's writes, clears and deletion run one at a time. A value control fails to delete is noted in SQLite and deleted when control next starts. Control never sends the value back to the desktop and never puts it in a log or event. `GET /projects/:id/secrets` lists only names and whether each is set. A value whose name the config stops declaring stays, marked as no longer declared, until a member clears it. Deleting the project deletes its settings and every secret value. Only the project's engineers and verifiers get the values, each for one task (**Engineers**, below).
 
@@ -394,8 +399,10 @@ Tests use a fake GitHub. This check uses the real GitHub and Docker and makes no
 6. Under **Secrets**, `DEMO_TOKEN` says **Not set**. Type `demo-secret-value-1` and click **Set**: it says **Set** and the field empties. Type `demo-secret-value-2` and click **Replace**.
 7. Check the value is only in control's secret store, sealed. `cat apps/control/.data/control.sqlite* | grep -c demo-secret-value` prints `0`. `docker exec chiefbot-<project id> sh -c 'env; cat /proc/*/environ 2>/dev/null' | grep -c demo-secret-value` prints `0`.
 8. Click **Clear**: `DEMO_TOKEN` says **Not set**.
-9. Click **New project** and type the second repo. The project is made. Its header shows an **Invalid project file** badge, and **Settings** shows `Unrecognized key: "conectors"`.
-10. Clean up: delete both projects. `docker ps -a` lists no `chiefbot-project_…` of them.
+9. Under **Template**, pick **Java and React enterprise**, then `ui` for **This repo**, and click **Save**. The `ui` row says **This repo**. **Settings** now ends with `template`, `service` and `services`, `meta` and `auth` on `stand-in`, and **Config** shows the three from **settings**.
+10. Set `meta` to **A repo**, type `octo-org/no-such-repo` and click **Save**. The form shows `invalid_settings` naming `services.meta`, and **Config** does not change.
+11. Click **New project** and type the second repo. The project is made. Its header shows an **Invalid project file** badge, and **Settings** shows `Unrecognized key: "conectors"`.
+12. Clean up: delete both projects. `docker ps -a` lists no `chiefbot-project_…` of them.
 
 ## Manual check: a project answers from its repo, on its own model
 

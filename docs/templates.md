@@ -2,7 +2,7 @@
 
 A **template** is a kind of service stack an engineer can get beside its code: for example a UI with its API, its gateway, a database and a seed step. Chiefbot ships a catalog of them in `templates/`, one folder each, as it ships connections in `connections/`. The first is `java-react-enterprise` (`templates/java-react-enterprise/README.md`).
 
-Engineers do not get a template's services yet. Control loads and lists the catalog. Picking a template for a project and giving each engineer its own copy of the stack come next.
+Control loads and lists the catalog, and a project picks a template (**Use one in a project**, below). Engineers do not get a template's services yet: giving each engineer its own copy of the stack comes next.
 
 ## See them
 
@@ -14,6 +14,34 @@ Open the gear menu at the bottom left of the sidebar and click **Connect apps**.
 - **Setup**: its stages in order, each with the compose services it waits for.
 
 The list is read-only. A template changes only with the repo. Control serves the list at `GET /templates`.
+
+## Use one in a project
+
+A project picks a template with three keys, in its `chiefbot.project.yaml` or in its settings in the app (README, **Projects**):
+
+```yaml
+template: java-react-enterprise                  # a template of the catalog, by its folder's name
+service: ui                                      # the template service this repo is
+services:                                        # where each other service runs from
+  meta: { repo: octo-org/meta-api, ref: main }   # a repo (owner/name) at a branch or tag
+  auth: stand-in                                 # the template's own stand-in
+```
+
+- `service` is the service the project's own repo is. It never runs as a container: each engineer will run it from its own clone, through `commands.setup` and `commands.dev`, so its edits show live. `services` cannot name it.
+- Each entry of `services` is `{ repo, ref }` or `stand-in`. A repo's image builds from the service's `context` in that repo, at `ref`, a branch or tag. Both keys are required, and no other key is allowed. A service that `services` leaves out runs its stand-in.
+- The settings override the file key by key, as for the other keys. `template`, `service` and `services` are each taken whole, so the settings' `services` replaces the file's.
+
+Control checks the keys against the catalog when it reads the file, as the project is made, and when settings are saved. It refuses:
+
+- a template that is not in the catalog;
+- a service the template does not have, in `service` or in `services`. Only the template's `services` count: a compose service such as `postgres` does not;
+- `services` naming the project's own service, or pointing another service at the project's own repo;
+- a template without `service`, or `service` or `services` without a template;
+- a repo the member cannot read, checked as for the project's own repo: through the repo app, or as a public repo where the app is not installed. A save checks the repos its settings name, as the member who saves.
+
+A file that breaks one of these rules is invalid: the project uses its settings alone, and **Settings** shows the error. Settings that break one are not saved (`invalid_settings`), and the error names the key.
+
+In the app, open the project's gear. **Template** has a picker with the catalog. Under it you pick the service this repo is, and for each other service **Stand-in** or **A repo**, with its repo and branch or tag. The project's own service is marked **This repo** and has no repo to pick. **Save** writes the three keys into the settings and keeps their other keys and comments. **Config** then shows each key with its source.
 
 ## Add one
 
