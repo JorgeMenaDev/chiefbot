@@ -1511,6 +1511,22 @@ test("a push through Chiefbot whose answer from GitHub is lost makes every verdi
   });
 });
 
+test("a push through Chiefbot that GitHub answers with a server error may have landed: every verdict on its branch is stale", async () => {
+  const control = await gitProject();
+  const { owner, project, copilot, github } = control;
+  const { tool } = await heldTurn(control, verifyOrPush(copilot));
+  const { head } = await pullRequestOnTask(control, tool);
+  await verifyTask(control, tool, "v-1");
+  const pushes = github.holdPushes();
+  const engineer = await pushFromTask(control, tool, 2);
+  await eventually(() => pushes.held() === 1);
+
+  pushes.timeOut();
+
+  await workerWhen(owner, project, engineer.id, ({ state }) => state === "finished");
+  expect(Task.array().parse((await tool({ tool: "list_tasks" })).body)[0]?.verification).toMatchObject({ result: "pass", sha: head, stale: true });
+});
+
 test("on restart a push through Chiefbot that was in flight is over: every verdict on its branch is stale, and a new verifier's is current", async () => {
   const control = await teamProject({ persistent: true });
   const { owner, project, copilot } = control;

@@ -575,7 +575,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     // That push is over. `moved` holds the branches GitHub took it for, each
     // with the commit it moved to (none when GitHub refused it): each
     // verification on one of them at another commit is stale. Null when its
-    // outcome is unknown, as GitHub's answer was lost: the push may land yet,
+    // outcome is unknown (GitHub's answer was lost, or a server error): it may have landed,
     // so its branches count a new revision and every verification on them is
     // stale, until a new verifier's. The projects whose tasks changed.
     pushEnded: db.transaction((repo: string, branches: string[], moved: Array<{ branch: string; sha: string }> | null): ProjectId[] => {

@@ -129,8 +129,9 @@ export function startFakeGitHub({
   let pullGate: Promise<void> | null = null;
   let pullsHeld = 0;
   // While set (holdPushes), each push waits before GitHub applies it, then is
-  // applied, or cut: dropped, its answer failing as a broken connection's would.
-  let pushGate: Promise<"apply" | "cut"> | null = null;
+  // applied; cut: dropped, its answer failing as a broken connection's would;
+  // or applied with a 502 answer, as a gateway that timed out gives.
+  let pushGate: Promise<"apply" | "cut" | "502"> | null = null;
   let pushesHeld = 0;
   const bareRepo = (fullName: string) => join(repoRoot, `${fullName}.git`);
   // Each repo: its id (as GitHub numbers repos), whether the app is installed on it, and who may do what.
@@ -370,13 +371,11 @@ export function startFakeGitHub({
       const push = url.pathname.endsWith("/git-receive-pack") || url.searchParams.get("service") === "git-receive-pack";
       const by = push ? writer(password, repository) : reader(password, repository);
       if (!by) return new Response("Repository not found.", { status: push ? 403 : 404 });
-      if (pushGate && req.method === "POST" && push) {
-        pushesHeld++;
-        if ((await pushGate) === "cut") return new Response(new ReadableStream({ start: (answer) => answer.error(new Error("connection lost")) }));
-      }
+      const how = pushGate && req.method === "POST" && push ? (pushesHeld++, await pushGate) : "apply";
+      if (how === "cut") return new Response(new ReadableStream({ start: (answer) => answer.error(new Error("connection lost")) }));
       const res = await gitHttpBackend(req, repoRoot);
       if (push && req.method === "POST" && res.ok) pushes.push({ repository, by });
-      return res;
+      return how === "502" ? new Response("Bad Gateway", { status: 502 }) : res;
     },
   });
 
@@ -520,16 +519,17 @@ export function startFakeGitHub({
       };
     },
     // Holds each push before it is applied: `release` applies them, `cut` drops
-    // them and fails their answers. `held` counts the pushes that waited.
+    // them and fails their answers, `timeOut` applies them and answers 502.
+    // `held` counts the pushes that waited.
     holdPushes() {
-      let settle = (_: "apply" | "cut") => {};
+      let settle = (_: "apply" | "cut" | "502") => {};
       pushGate = new Promise((resolve) => (settle = resolve));
       pushesHeld = 0;
-      const end = (how: "apply" | "cut") => {
+      const end = (how: "apply" | "cut" | "502") => {
         pushGate = null;
         settle(how);
       };
-      return { held: () => pushesHeld, release: () => end("apply"), cut: () => end("cut") };
+      return { held: () => pushesHeld, release: () => end("apply"), cut: () => end("cut"), timeOut: () => end("502") };
     },
     // Gives `login` `access` to the repo, or takes theirs away (null).
     setAccess(fullName: string, login: string, access: FakeRepoAccess | null) {
