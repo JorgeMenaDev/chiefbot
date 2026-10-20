@@ -1,5 +1,5 @@
 import type { Bot, BotStatus } from "@chiefbot/contracts";
-import { PanelRightIcon, PowerIcon, PowerOffIcon, Trash2Icon, XIcon } from "lucide-react";
+import { PanelRightIcon, PowerIcon, PowerOffIcon, Trash2Icon } from "lucide-react";
 import { useId, useState, type KeyboardEvent } from "react";
 import { Avatar } from "./Avatar.tsx";
 import { Chat } from "./Chat.tsx";
@@ -24,22 +24,23 @@ export function BotPane({ bot }: { bot: Bot }) {
     <>
       <Column>
         <PaneHeader icon={<BotFace bot={bot} className="size-6" dotClassName="-end-1 -bottom-1 bg-background" />} title={bot.name} note={`${statusText[bot.status]} · runs on your Copilot seat`}>
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            pressed={details}
-            aria-label="Bot details"
-            title={details ? "Hide details" : "Show details"}
-            onClick={() => showDetails(!details)}
-          >
-            <PanelRightIcon />
-          </Button>
+          {!details && <DetailsToggle open={false} onClick={() => showDetails(true)} />}
         </PaneHeader>
         <Chat bot={bot} />
       </Column>
       {/* Closed, the panel stays mounted but hidden, so the bot's screen stays open. */}
       <BotDetails bot={bot} hidden={!details} onClose={() => showDetails(false)} />
     </>
+  );
+}
+
+// Shows or hides the details panel. It sits at the window's top-right corner either
+// way: at the end of the chat header while the panel is closed, in the panel's bar while open.
+function DetailsToggle({ open, className, onClick }: { open: boolean; className?: string; onClick: () => void }) {
+  return (
+    <Button size="icon-xs" variant="ghost" pressed={open} className={className} aria-label="Bot details" title={open ? "Hide details" : "Show details"} onClick={onClick}>
+      <PanelRightIcon />
+    </Button>
   );
 }
 
@@ -95,9 +96,7 @@ function BotDetails({ bot, hidden, onClose }: { bot: Bot; hidden: boolean; onClo
     <SidePanel
       hidden={hidden}
       bar={
-        <Button size="icon-xs" variant="ghost" className="ms-auto" aria-label="Close details" title="Close details" onClick={onClose}>
-          <XIcon />
-        </Button>
+        <DetailsToggle open className="ms-auto" onClick={onClose} />
       }
     >
       <div className="flex flex-col items-center gap-3 px-5 pt-6 pb-5 text-center">
