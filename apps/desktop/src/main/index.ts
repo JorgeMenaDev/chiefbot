@@ -23,10 +23,11 @@ import {
   SubscriptionId,
   SubscriptionInput,
   TaskWorkerId,
+  Theme,
   UserId,
   WorkspaceId,
 } from "@chiefbot/contracts";
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, nativeTheme, session, shell } from "electron";
 import { configuredSignIn, setupNeeded } from "@chiefbot/setup";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -117,6 +118,15 @@ const auth = createAuth({
     }
   },
 });
+
+// The Theme setting (renderer lib/theme.ts), as T3 Code's desktop sets it: the native
+// theme drives scrollbars, menus, dialogs and the OS media query; the window's
+// background follows, so a resize never shows the other theme's colour.
+ipcMain.handle("theme:set", (_event, theme: unknown) => {
+  nativeTheme.themeSource = Theme.parse(theme);
+});
+const windowBackground = () => (nativeTheme.shouldUseDarkColors ? "#0a0a0a" : "#fcfcfc");
+nativeTheme.on("updated", () => window?.setBackgroundColor(windowBackground()));
 
 ipcMain.handle("auth:get", () => auth.state());
 ipcMain.handle("auth:sign-in", () => auth.signIn());
@@ -303,7 +313,11 @@ app.whenReady().then(async () => {
     // centred in its 52px height (buttons are 12px) beside the sidebar toggle.
     ...(process.platform === "darwin" ? ({ titleBarStyle: "hiddenInset", trafficLightPosition: { x: 16, y: 20 } } as const) : {}),
     webPreferences: { preload: join(import.meta.dirname, "../preload/index.cjs") },
+    // Shown once the page has painted in the saved theme, so it never flashes the other one.
+    show: false,
+    backgroundColor: windowBackground(),
   });
+  window.once("ready-to-show", () => window?.show());
   // Links (the GitHub device page) open in the default browser, never in the app.
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);

@@ -1,4 +1,4 @@
-import type { BotAvatar, ConnectorInput, RoutineInput, SubscriptionInput } from "@chiefbot/contracts";
+import type { BotAvatar, ConnectorInput, RoutineInput, SubscriptionInput, Theme } from "@chiefbot/contracts";
 import { contextBridge, ipcRenderer } from "electron";
 
 // Subscribes to one main → renderer channel; returns the unsubscribe.
@@ -84,6 +84,10 @@ const api = {
       ipcRenderer.invoke("projects:answer", id, workerId, approvalId, approved),
     // { projectId, workers } whenever one of a project's workers changes.
     onWorkers: (listener: (workers: unknown) => void) => subscribe("projects:workers", listener),
+  },
+  // The Theme setting: main sets Electron's native theme to match.
+  theme: {
+    set: (theme: Theme): Promise<void> => ipcRenderer.invoke("theme:set", theme),
   },
   // The user's own connections (Connect apps) and a bot's calls with them.
   connections: {

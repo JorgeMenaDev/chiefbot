@@ -23,6 +23,7 @@ import { z } from "zod";
 import { BotFace, BotPane } from "./BotPane.tsx";
 import { ConnectApps } from "./ConnectApps.tsx";
 import { Connectors } from "./Connectors.tsx";
+import { Settings } from "./Settings.tsx";
 import { NewBot } from "./NewBot.tsx";
 import { NewProject, ProjectPane, useProjects } from "./Projects.tsx";
 import { Column, PaneHeader } from "./Pane.tsx";
@@ -196,6 +197,7 @@ function Workspace({ user }: { user: User }) {
   const showConnectors = current !== null && selectedId === "connectors";
   // Connect apps (from the gear menu) is the person's own, in any workspace.
   const showConnectApps = selectedId === "connect-apps";
+  const showSettings = selectedId === "settings";
   const project = projects.find(({ id }) => id === selectedId);
   const selected = bots.find((bot) => bot.id === selectedId) ?? bots[0];
   const searching = query.trim() !== "";
@@ -289,7 +291,7 @@ function Workspace({ user }: { user: User }) {
               {shownBots.map((bot) => (
                 <SidebarRow
                   key={bot.id}
-                  active={!showMembers && !showConnectors && !showConnectApps && !project && bot.id === selected?.id}
+                  active={!showMembers && !showConnectors && !showConnectApps && !showSettings && !project && bot.id === selected?.id}
                   onClick={() => setSelectedId(bot.id)}
                 >
                   <BotFace bot={bot} className="size-4.5" dotClassName="-end-1 -bottom-1 scale-75 bg-sidebar" />
@@ -329,6 +331,7 @@ function Workspace({ user }: { user: User }) {
               setSelectedId("connect-apps");
               setMembersVisit(membersVisit + 1);
             }}
+            onSettings={() => setSelectedId("settings")}
           />
         </footer>
       </Sidebar>
@@ -336,6 +339,10 @@ function Workspace({ user }: { user: User }) {
         {showConnectApps ? (
           <Column>
             <ConnectApps key={membersVisit} />
+          </Column>
+        ) : showSettings ? (
+          <Column>
+            <Settings />
           </Column>
         ) : showMembers ? (
           <Column>
@@ -386,9 +393,9 @@ function Workspace({ user }: { user: User }) {
 }
 
 // Bottom left, after T3 Code's settings button: a menu with the signed-in GitHub
-// user and their Copilot plan, Connect apps, Disconnect GitHub and Sign out. The
+// user and their Copilot plan, Connect apps, Settings, Disconnect GitHub and Sign out. The
 // menu sits in the top layer, so it is never clipped, whatever the window's height.
-function SettingsMenu({ user, onConnectApps }: { user: User; onConnectApps: () => void }) {
+function SettingsMenu({ user, onConnectApps, onSettings }: { user: User; onConnectApps: () => void; onSettings: () => void }) {
   const menu = "settings-menu";
   const { disconnectGitHub, signOut } = window.chiefbot.auth;
   return (
@@ -415,6 +422,10 @@ function SettingsMenu({ user, onConnectApps }: { user: User; onConnectApps: () =
             Connect apps
             <span className="text-muted-foreground text-xs">Tools and skills for your Chief of Staff</span>
           </span>
+        </MenuItem>
+        <MenuItem menu={menu} onClick={onSettings}>
+          <SettingsIcon />
+          Settings
         </MenuItem>
         {!user.needsGitHubSignIn && (
           <MenuItem menu={menu} onClick={() => void disconnectGitHub()}>

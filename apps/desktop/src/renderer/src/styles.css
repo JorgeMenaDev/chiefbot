@@ -1,9 +1,10 @@
 /* T3 Code's design system (https://github.com/pingdotgg/t3code, MIT), from
    apps/web/src/index.css: the same colour roles, radii, fonts and sidebar
-   palette. Light or dark follows the system, as T3 Code does by default. */
+   palette. The `dark` class on <html> turns on the dark colours, as in T3 Code;
+   lib/theme.ts puts it there from the Theme setting. */
 @import "tailwindcss" source(".");
 
-@custom-variant dark (@media (prefers-color-scheme: dark));
+@custom-variant dark (&:is(.dark, .dark *));
 
 @theme {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
