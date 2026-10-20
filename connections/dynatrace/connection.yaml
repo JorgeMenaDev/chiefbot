@@ -1,0 +1,32 @@
+# Dynatrace through dtctl (github.com/dynatrace-oss/dtctl; docs/connections.md).
+# dtctl takes a platform token only from a config file's context, so install.sh
+# writes one to /etc/dtctl/config.yaml whose URL and token are ${DT_ENVIRONMENT_URL}
+# and ${DT_API_TOKEN}: dtctl fills them from its environment when it loads a file
+# named by DTCTL_CONFIG. The file is root's, so the agent cannot repoint it.
+# DTCTL_TOKEN_STORAGE=file keeps dtctl off any OS keyring, and HOME in the turn's
+# folder takes its query spills and usage ledger with the turn.
+title: Dynatrace
+description: Dynatrace problems, logs, services and SLOs through dtctl, as you.
+cli: dtctl
+fields:
+  environment: { label: "Environment URL, like https://abc12345.apps.dynatrace.com" }
+  token: { label: "Platform token (dt0s16...) with only the scopes it needs, and an expiry", secret: true }
+env:
+  DT_ENVIRONMENT_URL: "{environment}"
+  DT_API_TOKEN: "{token}"
+  DTCTL_CONFIG: "/etc/dtctl/config.yaml"
+  DTCTL_TOKEN_STORAGE: "file"
+  HOME: "{dir}"
+readOnly:
+  - "dtctl version*"
+  - "dtctl * --help"
+  - "dtctl doctor*"
+  - "dtctl commands*"
+  - "dtctl auth status*"
+  - "dtctl get *"
+  - "dtctl describe *"
+  - "dtctl query *"
+  - "dtctl verify *"
+  - "dtctl logs *"
+  - "dtctl history *"
+  - "dtctl inspect *"

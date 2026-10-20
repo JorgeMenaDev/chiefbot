@@ -65,7 +65,7 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
         return { code, out: out.trim() };
       };
       // Every connection's CLI is installed, and no turn's connection is staged between turns.
-      expect((await inBot("acli --version >/dev/null && harness --version >/dev/null")).code).toBe(0);
+      expect((await inBot("acli --version >/dev/null && harness --version >/dev/null && dtctl version >/dev/null")).code).toBe(0);
       expect(await inBot("ls /tmp/chiefbot")).toEqual({ code: 2, out: "ls: cannot access '/tmp/chiefbot': No such file or directory" });
 
       expect(await inBot("cd /tmp && git clone -q https://github.com/octo/demo.git demo && git -C demo log --format=%s")).toEqual({

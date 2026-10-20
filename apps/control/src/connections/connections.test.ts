@@ -49,6 +49,7 @@ test("a person turns a connection on with their own fields; its secrets stay in 
   expect(saved.status).toBe(200);
   const rows = await list();
   expect(rows.map(({ name, on }) => [name, on])).toEqual([
+    ["dynatrace", false],
     ["harness", true],
     ["jira", false],
   ]);
@@ -57,11 +58,11 @@ test("a person turns a connection on with their own fields; its secrets stay in 
   expect(connectionSecrets().map(([, value]) => JSON.parse(value))).toEqual([{ token: harness.token }]);
   // Connections are a person's own.
   const other = await signIn(friend);
-  expect((await list(other.api)).map(({ on }) => on)).toEqual([false, false]);
+  expect((await list(other.api)).map(({ on }) => on)).toEqual([false, false, false]);
 
   expect((await api("DELETE", "/connections/harness")).status).toBe(204);
   expect((await api("DELETE", "/connections/harness")).status).toBe(204);
-  expect((await list()).map(({ on }) => on)).toEqual([false, false]);
+  expect((await list()).map(({ on }) => on)).toEqual([false, false, false]);
   expect(connectionSecrets()).toEqual([]);
 });
 

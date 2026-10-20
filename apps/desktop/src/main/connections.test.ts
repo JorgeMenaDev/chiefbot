@@ -41,11 +41,12 @@ test("the user turns Jira on with their fields and off again, and reads a bot's 
   const bot = await createBots({ controlUrl: control.url, session, onChange: () => {} }).create({ name: "Ada", avatar: DEFAULT_AVATAR });
 
   expect(before.map(({ name, on }) => [name, on])).toEqual([
+    ["dynatrace", false],
     ["harness", false],
     ["jira", false],
   ]);
   expect(jira.on).toBe(true);
   expect(refused).toContain("invalid_connection: email is missing");
-  expect((await connections.list()).map(({ on }) => on)).toEqual([false, false]);
+  expect((await connections.list()).map(({ on }) => on)).toEqual([false, false, false]);
   expect(await connections.calls(bot.id)).toEqual([]);
 });

@@ -15,6 +15,7 @@ Connections differ from connectors (`docs/connectors.md`): a connector is an MCP
 | App | Fields |
 | --- | --- |
 | Jira | Site (like `mysite.atlassian.net`), your Atlassian email, an API token (id.atlassian.com, **Security**, **API tokens**; pick one with scopes and an expiry date). |
+| Dynatrace | Environment URL (like `https://abc12345.apps.dynatrace.com`) and a platform token (myaccount.dynatrace.com, **Platform tokens**; with an expiry date). Health checks need `storage:buckets:read`, `storage:events:read`, `storage:logs:read`, `storage:metrics:read` and `slo:slos:read`; dtctl's `docs/TOKEN_SCOPES.md` lists the rest. |
 | Harness | Account ID, a default organization and project (the CLI refuses to run without them; `--org` and `--project` still choose another per command), and a personal access token or service account token with only the roles it needs. |
 
 ## What happens in a turn
