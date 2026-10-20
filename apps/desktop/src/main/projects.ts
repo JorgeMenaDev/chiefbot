@@ -1,4 +1,6 @@
 import {
+  ContextFile,
+  ContextFileText,
   Project,
   ProjectSecret,
   SendMessageResponse,
@@ -11,6 +13,7 @@ import {
   type SubscriptionId,
   type SubscriptionInput,
   type TaskWorkerId,
+  type WorkerChatView,
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { foldChat, followChat } from "./chat.ts";
@@ -22,16 +25,20 @@ export type ProjectsOptions = {
   session: () => string | null;
   // The user's chat with a project's coordinator changed.
   onChat: (view: ProjectChatView) => void;
+  // The transcript of the worker main follows changed.
+  onWorkerChat?: (view: WorkerChatView) => void;
   // Wait between reconnects after a chat socket drops.
   retryMs?: number;
 };
 
 // The projects of the user's workspaces, owned by Electron main: plain HTTP
 // calls to control, plus the user's own chat with each opened project's
-// coordinator. Task ledger and worker changes arrive on /events (bots.ts, onTasks and onWorkers).
-export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: ProjectsOptions) {
+// coordinator, and the transcript of the one worker the user watches. Task
+// ledger and worker changes arrive on /events (bots.ts, onTasks and onWorkers).
+export function createProjects({ controlUrl, session, onChat, onWorkerChat, retryMs = 2000 }: ProjectsOptions) {
   const call = controlCaller({ controlUrl, session });
   const chats = new Map<ProjectId, { view: ProjectChatView; close: () => void }>();
+  let watched: { view: WorkerChatView; close: () => void } | null = null;
   const emptyView = (projectId: ProjectId): ProjectChatView => ({ projectId, items: [], working: null });
 
   return {
@@ -61,6 +68,15 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
     async answerChat(projectId: ProjectId, approvalId: ApprovalId, approved: boolean) {
       await call("POST", `/projects/${projectId}/approvals/${approvalId}`, { approved });
     },
+    // The shared context's files, and one file's Markdown.
+    context: async (projectId: ProjectId) => ContextFile.array().parse(await (await call("GET", `/projects/${projectId}/context`)).json()),
+    contextFile: async (projectId: ProjectId, path: string) =>
+      ContextFileText.parse(await (await call("GET", `/projects/${projectId}/context/file?path=${encodeURIComponent(path)}`)).json()),
+    // The user drives a worker's screen until handBack; its tool calls wait meanwhile. Any member may.
+    takeOver: async (projectId: ProjectId, workerId: TaskWorkerId) =>
+      TaskWorker.parse(await (await call("POST", `/projects/${projectId}/workers/${workerId}/take-over`)).json()),
+    handBack: async (projectId: ProjectId, workerId: TaskWorkerId) =>
+      TaskWorker.parse(await (await call("POST", `/projects/${projectId}/workers/${workerId}/hand-back`)).json()),
     // Approves or declines a push or pull request of a worker the user asked for.
     // The card goes when control's next `workers` event comes.
     async answer(projectId: ProjectId, workerId: TaskWorkerId, approvalId: ApprovalId, approved: boolean) {
@@ -95,6 +111,28 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
 
     chatView: (projectId: ProjectId) => chats.get(projectId)?.view ?? emptyView(projectId),
 
+    // Follows the worker's transcript, and stops following the one followed before:
+    // the window shows one at a time. Repeat calls are harmless.
+    openWorkerChat(projectId: ProjectId, workerId: TaskWorkerId) {
+      if (watched?.view.workerId === workerId) return;
+      watched?.close();
+      const worker = { view: { workerId, items: [], working: null } satisfies WorkerChatView, close: () => {} };
+      watched = worker;
+      worker.close = followChat({
+        controlUrl,
+        session,
+        retryMs,
+        path: (after) => `/projects/${projectId}/workers/${workerId}/transcript?after=${after}`,
+        onEvent: (event) => {
+          worker.view = foldChat(worker.view, event);
+          onWorkerChat?.(worker.view);
+        },
+      }).close;
+    },
+
+    workerChatView: (workerId: TaskWorkerId): WorkerChatView =>
+      watched?.view.workerId === workerId ? watched.view : { workerId, items: [], working: null },
+
     // Queues the message for the coordinator; throws while the user's last one is unanswered.
     send: async (projectId: ProjectId, text: string) =>
       SendMessageResponse.parse(await (await call("POST", `/projects/${projectId}/messages`, { text })).json()).turnId,
@@ -104,6 +142,8 @@ export function createProjects({ controlUrl, session, onChat, retryMs = 2000 }: 
       const open = [...chats.values()];
       chats.clear();
       for (const chat of open) chat.close();
+      watched?.close();
+      watched = null;
     },
   };
 }

@@ -1,9 +1,9 @@
 import { afterEach, expect, test } from "bun:test";
-import { Project, SignInResponse, Workspace, type ProjectId, type ProjectState } from "@chiefbot/contracts";
+import { ContextPath, Project, SignInResponse, Workspace, type ProjectId, type ProjectState, type WorkerChatView } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
-import { fakeCopilot, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
+import { fakeCopilot, sdk, type FakeCopilot } from "@chiefbot/worker/fake-copilot";
 import { createBots } from "./bots.ts";
 import { createProjects } from "./projects.ts";
 
@@ -56,4 +56,41 @@ test("each project's state reaches main live, and main keeps the latest for a wi
 
   await eventually(() => bots.projectStates()[project.id] === "idle");
   expect(states.at(-1)).toEqual([project.id, "idle"]);
+});
+
+test("main follows one engineer's transcript at a time, reads the shared context, and takes and hands back an engineer's screen", async () => {
+  // The project agent files the request, notes it and starts an engineer, which says one thing and keeps working.
+  const copilot = fakeCopilot({
+    script: async function* (prompt, runtime) {
+      if (/^Task #\d+:/m.test(prompt)) {
+        yield sdk.message("msg-1", "Cloned the repo.");
+        await new Promise(() => {});
+      }
+      await runtime.tool("create_task", { title: "Fix the typo" });
+      await runtime.tool("write_context", { path: "notes.md", content: "Started task #1." });
+      await runtime.tool("dispatch_worker", { task: 1 });
+      yield sdk.idle();
+    },
+  });
+  const { control, project, session } = await projectControl(copilot);
+  const views: WorkerChatView[] = [];
+  const projects = createProjects({ controlUrl: control.url, session, retryMs: 20, onChat: () => {}, onWorkerChat: (view) => views.push(view) });
+  stops.push(projects.disconnect);
+
+  await projects.send(project.id, "Fix the typo");
+  let engineers = await projects.workers(project.id);
+  await eventually(async () => (engineers = await projects.workers(project.id)).some(({ state }) => state === "working"));
+  const [engineer] = engineers;
+  if (!engineer) throw new Error("no engineer");
+
+  projects.openWorkerChat(project.id, engineer.id);
+  const said = (view: WorkerChatView | undefined) => view?.items.some((item) => item.kind === "assistant" && item.text === "Cloned the repo.");
+  await eventually(() => said(views.at(-1)) === true);
+  expect(projects.workerChatView(engineer.id)).toEqual(views.at(-1) ?? { workerId: engineer.id, items: [], working: null });
+
+  expect((await projects.context(project.id)).map(({ path }) => String(path))).toEqual(["notes.md"]);
+  expect(await projects.contextFile(project.id, "notes.md")).toEqual({ path: ContextPath.parse("notes.md"), content: "Started task #1." });
+
+  expect((await projects.takeOver(project.id, engineer.id)).screenControl).toBe("human");
+  expect((await projects.handBack(project.id, engineer.id)).screenControl).toBe("agent");
 });

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApprovalKind } from "./chat.ts";
+import { ApprovalKind, ChatItem } from "./chat.ts";
 import { ApprovalId, ProjectId, TaskWorkerId } from "./ids.ts";
 import { ScreenControl } from "./screens.ts";
 import { CopilotPayer } from "./workspaces.ts";
@@ -44,6 +44,11 @@ export type TaskWorker = z.infer<typeof TaskWorker>;
 // ClientEvent), and what Electron main hands the renderer.
 export const ProjectWorkers = z.object({ projectId: ProjectId, workers: z.array(TaskWorker) });
 export type ProjectWorkers = z.infer<typeof ProjectWorkers>;
+
+// A worker's transcript as a member watches it, folded like a chat by Electron
+// main: what main hands the renderer. `working` is null once its turn ended.
+export const WorkerChatView = z.object({ workerId: TaskWorkerId, items: z.array(ChatItem), working: z.string().nullable() });
+export type WorkerChatView = z.infer<typeof WorkerChatView>;
 
 // The answer of the coordinator's worker_transcript tool: what the worker did, one line per
 // message, tool call, approval or error, oldest first. `truncated` when older lines were left out.
