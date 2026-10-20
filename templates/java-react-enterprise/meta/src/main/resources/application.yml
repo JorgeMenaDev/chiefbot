@@ -1,0 +1,18 @@
+# Fixed port and a database on localhost, as on a developer's laptop.
+server:
+  port: 8082
+  # Say why a request failed (a bad schema name), not just the status.
+  error.include-message: always
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/acme
+    username: acme
+    password: acme
+  flyway:
+    # One Flyway run creates and migrates all three schemas. Its history table lives in live.
+    schemas: live,sandbox,experimental
+acme:
+  # Shared with the gateway, which signs the tokens meta trusts.
+  jwt-secret: ${ACME_JWT_SECRET}
+management:
+  endpoints.web.exposure.include: health
