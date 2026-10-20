@@ -136,6 +136,12 @@ test.each([
   ["two key presses in one action", [{ kind: "key", keys: "ctrl+a BackSpace" }]],
   ["a chord over 64 characters", [{ kind: "key", keys: `${"ctrl+".repeat(13)}a` }]],
   ["text over 1000 characters", [{ kind: "type", text: "a".repeat(1001) }]],
+  // Control characters other than newline and tab: their keys could stay held.
+  ["a carriage return in text", [{ kind: "type", text: "a\rb" }]],
+  ["a backspace in text", [{ kind: "type", text: "ab\b" }]],
+  ["a NUL in text", [{ kind: "type", text: "\u0000" }]],
+  ["a DEL in text", [{ kind: "type", text: "a\u007f" }]],
+  ["a C1 control character in text", [{ kind: "type", text: "a\u0085" }]],
   ["an unknown kind", [{ kind: "launch", app: "xterm" }]],
 ])("%s is refused before anything runs", async (_name, actions) => {
   const { display, call } = setup();
@@ -255,6 +261,7 @@ test("an invalid call tells the model what is wrong, in words", async () => {
   const { call } = setup();
 
   await expect(call({ actions: [{ kind: "key", keys: "exec echo X" }] })).rejects.toThrow("one key or chord of X key names joined by +");
+  await expect(call({ actions: [{ kind: "type", text: "a\rb" }] })).rejects.toThrow("printable characters, newlines and tabs");
 });
 
 test("the real runner stops a command when its call is cancelled, and fails one that complains on stderr", async () => {
@@ -297,7 +304,7 @@ test("typing cut short releases the modifiers xdotool adds and every character o
   expect(display.commands[2]).toEqual([
     "xdotool", "keyup", "--delay", "0",
     "Shift_L", "Shift_R", "Control_L", "Alt_L", "Super_L", "ISO_Level3_Shift",
-    // A, b, space, newline, tab, é, 😀: the X key names xdotool types them with.
-    "U0041", "U0062", "U0020", "Return", "Tab", "U00E9", "U1F600",
+    // A, b, space, newline, tab, é, 😀: the X key names xdotool may type them with.
+    "U0041", "U0062", "U0020", "Linefeed", "Return", "Tab", "U00E9", "U1F600",
   ]);
 });

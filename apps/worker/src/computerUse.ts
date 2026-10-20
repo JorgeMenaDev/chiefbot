@@ -40,6 +40,16 @@ const Keys = z
 // types: the person can take over between chunks.
 const MAX_TEXT = 1000;
 const TEXT_CHUNK = 100;
+// Text is printable characters, newlines and tabs: a cut-short command may hold
+// the key of any other control character (C0, DEL and C1), and X has no U+hex
+// key name to release it by.
+const printable = "printable characters, newlines and tabs only";
+const Text = z
+  .string()
+  .min(1)
+  .max(MAX_TEXT)
+  .regex(/^[^\u0000-\u0008\u000B-\u001F\u007F-\u009F]*$/, printable)
+  .describe(printable);
 
 // One thing the bot does on its screen. A union, not a discriminated one: its
 // JSON Schema is anyOf, which every model's tool schema takes (oneOf is not).
@@ -58,7 +68,7 @@ const ComputerAction = z.union([
     direction: z.enum(["up", "down", "left", "right"]),
     amount: z.number().int().min(1).max(30).optional().describe("Wheel clicks. Default 5."),
   }),
-  z.object({ kind: z.literal("type"), text: z.string().min(1).max(MAX_TEXT) }),
+  z.object({ kind: z.literal("type"), text: Text }),
   z.object({ kind: z.literal("key"), keys: Keys }),
   z.object({ kind: z.literal("wait"), ms: z.number().int().min(0).max(5000) }),
   z.object({ kind: z.literal("screenshot") }),
@@ -116,10 +126,11 @@ const keyup = (keys: string[]) => ["xdotool", "keyup", "--delay", "0", ...keys];
 // The modifiers xdotool may hold to type a character: Shift for a capital,
 // ISO_Level3_Shift for an AltGr one, and so on.
 const typingModifiers = ["Shift_L", "Shift_R", "Control_L", "Alt_L", "Super_L", "ISO_Level3_Shift"];
-// The X key name xdotool types a character with: Return and Tab for a newline
-// and a tab, and U+hex (as XStringToKeysym reads it) for any other.
-const typedKey = (character: string) =>
-  character === "\n" ? "Return" : character === "\t" ? "Tab" : `U${(character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}`;
+// The X key names xdotool may type a character with: Linefeed (as the image's
+// xdotool does) or Return for a newline, Tab for a tab, and U+hex (as
+// XStringToKeysym reads it) for any other.
+const typedKeys = (character: string) =>
+  character === "\n" ? ["Linefeed", "Return"] : character === "\t" ? ["Tab"] : [`U${(character.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}`];
 
 // The xdotool commands that do `action` (one, a text's chunks, or none for one
 // that only looks), each with the command that releases what it presses.
@@ -149,7 +160,7 @@ function commandsFor(action: ComputerAction): Array<{ command: string[]; release
       const chunks = Array.from({ length: Math.ceil(characters.length / TEXT_CHUNK) }, (_, i) => characters.slice(i * TEXT_CHUNK, (i + 1) * TEXT_CHUNK).join(""));
       return chunks.map((chunk) => ({
         command: ["xdotool", "type", "--", chunk],
-        release: keyup([...typingModifiers, ...new Set(Array.from(chunk, typedKey))]),
+        release: keyup([...typingModifiers, ...new Set(Array.from(chunk).flatMap(typedKeys))]),
       }));
     }
     case "key":
@@ -226,7 +237,7 @@ export function computerTool({
       `See and operate your computer's ${SCREEN.width}×${SCREEN.height} screen, with Chromium open on it. Runs 1 to 10 actions in order and stops at the first that fails, ` +
       "then waits 300 ms and returns { ran, cursor, error? } with one screenshot. Coordinates are screenshot pixels. " +
       'To look, send only { kind: "screenshot" }. To open a page in Chromium: key ctrl+l, type the address, key Return, wait. ' +
-      `A key action presses one key or chord; a type action types up to ${MAX_TEXT} characters.`,
+      `A key action presses one key or chord; a type action types up to ${MAX_TEXT} printable characters, newlines and tabs.`,
     parameters: ComputerArgs,
     async handler(raw: unknown, invocation: ToolInvocation): Promise<ToolResultObject> {
       const parsed = ComputerArgs.safeParse(raw);
