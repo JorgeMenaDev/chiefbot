@@ -1,20 +1,26 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { computerTool, displayCommands } from "./computerUse.ts";
 import { sdk } from "./fakeCopilot.ts";
 import { fakeDisplay } from "./fakeDisplay.ts";
 import { newTurnStream, toTurnEvents } from "./turnEvents.ts";
 
-// A command in short: xdotool's subcommand, or the shell's script.
-const step = (command: string[]) => (command[0] === "sh" ? command.slice(2).join(" ") : command.slice(0, 2).join(" "));
+// A command in short: the program and its first argument.
+const step = (command: string[]) => command.slice(0, 2).join(" ");
 
-// The computer tool on a fake display. The agent holds the screen and its turn
-// runs unless `agentHasScreen` or `turnRunning` say otherwise; `signal` is the call's.
-function setup({ agentHasScreen = (): boolean => true, turnRunning = (): boolean => true } = {}) {
+// The computer tool on a fake display, saving screenshots in a new temporary
+// folder. The agent holds the screen unless `agentHasScreen` says otherwise;
+// `endTurn()` ends its turn, and `signal` is the call's.
+function setup({ agentHasScreen = (): boolean => true } = {}) {
   const display = fakeDisplay();
-  const tool = computerTool({ run: display.run, agentHasScreen, turnRunning });
+  const turn = new AbortController();
+  const screenshotDir = join(mkdtempSync(join(tmpdir(), "chiefbot-screen-")), "screen");
+  const tool = computerTool({ run: display.run, agentHasScreen, turnEnded: turn.signal, screenshotDir });
   const call = (args: unknown, signal?: AbortSignal) =>
     tool.handler(args, { sessionId: "bot_1", toolCallId: "call-1", toolName: "computer", arguments: args, ...(signal ? { signal } : {}) });
-  return { display, call };
+  return { display, call, endTurn: () => turn.abort(), screenshotDir };
 }
 
 test("a batch runs its actions in order as xdotool commands", async () => {
@@ -46,8 +52,8 @@ test("a batch runs its actions in order as xdotool commands", async () => {
   ]);
 });
 
-test("every call ends with a settle, the cursor and one PNG screenshot for the model", async () => {
-  const { display, call } = setup();
+test("every call ends with a settle, the cursor and one PNG screenshot for the model, deleted from disk", async () => {
+  const { display, call, screenshotDir } = setup();
   display.cursor = { x: 12, y: 34 };
 
   const result = await call({ actions: [{ kind: "move", at: { x: 12, y: 34 } }, { kind: "screenshot" }] });
@@ -56,8 +62,9 @@ test("every call ends with a settle, the cursor and one PNG screenshot for the m
     ["xdotool", "mousemove", "12", "34"],
     ["xdotool", "sleep", "0.3"],
     ["xdotool", "getmouselocation", "--shell"],
-    ["sh", "-c", "scrot - | cat"],
+    ["scrot", "--overwrite", expect.stringMatching(new RegExp(`^${screenshotDir}/[\\w-]+\\.png$`))],
   ]);
+  expect(readdirSync(screenshotDir)).toEqual([]);
   expect(result).toEqual({
     textResultForLlm: JSON.stringify({ ran: 2, cursor: { x: 12, y: 34 } }),
     binaryResultsForLlm: [{ type: "image", mimeType: "image/png", data: Buffer.from(display.png).toString("base64") }],
@@ -82,7 +89,7 @@ test("a failed action stops the batch: ran says how many went through, and the s
     "xdotool key",
     "xdotool sleep",
     "xdotool getmouselocation",
-    "scrot - | cat",
+    "scrot --overwrite",
   ]);
   expect(JSON.parse(result.textResultForLlm)).toEqual({ ran: 1, cursor: display.cursor, error: "key failed: Invalid key sequence 'ctrl+nope'" });
   expect(result.binaryResultsForLlm).toHaveLength(1);
@@ -102,7 +109,7 @@ test("the person taking over mid-batch stops it before the next action", async (
     "xdotool mousemove",
     "xdotool sleep",
     "xdotool getmouselocation",
-    "scrot - | cat",
+    "scrot --overwrite",
   ]);
   expect(JSON.parse(result.textResultForLlm)).toEqual({ ran: 1, cursor: display.cursor, error: "the person has the screen" });
 });
@@ -170,7 +177,7 @@ test("long text types in chunks of 100 characters, and a take-over between chunk
     ["xdotool", "type", "--", "a".repeat(100)],
     ["xdotool", "type", "--", "b".repeat(100)],
   ]);
-  expect(display.commands.map(step).slice(2)).toEqual(["xdotool sleep", "xdotool getmouselocation", "scrot - | cat"]);
+  expect(display.commands.map(step).slice(2)).toEqual(["xdotool sleep", "xdotool getmouselocation", "scrot --overwrite"]);
   expect(JSON.parse(result.textResultForLlm)).toEqual({ ran: 0, cursor: display.cursor, error: "the person has the screen" });
 });
 
@@ -179,7 +186,7 @@ test("a cancelled call stops the command it runs and runs no other", async () =>
   const { display, call } = setup();
   let running: AbortSignal | undefined;
   display.hold = async (_command, signal) => {
-    running = signal;
+    running ??= signal;
     cancel.abort();
   };
 
@@ -187,23 +194,54 @@ test("a cancelled call stops the command it runs and runs no other", async () =>
 
   await expect(result).rejects.toThrow("cancelled");
   expect(running?.aborted).toBe(true);
-  expect(display.commands.map(step)).toEqual(["xdotool mousemove"]);
+  // The click's button is released: the one command after it.
+  expect(display.commands.map(step)).toEqual(["xdotool mousemove", "xdotool mouseup"]);
 });
 
-test("a call whose turn has ended runs no further command", async () => {
-  let turnRunning = true;
-  const { display, call } = setup({ turnRunning: () => turnRunning });
-  display.hold = async () => {
-    turnRunning = false;
+test("ending the turn stops the command it runs, even the final settle, and runs no other", async () => {
+  const { display, call, endTurn } = setup();
+  const running: Array<AbortSignal | undefined> = [];
+  display.hold = async (command, signal) => {
+    running.push(signal);
+    if (command[1] === "sleep") endTurn();
   };
 
-  await expect(call({ actions: [{ kind: "click", at: { x: 10, y: 20 } }, { kind: "type", text: "too late" }] })).rejects.toThrow("turn has ended");
-  expect(display.commands.map(step)).toEqual(["xdotool mousemove"]);
+  await expect(call({ actions: [{ kind: "type", text: "typed" }] })).rejects.toThrow("turn has ended");
+  expect(display.commands.map(step)).toEqual(["xdotool type", "xdotool sleep"]);
+  expect(running.every((signal) => signal?.aborted)).toBe(true);
+});
+
+test("a drag cut short releases its button with a command of its own, then the call goes on or stops", async () => {
+  const { display, call } = setup();
+  const drag = { kind: "drag", from: { x: 5, y: 6 }, to: { x: 7, y: 8 } };
+  display.fails = (command) => (command.includes("mousedown") ? "the X server went away" : null);
+  let release: AbortSignal | undefined;
+  display.hold = async (command, signal) => {
+    if (command[1] === "mouseup") release = signal;
+  };
+
+  const failed = await call({ actions: [drag] });
+
+  expect(display.commands.map(step).slice(0, 2)).toEqual(["xdotool mousemove", "xdotool mouseup"]);
+  expect(display.commands[1]).toEqual(["xdotool", "mouseup", "1"]);
+  expect(release?.aborted).toBe(false);
+  expect(JSON.parse(failed.textResultForLlm)).toMatchObject({ ran: 0, error: "drag failed: the X server went away" });
+
+  const cancel = new AbortController();
+  display.commands.length = 0;
+  display.fails = () => null;
+  display.hold = async (command) => {
+    if (command.includes("mousedown")) cancel.abort();
+  };
+  await expect(call({ actions: [drag] }, cancel.signal)).rejects.toThrow("cancelled");
+  expect(display.commands.map(step)).toEqual(["xdotool mousemove", "xdotool mouseup"]);
 });
 
 test.each([
   ["runs past its deadline", { deadlineMs: 100 }, ["sleep", "5"]],
-  ["prints past its output cap", { maxOutput: 1000 }, ["sh", "-c", "yes"]],
+  ["prints past its output cap", { maxOutput: 1000 }, ["yes"]],
+  // A child of a killed command may hold its output open: it is not waited for.
+  ["leaves a child holding its output", { deadlineMs: 100 }, ["sh", "-c", "sleep 3 | cat"]],
 ])("the real runner stops a command that %s", async (_name, limits, command) => {
   const started = performance.now();
 

@@ -1,8 +1,10 @@
+import { writeFileSync } from "node:fs";
 import type { CommandRunner } from "./computerUse.ts";
 
 // A fake display for tests of the computer tool (computerUse.ts): its `run`
 // records every command the tool runs and answers as xdotool and scrot would,
-// with the pointer at `cursor` and the screen showing `png`. Waits (xdotool
+// with the pointer at `cursor` and the screen showing `png` (scrot writes it to
+// the file it is given). Waits (xdotool
 // sleep) are instant. A test sets `fails` to make a command fail, and `hold` to
 // hold the batch at a command.
 export function fakeDisplay() {
@@ -19,9 +21,11 @@ export function fakeDisplay() {
   const run: CommandRunner = async (command, signal) => {
     display.commands.push(command);
     await display.hold(command, signal);
+    // Like the real runner, a command whose signal aborted is stopped.
+    if (signal?.aborted) throw new Error(`${command[0]} was cancelled`);
     const error = display.fails(command);
     if (error !== null) throw new Error(error);
-    if (command.join(" ").includes("scrot")) return display.png;
+    if (command[0] === "scrot") writeFileSync(command.at(-1) ?? "", display.png);
     if (command[1] === "getmouselocation") return new TextEncoder().encode(`X=${display.cursor.x}\nY=${display.cursor.y}\nSCREEN=0\nWINDOW=2097156\n`);
     return new Uint8Array();
   };

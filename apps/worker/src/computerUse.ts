@@ -1,4 +1,6 @@
 import type { Tool, ToolInvocation, ToolResultObject } from "@github/copilot-sdk";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 
 // The computer's screen: Xvfb :1 at 1280×800 (infra/computer/start.sh).
@@ -75,9 +77,10 @@ export type CommandRunner = (command: string[], signal?: AbortSignal) => Promise
 // typed text in the locale's encoding, and the image sets no locale: UTF-8 lets
 // it type non-ASCII text. A command fails when it exits non-zero or complains on
 // stderr: xdotool only warns about an unknown key name, and exits 0. It is
-// killed past `deadlineMs`, once stdout or stderr passes `maxOutput` bytes
-// (8 MiB holds any 1280×800 PNG), or when its call is cancelled.
-export function displayCommands({ deadlineMs = 10_000, maxOutput = 8 * 1024 * 1024 } = {}): CommandRunner {
+// killed past `deadlineMs`, once stdout or stderr passes `maxOutput` bytes, or
+// when `signal` aborts. Once it has exited, its output gets one more second to
+// end: a child it left behind may hold it open.
+export function displayCommands({ deadlineMs = 10_000, maxOutput = 1024 * 1024 } = {}): CommandRunner {
   return async (command, signal) => {
     const proc = Bun.spawn(command, {
       env: { ...process.env, DISPLAY: ":1", LC_ALL: "C.UTF-8" },
@@ -88,9 +91,12 @@ export function displayCommands({ deadlineMs = 10_000, maxOutput = 8 * 1024 * 10
       killSignal: "SIGKILL",
       ...(signal ? { signal } : {}),
     });
-    const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text(), proc.exited]);
+    const output = Promise.all([new Response(proc.stdout).bytes(), new Response(proc.stderr).text()]);
+    const exitCode = await proc.exited;
+    const drained = await Promise.race([output, Bun.sleep(1000).then(() => null)]);
     if (signal?.aborted) throw new Error(`${command[0]} was cancelled`);
-    if (proc.signalCode !== null) throw new Error(`${command[0]} was stopped: over ${deadlineMs / 1000} s or ${maxOutput} bytes of output`);
+    if (proc.signalCode !== null || drained === null) throw new Error(`${command[0]} was stopped: over ${deadlineMs / 1000} s or ${maxOutput} bytes of output`);
+    const [stdout, stderr] = drained;
     if (exitCode !== 0 || stderr.trim() !== "") throw new Error(stderr.trim() || `${command[0]} exited with ${exitCode}`);
     return stdout;
   };
@@ -145,17 +151,38 @@ function cursorFrom(output: Uint8Array) {
   return { x: X, y: Y };
 }
 
+// The mouse button `action` presses, to release if its command is cut short
+// (a drag holds it down between its mousedown and mouseup).
+function heldButton(action: ComputerAction) {
+  switch (action.kind) {
+    case "click":
+      return buttons[action.button ?? "left"];
+    case "drag":
+      return "1";
+    case "scroll":
+      return wheel[action.direction];
+    default:
+      return null;
+  }
+}
+
 // Runs `actions` in order through `run`, checking before each command that the
-// call is still wanted (`stopIfAbandoned` throws if not) and that the agent has the
-// screen. How many actions went through, and why it stopped early.
-async function act(actions: ComputerAction[], run: (command: string[]) => Promise<unknown>, agentHasScreen: () => boolean, stopIfAbandoned: () => void) {
+// agent has the screen. A command that fails or is cut short has its action's
+// button released by `release`; then a call no longer wanted throws (`run`
+// does, and so does `stopIfAbandoned`). How many actions went through, and why
+// it stopped early.
+async function act(
+  actions: ComputerAction[],
+  { run, release, agentHasScreen, stopIfAbandoned }: { run: (command: string[]) => Promise<unknown>; release: (button: string) => Promise<void>; agentHasScreen: () => boolean; stopIfAbandoned: () => void },
+) {
   for (const [ran, action] of actions.entries()) {
     for (const command of commandsFor(action)) {
-      stopIfAbandoned();
       if (!agentHasScreen()) return { ran, error: "the person has the screen" };
       try {
         await run(command);
       } catch (failure) {
+        const button = heldButton(action);
+        if (button) await release(button);
         stopIfAbandoned();
         return { ran, error: `${action.kind} failed: ${failure instanceof Error ? failure.message : String(failure)}` };
       }
@@ -169,17 +196,21 @@ async function act(actions: ComputerAction[], run: (command: string[]) => Promis
 // before the next command once `agentHasScreen` says the person took the screen
 // over; `ran` says how many went through. Every call then settles for 300 ms
 // and returns the cursor and one PNG screenshot. The screenshot goes only to
-// the model: never to a file or to control. Invalid actions throw before
-// anything runs, so the model reads why. A call the runtime cancels, or whose
-// turn is over (`turnRunning`), stops the command it runs and throws.
+// the model: scrot writes it in `screenshotDir` (the turn's own temporary
+// folder), and the tool reads and deletes it. Invalid actions throw before
+// anything runs, so the model reads why. Every command gets a signal that
+// aborts when the runtime cancels the call or `turnEnded` aborts: the command
+// running stops, its button is released, and the call throws without running another.
 export function computerTool({
   run,
   agentHasScreen,
-  turnRunning,
+  turnEnded,
+  screenshotDir,
 }: {
   run: CommandRunner;
   agentHasScreen: () => boolean;
-  turnRunning: () => boolean;
+  turnEnded: AbortSignal;
+  screenshotDir: string;
 }) {
   return {
     name: computerToolName,
@@ -189,24 +220,42 @@ export function computerTool({
       'To look, send only { kind: "screenshot" }. To open a page in Chromium: key ctrl+l, type the address, key Return, wait. ' +
       `A key action presses one key or chord; a type action types up to ${MAX_TEXT} characters.`,
     parameters: ComputerArgs,
-    async handler(raw: unknown, { signal }: ToolInvocation): Promise<ToolResultObject> {
+    async handler(raw: unknown, invocation: ToolInvocation): Promise<ToolResultObject> {
       const parsed = ComputerArgs.safeParse(raw);
       if (!parsed.success) throw new Error(z.prettifyError(parsed.error));
-      const { actions } = parsed.data;
+      const signal = invocation.signal ? AbortSignal.any([turnEnded, invocation.signal]) : turnEnded;
       const stopIfAbandoned = () => {
-        if (signal?.aborted) throw new Error("This computer call was cancelled.");
-        if (!turnRunning()) throw new Error("This computer call's turn has ended.");
+        if (turnEnded.aborted) throw new Error("This computer call's turn has ended.");
+        if (signal.aborted) throw new Error("This computer call was cancelled.");
       };
-      const runHere = (command: string[]) => run(command, signal);
-      const { ran, error } = await act(actions, runHere, agentHasScreen, stopIfAbandoned);
-      stopIfAbandoned();
+      // Every command of the call, while it is still wanted: one stopped as it ends says why.
+      const runHere = async (command: string[]) => {
+        stopIfAbandoned();
+        try {
+          return await run(command, signal);
+        } catch (failure) {
+          stopIfAbandoned();
+          throw failure;
+        }
+      };
+      // On its own short deadline, as the call's signal may have aborted already. A failure leaves nothing more to do.
+      const release = (button: string) => run(["xdotool", "mouseup", button], AbortSignal.timeout(2000)).then(() => undefined, () => undefined);
+      const { ran, error } = await act(parsed.data.actions, { run: runHere, release, agentHasScreen, stopIfAbandoned });
       await runHere(["xdotool", "sleep", "0.3"]);
       const cursor = cursorFrom(await runHere(["xdotool", "getmouselocation", "--shell"]));
-      // scrot writes "-" by opening /dev/stdout, which a socket (Bun's pipe to a child) refuses: a shell pipe is a real one.
-      const png = await runHere(["sh", "-c", "scrot - | cat"]);
+      const path = join(screenshotDir, `${crypto.randomUUID()}.png`);
+      mkdirSync(screenshotDir, { recursive: true });
+      let png: Buffer;
+      try {
+        await runHere(["scrot", "--overwrite", path]);
+        png = readFileSync(path);
+      } finally {
+        rmSync(path, { force: true });
+      }
+      stopIfAbandoned();
       return {
         textResultForLlm: JSON.stringify({ ran, cursor, error }),
-        binaryResultsForLlm: [{ type: "image", mimeType: "image/png", data: Buffer.from(png).toString("base64") }],
+        binaryResultsForLlm: [{ type: "image", mimeType: "image/png", data: png.toString("base64") }],
         resultType: "success",
       };
     },

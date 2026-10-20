@@ -71,3 +71,15 @@ test("a request forwarded after a rekey carries the new key, even when its uploa
   expect((await forwarded).status).toBe(200);
   expect(seen).toEqual(["Bearer key-2"]);
 });
+
+test("a turn's ended signal aborts when it is done, when control drops it, or when another turn begins", () => {
+  const { link, turn } = setup();
+  const running = turn.ended.aborted;
+
+  link.emit(turn.turnId, { type: "done" });
+  const second = link.begin(TurnId.parse("turn_2"), TurnKey.parse("key-2"));
+  const third = link.begin(TurnId.parse("turn_3"), TurnKey.parse("key-3"));
+  link.drop(third);
+
+  expect([running, turn.ended.aborted, second.ended.aborted, third.ended.aborted]).toEqual([false, true, true, true]);
+});

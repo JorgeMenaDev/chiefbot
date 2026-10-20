@@ -223,7 +223,13 @@ export function startWorker({
     const turnKey = keyOf(turn);
     const tools = [
       pullRequestTool({ base, turnKey }),
-      computerTool({ run: screenCommands, agentHasScreen: () => screenControl === "agent", turnRunning: () => turn !== null && link.running(turn) }),
+      computerTool({
+        run: screenCommands,
+        agentHasScreen: () => screenControl === "agent",
+        // A session for no turn runs no computer call.
+        turnEnded: turn?.ended ?? AbortSignal.abort(),
+        screenshotDir: join(connectionsRoot, "screen"),
+      }),
       ...(route === "worker" ? chiefTools({ controlUrl, botId: id, turnKey }) : []),
     ];
     const options = { sessionId: id, onPermissionRequest: permissionFor(turn, connections, access), tools, instructions: computerInstructions, skillDirectories };
