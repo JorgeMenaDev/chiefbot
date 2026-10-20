@@ -210,6 +210,8 @@ type SocketData =
 //   …      /health/services  people's own services on Health, checked on demand (health/services.ts)
 //   POST   /worker/:botId/chief-tools  a bot's tools as its owner's chief of staff, with its running
 //                             turn's key: handing work to projects and watching it (handoffs.ts)
+//   POST   /bots/:id/handoffs/:handoffId/messages  bearer session: the owner's answer from a
+//                             handoff's card in the bot's chat (handoffs.ts)
 //
 // Every other error body is an ApiError (packages/contracts errors.ts).
 //

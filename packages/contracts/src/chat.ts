@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ApprovalId, AttachmentId, BotId, HandoffId, TurnId, TurnKey } from "./ids.ts";
+import { ApprovalId, AttachmentId, BotId, HandoffId, ProjectId, TurnId, TurnKey, WorkspaceId } from "./ids.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
@@ -90,23 +90,53 @@ export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPaye
 export const AnswerApprovalRequest = z.object({ approved: z.boolean() });
 export type AnswerApprovalRequest = z.infer<typeof AnswerApprovalRequest>;
 
-// Control's note in a chief of staff's chat: a project's task for one of its
-// handoffs (handoffs.ts) now needs the owner's input, or is done. Posted once
-// each time the task's status becomes one of these, in a turn of its own.
+// Where a handoff (handoffs.ts) stands, as its card in the chief's chat says it,
+// from its task in the ledger:
+//   accepted     the task is open: the project has it
+//   working      the task is in progress
+//   needs_input  the task waits on the owner's answer to `question`
+//   pr_opened    the task, in progress or open, links a pull request
+//   done, abandoned  the task is closed
+export const HandoffStage = z.enum(["accepted", "working", "needs_input", "pr_opened", "done", "abandoned"]);
+export type HandoffStage = z.infer<typeof HandoffStage>;
+
+// What a handoff's card in its chief's chat shows. `project` is the project's
+// name; `question` is set only at needs_input; `pullRequests` are the task's.
+export const HandoffCard = z.object({
+  handoffId: HandoffId,
+  workspaceId: WorkspaceId,
+  projectId: ProjectId,
+  project: z.string(),
+  title: z.string(),
+  taskNumber: z.number().int().min(1),
+  stage: HandoffStage,
+  question: z.string().nullable(),
+  pullRequests: z.array(z.url()),
+});
+export type HandoffCard = z.infer<typeof HandoffCard>;
+
+// Control's note in a chief of staff's chat: its handoff's card, whole. Posted
+// when the chief hands the work over and again whenever what the card shows
+// changes, each in a turn of its own. The desktop shows one card per handoff,
+// where it first appeared, with the latest of these.
+export const HandoffCardEvent = z.object({ type: z.literal("handoff-card"), card: HandoffCard });
+export type HandoffCardEvent = z.infer<typeof HandoffCardEvent>;
+
+// Control's note in chats from before handoff cards: the handoff's task needed
+// the owner's input, or was done. Control posts no more of them.
 export const HandoffUpdate = z.object({
   type: z.literal("handoff-update"),
   handoffId: HandoffId,
   status: z.enum(["needs_input", "done"]),
   text: z.string(),
 });
-export type HandoffUpdate = z.infer<typeof HandoffUpdate>;
 
 // One entry of a bot's chat history as control stores it. `seq` grows across all
 // of control's chat history, so a client resumes with "everything after seq N".
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, HandoffCardEvent, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
@@ -145,7 +175,9 @@ export const ChatItem = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("assistant"), id: z.string(), text: z.string() }),
   z.object({ kind: z.literal("tool"), id: z.string(), name: z.string(), status: z.enum(["running", "succeeded", "failed"]) }),
   z.object({ kind: z.literal("error"), id: z.string(), message: z.string() }),
-  // Control's note about a handoff (HandoffUpdate).
+  // A handoff's card (HandoffCardEvent), as its latest event says.
+  HandoffCard.extend({ kind: z.literal("handoff"), id: z.string() }),
+  // Control's note about a handoff, from before cards (HandoffUpdate).
   z.object({ kind: z.literal("notice"), id: z.string(), text: z.string() }),
   // Who pays for the turn that follows.
   z.object({ kind: z.literal("payer"), id: z.string(), payer: CopilotPayer }),

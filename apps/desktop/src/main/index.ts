@@ -14,9 +14,11 @@ import {
   CreateProjectRequest,
   CreateWorkspaceRequest,
   EnvironmentInput,
+  HandoffId,
   InviteId,
   InviteRequest,
   ProjectId,
+  ReplyToHandoffRequest,
   RoutineId,
   RoutineInput,
   SendBotMessageRequest,
@@ -168,6 +170,10 @@ ipcMain.handle("chat:attachment", (_event, id: unknown, attachmentId: unknown) =
 ipcMain.handle("chat:answer", (_event, id: unknown, approvalId: unknown, approved: unknown) =>
   chats.answer(BotId.parse(id), ApprovalId.parse(approvalId), AnswerApprovalRequest.parse({ approved }).approved),
 );
+ipcMain.handle("chat:reply-to-handoff", (_event, id: unknown, handoffId: unknown, text: unknown, deliveryId: unknown) => {
+  const reply = ReplyToHandoffRequest.parse({ text, deliveryId });
+  return chats.replyToHandoff(BotId.parse(id), HandoffId.parse(handoffId), reply.text, reply.deliveryId);
+});
 ipcMain.handle("routines:list", (_event, botId: unknown) => routines.list(BotId.parse(botId)));
 ipcMain.handle("routines:create", (_event, botId: unknown, input: unknown) =>
   routines.create(BotId.parse(botId), RoutineInput.parse(input)),

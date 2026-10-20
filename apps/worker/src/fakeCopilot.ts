@@ -14,7 +14,8 @@ export type FakeRuntime = {
   // Runs a real shell command in `shell.cwd` once the permission handler approves it.
   shell(command: string): Promise<{ approved: boolean; exitCode: number; output: string }>;
   // Calls one of the session's custom tools once the permission handler approves it.
-  tool(name: string, args: JsonValue): Promise<{ approved: boolean; result: unknown }>;
+  // `toolCallId` repeats an earlier call's id, as a runtime that resends a call does.
+  tool(name: string, args: JsonValue, toolCallId?: string): Promise<{ approved: boolean; result: unknown }>;
   // An MCP server's tool (a GitHub tool that writes, unless readOnly): resolves
   // with whether the permission handler let it run. It does nothing else.
   mcp(serverName: string, toolTitle: string, readOnly: boolean): Promise<boolean>;
@@ -83,11 +84,11 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           publish(sdk.toolComplete(toolCallId, result.approved && result.exitCode === 0));
           return result;
         },
-        async tool(name, args) {
+        async tool(name, args, toolCallId = `call-${name}-${++toolCalls}`) {
           const tool = tools.find((candidate) => candidate.name === name);
           if (!tool?.handler) throw new Error(`no tool ${name}`);
           if (!(await allowed(fakeRequest.tool(name, args)))) return { approved: false, result: null };
-          const result = await tool.handler(args, { sessionId, toolCallId: `call-${name}-${++toolCalls}`, toolName: name, arguments: args });
+          const result = await tool.handler(args, { sessionId, toolCallId, toolName: name, arguments: args });
           return { approved: true, result };
         },
         mcp: (serverName, toolTitle, readOnly) => allowed(fakeRequest.mcp(serverName, toolTitle, readOnly)),

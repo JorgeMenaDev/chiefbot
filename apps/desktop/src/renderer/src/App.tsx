@@ -228,6 +228,11 @@ function Workspace({ user }: { user: User }) {
     else localStorage.setItem(currentWorkspaceKey, id);
     setSelectedId(id === null ? null : "members");
   };
+  // A handoff card's Open in Projects: the project, in its workspace.
+  const openProject = ({ workspaceId: workspace, projectId }: { workspaceId: string; projectId: string }) => {
+    selectWorkspace(workspace);
+    setSelectedId(projectId);
+  };
 
   return (
     <SidebarLayout open={sidebar.open} onToggle={sidebar.toggle}>
@@ -414,7 +419,12 @@ function Workspace({ user }: { user: User }) {
             }}
           />
         ) : selected ? (
-          <BotPane key={selected.id} bot={selected} draft={askDraft?.botId === selected.id ? askDraft.text : undefined} />
+          <BotPane
+            key={selected.id}
+            bot={selected}
+            draft={askDraft?.botId === selected.id ? askDraft.text : undefined}
+            onOpenProject={openProject}
+          />
         ) : (
           <Column>
             <PaneHeader title="Chiefbot" />

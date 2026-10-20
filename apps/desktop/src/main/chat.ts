@@ -7,6 +7,7 @@ import {
   type BotId,
   type ChatItem,
   type ChatView,
+  type HandoffId,
 } from "@chiefbot/contracts";
 import { controlCaller } from "./controlApi.ts";
 
@@ -110,6 +111,12 @@ export function createChats({ controlUrl, session, onChange, retryMs = 2000 }: C
       await call("POST", `/bots/${botId}/approvals/${approvalId}`, { approved });
     },
 
+    // The owner's answer to a handoff's question, from its card in the bot's chat.
+    // `deliveryId` is the answer's own: sent again, it is delivered once.
+    async replyToHandoff(botId: BotId, handoffId: HandoffId, text: string, deliveryId: string) {
+      await call("POST", `/bots/${botId}/handoffs/${handoffId}/messages`, { text, deliveryId });
+    },
+
     // Call on sign-out.
     disconnect() {
       const open = [...chats.values()];
@@ -158,7 +165,12 @@ export function foldChat<View extends Pick<ChatView, "items" | "working">>(view:
       const card: ChatItem = { kind: "approval", id: `${turnId}:${approvalId}`, approvalId, request: kind, detail, state: "pending" };
       return { ...view, working: waitingForApproval, items: [...view.items, card] };
     }
-    // Control's note about a handoff: it leaves any running turn as it is.
+    // Control's notes about a handoff leave any running turn as it is. A card
+    // stays where the handoff's first appeared, showing its latest.
+    case "handoff-card": {
+      const id = `handoff:${event.card.handoffId}`;
+      return { ...view, items: upsert(id, () => ({ kind: "handoff", id, ...event.card })) };
+    }
     case "handoff-update":
       return { ...view, items: [...view.items, { kind: "notice", id: `${turnId}:notice`, text: event.text }] };
     case "approval-answer": {

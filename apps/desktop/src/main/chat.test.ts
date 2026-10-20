@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { ApprovalId, Bot, BotId, ClientEvent, HandoffId, SignInResponse, TurnId, type ChatEvent, type ChatView } from "@chiefbot/contracts";
+import { ApprovalId, Bot, BotId, ClientEvent, HandoffId, ProjectId, SignInResponse, TurnId, WorkspaceId, type ChatEvent, type ChatView, type HandoffCard } from "@chiefbot/contracts";
 import { startControl } from "@chiefbot/control";
 import { fakeComputers } from "@chiefbot/control/fake-computers";
 import { startFakeGitHub } from "@chiefbot/fake-github";
@@ -173,7 +173,43 @@ test("an approval nobody answered before its turn ended shows as expired", () =>
   expect(view.items.find((item) => item.kind === "approval")).toMatchObject({ state: "expired" });
 });
 
-test("control's handoff notice shows in the chief's chat as a notice, even in the middle of a reply", () => {
+test("a handoff's cards fold into one card, where it first appeared, that shows the latest", () => {
+  const ask = TurnId.parse("turn-1");
+  const later = TurnId.parse("turn-3");
+  const card: HandoffCard = {
+    handoffId: HandoffId.parse("handoff-1"),
+    workspaceId: WorkspaceId.parse("workspace-1"),
+    projectId: ProjectId.parse("project-1"),
+    project: "shop",
+    title: "Checkout",
+    taskNumber: 1,
+    stage: "accepted",
+    question: null,
+    pullRequests: [],
+  };
+  const pullRequest = "https://github.com/octo-org/shop/pull/7";
+  const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };
+  const events: ChatEvent[] = [
+    { seq: 1, turnId: ask, event: { type: "user-message", text: "hand the checkout over" } },
+    { seq: 2, turnId: ask, event: { type: "tool-call", toolCallId: "t1", name: "send_to_project", status: "running" } },
+    { seq: 3, turnId: TurnId.parse("turn-2"), event: { type: "handoff-card", card } },
+    { seq: 4, turnId: ask, event: { type: "tool-call", toolCallId: "t1", name: "send_to_project", status: "succeeded" } },
+    { seq: 5, turnId: ask, event: { type: "text-delta", messageId: "m1", text: "Sent." } },
+    { seq: 6, turnId: ask, event: { type: "done" } },
+    { seq: 7, turnId: later, event: { type: "user-message", text: "thanks" } },
+    { seq: 8, turnId: later, event: { type: "done" } },
+    { seq: 9, turnId: TurnId.parse("turn-4"), event: { type: "handoff-card", card: { ...card, stage: "needs_input", question: "Stripe or Adyen?" } } },
+    { seq: 10, turnId: TurnId.parse("turn-5"), event: { type: "handoff-card", card: { ...card, stage: "pr_opened", pullRequests: [pullRequest] } } },
+  ];
+
+  const view = events.reduce<ChatView>(foldChat, empty);
+
+  expect(view.items.map(({ kind }) => kind)).toEqual(["user", "tool", "handoff", "assistant", "user"]);
+  expect(view.items[2]).toEqual({ kind: "handoff", id: "handoff:handoff-1", ...card, stage: "pr_opened", pullRequests: [pullRequest] });
+  expect(view.working).toBeNull();
+});
+
+test("a handoff notice from before cards shows in the chief's chat as a notice, even in the middle of a reply", () => {
   const reply = TurnId.parse("turn-1");
   const notice = TurnId.parse("turn-2");
   const empty: ChatView = { botId: BotId.parse("bot-1"), items: [], working: null };

@@ -18,6 +18,7 @@ import {
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { z } from "zod";
+import { addColumn } from "./addColumn.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 
 // Projects, their task ledgers and their members' chats with the coordinator,
@@ -51,6 +52,8 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (project_id, number)
   )`);
+  // What the task waits on while it needs input; NULL otherwise.
+  addColumn(db, "project_tasks", "question", "TEXT");
   // Each member's chat with the coordinator: turns and their events, as for a
   // bot's chat. A turn waits `queued` until the project's scheduler gives it
   // the coordinator; at most one turn per project is `running`.
@@ -102,6 +105,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     title: string;
     detail: string;
     status: string;
+    question: string | null;
     owner: string | null;
     requested_by: string;
     links: string;
@@ -115,6 +119,7 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       title: row.title,
       detail: row.detail,
       status: row.status,
+      question: row.question,
       owner: row.owner,
       requestedBy: row.requested_by,
       links: JSON.parse(row.links),
@@ -241,21 +246,24 @@ export function projectStore(db: Database, hash: (token: string) => string) {
       return toTask(row);
     }),
 
-    // Changes the fields given and adds `links`. Null when the project has no such task.
+    // Changes the fields given and adds `links`. A question stays while the task
+    // needs input, and goes once it does not. Null when the project has no such task.
     updateTask: db.transaction((projectId: ProjectId, { number, links, ...change }: z.output<typeof UpdateTaskArgs>): Task | null => {
       const current = task(projectId, number);
       if (!current) return null;
+      const status = change.status ?? current.status;
       const next = {
         title: change.title ?? current.title,
         detail: change.detail ?? current.detail,
-        status: change.status ?? current.status,
+        status,
+        question: status === "needs_input" ? (change.question ?? current.question) : null,
         owner: change.owner === undefined ? current.owner : change.owner,
         links: [...current.links, ...(links ?? [])],
       };
       db.query(
-        `UPDATE project_tasks SET title = ?3, detail = ?4, status = ?5, owner = ?6, links = ?7, updated_at = ?8
+        `UPDATE project_tasks SET title = ?3, detail = ?4, status = ?5, question = ?6, owner = ?7, links = ?8, updated_at = ?9
          WHERE project_id = ?1 AND number = ?2`,
-      ).run(projectId, number, next.title, next.detail, next.status, next.owner, JSON.stringify(next.links), Date.now());
+      ).run(projectId, number, next.title, next.detail, next.status, next.question, next.owner, JSON.stringify(next.links), Date.now());
       return task(projectId, number);
     }),
 
@@ -377,6 +385,25 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         { userId, event: append(turnId, { type: "done" }) },
       ];
     }),
+
+    // The coordinator's last message in the latest of `turnIds` that has one and
+    // is done; null when none has.
+    lastReply(turnIds: readonly TurnId[]): string | null {
+      const events = db
+        .query<ChatEventRow, [string]>(
+          `SELECT seq, turn_id, event FROM coordinator_events
+           WHERE turn_id IN (SELECT id FROM coordinator_turns WHERE state = 'done' AND id IN (SELECT value FROM json_each(?1)))
+           ORDER BY seq`,
+        )
+        .all(JSON.stringify(turnIds))
+        .map(toChatEvent);
+      const last = events.findLast(({ event }) => event.type === "text-delta");
+      if (last?.event.type !== "text-delta") return null;
+      const { turnId, event: { messageId } } = last;
+      return events
+        .flatMap(({ turnId: id, event }) => (id === turnId && event.type === "text-delta" && event.messageId === messageId ? [event.text] : []))
+        .join("");
+    },
 
     // The member's chat with the project's coordinator after `seq` (0 for all of it), oldest first.
     chatAfter(projectId: ProjectId, userId: UserId, seq: number): ChatEvent[] {
