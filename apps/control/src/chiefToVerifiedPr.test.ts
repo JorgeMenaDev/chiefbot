@@ -161,7 +161,7 @@ test("a chief's request ends in a verified pull request: request, follow-up, an 
   await eventually(() => cards(chiefChat.events).some(({ stage }) => stage === "done"));
 
   // 5. The chief's card followed the task in place, and says the same after control restarts.
-  const passed = { result: "pass", sha: head, stale: false, summary: "The README reads The shop." };
+  const passed = { result: "pass" as const, sha: head, stale: false, summary: "The README reads The shop." };
   expect(cards(chiefChat.events).map(({ stage, pullRequests, verification }) => [stage, pullRequests, verification])).toEqual([
     ["accepted", [], null],
     ["working", [], null],
