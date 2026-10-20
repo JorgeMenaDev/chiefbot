@@ -117,6 +117,51 @@ test("a project file's template is checked when the project is made: a name the 
   }
 });
 
+test("GitHub failing while control checks a service's repo refuses the project or the save as github_failed, which a retry clears, and keeps nothing", async () => {
+  const file = "template: java-react-enterprise\nservice: ui\nservices:\n  meta: { repo: octo-org/meta-api, ref: main }\n";
+  const { owner, workspace, createProject, github, computers } = await team({ "chiefbot.project.yaml": file });
+  github.createRepo("octo-org/meta-api", { "README.md": "# Meta API" });
+  github.createRepo("octo-org/legacy-gateway", { "README.md": "# Legacy" }, { installed: false });
+  github.failApi("/repos/octo-org/meta-api/installation", 503);
+
+  const failed = await createProject();
+
+  const body = ApiError.parse(await failed.json());
+  expect([failed.status, body.error]).toEqual([502, "github_failed"]);
+  expect(body.message).toContain("octo-org/meta-api");
+  expect(Project.array().parse(await (await owner.api("GET", `/workspaces/${workspace.id}/projects`)).json())).toEqual([]);
+  expect(computers.computers.size).toBe(0);
+  // Once GitHub answers again, the same file makes the project.
+  github.failApi("/repos/octo-org/meta-api/installation", null);
+  const project = Project.parse(await (await createProject()).json());
+  expect(project.file.status).toBe("found");
+
+  // A repo the app is not installed on is checked as a public repo: GitHub failing there fails the save.
+  github.failApi("/repos/octo-org/legacy-gateway", 503);
+  const text = "services:\n  auth: { repo: octo-org/legacy-gateway, ref: main }\n";
+  const refused = await owner.api("PUT", `/projects/${project.id}/settings`, { text });
+  const refusal = ApiError.parse(await refused.json());
+  expect([refused.status, refusal.error]).toEqual([502, "github_failed"]);
+  expect(refusal.message).toContain("octo-org/legacy-gateway");
+  expect(Project.parse(await (await owner.api("GET", `/projects/${project.id}`)).json())).toEqual(project);
+  github.failApi("/repos/octo-org/legacy-gateway", null);
+  const notFound = ApiError.parse(await (await owner.api("PUT", `/projects/${project.id}/settings`, { text })).json());
+  expect(notFound).toMatchObject({ error: "invalid_settings", message: "Settings: services.auth: octo-org/legacy-gateway was not found, or your GitHub account cannot see it." });
+});
+
+test("template: null in the settings turns the file's template off, with its service and services", async () => {
+  const file = "template: java-react-enterprise\nservice: ui\nservices:\n  auth: stand-in\n";
+  const { owner, createProject } = await team({ "chiefbot.project.yaml": file });
+  const project = Project.parse(await (await createProject()).json());
+  const save = (text: string) => owner.api("PUT", `/projects/${project.id}/settings`, { text });
+
+  const saved = Project.parse(await (await save("template: null\n")).json());
+
+  expect([saved.config.template, saved.config.service, saved.config.services, saved.sources]).toEqual([undefined, undefined, {}, { template: "settings" }]);
+  const refused = ApiError.parse(await (await save("template: null\nservice: ui\n")).json());
+  expect(refused).toMatchObject({ error: "invalid_settings", message: "Settings: service: pick a template first." });
+});
+
 test("a project whose stored file no longer fits the project file's rules opens as an invalid file: members still edit its settings, and the owner deletes it", async () => {
   const { owner, workspace, createProject, stopControl, startControl, dbPath } = await team(undefined, { persistent: true });
   const project = Project.parse(await (await createProject()).json());

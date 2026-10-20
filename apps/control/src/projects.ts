@@ -16,6 +16,7 @@ import {
   SetProjectSecretRequest,
   supportedEffort,
   type AgentConnector,
+  type ApiErrorCode,
   type ApprovalKind,
   type ChatEvent,
   type ClientEvent,
@@ -76,6 +77,8 @@ export type ProjectHostOptions = {
   githubApiUrl: string;
   // A token to read a repo for a user, or why not (repos.ts readToken).
   repoReadToken: ReturnType<typeof repoAccess>["readToken"];
+  // Whether a user may read a repo (repos.ts readable).
+  repoReadable: ReturnType<typeof repoAccess>["readable"];
   // The template catalog (templates/catalog.ts loadTemplates) a project's template keys must name.
   templates: Template[];
   // Control's URL as a computer reaches it.
@@ -118,7 +121,8 @@ const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.r
 //                                    the coordinator's computer. No file, or an invalid one, still makes the
 //                                    project: Project.file says so, and the settings alone make its config.
 //                                    A file whose template keys fail templateProblem, or map a service to a
-//                                    repo the user cannot read, is invalid.
+//                                    repo the user cannot read, is invalid. GitHub failing while control
+//                                    checks those repos makes no project (502 github_failed).
 //   GET    /projects/:id             → Project
 //   DELETE /projects/:id             → 204 (workspace owner only): its computer, its workers' computers,
 //                                    ledger, chats, context, settings and secrets go, once the secret
@@ -126,7 +130,7 @@ const newSecretName = (projectId: ProjectId) => `project-${projectId}-${crypto.r
 //   PUT    /projects/:id/settings    body ProjectSettingsRequest → Project with the new config (400
 //                                    invalid_settings says what is wrong: also when the config's template
 //                                    keys fail templateProblem, or the settings map a service to a repo
-//                                    the member cannot read)
+//                                    the member cannot read; 502 github_failed when GitHub fails to say)
 //   PUT    /projects/:id/model       body SetBotModelRequest → Project: the coordinator's next turn runs on
 //                                    it (400 model_unavailable when the member's plan does not offer it or it is
 //                                    locked, effort_unavailable when the model does not support the effort)
@@ -167,6 +171,7 @@ export function projectHost({
   approvals,
   githubApiUrl,
   repoReadToken,
+  repoReadable,
   templates,
   controlUrlForComputers,
   publish,
@@ -386,17 +391,21 @@ export function projectHost({
     return [...declared, ...left];
   };
 
-  // Why the user cannot read a repo `services` maps a service to, with its key, or
-  // null. Control's repo access decides (repos.ts readToken), and a repo the repo
-  // app is not installed on must be one GitHub shows without a token: a public one.
-  const unreadable = async (userId: UserId, services: NonNullable<ProjectFile["services"]>) => {
+  // What is wrong with a project's template keys `keys` (templateProblem), then with
+  // the repos `services` maps services to, as the user may read them (repos.ts
+  // readable): a problem, a refusal to pass on (GitHub failed, or the user must sign
+  // in again), or null.
+  const checkTemplate = async (
+    userId: UserId,
+    repo: string,
+    keys: Parameters<typeof templateProblem>[0],
+    services: NonNullable<ProjectFile["services"]>,
+  ): Promise<{ problem: string } | { refusal: { error: ApiErrorCode; status: number; message: string } } | null> => {
+    const problem = templateProblem(keys, repo, templates);
+    if (problem) return { problem };
     for (const [name, source] of Object.entries(services)) {
-      if (source === "stand-in") continue;
-      const access = await repoReadToken(userId, source.repo);
-      if ("error" in access) return `services.${name}: ${access.message}`;
-      if (access.token === null && !(await fetch(`${githubApiUrl}/repos/${source.repo}`, { headers: { accept: "application/vnd.github+json" } })).ok) {
-        return `services.${name}: ${source.repo} was not found, or your GitHub account cannot see it.`;
-      }
+      const refusal = source === "stand-in" ? null : await repoReadable(userId, source.repo);
+      if (refusal) return refusal.error === "repo_not_found" ? { problem: `services.${name}: ${refusal.message}` } : { refusal };
     }
     return null;
   };
@@ -421,8 +430,9 @@ export function projectHost({
         if ("error" in access) return apiError(access.status, access.error, access.message);
         const read = await readProjectFile(githubApiUrl, access.token, body.data.repo);
         if ("refusal" in read) return apiError(read.refusal.status, read.refusal.error, read.refusal.message);
-        const problem = read.status === "found" ? (templateProblem(read.file, body.data.repo, templates) ?? (await unreadable(user.id, read.file.services ?? {}))) : null;
-        const file = problem === null ? read : { status: "invalid" as const, error: `${projectFileName}: ${problem}` };
+        const check = read.status === "found" ? await checkTemplate(user.id, body.data.repo, read.file, read.file.services ?? {}) : null;
+        if (check && "refusal" in check) return apiError(check.refusal.status, check.refusal.error, check.refusal.message);
+        const file = check === null ? read : { status: "invalid" as const, error: `${projectFileName}: ${check.problem}` };
         const projectToken = crypto.randomUUID() + crypto.randomUUID();
         const project = projects.create(workspace.id, body.data.repo, file, projectToken);
         if (project === "exists") return apiError(409, "project_exists");
@@ -462,8 +472,9 @@ export function projectHost({
         // The template keys as the config takes them, from the settings or the file;
         // only the repos the settings map are checked, as the member who saves them.
         const { config } = effectiveConfig(project.file.status === "found" ? project.file.file : null, settings);
-        const problem = templateProblem(config, project.repo, templates) ?? (await unreadable(user.id, settings.services ?? {}));
-        if (problem) return apiError(400, "invalid_settings", `Settings: ${problem}`);
+        const check = await checkTemplate(user.id, project.repo, config, settings.services ?? {});
+        if (check && "refusal" in check) return apiError(check.refusal.status, check.refusal.error, check.refusal.message);
+        if (check) return apiError(400, "invalid_settings", `Settings: ${check.problem}`);
         const saved = projects.setSettings(project.id, body.data.text);
         if (!saved) return apiError(404, "not_found");
         toCoordinator(project.id, { type: "bound", project: saved });

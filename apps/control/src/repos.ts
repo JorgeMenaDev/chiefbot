@@ -93,6 +93,27 @@ export function repoAccess({ githubUrl, githubApiUrl, app, ownerLogin, agentFor,
     // which works only for a public repo the app is not installed on), or why not.
     readToken: (userId: UserId, fullName: string) => grant(userId, fullName, "read"),
 
+    // Null when the user may read the repo, else why not. readToken decides, and a
+    // repo the app is not installed on must be one GitHub shows without a token: a
+    // public one. GitHub failing to answer (a 5xx, a lost connection) is
+    // github_failed, which a retry may clear, never repo_not_found.
+    async readable(userId: UserId, fullName: string): Promise<Refusal | null> {
+      const failed = (why: string): Refusal => ({ error: "github_failed", status: 502, message: `GitHub failed while control checked ${fullName} (${why}). Try again.` });
+      try {
+        const access = await grant(userId, fullName, "read");
+        if ("error" in access) return access;
+        if (access.token !== null) return null;
+        const res = await fetch(`${githubApiUrl}/repos/${fullName}`, { headers: { accept: "application/vnd.github+json" } });
+        if (res.ok) return null;
+        if (res.status === 401 || res.status === 403 || res.status === 404) {
+          return { error: "repo_not_found", status: 404, message: `${fullName} was not found, or your GitHub account cannot see it.` };
+        }
+        return failed(`it answered ${res.status}`);
+      } catch (error) {
+        return failed(error instanceof Error ? error.message : String(error));
+      }
+    },
+
     // GET /git/:owner/:repo/info/refs, POST /git/:owner/:repo/git-upload-pack and
     // POST /git/:owner/:repo/git-receive-pack: git's smart HTTP protocol, with the
     // turn's key as the Basic auth password. Errors are text/plain, which git

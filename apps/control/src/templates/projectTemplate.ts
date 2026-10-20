@@ -7,7 +7,8 @@ import type { ProjectFile, Template } from "@chiefbot/contracts";
 // Control checks this when it reads the file and when settings are saved
 // (projects.ts), and checks repo access apart.
 export function templateProblem({ template, service, services = {} }: Pick<ProjectFile, "template" | "service" | "services">, repo: string, catalog: Template[]): string | null {
-  if (template === undefined) {
+  // No template, or `template: null` in a file (null in settings is gone from the config).
+  if (template === undefined || template === null) {
     if (service !== undefined) return "service: pick a template first.";
     return Object.keys(services).length > 0 ? "services: pick a template first." : null;
   }
