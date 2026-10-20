@@ -1,5 +1,5 @@
 import type { ReasoningEffort } from "@chiefbot/contracts";
-import type { JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
+import type { ElicitationResult, ElicitationSchema, JsonValue, MCPServerConfig, PermissionRequest, SessionEvent } from "@github/copilot-sdk";
 import type { BotSession, Copilot, FileAttachment, SdkModelList } from "./copilot.ts";
 
 // A fake Copilot SDK for tests. Each send() plays a script of real-shaped SDK
@@ -24,6 +24,14 @@ export type FakeRuntime = {
   // POSTed to its url with its headers. Resolves with the HTTP status and JSON
   // answer (null for a local server, which it does not start).
   callMcp(serverName: string, toolName: string, readOnly?: boolean): Promise<{ approved: boolean; status: number | null; body: unknown }>;
+  // Asks the user an ask_user form as the runtime does: the session's
+  // questions.ask gets it with its request id (question-1, question-2… per
+  // session), then elicitation.requested goes out, and elicitation.completed once
+  // it is answered. Null when the session has no `questions`, so no ask_user tool.
+  ask(message: string, requestedSchema?: ElicitationSchema, mode?: "form" | "url"): Promise<ElicitationResult | null>;
+  // The runtime resolved request `requestId` without the session's answer (it gave
+  // up, or another client answered): elicitation.completed goes out.
+  resolveQuestion(requestId: string): void;
 };
 
 // What every session's model listing returns. The default is Copilot Free with an empty catalog.
@@ -57,7 +65,17 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
   const sends: Array<{ sessionId: string; prompt: string; model: string; effort: ReasoningEffort | null; files: FileAttachment[] }> = [];
 
   const copilot: Copilot = {
-    async openSession({ sessionId, auth, onPermissionRequest, tools, instructions: told, mcpServers: servers = {}, onMcpCall, skillDirectories: skills = [] }) {
+    async openSession({
+      sessionId,
+      auth,
+      onPermissionRequest,
+      tools,
+      instructions: told,
+      mcpServers: servers = {},
+      onMcpCall,
+      skillDirectories: skills = [],
+      questions,
+    }) {
       if (auth.kind === "installation") tokens.push(auth.token);
       else {
         const token = await auth.gitHubTokenProvider({ host: "https://github.com", sessionId, reason: "initial" });
@@ -73,8 +91,16 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
       const publish = (event: SessionEvent) => {
         for (const handler of handlers) handler(event);
       };
+      // As the SDK's config.onEvent: questions.ended hears each resolved request before any subscriber.
+      if (questions) {
+        const { ended } = questions;
+        handlers.add((event) => {
+          if (event.type === "elicitation.completed") ended(event.data.requestId);
+        });
+      }
       let shellCalls = 0;
       let toolCalls = 0;
+      let asked = 0;
       const runtime: FakeRuntime = {
         async shell(command) {
           const toolCallId = `shell-${++shellCalls}`;
@@ -104,6 +130,16 @@ export function fakeCopilot({ script = echo, models = { list: [] }, shell }: Fak
           });
           return { approved: true, status: res.status, body: await res.json().catch(() => null) };
         },
+        async ask(message, requestedSchema, mode = "form") {
+          if (!questions) return null;
+          const requestId = `question-${++asked}`;
+          const answer = questions.ask({ sessionId, requestId, message, mode, ...(requestedSchema === undefined ? {} : { requestedSchema }) });
+          publish(sdk.elicitationRequested(requestId, message, requestedSchema));
+          const result = await answer;
+          publish(sdk.elicitationCompleted(requestId, result.action));
+          return result;
+        },
+        resolveQuestion: (requestId) => publish(sdk.elicitationCompleted(requestId)),
       };
       async function runShell(command: string, toolCallId: string) {
         if (!(await allowed(fakeRequest.shell(command, toolCallId)))) return { approved: false, exitCode: -1, output: "" };
@@ -205,6 +241,19 @@ export const sdk = {
     data: { errorType: "query", message },
   }),
   idle: (): SessionEvent => ({ ...envelope(), ephemeral: true, type: "session.idle", data: {} }),
+  // The runtime asks the user (its ask_user tool), and later says the request was resolved.
+  elicitationRequested: (requestId: string, message: string, requestedSchema?: ElicitationSchema): SessionEvent => ({
+    ...envelope(),
+    ephemeral: true,
+    type: "elicitation.requested",
+    data: { requestId, message, mode: "form", ...(requestedSchema === undefined ? {} : { requestedSchema }) },
+  }),
+  elicitationCompleted: (requestId: string, action?: ElicitationResult["action"]): SessionEvent => ({
+    ...envelope(),
+    ephemeral: true,
+    type: "elicitation.completed",
+    data: { requestId, ...(action === undefined ? {} : { action }) },
+  }),
 };
 
 // A shell command's segments as the runtime parses them, roughly: split on

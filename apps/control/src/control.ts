@@ -5,6 +5,9 @@ import { dirname, join } from "node:path";
 import {
   AnswerApprovalRequest,
   ApprovalId,
+  formAnswers,
+  QuestionId,
+  QuestionResult,
   BotToken,
   CreateBotRequest,
   DEFAULT_AVATAR,
@@ -169,6 +172,9 @@ type SocketData =
 //   GET    /models            bearer session    → ModelOption[]: the picker rows for the user's Copilot plan
 //   POST   /bots/:id/approvals/:approvalId  bearer session, body AnswerApprovalRequest → 204
 //                             (409 when it is not pending: answered, unknown, or its turn ended)
+//   POST   /bots/:id/questions/:questionId  bearer session, body QuestionResult → 204 (400 invalid_answer
+//                             when it does not answer the form's questions; 409 not_pending when the
+//                             question is answered, withdrawn, unknown, or its turn ended)
 //   GET    /bots/:id/routines bearer session    → Routine[]
 //   POST   /bots/:id/routines bearer session, body RoutineInput → 201 Routine (400 invalid_schedule)
 //   PUT    /bots/:id/routines/:routineId  bearer session, body RoutineInput → Routine
@@ -412,13 +418,14 @@ export function startControl({
   };
 
   // A stop marks the bot stopping first, so no new work lands on a computer about to go.
-  // Stopping ends the bot's unfinished turn first, so its approvals expire and
-  // its key stops working while the computer shuts down.
+  // Stopping ends the bot's unfinished turn first, so its approvals expire, its
+  // questions are withdrawn and its key stops working while the computer shuts down.
   const setRunning = async (userId: UserId, botId: BotId, running: boolean) => {
     if (!running) {
       stopping.add(botId);
       publish(userId);
       for (const turnId of store.unfinishedTurns(botId)) {
+        for (const event of store.withdrawQuestions(botId, turnId)) turns.publishChat(botId, event);
         for (const event of store.abandonTurn(botId, turnId, "The bot was stopped before it finished this message.")) turns.publishChat(botId, event);
       }
     }
@@ -647,6 +654,23 @@ export function startControl({
               approved: body.data.approved,
             } satisfies ControlToWorker),
           );
+          return new Response(null, { status: 204 });
+        }),
+      },
+      // Like an approval's: the answer is stored first, so it reaches the worker even if it is offline now.
+      "/bots/:id/questions/:questionId": {
+        POST: ownBot(async (_user, botId, req) => {
+          const body = QuestionResult.safeParse(await req.json().catch(() => null));
+          if (!body.success) return apiError(400, "invalid_answer", body.error.issues[0]?.message);
+          const questionId = QuestionId.safeParse(req.params.questionId);
+          const form = questionId.success ? store.answerableQuestion(botId, questionId.data) : null;
+          if (!form || !questionId.success) return apiError(409, "not_pending");
+          const misfit = body.data.action === "accept" ? formAnswers(form).safeParse(body.data.answers).error : undefined;
+          if (misfit) return apiError(400, "invalid_answer", misfit.issues[0]?.message);
+          const answer = store.answerQuestion(botId, questionId.data, body.data);
+          if (!answer) return apiError(409, "not_pending");
+          turns.publishChat(botId, answer);
+          workers.get(botId)?.send(JSON.stringify({ type: "question-answer", questionId: questionId.data, result: body.data } satisfies ControlToWorker));
           return new Response(null, { status: 204 });
         }),
       },

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { ApprovalId, AttachmentId, BotId, HandoffId, TurnId, TurnKey } from "./ids.ts";
+import { ApprovalId, AttachmentId, BotId, HandoffId, QuestionId, TurnId, TurnKey } from "./ids.ts";
+import { QuestionForm, QuestionResult } from "./questions.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
 // What a bot asks the user to approve, as the desktop labels it (after T3 Code):
@@ -26,6 +27,11 @@ export type ApprovalKind = z.infer<typeof ApprovalKind>;
 //   approval-withdrawn  the agent no longer waits on that approval-request, which can
 //               no longer be answered: a task worker's runtime was cut short to renew
 //               its token, or the request control held for it went away.
+//   question-request  the bot's agent asks the user `form` and waits for the answer
+//               (POST /bots/:id/questions/:questionId). Control records it.
+//   question-withdrawn  the agent no longer waits on that question, which can no
+//               longer be answered: the SDK ended it, its turn ended, or the bot was stopped
+//               (control adds that one).
 export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("text-delta"), messageId: z.string(), text: z.string() }),
   z.object({
@@ -38,6 +44,8 @@ export const TurnEvent = z.discriminatedUnion("type", [
   z.object({ type: z.literal("error"), message: z.string() }),
   z.object({ type: z.literal("approval-request"), approvalId: ApprovalId, kind: ApprovalKind, detail: z.string() }),
   z.object({ type: z.literal("approval-withdrawn"), approvalId: ApprovalId }),
+  z.object({ type: z.literal("question-request"), questionId: QuestionId, form: QuestionForm }),
+  z.object({ type: z.literal("question-withdrawn"), questionId: QuestionId }),
   z.object({ type: z.literal("done") }),
 ]);
 export type TurnEvent = z.infer<typeof TurnEvent>;
@@ -82,6 +90,10 @@ export type UserMessage = z.infer<typeof UserMessage>;
 export const ApprovalAnswer = z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() });
 export type ApprovalAnswer = z.infer<typeof ApprovalAnswer>;
 
+// The user's answer to a question-request of the same turn. Control adds it.
+export const QuestionAnswer = z.object({ type: z.literal("question-answer"), questionId: QuestionId, result: QuestionResult });
+export type QuestionAnswer = z.infer<typeof QuestionAnswer>;
+
 // Who pays for the turn's Copilot requests. Control adds it when a project's
 // coordinator starts the turn, outside the runtime's numbering.
 export const TurnPayer = z.object({ type: z.literal("payer"), payer: CopilotPayer });
@@ -106,7 +118,7 @@ export type HandoffUpdate = z.infer<typeof HandoffUpdate>;
 export const ChatEvent = z.object({
   seq: z.number().int(),
   turnId: TurnId,
-  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
+  event: z.discriminatedUnion("type", [UserMessage, ApprovalAnswer, QuestionAnswer, HandoffUpdate, TurnPayer, ...TurnEvent.options]),
 });
 export type ChatEvent = z.infer<typeof ChatEvent>;
 
@@ -158,6 +170,17 @@ export const ChatItem = z.discriminatedUnion("kind", [
     request: ApprovalKind,
     detail: z.string(),
     state: z.enum(["pending", "approved", "declined", "expired", "withdrawn"]),
+  }),
+  // A question card. answered: `answer` is the user's (accept or decline).
+  // expired: the turn ended before anyone answered (its worker restarted).
+  // withdrawn: the agent stopped waiting on it (question-withdrawn).
+  z.object({
+    kind: z.literal("question"),
+    id: z.string(),
+    questionId: QuestionId,
+    form: QuestionForm,
+    state: z.enum(["pending", "answered", "expired", "withdrawn"]),
+    answer: QuestionResult.optional(),
   }),
 ]);
 export type ChatItem = z.infer<typeof ChatItem>;

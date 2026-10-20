@@ -153,6 +153,7 @@ export function chatTurns({
       const turnId = message.activeTurnId;
       if (turnId && store.unfinishedTurns(botId).includes(turnId)) {
         for (const answer of store.answeredApprovals(botId, turnId)) reply({ type: "approval-answer", ...answer });
+        for (const answer of store.answeredQuestions(botId, turnId)) reply({ type: "question-answer", ...answer });
         if (store.turnKeys.missing(turnId)) reply({ type: "turn-key", turnId, turnKey: store.turnKeys.issue({ agent: "bot", botId, userId, turnId }) });
       }
       // The worker lost every unfinished turn but the one it says it is still running.

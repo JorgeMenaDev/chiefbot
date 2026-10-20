@@ -3,9 +3,10 @@ import { User } from "./auth.ts";
 import { SentAttachment, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts";
 import { AgentConnection, ConnectionCallsMessage } from "./connections.ts";
 import { AgentConnector } from "./connectors.ts";
-import { ApprovalId, BotId, ProjectId, TurnId, TurnKey } from "./ids.ts";
+import { ApprovalId, BotId, ProjectId, QuestionId, TurnId, TurnKey } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
 import { ProjectTasks } from "./projects.ts";
+import { QuestionResult } from "./questions.ts";
 import { ProjectWorkers } from "./taskWorkers.ts";
 import { CopilotPayer } from "./workspaces.ts";
 
@@ -102,6 +103,8 @@ export type ClientEvent = z.infer<typeof ClientEvent>;
 //   approval-answer the user's answer to one of the worker's approval-requests.
 //                   Sent when the user answers and again after every hello for the
 //                   active turn's answered approvals; the worker ignores repeats.
+//   question-answer the user's answer to one of the worker's question-requests, sent
+//                   and resent like approval-answer.
 export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("bound") }),
   z.object({
@@ -126,6 +129,7 @@ export const ControlToWorker = z.discriminatedUnion("type", [
   z.object({ type: z.literal("screen-control"), control: ScreenControl }),
   z.object({ type: z.literal("screen-open"), streamId: z.string().min(1) }),
   z.object({ type: z.literal("approval-answer"), approvalId: ApprovalId, approved: z.boolean() }),
+  z.object({ type: z.literal("question-answer"), questionId: QuestionId, result: QuestionResult }),
   TurnKeyMessage,
 ]);
 export type ControlToWorker = z.infer<typeof ControlToWorker>;
