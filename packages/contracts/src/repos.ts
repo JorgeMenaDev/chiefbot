@@ -7,6 +7,19 @@ export const RepoFullName = z
   .regex(/^[\w-][\w.-]*\/[\w.-]+$/)
   .refine((fullName) => !/\/\.\.?$/.test(fullName), "not a repository name");
 
+// A branch or tag name by git's ref-name rules (`git check-ref-format --branch`,
+// https://git-scm.com/docs/git-check-ref-format), and never starting with "-", so
+// a command line cannot take it for an option.
+export const GitRef = z.string().max(200).refine(isRefName, "expected a branch or tag, like main or v1.2");
+
+function isRefName(ref: string) {
+  // No control character, space, ~ ^ : ? * [ or \; no ".." or "@{"; not "@"; no "." last.
+  if (ref.startsWith("-") || ref === "@" || ref.endsWith(".") || ref.includes("..") || ref.includes("@{")) return false;
+  if (/[\x00-\x20\x7f~^:?*[\\]/.test(ref)) return false;
+  // Each "/" part is not empty (no "/" first or last, no "//"), starts with no "." and ends with no ".lock".
+  return ref.split("/").every((part) => part !== "" && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
 // Body of POST /worker/:botId/pull-requests: the bot's create_pull_request tool
 // asks control, which asks the user and then opens it with the repo app.
 export const PullRequestArgs = z.object({

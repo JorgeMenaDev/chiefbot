@@ -3,7 +3,7 @@ import { ChatItem, TurnEventMessage, TurnHello, TurnKeyMessage } from "./chat.ts
 import { AgentConnector, ConnectorName } from "./connectors.ts";
 import { ProjectId, TaskWorkerId, TurnId, TurnKey, UserId, WorkspaceId } from "./ids.ts";
 import { ModelReport, ReasoningEffort } from "./models.ts";
-import { RepoFullName } from "./repos.ts";
+import { GitRef, RepoFullName } from "./repos.ts";
 import { TemplateName, TemplateServiceName } from "./templates.ts";
 import type { TaskWorker, TaskWorkerState } from "./taskWorkers.ts";
 import { VerdictLine, VerdictResult } from "./verification.ts";
@@ -46,13 +46,6 @@ const NamedRecord = <K extends z.ZodType<string>, V extends z.ZodType>(name: K, 
 // The stdio servers by name.
 const ProjectMcpServers = NamedRecord(ConnectorName, ProjectMcpServer, "server");
 
-// A branch or tag of a repo: no space, no "..", and no "-" first.
-const GitRef = z
-  .string()
-  .max(200)
-  .regex(/^\w[\w./-]*$/, "expected a branch or tag, like main or v1.2")
-  .refine((ref) => !ref.includes(".."), "expected a branch or tag, like main or v1.2");
-
 // What a template service of the project runs from: a repo at a branch or tag (its
 // image builds from the service's context in that repo), or the template's stand-in.
 export const ServiceSource = z.union([z.literal("stand-in"), z.strictObject({ repo: RepoFullName, ref: GitRef })]);
@@ -69,7 +62,8 @@ export type ServiceSource = z.infer<typeof ServiceSource>;
 //   mcp           stdio MCP servers, by name, that run inside workers only
 //   secrets       the names of the project's secrets; members set their values in the app
 //   workers.max   how many worker computers the project runs at once
-//   template      the catalog's template (templates/<name>) whose services engineers get (docs/templates.md)
+//   template      the catalog's template (templates/<name>) whose services engineers get (docs/templates.md);
+//                 null in the settings turns the file's off
 //   service       the template service this repo is: it runs from the engineer's own clone
 //   services      the template's other services, by name: { repo, ref } or stand-in (the default)
 export const ProjectFile = z.strictObject({
@@ -81,7 +75,7 @@ export const ProjectFile = z.strictObject({
   mcp: ProjectMcpServers.optional(),
   secrets: z.array(SecretName).max(50).optional(),
   workers: z.strictObject({ max: z.int().min(1).max(10).optional() }).optional(),
-  template: TemplateName.optional(),
+  template: TemplateName.nullable().optional(),
   service: TemplateServiceName.optional(),
   services: NamedRecord(TemplateServiceName, ServiceSource, "service").optional(),
 });
@@ -149,7 +143,8 @@ export type ConfigSources = z.infer<typeof ConfigSources>;
 // The config from the repo's file (null when it has none, or an invalid one) and
 // the settings: each key from the settings when they set it, else from the file.
 // `commands` and `workers` merge key by key; any other key is taken whole, so
-// `connectors: []` in the settings clears the file's list.
+// `connectors: []` in the settings clears the file's list. `template: null` in the
+// settings turns the file's template off, and its `service` and `services` with it.
 export function effectiveConfig(file: ProjectFile | null, settings: ProjectFile): { config: ProjectConfig; sources: ConfigSources } {
   const sources: ConfigSources = {};
   const pick = <T>(key: ConfigKey, fromSettings: T | undefined, fromFile: T | undefined) => {
@@ -161,6 +156,9 @@ export function effectiveConfig(file: ProjectFile | null, settings: ProjectFile)
     const line = pick(`commands.${name}`, settings.commands?.[name], file?.commands?.[name]);
     return line === undefined ? {} : { [name]: line };
   };
+  const templateOff = settings.template === null;
+  if (templateOff) sources.template = "settings";
+  const templateFile = templateOff ? null : file;
   const config = ProjectConfig.parse({
     instructions: pick("instructions", settings.instructions, file?.instructions),
     commands: { ...command("setup"), ...command("build"), ...command("test"), ...command("dev"), ...command("devUrl") },
@@ -170,9 +168,9 @@ export function effectiveConfig(file: ProjectFile | null, settings: ProjectFile)
     mcp: pick("mcp", settings.mcp, file?.mcp),
     secrets: pick("secrets", settings.secrets, file?.secrets),
     workers: { max: pick("workers.max", settings.workers?.max, file?.workers?.max) },
-    template: pick("template", settings.template, file?.template),
-    service: pick("service", settings.service, file?.service),
-    services: pick("services", settings.services, file?.services),
+    template: pick("template", settings.template ?? undefined, templateFile?.template ?? undefined),
+    service: pick("service", settings.service, templateFile?.service),
+    services: pick("services", settings.services, templateFile?.services),
   });
   return { config, sources };
 }

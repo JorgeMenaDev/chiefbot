@@ -96,6 +96,16 @@ test("a template, the project's own service and the other services come from the
   });
 });
 
+test("template: null in the settings turns the file's template off, and its service and services with it", () => {
+  const file = ProjectFile.parse({ template: "java-react-enterprise", service: "ui", services: { auth: "stand-in" }, workers: { max: 3 } });
+  const settings = ProjectFile.parse({ template: null });
+
+  const { config, sources } = effectiveConfig(file, settings);
+
+  expect([config.template, config.service, config.services, config.workers.max]).toEqual([undefined, undefined, {}, 3]);
+  expect(sources).toEqual({ template: "settings", "workers.max": "file" });
+});
+
 test("with no project file, the settings and the defaults make the config", () => {
   expect(effectiveConfig(null, {})).toEqual({
     config: { instructions: [], commands: {}, skills: [], connectors: [], mcp: {}, secrets: [], workers: { max: 2 }, services: {} },
