@@ -46,8 +46,10 @@ async function gitControl() {
 // The handoff cards control posted in a chief's chat, oldest first.
 const cards = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "handoff-card" ? [event.card] : []));
 
-// The user messages of a member's chat with the coordinator.
+// The user messages of a member's chat with the coordinator, and the system
+// lines control started turns with.
 const sentToCoordinator = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "user-message" ? [event.text] : []));
+const systemLines = (events: ChatEvent[]) => events.flatMap(({ event }) => (event.type === "system-message" ? [event.text] : []));
 
 // Waits until the project's worker `id` matches, then returns it.
 async function workerWhen(member: TestUser, project: Project, id: string, matches: (worker: TaskWorker) => boolean) {
@@ -62,7 +64,7 @@ async function workerWhen(member: TestUser, project: Project, id: string, matche
   return found;
 }
 
-test("a chief's request ends in a verified pull request: request, follow-up, an engineer's draft PR, a verifier's PASS at its head, done, and the verdict on the chief's card", async () => {
+test("a chief's request ends in a verified pull request with no member's nudge: request, follow-up, an engineer's draft PR, a verifier's PASS at its head, done, and the verdict on the chief's card", async () => {
   const control = await gitControl();
   const { owner, github, copilot, workspace } = control;
   // A repo with no project file: the app's settings configure the project.
@@ -91,11 +93,11 @@ test("a chief's request ends in a verified pull request: request, follow-up, an 
     } else if (prompt === "How is the typo fix going?") {
       status.push(JSON.parse(String((await runtime.tool("handoff_status", {})).result)));
     }
-    // The coordinator: the handoff, the follow-up, then the owner's own messages.
+    // The coordinator: the handoff, the follow-up, then the turns each worker's ending starts.
     else if (prompt.includes("task #1 in the ledger")) await runtime.tool("update_task", { number: 1, status: "in_progress" });
     else if (prompt.startsWith("About task #1, from your chief of staff:")) await runtime.tool("dispatch_worker", { task: 1 });
-    else if (prompt === "Verify task #1.") await runtime.tool("dispatch_verifier", { task: 1 });
-    else if (prompt === "Mark task #1 done.") await runtime.tool("update_task", { number: 1, status: "done" });
+    else if (prompt.startsWith("Engineer for task #1 ended: opened ")) await runtime.tool("dispatch_verifier", { task: 1 });
+    else if (prompt.startsWith("Verifier for task #1 ended: PASS ")) await runtime.tool("update_task", { number: 1, status: "done" });
     // The engineer, in the clone its setup made.
     else if (prompt.startsWith("You are an engineer")) {
       await runtime.shell(`cd ${clone} && git checkout -q -b fix-typo && sed -i.bak 's/Teh/The/' README.md && rm README.md.bak && git commit -q -am 'Fix a typo' && git push -q -u origin fix-typo`);
@@ -113,11 +115,6 @@ test("a chief's request ends in a verified pull request: request, follow-up, an 
   const tell = async (text: string, turns: number) => {
     await owner.send(chief.id, text);
     await chiefChat.until(doneCount(turns));
-  };
-  const ask = async (text: string, turns: number) => {
-    const chat = owner.watchProjectChat(project.id);
-    await owner.api("POST", `/projects/${project.id}/messages`, { text });
-    await chat.until(doneCount(turns));
   };
 
   // 1. The chief hands the work over, then follows up: one task, both in the owner's chat with the coordinator.
@@ -149,16 +146,23 @@ test("a chief's request ends in a verified pull request: request, follow-up, an 
   expect(github.pullRequests).toMatchObject([{ repository: "octo-org/shop", head: "fix-typo", base: "main", draft: true, by: "app" }]);
   const head = github.git("octo-org/shop", "rev-parse", "fix-typo");
 
-  // 3. A verifier on a computer of its own checks the pull request at the head control pinned, and passes it.
-  await ask("Verify task #1.", 3);
-  const verifierId = (await workerIds(owner, project)).find((id) => id !== engineer.id) ?? "";
+  // 3. The engineer's ending wakes the coordinator, which dispatches a verifier. On a computer of its own, it checks
+  // the pull request at the head control pinned, and passes it.
+  const verifierId = (await workerIds(owner, project, 2)).find((id) => id !== engineer.id) ?? "";
   const verifier = await workerWhen(owner, project, verifierId, ({ state }) => state === "finished");
   expect(verifier).toMatchObject({ kind: "verifier", state: "finished", verdict: "pass", sha: head, pullRequest });
   expect(checkedOut).toBe(head);
 
-  // 4. The coordinator marks the task done: it has a PASS for its pull request's head.
-  await ask("Mark task #1 done.", 4);
+  // 4. The verifier's ending wakes the coordinator, which marks the task done: it has a PASS for its pull request's head.
+  // Both wake-ups are system lines in the owner's chat with the coordinator, not their messages.
   await eventually(() => cards(chiefChat.events).some(({ stage }) => stage === "done"));
+  const woken = await owner.watchProjectChat(project.id).until(doneCount(4));
+  const next = "Continue the task: dispatch the verifier on its PR, send fixes for ISSUES, or mark it done after a current PASS.";
+  expect(systemLines(woken)).toEqual([
+    `Engineer for task #1 ended: opened ${pullRequest}. ${next}`,
+    `Verifier for task #1 ended: PASS for ${pullRequest} at ${head.slice(0, 7)}: The README reads The shop. ${next}`,
+  ]);
+  expect(sentToCoordinator(woken)).toEqual(sent);
 
   // 5. The chief's card followed the task in place, and says the same after control restarts.
   const passed = { result: "pass" as const, sha: head, stale: false, summary: "The README reads The shop." };
@@ -171,7 +175,8 @@ test("a chief's request ends in a verified pull request: request, follow-up, an 
   ]);
   control.restart();
   await owner.watchBots().until((bots) => bots.some(({ id, status }) => id === chief.id && status === "online"));
-  expect(cards(await owner.watchChat(chief.id).settled())).toEqual(cards(chiefChat.events));
+  const stored = await owner.watchChat(chief.id).until((events) => cards(events).at(-1)?.stage === "done");
+  expect(cards(stored)).toEqual(cards(chiefChat.events));
   await owner.send(chief.id, "How is the typo fix going?");
   await owner.watchChat(chief.id).until(doneCount(3));
   expect(Handoff.array().parse(status[0])).toMatchObject([
@@ -188,14 +193,14 @@ test("a chief's request ends in a verified pull request: request, follow-up, an 
   ]);
 });
 
-// The ids of the project's workers, once it has any, oldest first.
-async function workerIds(member: TestUser, project: Project) {
+// The ids of the project's workers, once it has `count`, oldest first.
+async function workerIds(member: TestUser, project: Project, count = 1) {
   let ids: string[] = [];
   await eventually(async () => {
     ids = TaskWorker.array()
       .parse(await (await member.api("GET", `/projects/${project.id}/workers`)).json())
       .map(({ id }) => id);
-    return ids.length > 0;
+    return ids.length >= count;
   });
   return ids;
 }

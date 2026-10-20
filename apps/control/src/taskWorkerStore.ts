@@ -16,6 +16,7 @@ import {
   type WorkspaceId,
 } from "@chiefbot/contracts";
 import { addColumn } from "./addColumn.ts";
+import type { projectStore } from "./projectStore.ts";
 import { rebuildTable } from "./rebuildTable.ts";
 import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./turnRecords.ts";
 
@@ -23,7 +24,7 @@ import { acceptEvent, approvalRecords, toChatEvent, type ChatEventRow } from "./
 // events of its one turn (the task) and its approvals. openStore (store.ts)
 // calls this once the projects tables exist. Methods that take an id from a URL
 // or a tool call accept a plain string: an unknown one reads as missing.
-export function taskWorkerStore(db: Database, hash: (token: string) => string) {
+export function taskWorkerStore(db: Database, hash: (token: string) => string, projects: ReturnType<typeof projectStore>) {
   // The launch record, written before control asks for a computer (or queues
   // it). (project_id, creation_id) is unique, so a resent dispatch finds the
   // worker it started. user_id is the member who asked: their Copilot seat,
@@ -96,6 +97,16 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
   addColumn(db, "task_worker_approvals", "turn_id", "TEXT NOT NULL DEFAULT ''");
   addColumn(db, "task_worker_approvals", "requested_at", "INTEGER NOT NULL DEFAULT 0");
   db.run(`UPDATE task_worker_approvals SET turn_id = (SELECT turn_id FROM task_workers WHERE task_workers.id = worker_id) WHERE turn_id = ''`);
+  // Each ended worker's continuation (continueTask): the coordinator turn control
+  // queued for it, or NULL when it queued none. One row per worker, so one ending
+  // continues its task once, across restarts. Workers that had ended when the
+  // table was made count as continued: an upgrade starts no burst of turns.
+  const continuationsExisted = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_continuations'").get() !== null;
+  db.run(`CREATE TABLE IF NOT EXISTS task_continuations (
+    worker_id TEXT PRIMARY KEY REFERENCES task_workers(id) ON DELETE CASCADE,
+    turn_id TEXT
+  )`);
+  if (!continuationsExisted) db.run(`INSERT INTO task_continuations (worker_id) SELECT id FROM task_workers WHERE state IN (${ended})`);
   // Approvals wait only while the worker works: a pending one of an ended turn can never be answered.
   const approvals = approvalRecords(db, {
     table: "task_worker_approvals",
@@ -474,8 +485,58 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string) {
 
     // Everything the worker's turn did so far, oldest first.
     transcript,
+
+    // Continues the task of a worker whose turn ended by itself (finished,
+    // blocked or failed), once per worker: queues `text` as a system turn for the
+    // project's coordinator, in the chat of the member who requested the task,
+    // behind any turn of theirs. Then that member and the turn's event. Once the
+    // task had CONTINUATIONS_MAX, it needs that member instead: "used_up". Null
+    // when nothing changed: the worker continued already or was stopped, its
+    // task is done or abandoned, or the member left the workspace.
+    continueTask: db.transaction((workerId: TaskWorkerId, text: string): { userId: UserId; event: ChatEvent } | "used_up" | null => {
+      const row = db
+        .query<{ project_id: string; task_number: number; status: string; requested_by: string }, [string]>(
+          `SELECT task_workers.project_id, task_workers.task_number, project_tasks.status, project_tasks.requested_by FROM ${withTask}
+           WHERE task_workers.id = ?1 AND task_workers.state IN (${ended})`,
+        )
+        .get(workerId);
+      if (!row || !db.query("INSERT INTO task_continuations (worker_id) VALUES (?1) ON CONFLICT DO NOTHING RETURNING worker_id").get(workerId)) return null;
+      const projectId = ProjectId.parse(row.project_id);
+      const member = projects.member(projectId, { login: row.requested_by });
+      if (row.status === "done" || row.status === "abandoned" || !member) return null;
+      const queued = db
+        .query<{ n: number }, [string, number]>(
+          `SELECT count(*) AS n FROM task_continuations JOIN task_workers ON task_workers.id = task_continuations.worker_id
+           WHERE task_workers.project_id = ?1 AND task_workers.task_number = ?2 AND task_continuations.turn_id IS NOT NULL`,
+        )
+        .get(projectId, row.task_number);
+      if ((queued?.n ?? 0) >= CONTINUATIONS_MAX) {
+        projects.updateTask(projectId, { number: row.task_number, status: "needs_input", question: STEPS_USED_UP });
+        return "used_up";
+      }
+      const event = projects.queueSystemTurn(projectId, member.userId, text);
+      db.query("UPDATE task_continuations SET turn_id = ?2 WHERE worker_id = ?1").run(workerId, event.turnId);
+      return { userId: member.userId, event };
+    }),
+
+    // Workers whose turn ended by itself and that have not continued their task:
+    // control stopped before they did.
+    uncontinued(): TaskWorkerId[] {
+      return db
+        .query<{ id: string }, []>(
+          `SELECT id FROM task_workers WHERE state IN (${ended}) AND id NOT IN (SELECT worker_id FROM task_continuations) ORDER BY updated_at, rowid`,
+        )
+        .all()
+        .map((row) => TaskWorkerId.parse(row.id));
+    },
   };
 }
+
+// How many turns a task's ended workers start for the coordinator on their own
+// (continueTask). Past that, the task needs its requester: a loop of engineers
+// and verifiers that never reaches done stops costing their Copilot.
+export const CONTINUATIONS_MAX = 6;
+export const STEPS_USED_UP = "Automatic steps used up: tell the project how to go on.";
 
 // The states of workers that run, of those that have not ended yet, and of those
 // whose turn ended by itself (a stopped worker's computer goes).

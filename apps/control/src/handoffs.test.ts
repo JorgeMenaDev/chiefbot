@@ -371,6 +371,8 @@ test("a handoff's card and handoff_status show its task's verdict: Verified PASS
   await owner.send(chief.id, "hand off the checkout");
   await chiefChat.until(doneCount(1));
   await eventually(() => cards(chiefChat.events).length === 3);
+  // The verifier's ending wakes the coordinator, whose turn does nothing.
+  await owner.watchProjectChat(project.id).until(doneCount(2));
   // The pull request moves outside Chiefbot; the coordinator's done finds it.
   const moved = github.commit("octo-org/shop", { "checkout.html": "<form>pay</form>\n" }, "checkout");
   await owner.api("POST", `/projects/${project.id}/messages`, { text: "Mark task #1 done." });

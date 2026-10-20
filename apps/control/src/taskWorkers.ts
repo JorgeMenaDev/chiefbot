@@ -31,6 +31,7 @@ import {
   type TaskWorkerId,
   type TurnId,
   type UserId,
+  type Verification,
   type WorkerTranscript,
   type WorkspaceId,
 } from "@chiefbot/contracts";
@@ -99,6 +100,9 @@ export type TaskWorkerHostOptions = {
   onLedgerChange: (projectId: ProjectId) => void;
   // One of the project's workers changed, so its state may have (contracts projectState).
   onStateChange: (projectId: ProjectId) => void;
+  // Control queued a turn for the project's coordinator in the member's chat
+  // (a task's continuation): their chat shows it, and the scheduler picks it up.
+  onTurnQueued: (projectId: ProjectId, userId: UserId, event: ChatEvent) => void;
   // Upgrades the request to a worker's WebSocket, or one watching it; undefined once upgraded.
   upgrade: (req: Request, data: TaskWorkerSocketData | WorkerWatchSocketData) => Response | undefined;
 };
@@ -132,9 +136,13 @@ export type TaskWorkerHostOptions = {
 // pushes and pull requests. It ends with a verdict (report_verdict), which
 // control keeps with its report and screenshots in the project's context and
 // sets on the task (recordVerdict), BLOCKED when it ends without one
-// (noVerdict). A push through the git proxy since its commit was pinned, or
-// GitHub's head when the coordinator marks the task done (doneCheck), makes a
-// verdict stale. Control counts the pushes through the proxy to each branch,
+// (noVerdict). A worker that ends by itself (not stopped) wakes the project's
+// coordinator: one turn, in the chat of the member who requested its task,
+// says how it ended, so the task goes on with nobody's nudge (workerEnded; at
+// most CONTINUATIONS_MAX per task, taskWorkerStore.ts). A push through the git
+// proxy since its commit was pinned, or GitHub's head when the coordinator
+// marks the task done (doneCheck), makes a verdict stale. Control counts the
+// pushes through the proxy to each branch,
 // those started and those in flight (projectStore.ts branch_pushes), so a check
 // that reads GitHub can tell whether a push came in between.
 //
@@ -188,6 +196,7 @@ export function taskWorkerHost({
   publishToUser,
   onLedgerChange,
   onStateChange,
+  onTurnQueued,
   upgrade,
 }: TaskWorkerHostOptions) {
   const { projects, taskWorkers: workers } = store;
@@ -346,7 +355,7 @@ export function taskWorkerHost({
       if (stopped) return;
       if (failure !== null) {
         workers.launchFailed(workerId, `Its computer could not start: ${failure}`);
-        noVerdict(workerId);
+        void workerEnded(workerId);
         void reap();
       }
       publish(projectId);
@@ -370,23 +379,39 @@ export function taskWorkerHost({
   const reap = () => Promise.all(workers.toReap().map(settle));
 
   // The worker's turn ended: its approvals stop waiting, its computer stops
-  // (settle), and a verifier that gave no verdict is BLOCKED (noVerdict).
+  // (settle), and its task goes on (workerEnded).
   function turnOver(workerId: TaskWorkerId, turnId: TurnId) {
     approvals.turnEnded(turnId);
     holders.delete(workerId);
     void settle(workerId);
-    noVerdict(workerId);
+    void workerEnded(workerId);
+  }
+
+  // A worker ended by itself: its turn did, or its launch failed. A verifier
+  // without a verdict gets BLOCKED first (noVerdict). Then the project's
+  // coordinator continues the task, told how the worker ended, in a turn of the
+  // chat of the member who requested it (continueTask). Control stopping
+  // first leaves that to recover.
+  async function workerEnded(workerId: TaskWorkerId) {
+    await noVerdict(workerId);
+    const worker = workers.worker(workerId);
+    if (stopped || !worker) return;
+    const verification = projects.tasks(worker.projectId).find(({ number }) => number === worker.taskNumber)?.verification ?? null;
+    const continued = workers.continueTask(workerId, continuation(worker, verification?.worker === workerId ? verification : null));
+    if (continued === "used_up") publishTasks(worker.projectId);
+    else if (continued) onTurnQueued(worker.projectId, continued.userId, continued.event);
   }
 
   // A verifier that ended (its turn did, or its launch failed) without a verdict
   // gets BLOCKED, so the task shows that nobody checked the pull request. Its
   // summary says why: its error, or its last message. A failed setup step's log
   // is its report. A stopped verifier gets none: someone chose to stop it.
-  function noVerdict(workerId: TaskWorkerId) {
+  // Settles once any verdict of the verifier is recorded.
+  async function noVerdict(workerId: TaskWorkerId) {
     const worker = workers.worker(workerId);
     if (worker?.kind !== "verifier" || worker.verdict !== null || !["finished", "blocked", "failed"].includes(worker.state)) return;
     const failed = worker.setup.find(({ exitCode }) => exitCode !== 0);
-    void recordVerdict(
+    await recordVerdict(
       workerId,
       {
         result: "blocked",
@@ -954,7 +979,8 @@ export function taskWorkerHost({
 
     // On control's start: every approval a worker waits on gets its wait limit
     // again. A worker still launching whose computer is not running lost its
-    // launch to the restart, so it fails. A computer whose turn ended but still
+    // launch to the restart, so it fails. Each worker that ended and has not
+    // continued its task does. A computer whose turn ended but still
     // runs stops. Then every worker computer that should be gone is removed, and
     // queued workers launch where there is room.
     async recover() {
@@ -962,11 +988,9 @@ export function taskWorkerHost({
       for (const workerId of workers.launching()) {
         const status = await computers.status(workerId);
         if (stopped) return;
-        if (status !== "running") {
-          workers.launchFailed(workerId, "Control restarted before its computer was ready.");
-          noVerdict(workerId);
-        }
+        if (status !== "running") workers.launchFailed(workerId, "Control restarted before its computer was ready.");
       }
+      for (const workerId of workers.uncontinued()) void workerEnded(workerId);
       for (const workerId of workers.ended()) {
         const status = await computers.status(workerId);
         if (stopped) return;
@@ -1088,6 +1112,24 @@ export function taskWorkerHost({
 
 // Why the project agent may not mark a task done (the done rule), as it reads it.
 const notDone = (why: string) => `${why} A member can still mark it done in the app.`;
+
+// What the project's coordinator is told when one of a task's workers ended by
+// itself (workerEnded): how it ended, a verifier's with its verdict
+// (`verification`, when the task's is its), and what to do next.
+function continuation(worker: TaskWorker, verification: Verification | null) {
+  const how =
+    worker.kind === "verifier"
+      ? verification
+        ? `${verification.result.toUpperCase()} for ${verification.pullRequest} at ${verification.sha.slice(0, 7)}${verification.stale ? " (stale: the branch moved since)" : ""}: ${verification.summary}`
+        : `${worker.state} without a verdict: ${worker.result ?? "no reason given"}`
+      : worker.state !== "finished"
+        ? `${worker.state}: ${worker.result ?? "no reason given"}`
+        : worker.pullRequest
+          ? `opened ${worker.pullRequest}`
+          : "finished without opening a pull request (worker_status has its report)";
+  const role = worker.kind === "verifier" ? "Verifier" : "Engineer";
+  return `${role} for task #${worker.taskNumber} ended: ${how.trim().replace(/\.$/, "")}. Continue the task: dispatch the verifier on its PR, send fixes for ISSUES, or mark it done after a current PASS.`;
+}
 
 // The done rule's answer when task `number`'s pull request or its verdict moved while control checked it.
 export const movedWhileChecking = (number: number) =>

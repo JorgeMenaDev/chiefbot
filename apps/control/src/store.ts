@@ -261,7 +261,7 @@ export function openStore(path: string) {
     db.query("INSERT INTO turns (id, bot_id, done, created_at) VALUES (?1, ?2, 1, ?3)").run(turnId, botId, Date.now());
     return append(botId, turnId, card);
   };
-  const taskWorkers = taskWorkerStore(db, hash);
+  const taskWorkers = taskWorkerStore(db, hash, projects);
   const handoffs = handoffStore(db, projects, taskWorkers, postCard);
   const turnKeys = turnKeyStore(db, hash);
 

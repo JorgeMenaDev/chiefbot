@@ -291,6 +291,18 @@ export function projectStore(db: Database, hash: (token: string) => string) {
     if (!row) throw new Error("coordinator event insert returned no row");
     return toChatEvent(row);
   };
+  // A new queued turn of `text` in the member's chat with the coordinator: its id.
+  const insertTurn = (projectId: ProjectId, userId: UserId, text: string) => {
+    const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
+    db.query("INSERT INTO coordinator_turns (id, project_id, user_id, text, state, created_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5)").run(
+      turnId,
+      projectId,
+      userId,
+      text,
+      Date.now(),
+    );
+    return turnId;
+  };
 
   // A stored chat event and the member whose chat it is in.
   type MemberEvent = { userId: UserId; event: ChatEvent };
@@ -595,12 +607,15 @@ export function projectStore(db: Database, hash: (token: string) => string) {
         .query("SELECT 1 FROM coordinator_turns WHERE project_id = ?1 AND user_id = ?2 AND state != 'done'")
         .get(projectId, userId);
       if (unfinished && !whileBusy) return null;
-      const turnId = TurnId.parse(`turn_${crypto.randomUUID()}`);
-      db.query(
-        "INSERT INTO coordinator_turns (id, project_id, user_id, text, state, created_at) VALUES (?1, ?2, ?3, ?4, 'queued', ?5)",
-      ).run(turnId, projectId, userId, text, Date.now());
-      return append(turnId, { type: "user-message", text });
+      return append(insertTurn(projectId, userId, text), { type: "user-message", text });
     }),
+
+    // Queues a turn control starts itself in the member's chat (a task's
+    // continuation, taskWorkers.ts), behind any turn of theirs: the chat shows it
+    // as a system line, not as the member's message.
+    queueSystemTurn: db.transaction(
+      (projectId: ProjectId, userId: UserId, text: string): ChatEvent => append(insertTurn(projectId, userId, text), { type: "system-message", text }),
+    ),
 
     // The scheduler's one claim: the project's oldest queued turn becomes its
     // running turn. Null while a turn is running or none waits, so the
