@@ -158,7 +158,11 @@ function sdkCopilot(
       const env = { ...extra, ...clientOptions.env };
       const own = new CopilotClient({ ...clientOptions, env: options.auth.kind === "seat" ? env : { ...env, COPILOT_GITHUB_TOKEN: options.auth.token } });
       const auth = options.auth.kind === "seat" ? { gitHubTokenProvider: options.auth.gitHubTokenProvider } : {};
-      const session = await openOn(own, options.sessionId, { ...config, ...auth });
+      // A runtime whose session never opened stops at once, with the secrets or token it holds.
+      const session = await openOn(own, options.sessionId, { ...config, ...auth }).catch(async (error: unknown) => {
+        await own.stop().catch(() => []);
+        throw error;
+      });
       const disconnect = async () => {
         asks?.close();
         await own.stop();
