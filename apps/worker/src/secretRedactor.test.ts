@@ -1,5 +1,6 @@
+import { SETUP_LOG_MAX } from "@chiefbot/contracts";
 import { expect, test } from "bun:test";
-import { secretRedactor, turnEventRedactor } from "./secretRedactor.ts";
+import { redactedLog, secretRedactor, turnEventRedactor } from "./secretRedactor.ts";
 
 const key = "sk-live-4f9a2b7c1d";
 
@@ -56,6 +57,22 @@ test("a secret split across chunks is still hidden: the end of the text waits fo
 
   expect(out.join("")).toBe(`token: *** done ${key.slice(0, 5)}`);
   expect(out.slice(0, 2)).toEqual(["", ""]);
+});
+
+test("a log hides each secret as its text comes, one split across chunks too, and only then keeps its last SETUP_LOG_MAX characters", () => {
+  const log = redactedLog(secretRedactor([key]));
+  const after = "y".repeat(SETUP_LOG_MAX - 5);
+
+  log.push(key.slice(0, 9));
+  log.push(`${key.slice(9)}${after}`);
+
+  // Cut first, the log would start with the secret's last characters.
+  expect(log.end()).toBe(`***${after}`);
+
+  const long = redactedLog(secretRedactor([]));
+  long.push("a".repeat(SETUP_LOG_MAX));
+  long.push("bc");
+  expect(long.end()).toBe(`${"a".repeat(SETUP_LOG_MAX - 2)}bc`);
 });
 
 test("with no secrets, text passes as it is", () => {

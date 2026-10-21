@@ -26,7 +26,7 @@ templates/    The template catalog: one folder per kind of service stack an engi
 
 - TypeScript strict, no `any`, no casting wrappers. Zod schemas in `packages/contracts` are the source of types. Infer them, don't restate them.
 - Keep it simple (YAGNI). No abstraction until a second caller exists. `ComputerProvider` is the one planned seam.
-- Build each ticket test-first (`tdd`). Tests are focused, with no smoke-test sprawl. Tests use fakes for Copilot, Docker and GCP, so `bun test` needs no network, Docker or tokens.
+- Build each ticket test-first (`tdd`). Tests are focused, with no smoke-test sprawl. Tests use fakes for Copilot, Docker and GCP, so `bun test` needs no network, Docker or tokens. Real-Docker behaviour gets a live test that `bun test` skips unless `CHIEFBOT_DOCKER_TESTS=1` (`*.live.test.ts`) where a live test can show it, and a numbered manual check in `README.md` otherwise.
 - **No GCP spend.** Never run `terraform apply` or create any cloud resource. GCP code is tested with fakes only.
 - **Docker cleanup:** remove only the objects you created, by ID. Remove images with `docker rmi --no-prune <id>`. Never run `docker system/image/builder prune`: it deletes the owner's build cache.
 - **Copilot Free has 200 chats/month.** Live Copilot calls happen only in explicitly named manual checks, at most a handful per ticket.

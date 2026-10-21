@@ -56,7 +56,7 @@ A template is a folder, `templates/<name>/`, with a `template.yaml`, a compose f
 | `compose` | The compose file, in the template's folder. |
 | `services` | The compose services a project may run from one of its repos instead of the stand-in: `<service>: { context }`. `context` is the folder inside that repo that its image builds from, `.` for the repo's root. Each service needs a `build` in the compose file: a folder, or `{ context: <folder> }`. |
 | `stages` | The setup steps an engineer's task shows, in order: `{ label, waitsFor }`. `waitsFor` names the compose services that must be healthy (or running, without a healthcheck) before the step passes. The `seed` must finish instead: it is the only one-shot service a stage may wait for. |
-| `seed` | The one-shot compose service that fills the database. |
+| `seed` | The one-shot compose service that fills the database. Exactly one stage waits for it, so it runs once. |
 | `notes` | Up to 10 lines for the engineer's brief: the app's URLs and how to sign in as the seeded user. Use dev-only sample values, never secrets. |
 
 Every service, stage and seed the manifest names must be a service of the compose file.
@@ -75,14 +75,14 @@ The computer's ports, each with its protocol, are one list: `computerPorts` in `
 
 Behind a company proxy, the deployer gives Chiefbot a proxy, a CA certificate and a registry mirror (`docs/deploy.md`, **Behind a company proxy**). Each build of a stack gets the proxy variables as build args, which reach every `RUN` step with no `ARG` line, and the CA as the build secret `chiefbot-ca`. The mirror reaches a build only if its Dockerfile uses it. So write a stand-in's Dockerfile to build both with these settings and without them:
 
-- **The proxy:** nothing to write. Do not declare `HTTP_PROXY`, `HTTPS_PROXY` or `NO_PROXY` with an `ARG` of your own, or copy them into `ENV`. Docker leaves its own proxy build args out of the image's history, but an `ARG` or `ENV` of yours keeps them in the image.
+- **The proxy:** nothing to write for npm, curl, git or a package manager: they read the variables. Do not declare `HTTP_PROXY`, `HTTPS_PROXY` or `NO_PROXY` with an `ARG` of your own, or copy them into `ENV`. Docker leaves its own proxy build args out of the image's history, but an `ARG` or `ENV` of yours keeps them in the image. Java reads no proxy variables: in the `RUN` step, turn them into JVM properties (`-Dhttps.proxyHost`, `-Dhttps.proxyPort`, the same for `http`, and `-Dhttp.nonProxyHosts` from `NO_PROXY`) for Gradle or Maven, as the `auth` and `meta` Dockerfiles do.
 - **Base images:** declare `ARG CHIEFBOT_IMAGE_PREFIX=` before the first `FROM`, and write `FROM ${CHIEFBOT_IMAGE_PREFIX}node:24-alpine`. Set, it is the mirror with a trailing slash. Unset, it is empty, and the image comes from Docker Hub.
 - **The CA:** mount the secret in each `RUN` step that reaches the network: `RUN --mount=type=secret,id=chiefbot-ca …`. It is at `/run/secrets/chiefbot-ca` only when set. Then add it to the trust of the tool the step runs:
   - Node: `if [ -f /run/secrets/chiefbot-ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/chiefbot-ca; fi && npm ci`;
   - Java: `keytool -importcert -noprompt -cacerts -storepass changeit -alias chiefbot-ca -file /run/secrets/chiefbot-ca` (only the file's first certificate) before `gradle build`;
   - Debian, Ubuntu and Alpine images with `ca-certificates`, for git, curl and the package manager: copy it to `/usr/local/share/ca-certificates/chiefbot-ca.crt`, then run `update-ca-certificates`.
 
-The Dockerfiles of `java-react-enterprise` do all of this, for npm and Gradle. A service's `image:` needs nothing: Chiefbot puts the prefix before it. A real service repo's own Dockerfile gets the same build args and secret, but uses them only if it is written for them.
+The Dockerfiles of `java-react-enterprise` do all of this, for npm and Gradle, the proxy for Gradle included. A service's `image:` needs nothing: Chiefbot puts the prefix before it. A real service repo's own Dockerfile gets the same build args and secret, but uses them only if it is written for them.
 
 ## An engineer's stack
 

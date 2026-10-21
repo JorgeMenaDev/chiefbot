@@ -94,6 +94,17 @@ export function secretRedactor(values: string[]): SecretRedactor {
   };
 }
 
+// A log of output that comes in chunks: each secret hidden as the text comes
+// (one split across chunks too), and only then cut to its last SETUP_LOG_MAX
+// characters, so no cut leaves a piece of one. `end` gives the log. An engineer's
+// setup steps (engineerSetup.ts) and control's stack stages keep theirs this way.
+export function redactedLog({ stream }: SecretRedactor) {
+  const hidden = stream();
+  let text = "";
+  const keep = (more: string) => (text = (text + more).slice(-SETUP_LOG_MAX));
+  return { push: (chunk: string) => void keep(hidden.push(chunk)), end: () => keep(hidden.end()) };
+}
+
 // An engineer's turn events with its secrets hidden in every text they carry.
 // The message being written streams through the redactor, so a secret split
 // across its deltas is still hidden, even around a tool row between them. What

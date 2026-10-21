@@ -1,7 +1,7 @@
-import { instructionPaths, SETUP_LOG_MAX, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
+import { instructionPaths, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
 import { closeSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
-import { secretRedactor } from "./secretRedactor.ts";
+import { redactedLog, secretRedactor } from "./secretRedactor.ts";
 
 // Runs one setup command of an engineer: `sh -c command` in `cwd`, with `env`
 // added to the computer's environment (whose own variables win), killed when
@@ -69,23 +69,19 @@ export async function setUpEngineer({
   const clone = join(workspace, name);
   const secrets = secretRedactor(Object.values(setup.secrets));
   const run = async (step: SetupStep["step"], command: string, cwd: string, env: Record<string, string>) => {
-    const output = secrets.stream();
-    let log = "";
-    const keep = (text: string) => (log = (log + text).slice(-SETUP_LOG_MAX));
+    const output = redactedLog(secrets);
     const startedAt = now();
-    report({ step, command, exitCode: null, log, startedAt, endedAt: null });
+    report({ step, command, exitCode: null, log: "", startedAt, endedAt: null });
     let exitCode: number;
     try {
-      exitCode = await shell(command, { cwd, env, signal, onOutput: (text) => keep(output.push(text)) });
+      exitCode = await shell(command, { cwd, env, signal, onOutput: output.push });
     } catch (error) {
       // The shell could not run it: the step still ends, failed, with why in its log, before the error ends the setup.
-      keep(output.push(`${error instanceof Error ? error.message : String(error)}\n`));
-      keep(output.end());
-      report({ step, command, exitCode: -1, log, startedAt, endedAt: now() });
+      output.push(`${error instanceof Error ? error.message : String(error)}\n`);
+      report({ step, command, exitCode: -1, log: output.end(), startedAt, endedAt: now() });
       throw error;
     }
-    keep(output.end());
-    const done = { step, command, exitCode, log, startedAt, endedAt: now() };
+    const done = { step, command, exitCode, log: output.end(), startedAt, endedAt: now() };
     report(done);
     return done;
   };
