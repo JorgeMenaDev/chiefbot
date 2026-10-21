@@ -49,7 +49,7 @@ RUN cd /opt/chiefbot \
   && bun install --production \
   && rm -rf node_modules/@github/copilot-sdk-linuxmusl-* /root/.bun/install/cache
 
-COPY --from=dist /src/infra/computer/dist/worker.js /src/infra/computer/dist/git-credential.js /src/infra/computer/dist/wallpaper.png /opt/chiefbot/
+COPY --from=dist /src/infra/computer/dist/worker.js /src/infra/computer/dist/git-credential.js /src/infra/computer/dist/wallpaper.png /src/infra/computer/dist/ports.env /opt/chiefbot/
 COPY infra/computer/start.sh /opt/chiefbot/start.sh
 COPY infra/computer/dock /opt/chiefbot/dock
 COPY infra/computer/chromium-flags /etc/chromium.d/chiefbot

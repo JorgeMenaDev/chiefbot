@@ -14,7 +14,7 @@ packages/contracts  Zod schemas for every message that crosses a process boundar
 packages/setup      `bun run setup`: registers the deployer's own repo app and sign-in app (App Manifest flow) and writes ~/.chiefbot. Control and desktop read the sign-in app's client ID; control alone uses the repo app.
 packages/fake-github  The fake GitHub every test uses.
 infra/        Computer and control Docker images (built from the repo root), Caddy for compose.yaml, Terraform for GCP (written, NOT applied until the deployer approves the spend). docs/deploy.md.
-templates/    The template catalog: one folder per kind of service stack an engineer can get (templates/<name>/README.md). Not wired into control yet. Its checks need Docker, so `bun run check` leaves them out.
+templates/    The template catalog: one folder per kind of service stack an engineer can get (templates/<name>/template.yaml, docs/templates.md). Control loads it at start, refusing a bad template, and the app lists it under Connect apps. A project picks one and maps its services to repos (`template`, `service`, `services` in its config). Each engineer and verifier gets its own copy of the stack in its computer's network namespace (apps/control/src/templates/stacks.ts; a fake in tests). A template's own checks and the stacks' live test need Docker, so `bun run check` leaves them out.
 ```
 
 - **Bot computer** = one Docker image (Xvfb + a desktop whose dock opens Chromium, Files and Terminal + x11vnc on loopback + xdotool and scrot for the agent's `computer` tool + git + worker) with one volume per bot. It runs locally under Docker now and on GCP later, one Compute Engine VM per bot. Both sit behind one `ComputerProvider` interface (`create / start / stop / destroy / status`): `DockerProvider` (local) and `GceProvider` (GCP). The screen opens no port: for each viewer the worker dials control and pipes x11vnc, and control checks the viewer owns the bot.
@@ -26,7 +26,7 @@ templates/    The template catalog: one folder per kind of service stack an engi
 
 - TypeScript strict, no `any`, no casting wrappers. Zod schemas in `packages/contracts` are the source of types. Infer them, don't restate them.
 - Keep it simple (YAGNI). No abstraction until a second caller exists. `ComputerProvider` is the one planned seam.
-- Build each ticket test-first (`tdd`). Tests are focused, with no smoke-test sprawl. Tests use fakes for Copilot, Docker and GCP, so `bun test` needs no network, Docker or tokens.
+- Build each ticket test-first (`tdd`). Tests are focused, with no smoke-test sprawl. Tests use fakes for Copilot, Docker and GCP, so `bun test` needs no network, Docker or tokens. Real-Docker behaviour gets a live test that `bun test` skips unless `CHIEFBOT_DOCKER_TESTS=1` (`*.live.test.ts`) where a live test can show it, and a numbered manual check in `README.md` otherwise.
 - **No GCP spend.** Never run `terraform apply` or create any cloud resource. GCP code is tested with fakes only.
 - **Docker cleanup:** remove only the objects you created, by ID. Remove images with `docker rmi --no-prune <id>`. Never run `docker system/image/builder prune`: it deletes the owner's build cache.
 - **Copilot Free has 200 chats/month.** Live Copilot calls happen only in explicitly named manual checks, at most a handful per ticket.

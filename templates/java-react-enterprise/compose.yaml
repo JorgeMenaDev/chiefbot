@@ -14,8 +14,11 @@ x-health: &health
 services:
   # Owns the namespace and does nothing else, like a Kubernetes pause container,
   # so any app service can restart without taking the namespace with it.
+  # `expose` lists the ports the services bind in it, publishing none: Chiefbot
+  # refuses a template whose ports clash with the engineer computer's own.
   pod:
     image: registry.k8s.io/pause:3.10
+    expose: ["3000", "8081", "8082", "5432"]
 
   postgres:
     image: postgres:17

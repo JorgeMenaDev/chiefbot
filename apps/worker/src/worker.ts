@@ -5,6 +5,7 @@ import {
   ENGINEER_SETUP,
   VERIFIER,
   ApprovalId,
+  computerPorts,
   ControlToWorker,
   DEFAULT_ACCESS,
   QuestionId,
@@ -26,7 +27,7 @@ import { chiefTools } from "./chiefTools.ts";
 import { computerInstructions, computerTool, displayCommands, type CommandRunner } from "./computerUse.ts";
 import { connectionsRoot as defaultConnectionsRoot, stageConnections } from "./connections.ts";
 import { connectorServers } from "./connectorServers.ts";
-import type { Clock } from "./clock.ts";
+import { systemClock, type Clock } from "./clock.ts";
 import { controlLink, type Turn } from "./controlLink.ts";
 import type { BotSession, Copilot, FileAttachment, QuestionRequest, Questions } from "./copilot.ts";
 import { agentEnv } from "./copilotSdk.ts";
@@ -50,7 +51,7 @@ export type WorkerOptions = {
   token: string;
   // The agent engine: the Copilot SDK in a bot computer, a fake in tests.
   copilot: Copilot;
-  // The computer's VNC server. Default: x11vnc on 127.0.0.1:5900.
+  // The computer's VNC server. Default: x11vnc on 127.0.0.1, at computerPorts.vnc.
   screen?: ScreenAddress;
   // Runs the computer tool's xdotool and scrot commands on the screen. Default:
   // on display :1 (computerUse.ts); a fake display in tests.
@@ -112,7 +113,7 @@ export function startWorker({
   token,
   copilot,
   gitSocket,
-  screen = { hostname: "127.0.0.1", port: 5900 },
+  screen = { hostname: "127.0.0.1", port: computerPorts.vnc.port },
   screenCommands = displayCommands(),
   retryMs = 2000,
   onBound,
@@ -270,10 +271,17 @@ export function startWorker({
   }
 
   // An engineer sets its computer up for its task before its agent starts
-  // (engineerSetup.ts): each step goes to the turn as it ends, then setup-done.
+  // (engineerSetup.ts): each step goes to the turn as it starts and as it ends, then setup-done.
   // Null when a step failed: the turn has ended, blocked.
   async function setUp(turn: Turn, setup: EngineerSetup) {
-    const outcome = await setUpEngineer({ setup, workspace, shell: setupShell, signal: turn.ended, report: (step) => link.emit(turn.turnId, { type: "setup-step", step }) });
+    const outcome = await setUpEngineer({
+      setup,
+      workspace,
+      shell: setupShell,
+      signal: turn.ended,
+      report: (step) => link.emit(turn.turnId, { type: "setup-step", step }),
+      now: (clock ?? systemClock).now,
+    });
     if ("failed" in outcome) {
       const { command, exitCode } = outcome.failed;
       link.fail(turn.turnId, new Error(`Its setup failed: \`${command}\` exited with ${exitCode}.`));

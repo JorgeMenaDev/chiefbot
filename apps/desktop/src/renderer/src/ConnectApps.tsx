@@ -6,6 +6,7 @@ import { ErrorText, Muted, PaneBody, PaneHeader, PanelSection, Row, Section } fr
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input } from "./components/ui/input.tsx";
+import { Templates } from "./Templates.tsx";
 import { useAction } from "./Workspaces.tsx";
 import { listOf } from "./lib/utils.ts";
 
@@ -16,7 +17,7 @@ const CallList = z.array(ConnectionCall);
 // with whether it is on for the user. Connect (or Edit) opens a form of its
 // fields, secret ones as password fields; Save turns it on, Disconnect turns it
 // off and deletes the fields. Control never sends a saved value back, so Edit
-// asks for every field again.
+// asks for every field again. Under them, the template catalog (Templates.tsx).
 export function ConnectApps() {
   const api = window.chiefbot.connections;
   // Null until the first list arrives.
@@ -78,6 +79,7 @@ export function ConnectApps() {
           ))}
           <ErrorText message={error} />
         </Section>
+        <Templates />
       </PaneBody>
     </>
   );

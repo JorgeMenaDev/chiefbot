@@ -27,7 +27,7 @@ The README Quickstart: `bun run setup`, `bun run computer:build`, `bun run dev`.
 
 `compose.yaml` runs two containers: **control** and **Caddy**, which gets a Let's Encrypt certificate for your domain and passes every request (WebSockets included) to control. Control runs each computer as a sibling container on the machine's Docker Engine. The computers dial control through Caddy at the same `https://` address members use, so nothing but 80 and 443 is open.
 
-**The Docker socket.** Control mounts `/var/run/docker.sock` to make computers. Access to that socket is root on the machine: anyone who takes over the control container can start a privileged container and own the machine, and with it every computer's files. Control never hands the socket to a computer (`apps/control/src/computers/docker.ts` mounts nothing but each computer's own volume), so a bot that goes wrong cannot reach it. Treat the machine as control's: run nothing else on it, and limit who can SSH in. On GCP, the VM-per-computer path below avoids the socket altogether.
+**The Docker socket.** Control mounts `/var/run/docker.sock` to make computers and engineers' template stacks. Access to that socket is root on the machine: anyone who takes over the control container can start a privileged container and own the machine, and with it every computer's files. Control never hands the socket to a computer (`apps/control/src/computers/docker.ts` mounts nothing but each computer's own volume), so a bot that goes wrong cannot reach it. Treat the machine as control's: run nothing else on it, and limit who can SSH in. On GCP, the VM-per-computer path below avoids the socket altogether.
 
 You need a Linux machine with Docker Engine and the compose plugin (`curl -fsSL https://get.docker.com | sh`, then add your user to the `docker` group), a DNS name whose A record points at it, and ports 80 and 443 open. Size it for the computers that run at once: each runs Chromium and the Copilot runtime. Docker needs no other tools: both images build from their Dockerfiles.
 
@@ -78,6 +78,58 @@ docker compose start control
 ```
 
 **Tear down:** delete every bot and project in the app (with **Also delete its files**), then `docker compose down`. `docker compose down -v` also deletes the database and certificates.
+
+## Behind a company proxy
+
+On a company network, traffic out often goes through a proxy, and the proxy may inspect HTTPS with the company's own CA (certificate authority) certificate. Engineers' computers and their template stacks need to know both. Control reads these settings from its env once, when it starts, with the local Docker provider (**Local** and **Docker compose** above):
+
+| Variable | Example | What it does |
+| --- | --- | --- |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | `http://proxy.example.com:3128`, `.corp.example.com` | The proxy, and the hosts reached without it. The lower-case forms work too: an upper-case one that is set and nonempty wins. |
+| `CHIEFBOT_CA_FILE` | `/etc/ssl/company-ca.pem` | A PEM file with the proxy's CA certificate (more than one is fine). Control refuses to start when it cannot read the file or finds no `-----BEGIN CERTIFICATE-----` in it, and the error names the variable and the path. |
+| `CHIEFBOT_IMAGE_PREFIX` | `registry.example.com/hub` | A registry that mirrors Docker Hub, for the base images of template stacks. |
+
+An unset or empty variable passes nothing on. These are deployer settings: a project cannot set them.
+
+**What gets them:**
+
+- **Engineers' and verifiers' computers** get the proxy variables, upper- and lower-case, and the CA as `CHIEFBOT_CA_CERT`. So `commands.setup` reaches the company's package mirrors. Bots' and project agents' computers get none of them yet.
+- **Template stacks' builds** get the proxy variables and `CHIEFBOT_IMAGE_PREFIX` as build args, and the CA as the build secret `chiefbot-ca`. Docker passes the proxy variables to every `RUN` step without an `ARG` line. The prefix and the CA work only in a Dockerfile written for them: `docs/templates.md`, **Company networks**.
+- **Template stacks' containers** get the proxy variables and the CA. Each `image:` of a service with no build gets the prefix: `postgres:17` becomes `registry.example.com/hub/postgres:17`.
+- **Control's fetches of services' repos**, before it builds them, go through the proxy and trust the CA.
+
+Chiefbot adds `localhost`, `127.0.0.1`, `::1` and control's own host (from `CHIEFBOT_WORKER_CONTROL_URL`) to `NO_PROXY`. A stack's services reach each other on `localhost`, and a computer reaches control's WebSocket and git proxy, without the proxy.
+
+Control refuses to start when a proxy URL holds a user or password, and the error names the variable. Engineers' computers get the proxy variables, and an agent there could print them. For a proxy that needs a sign-in, run a local forwarder that adds it, such as cntlm or px, and point the proxy variables at it.
+
+**What trusts the CA.** Chiefbot adds the CA to the default trust. Each bundle keeps the public roots, so public sites still work.
+
+| Where | Node and Bun | git, curl and OpenSSL | Java |
+| --- | --- | --- | --- |
+| Engineer computer | Yes (`NODE_EXTRA_CA_CERTS`) | Yes: a bundle of the image's own roots and the CA (`SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`), made by `infra/computer/start.sh` | No Java in the image |
+| Stack container | Yes, from `/etc/chiefbot/ca.pem` | Yes, from `/etc/chiefbot/ca-bundle.pem`: the public roots Bun ships (Mozilla's) and the CA. These tools read it in place of the image's own bundle, so roots an image added to its own are not kept | No |
+| Stack build | Where the Dockerfile mounts the secret | Where the Dockerfile mounts the secret | Where the Dockerfile imports it with `keytool` |
+
+Chromium in the computer does not trust the CA: it keeps its own certificate store.
+
+**What these settings do not cover:**
+
+- **Docker pulls images itself**, with its own proxy and trust settings: Docker Desktop's **Settings > Resources > Proxies**, or `proxies` in `/etc/docker/daemon.json` on Linux, and `/etc/docker/certs.d/<registry>/ca.crt` for a registry signed by the CA. A mirror in `CHIEFBOT_IMAGE_PREFIX` that Docker reaches directly needs neither.
+- **Java reads no proxy variables.** The Gradle builds of `java-react-enterprise`'s stand-ins handle it: they turn the proxy variables into Gradle's JVM proxy properties and trust the CA. Their Gradle step reads only `http://host:port` proxies (a hostname or an IPv4 address) and `NO_PROXY` entries that are hosts or domains (a domain counts with its subdomains, as curl reads it). It does not translate IPv6 proxy addresses, CIDR ranges or `https://` proxies. A real repo's Gradle or Maven build needs its own proxy settings (`systemProp.https.proxyHost` and `systemProp.https.proxyPort` in `gradle.properties`, or Maven's `settings.xml`), or a Dockerfile that does the same as the stand-ins'.
+- **A real service repo's own Dockerfile** uses the prefix and the CA only if it is written for them. Its own base images often trust the CA already. It must not declare the proxy variables as its own `ARG` or copy them into `ENV`: that keeps them in the image (`docs/templates.md`, **Company networks**).
+- **Control's own calls** (GitHub, Copilot tokens, connectors) go through Bun's `fetch`, which reads the proxy variables from control's env. For the CA, also set `NODE_EXTRA_CA_CERTS` to the same file when you start control on the host. `compose.yaml` sets it for you.
+
+**With compose**, put the CA file in `~/.chiefbot`, which compose mounts at `/chiefbot`, and add the settings to `.env`. `compose.yaml` passes them to control:
+
+```bash
+HTTP_PROXY=http://proxy.example.com:3128
+HTTPS_PROXY=http://proxy.example.com:3128
+NO_PROXY=.corp.example.com
+CHIEFBOT_CA_FILE=/chiefbot/company-ca.pem
+CHIEFBOT_IMAGE_PREFIX=registry.example.com/hub
+```
+
+**On GCP** these settings do nothing: control there reads none of them, and computers reach the internet through Cloud NAT. Templates need the local Docker provider anyway.
 
 ## GCP with Terraform
 

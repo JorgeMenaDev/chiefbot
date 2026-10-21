@@ -1,7 +1,7 @@
-import { instructionPaths, SETUP_LOG_MAX, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
+import { instructionPaths, type EngineerSetup, type SetupStep } from "@chiefbot/contracts";
 import { closeSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
-import { secretRedactor } from "./secretRedactor.ts";
+import { redactedLog, secretRedactor } from "./secretRedactor.ts";
 
 // Runs one setup command of an engineer: `sh -c command` in `cwd`, with `env`
 // added to the computer's environment (whose own variables win), killed when
@@ -42,36 +42,46 @@ const instructionMax = 64 * 1024;
 // Sets an engineer's computer up for `setup`, before its agent starts: clones
 // the repo into <workspace>/<repo name> (a verifier's then checks out the commit
 // it checks, `setup.sha`, detached) and runs the setup command there with
-// the project's secrets, each step reported as it ends. Its log is the end of its
+// the project's secrets, each step reported as it starts and again as it ends,
+// at `now` (epoch milliseconds). Its log is the end of its
 // output with every secret hidden (secretRedactor.ts) as it streams, before it
 // is cut to SETUP_LOG_MAX, so no cut leaves a piece of one. Then reads the
 // repo's instruction files and finds its skill folders; a configured one the
 // repo lacks is left out, and so is any that leads outside the clone or holds a
 // link that does. A step that fails stops the setup: `failed` is that step,
-// reported last.
+// reported last. A step the shell throws on ends with exit -1, and the error ends the setup.
 export async function setUpEngineer({
   setup,
   workspace,
   shell,
   signal,
   report,
+  now,
 }: {
   setup: EngineerSetup;
   workspace: string;
   shell: SetupShell;
   signal: AbortSignal;
   report: (step: SetupStep) => void;
+  now: () => number;
 }): Promise<EngineerReady | { failed: SetupStep }> {
   const name = setup.repo.split("/")[1] ?? setup.repo;
   const clone = join(workspace, name);
   const secrets = secretRedactor(Object.values(setup.secrets));
   const run = async (step: SetupStep["step"], command: string, cwd: string, env: Record<string, string>) => {
-    const output = secrets.stream();
-    let log = "";
-    const keep = (text: string) => (log = (log + text).slice(-SETUP_LOG_MAX));
-    const exitCode = await shell(command, { cwd, env, signal, onOutput: (text) => keep(output.push(text)) });
-    keep(output.end());
-    const done: SetupStep = { step, command, exitCode, log };
+    const output = redactedLog(secrets);
+    const startedAt = now();
+    report({ step, command, exitCode: null, log: "", startedAt, endedAt: null });
+    let exitCode: number;
+    try {
+      exitCode = await shell(command, { cwd, env, signal, onOutput: output.push });
+    } catch (error) {
+      // The shell could not run it: the step still ends, failed, with why in its log, before the error ends the setup.
+      output.push(`${error instanceof Error ? error.message : String(error)}\n`);
+      report({ step, command, exitCode: -1, log: output.end(), startedAt, endedAt: now() });
+      throw error;
+    }
+    const done = { step, command, exitCode, log: output.end(), startedAt, endedAt: now() };
     report(done);
     return done;
   };

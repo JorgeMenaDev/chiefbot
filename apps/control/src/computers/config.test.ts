@@ -1,7 +1,19 @@
 import { expect, test } from "bun:test";
-import { computersConfig } from "./config.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { computersConfig, proxyEnv } from "./config.ts";
 
 const home = "/Users/ada";
+const noNetwork = { imagePrefix: null, proxy: { http: null, https: null, noProxy: null }, ca: null };
+const pem = "-----BEGIN CERTIFICATE-----\nMIIBacmeCA\n-----END CERTIFICATE-----\n";
+
+// The company network of docker computers configured with `env`.
+function networkOf(env: Record<string, string>) {
+  const config = computersConfig(env, home, () => false);
+  if (config.provider !== "docker") throw new Error("not docker");
+  return config.network;
+}
 
 test("bots run on local Docker unless configured otherwise", () => {
   const colima = "/Users/ada/.colima/default/docker.sock";
@@ -9,6 +21,7 @@ test("bots run on local Docker unless configured otherwise", () => {
     provider: "docker",
     socketPath: colima,
     image: "chiefbot-computer:dev",
+    network: noNetwork,
   });
   expect(computersConfig({ DOCKER_HOST: "unix:///run/user/501/docker.sock" }, home, () => true)).toMatchObject({
     socketPath: "/run/user/501/docker.sock",
@@ -41,4 +54,76 @@ test("gce without a project or an image fails, naming what is missing", () => {
   expect(gce).toThrow(/CHIEFBOT_GCP_PROJECT/);
   expect(gce).toThrow(/CHIEFBOT_COMPUTER_IMAGE/);
   expect(() => computersConfig({ CHIEFBOT_COMPUTERS: "k8s" }, home)).toThrow(/CHIEFBOT_COMPUTERS/);
+});
+
+test("behind a company network, docker computers get the deployer's image prefix, proxy and CA certificate, read once at start; unset or empty, none", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acme-config-test-"));
+  try {
+    writeFileSync(join(dir, "company-ca.pem"), pem);
+    const env = {
+      CHIEFBOT_IMAGE_PREFIX: "registry.example.com/hub",
+      HTTPS_PROXY: "http://proxy.example.com:3128",
+      https_proxy: "http://ignored.example.com:1",
+      http_proxy: "http://proxy.example.com:3128",
+      no_proxy: ".corp.example.com,10.0.0.0/8",
+      CHIEFBOT_CA_FILE: join(dir, "company-ca.pem"),
+    };
+
+    expect(networkOf(env)).toEqual({
+      imagePrefix: "registry.example.com/hub/",
+      proxy: { http: "http://proxy.example.com:3128", https: "http://proxy.example.com:3128", noProxy: ".corp.example.com,10.0.0.0/8" },
+      ca: pem,
+    });
+    expect(networkOf({ ...env, CHIEFBOT_IMAGE_PREFIX: "registry.example.com/hub/" }).imagePrefix).toBe("registry.example.com/hub/");
+    const empty = { CHIEFBOT_IMAGE_PREFIX: "", HTTP_PROXY: "", HTTPS_PROXY: "", NO_PROXY: "", CHIEFBOT_CA_FILE: "" };
+    expect(networkOf(empty)).toEqual(noNetwork);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a CA certificate file that is missing, unreadable or holds no PEM certificate stops control, naming CHIEFBOT_CA_FILE and the path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acme-config-test-"));
+  const config = (file: string) => () => networkOf({ CHIEFBOT_CA_FILE: file });
+  try {
+    const missing = join(dir, "missing.pem");
+    expect(config(missing)).toThrow(`CHIEFBOT_CA_FILE: cannot read ${missing}`);
+    mkdirSync(join(dir, "folder.pem"));
+    expect(config(join(dir, "folder.pem"))).toThrow(`CHIEFBOT_CA_FILE: cannot read ${join(dir, "folder.pem")}`);
+    writeFileSync(join(dir, "der.cer"), "0\x82\x01\x0a");
+    expect(config(join(dir, "der.cer"))).toThrow(`CHIEFBOT_CA_FILE: ${join(dir, "der.cer")} holds no PEM certificate (-----BEGIN CERTIFICATE-----)`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the proxy's env leaves the deployer's NO_PROXY, localhost and control's own host out of the proxy; with no proxy set it is empty", () => {
+  const proxy = { http: null, https: "http://proxy.example.com:3128", noProxy: " .corp.example.com , localhost" };
+
+  expect(proxyEnv({ ...noNetwork, proxy }, "https://chiefbot.example.com")).toEqual({
+    HTTPS_PROXY: "http://proxy.example.com:3128",
+    https_proxy: "http://proxy.example.com:3128",
+    NO_PROXY: ".corp.example.com,localhost,127.0.0.1,::1,chiefbot.example.com",
+    no_proxy: ".corp.example.com,localhost,127.0.0.1,::1,chiefbot.example.com",
+  });
+  // An IPv6 control host goes in without its URL's brackets, as curl and git read NO_PROXY.
+  expect(proxyEnv({ ...noNetwork, proxy }, "http://[fd00::1234]:7410").NO_PROXY).toBe(".corp.example.com,localhost,127.0.0.1,::1,fd00::1234");
+  expect(proxyEnv({ ...noNetwork, proxy: { ...proxy, https: null } }, "http://host.docker.internal:7410")).toEqual({});
+});
+
+test("a proxy URL with a user or a password stops control, naming its variable and the way round it, never the URL or its credentials", () => {
+  const refusal = (name: string) =>
+    `${name} has a user or password. Chiefbot does not pass proxy credentials to engineers' computers, where an agent could print them. For a proxy that needs a sign-in, run a local forwarder that adds it (such as cntlm or px) and point ${name} at it.`;
+  const proxies = {
+    HTTPS_PROXY: "http://acme:hunter2-proxy@proxy.example.com:3128",
+    https_proxy: "http://:only-a-password@proxy.example.com:3128",
+    HTTP_PROXY: "tok-0123456789@proxy.example.com:3128",
+    http_proxy: "http://acme:p%40ss@proxy.example.com:3128",
+  };
+
+  for (const [name, value] of Object.entries(proxies)) {
+    const config = () => networkOf({ [name]: value });
+    expect(config).toThrow(refusal(name));
+    expect(config).not.toThrow(/hunter2|only-a-password|tok-0123456789|acme|p%40ss|proxy\.example\.com/);
+  }
 });

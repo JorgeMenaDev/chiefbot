@@ -2,6 +2,7 @@ import type { ChatItem, HandoffStage, ReplyToHandoffRequest } from "@chiefbot/co
 import { FolderGit2Icon, SendIcon } from "lucide-react";
 import { useState, type KeyboardEvent } from "react";
 import { Button } from "./components/ui/button.tsx";
+import { Spinner } from "./components/ui/spinner.tsx";
 import { Textarea } from "./components/ui/input.tsx";
 import { cn } from "./lib/utils.ts";
 import { verdictColor, verdictText } from "./ProjectTasks.tsx";
@@ -43,7 +44,8 @@ export const replyFor = (unanswered: ReplyToHandoffRequest | null, text: string,
 
 // Work the chief of staff handed to a project, in the chief's chat: one card per
 // handoff that control keeps up to date (ApprovalCard's look). It names the
-// project's task and where it stands, with its pull requests and a verifier's
+// project's task and where it stands, the stage of the template stack its
+// engineer or verifier is setting up, its pull requests and a verifier's
 // verdict on the latest (stale once it moved). While the project
 // needs input, it shows the question and a box to answer it: the answer goes to
 // the same task in the project's chat (`onReply`). Each answer carries the
@@ -113,6 +115,12 @@ export function HandoffCard({
       <p className="mt-1 truncate text-muted-foreground text-xs">
         Handed to {item.project} · task #{item.taskNumber}
       </p>
+      {item.settingUp && (
+        <p className="mt-1 flex items-center gap-1.5 text-muted-foreground text-xs">
+          <Spinner className="size-3 shrink-0" />
+          <span className="truncate">Setting up: {item.settingUp}</span>
+        </p>
+      )}
       {item.question && (
         <p className="mt-3 whitespace-pre-wrap break-words rounded-lg border border-border/65 bg-background/70 p-3 text-sm leading-relaxed">
           {item.question}

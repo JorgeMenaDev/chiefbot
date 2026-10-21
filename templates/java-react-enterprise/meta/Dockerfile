@@ -1,10 +1,45 @@
 # syntax=docker/dockerfile:1
-FROM gradle:8.14.6-jdk17 AS build
+# Behind a company network, Chiefbot passes CHIEFBOT_IMAGE_PREFIX, a registry
+# mirror for the base images (docs/templates.md). Unset, they come from Docker Hub.
+ARG CHIEFBOT_IMAGE_PREFIX=
+FROM ${CHIEFBOT_IMAGE_PREFIX}gradle:8.14.6-jdk17 AS build
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,target=/home/gradle/.gradle gradle build --no-daemon --quiet
+# Gradle trusts the network's CA certificate, the build secret chiefbot-ca (its
+# first certificate), on top of the JDK's roots. Java reads no proxy variables,
+# so the proxy Docker passes to this step (HTTPS_PROXY, HTTP_PROXY and NO_PROXY,
+# or lower-case: never declare them as an ARG or ENV) becomes Gradle's JVM proxy
+# properties. With no proxy set, Gradle gets none. Gradle's home, root's
+# ~/.gradle, is a link to /home/gradle/.gradle in the gradle image, so its caches
+# stay between builds in this cache mount.
+RUN --mount=type=secret,id=chiefbot-ca --mount=type=cache,target=/home/gradle/.gradle <<'EOF'
+set -euf
+if [ -f /run/secrets/chiefbot-ca ]; then keytool -importcert -noprompt -cacerts -storepass changeit -alias chiefbot-ca -file /run/secrets/chiefbot-ca; fi
+proxy=""
+for scheme in http https; do
+  if [ "$scheme" = http ]; then url=${HTTP_PROXY:-${http_proxy:-}}; else url=${HTTPS_PROXY:-${https_proxy:-}}; fi
+  [ -n "$url" ] || continue
+  # http://proxy.example.com:3128/ gives proxy.example.com and 3128 (with no port, the URL scheme's).
+  address=${url#*://}; address=${address%%/*}; host=${address%:*}; port=${address##*:}
+  if [ "$host" = "$address" ]; then case $url in https://*) port=443 ;; *) port=80 ;; esac; fi
+  proxy="$proxy -D$scheme.proxyHost=$host -D$scheme.proxyPort=$port"
+done
+# NO_PROXY's entries, |-separated. A domain, with or without its leading dot,
+# counts with its subdomains, as curl reads it. *, localhost and IPs stay as they are.
+skip=""
+for entry in $(printf %s "${NO_PROXY:-${no_proxy:-}}" | tr ',' ' '); do
+  case $entry in
+    \*|\*.*|localhost|*:*|*/*) ;;
+    *[!0-9.]*) entry="${entry#.}|*.${entry#.}" ;;
+  esac
+  skip="${skip:+$skip|}$entry"
+done
+if [ -n "$proxy" ] && [ -n "$skip" ]; then proxy="$proxy -Dhttp.nonProxyHosts=$skip"; fi
+# One word per property (set -f keeps a * as it is).
+gradle $proxy build --no-daemon --quiet
+EOF
 
-FROM eclipse-temurin:17-jre
+FROM ${CHIEFBOT_IMAGE_PREFIX}eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /src/build/libs/app.jar app.jar
 EXPOSE 8082

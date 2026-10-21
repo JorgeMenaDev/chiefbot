@@ -2,7 +2,9 @@
 
 The first template in the template catalog (`templates/<name>/`, one folder per kind of stack). It is a multi-repo Java and React stack named `acme`, with small generic stand-in services, so it runs out of the box. The stand-ins copy the awkward parts of a typical company stack instead of avoiding them.
 
-**Each service folder stands in for a real repo.** `ui/`, `meta/` and `auth/` each have their own build file and Dockerfile, and nothing is shared between them. A later change lets a project point each service at its real repo.
+**Each service folder stands in for a real repo.** `ui/`, `meta/` and `auth/` each have their own build file and Dockerfile, and nothing is shared between them. A project runs any of them from its real repo instead, with `services` in its config (`docs/templates.md`, **Use one in a project**).
+
+`template.yaml` tells Chiefbot what compose cannot: the services a project may point at a repo (`ui`, `meta`, `auth`), the setup stages, the seed and the notes for an engineer's brief (`docs/templates.md`).
 
 ## Shape
 
@@ -27,7 +29,7 @@ The awkward parts it keeps on purpose:
 
 ## One shared network namespace per copy
 
-`compose.yaml` runs the stack the way Kubernetes runs a pod. A tiny `pod` service (the Kubernetes pause image) owns one network namespace, and every other service joins it with `network_mode: service:pod`. Inside a copy, everything is on `localhost` with the fixed ports above, exactly as a developer runs it on a laptop. `pod` does nothing else, so any app service can restart without taking the namespace with it. Nothing is published to this machine unless you ask.
+`compose.yaml` runs the stack the way Kubernetes runs a pod. A tiny `pod` service (the Kubernetes pause image) owns one network namespace, and every other service joins it with `network_mode: service:pod`. Inside a copy, everything is on `localhost` with the fixed ports above, exactly as a developer runs it on a laptop. `pod` does nothing else, so any app service can restart without taking the namespace with it. Its `expose` lists those ports, which Chiefbot checks against the engineer computer's own. Nothing is published to this machine unless you ask.
 
 This is what lets two copies run side by side, unchanged:
 

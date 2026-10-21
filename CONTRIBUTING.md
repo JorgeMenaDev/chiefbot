@@ -14,7 +14,8 @@ Follow the quickstart in `README.md`. Tests need none of it: `bun install` then 
 ## Make the change
 
 - Build test-first. Tests use fakes for GitHub, Copilot, Docker and GCP (`packages/fake-github`, `apps/worker`'s fake Copilot, `apps/control/src/computers/fake*.ts`), so `bun test` needs no network, Docker or tokens. Keep tests focused on behaviour.
-- Behaviour that needs the real GitHub, Copilot, Docker or GCP gets a numbered manual check in `README.md` instead of a test. Copilot Free has 200 chats a month: keep live chats in a manual check to a handful.
+- Behaviour that needs real Docker gets a live test that `bun test` skips unless `CHIEFBOT_DOCKER_TESTS=1` (`*.live.test.ts`, such as `apps/control/src/templates/stacks.live.test.ts`) where a live test can show it, and a numbered manual check in `README.md` otherwise.
+- Behaviour that needs the real GitHub, Copilot or GCP gets a numbered manual check in `README.md` instead of a test. Copilot Free has 200 chats a month: keep live chats in a manual check to a handful.
 - Never run `terraform apply` or create cloud resources from a change. GCP code is tested with fakes.
 - Never commit tokens, keys or `.env` files. Your GitHub App's secrets live in `~/.chiefbot/`, outside the repo.
 - Keep the code generic: no personal or company names, client IDs or private links. `bun run check` runs `scripts/check-public.sh`, which fails on them.

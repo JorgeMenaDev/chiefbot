@@ -3,10 +3,13 @@ import {
   CopilotPayer,
   ProjectId,
   SetupStep,
+  StackStage,
   TaskWorker,
   TaskWorkerId,
   TurnId,
   UserId,
+  foldStage,
+  foldStep,
   type ApprovalId,
   type ApprovalKind,
   type ChatEvent,
@@ -36,7 +39,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
   // project's places (workers.max) while its computer is wanted or unwanted, so
   // a computer that is slow or fails to stop or go keeps its place until it has. `payer` is who pays
   // for its Copilot (JSON), set when its task starts. `setup` is a JSON array of
-  // the SetupSteps it ran. The worker's credential is stored as a SHA-256: a
+  // the SetupSteps it reported, as each started and ended. The worker's credential is stored as a SHA-256: a
   // queued worker's is replaced as it launches.
   const create = `CREATE TABLE IF NOT EXISTS task_workers (
     id TEXT PRIMARY KEY,
@@ -95,6 +98,8 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
   addColumn(db, "task_workers", "branch", "TEXT");
   addColumn(db, "task_workers", "verdict", "TEXT");
   addColumn(db, "task_workers", "revision", "INTEGER");
+  // `stack` is a JSON array of the StackStages its template stack reported, in order.
+  addColumn(db, "task_workers", "stack", "TEXT NOT NULL DEFAULT '[]'");
   // The worker's turn as control stores it: its transcript.
   db.run(`CREATE TABLE IF NOT EXISTS task_worker_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,6 +153,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
     payer: string | null;
     state: string;
     setup: string;
+    stack: string;
     computer: string;
     result: string | null;
     pull_request: string | null;
@@ -158,7 +164,7 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
     updated_at: number;
   };
   const workerColumns = `task_workers.id, task_workers.project_id, task_workers.kind, task_workers.task_number, users.login, task_workers.payer,
-    task_workers.state, task_workers.setup, task_workers.computer, task_workers.result, task_workers.pull_request, task_workers.sha,
+    task_workers.state, task_workers.setup, task_workers.stack, task_workers.computer, task_workers.result, task_workers.pull_request, task_workers.sha,
     task_workers.branch, task_workers.verdict, task_workers.created_at, task_workers.updated_at
     FROM task_workers JOIN users ON users.id = task_workers.user_id`;
   const toWorker = (row: WorkerRow): TaskWorker =>
@@ -170,7 +176,8 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
       requestedBy: row.login,
       payer: row.payer === null ? null : CopilotPayer.parse(JSON.parse(row.payer)),
       state: row.state,
-      setup: SetupStep.array().parse(JSON.parse(row.setup)),
+      setup: SetupStep.array().parse(JSON.parse(row.setup)).reduce(foldStep, []),
+      stack: StackStage.array().parse(JSON.parse(row.stack)).reduce(foldStage, []),
       result: row.result,
       pullRequest: row.pull_request,
       sha: row.sha,
@@ -375,6 +382,15 @@ export function taskWorkerStore(db: Database, hash: (token: string) => string, p
         db.query("UPDATE task_workers SET state = CASE state WHEN 'setting_up' THEN 'blocked' ELSE ?2 END, result = ?3 WHERE id = ?1").run(workerId, state, result);
       }
       return stored;
+    }),
+
+    // A stage of the worker's stack, which control adds while the worker sets
+    // up: to its stack and its transcript. Null, storing nothing, once it no longer sets up.
+    stackStage: db.transaction((workerId: TaskWorkerId, stage: StackStage): ChatEvent | null => {
+      const added = db
+        .query("UPDATE task_workers SET stack = json_insert(stack, '$[#]', json(?2)), updated_at = ?3 WHERE id = ?1 AND state = 'setting_up' RETURNING id")
+        .get(workerId, JSON.stringify(stage), Date.now());
+      return added ? append(workerId, { type: "stack-stage", stage }) : null;
     }),
 
     // Records a verifier's verdict, the first only: the push `revision` of its

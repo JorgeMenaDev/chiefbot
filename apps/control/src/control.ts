@@ -33,12 +33,14 @@ import {
   type ScreenControl,
   type SendMessageResponse,
   type SignInResponse,
+  type Template,
   type User,
   type UserId,
 } from "@chiefbot/contracts";
 import { systemClock, type Clock } from "@chiefbot/worker/clock";
 import { controlApprovals } from "./approvals.ts";
 import type { ComputerProvider } from "./computers/computer.ts";
+import { noCompanyNetwork, type CompanyNetwork } from "./computers/config.ts";
 import { copilotIdentity, type CopilotTokenMinter } from "./copilotIdentity.ts";
 import { chiefHost } from "./handoffs.ts";
 import { copilotRequestsToken, fetchIdentity, GitHubAuthError, refreshGitHubTokens, type GitHubAppKey } from "./github.ts";
@@ -51,6 +53,8 @@ import { screenTunnel } from "./screens.ts";
 import { nextDueAt } from "./schedule.ts";
 import type { CatalogConnection } from "./connections/catalog.ts";
 import { connectionHost } from "./connections/connections.ts";
+import type { StackRunner } from "./templates/stacks.ts";
+import { templateRoutes } from "./templates/templates.ts";
 import { connectorHost } from "./connectors/connectors.ts";
 import { defaultProbes, healthHost } from "./health/health.ts";
 import { googleUrls } from "./health/gcloud.ts";
@@ -117,6 +121,14 @@ export type ControlOptions = {
   firstBot?: string;
   // The connections people may turn on (connections/catalog.ts loadConnections). Default: none.
   connections?: CatalogConnection[];
+  // The template catalog (templates/catalog.ts loadTemplates). Default: none.
+  templates?: Template[];
+  // Where engineers' and verifiers' template stacks run (templates/stacks.ts): the
+  // local Docker Engine; a fake in tests. Null (the default) where computers have
+  // none, as on GCE: a task of a project with a template ends blocked.
+  stacks?: StackRunner | null;
+  // What engineers' computers and stacks get behind a company network (computers/config.ts). Default: nothing.
+  network?: CompanyNetwork;
   // Where connections mint Google access tokens (connections/googleToken.ts). Default: Google's.
   googleTokenUrl?: string;
   // The health probe of each connection that has one (health/health.ts). Default: the
@@ -214,6 +226,7 @@ type SocketData =
 //   …      /connections, /bots/:id/connection-calls  people's
 //                             connections (CLIs their bots use as them) and the calls made with them
 //                             (connections/connections.ts)
+//   GET    /templates          the template catalog, read-only (templates/templates.ts)
 //   …      /health, /health/refresh  control's own read-only health checks of people's
 //                             connections (health/health.ts)
 //   …      /health/services  people's own services on Health, checked on demand (health/services.ts)
@@ -246,6 +259,9 @@ export function startControl({
   publicUrl,
   firstBot,
   connections: catalog = [],
+  templates = [],
+  stacks = null,
+  network = noCompanyNetwork,
   googleTokenUrl,
   probes = defaultProbes({ ...googleUrls, ...(googleTokenUrl === undefined ? {} : { token: googleTokenUrl }) }),
   serviceNet = systemNet,
@@ -335,7 +351,7 @@ export function startControl({
     ask: { coordinator: (...args) => projects.ask(...args), taskWorker: (...args) => taskWorkers.ask(...args) },
     turnSignal: approvals.turnSignal,
   });
-  // The handoffs watcher: tells chiefs when their task needs input or is done.
+  // The handoffs watcher: tells chiefs where their task stands (handoffStore.ts watch).
   // Without a project, it looks at every one.
   const watchHandoffs = (projectId?: ProjectId) => {
     for (const { botId, event } of store.handoffs.watch(projectId)) turns.publishChat(botId, event);
@@ -348,6 +364,11 @@ export function startControl({
     connectorsFor: connectors.agentConnectors,
     secretsFor: (projectId) => projects.secretValues(projectId),
     computers,
+    templates,
+    stacks,
+    network,
+    repoReadable: repos.readable,
+    repoReadToken: repos.readToken,
     approvals,
     approvalWaitMinutes,
     clock,
@@ -357,7 +378,11 @@ export function startControl({
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
     onLedgerChange: watchHandoffs,
-    onStateChange: (projectId) => projectStateChanged(projectId),
+    // A worker's change may move a card too: the stage of the stack it sets up.
+    onStateChange: (projectId) => {
+      watchHandoffs(projectId);
+      projectStateChanged(projectId);
+    },
     onTurnQueued: (projectId, userId, event) => projects.queued(projectId, userId, event),
     upgrade: (req, data) => upgrade(server, req, data),
   });
@@ -373,6 +398,8 @@ export function startControl({
     approvals,
     githubApiUrl,
     repoReadToken: repos.readToken,
+    repoReadable: repos.readable,
+    templates,
     controlUrlForComputers: () => workerControlUrl ?? server.url.origin,
     publish: (topic, message) => server.publish(topic, message),
     publishToUser: (userId, event) => server.publish(topic(userId), JSON.stringify(event satisfies ClientEvent)),
@@ -548,6 +575,7 @@ export function startControl({
       ...taskWorkers.routes,
       ...connectors.routes,
       ...connections.routes,
+      ...templateRoutes({ store, catalog: templates }),
       ...health.routes,
       ...services.routes,
       ...chiefs.routes,
