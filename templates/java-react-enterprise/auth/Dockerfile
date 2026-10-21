@@ -10,7 +10,9 @@ COPY . .
 # first certificate), on top of the JDK's roots. Java reads no proxy variables,
 # so the proxy Docker passes to this step (HTTPS_PROXY, HTTP_PROXY and NO_PROXY,
 # or lower-case: never declare them as an ARG or ENV) becomes Gradle's JVM proxy
-# properties. With no proxy set, Gradle gets none.
+# properties. With no proxy set, Gradle gets none. Gradle's home, root's
+# ~/.gradle, is a link to /home/gradle/.gradle in the gradle image, so its caches
+# stay between builds in this cache mount.
 RUN --mount=type=secret,id=chiefbot-ca --mount=type=cache,target=/home/gradle/.gradle <<'EOF'
 set -euf
 if [ -f /run/secrets/chiefbot-ca ]; then keytool -importcert -noprompt -cacerts -storepass changeit -alias chiefbot-ca -file /run/secrets/chiefbot-ca; fi
