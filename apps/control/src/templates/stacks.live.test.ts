@@ -14,7 +14,7 @@ import { dockerStacks, type StackReport } from "./stacks.ts";
 // Each joins the network namespace of its own stand-in computer, a pause
 // container, so both bind the same ports. The first run builds the stand-ins'
 // images (minutes). Every name starts acme-stacktest-<run>-, and the test removes
-// what it made: containers by ID, image tags by those names. Run with CHIEFBOT_DOCKER_TESTS=1 bun test stacks.live
+// what it made by ID: containers, and the images its tags name. Run with CHIEFBOT_DOCKER_TESTS=1 bun test stacks.live
 const socketPath = process.env.CHIEFBOT_DOCKER_SOCKET ?? join(homedir(), ".colima/default/docker.sock");
 
 // Runs the docker CLI on that socket: its exit code and its output, trimmed.
@@ -93,11 +93,12 @@ test.skipIf(!process.env.CHIEFBOT_DOCKER_TESTS)(
         expect((await docker(...kind.split(" "), "-q", "--filter", `label=com.docker.compose.project=${prefix}${first}-stack`)).out).toBe("");
         expect((await docker(...kind.split(" "), "-q", "--filter", `label=com.docker.compose.project=${prefix}${second}-stack`)).out).toBe("");
       }
-      // The tags this run made, each removed by its own name, which only this run
-      // uses: an image goes with its last tag, and one that had other tags before
-      // (a cached build can match an image someone else built) keeps them. No -f, and the build cache stays.
+      // The images this run's tags name, each removed by its ID. Each has one tag,
+      // its service's. Docker removes an image with more tags only when forced, so
+      // one that also had a tag of someone else's would stay, and fail this. No -f, and the build cache stays.
       const ours = (await docker("image", "ls", "--format", "{{.Repository}}:{{.Tag}}")).out.split("\n").filter((tag) => tag.startsWith(prefix));
-      for (const tag of ours) expect((await docker("rmi", "--no-prune", tag)).code).toBe(0);
+      const ids = new Set(await Promise.all(ours.map(async (tag) => (await docker("image", "inspect", "--format", "{{.Id}}", tag)).out)));
+      for (const id of ids) expect(await docker("rmi", "--no-prune", id)).toMatchObject({ code: 0 });
     }
   },
   20 * 60_000,
