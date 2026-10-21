@@ -1,4 +1,4 @@
-import { SETUP_LOG_MAX, type StackStage, type TaskWorkerId, type Template, type TemplateStage } from "@chiefbot/contracts";
+import { SETUP_LOG_MAX, type ServiceSource, type StackStage, type TaskWorkerId, type Template, type TemplateStage } from "@chiefbot/contracts";
 import { redactedLog, secretRedactor } from "@chiefbot/worker/secret-redactor";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +24,7 @@ import { dockerEngine } from "../computers/docker.ts";
 export type StackPlan = {
   template: Template;
   own: string;
-  repos: Record<string, { repo: string; ref: string; token: string | null }>;
+  repos: Record<string, Exclude<ServiceSource, "stand-in"> & { token: string | null }>;
   secrets: string[];
   network: { imagePrefix: string | null; proxy: Record<string, string>; ca: string | null };
 };
