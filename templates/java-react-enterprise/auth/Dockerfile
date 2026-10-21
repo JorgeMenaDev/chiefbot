@@ -25,9 +25,17 @@ for scheme in http https; do
   if [ "$host" = "$address" ]; then case $url in https://*) port=443 ;; *) port=80 ;; esac; fi
   proxy="$proxy -D$scheme.proxyHost=$host -D$scheme.proxyPort=$port"
 done
-# NO_PROXY's hosts, |-separated, with a leading-dot domain as *.domain.
-skip=${NO_PROXY:-${no_proxy:-}}
-if [ -n "$proxy" ] && [ -n "$skip" ]; then proxy="$proxy -Dhttp.nonProxyHosts=$(printf %s "$skip" | sed -e 's/ //g' -e 's/^\./*./' -e 's/,\./,*./g' -e 's/,/|/g')"; fi
+# NO_PROXY's entries, |-separated. A domain, with or without its leading dot,
+# counts with its subdomains, as curl reads it. *, localhost and IPs stay as they are.
+skip=""
+for entry in $(printf %s "${NO_PROXY:-${no_proxy:-}}" | tr ',' ' '); do
+  case $entry in
+    \*|\*.*|localhost|*:*|*/*) ;;
+    *[!0-9.]*) entry="${entry#.}|*.${entry#.}" ;;
+  esac
+  skip="${skip:+$skip|}$entry"
+done
+if [ -n "$proxy" ] && [ -n "$skip" ]; then proxy="$proxy -Dhttp.nonProxyHosts=$skip"; fi
 # One word per property (set -f keeps a * as it is).
 gradle $proxy build --no-daemon --quiet
 EOF
