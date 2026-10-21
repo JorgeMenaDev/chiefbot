@@ -6,16 +6,23 @@ import { useAction } from "./Workspaces.tsx";
 
 const TemplateList = z.array(Template);
 
-// The Templates section of Connect apps, under the connections: the template catalog
-// control loaded (templates/ in the repo, docs/templates.md), read-only, one row each.
-export function Templates() {
-  // Null until the list arrives.
+// The template catalog control loaded (templates/ in the repo, docs/templates.md),
+// fetched once: null until it arrives, and why it could not load. Connect apps'
+// Templates and a project's Template and services use it.
+export function useTemplates() {
   const [templates, setTemplates] = useState<Template[] | null>(null);
   const { run, error } = useAction(async () => setTemplates(TemplateList.parse(await window.chiefbot.templates.list())));
 
   useEffect(() => {
     void run(async () => {});
   }, []);
+
+  return { templates, error };
+}
+
+// The Templates section of Connect apps, under the connections: the catalog, read-only, one row each.
+export function Templates() {
+  const { templates, error } = useTemplates();
 
   return (
     <Section

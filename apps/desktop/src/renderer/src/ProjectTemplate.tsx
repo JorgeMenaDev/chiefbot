@@ -1,13 +1,11 @@
-import { Template, type Project, type ProjectConfig, type ServiceSource } from "@chiefbot/contracts";
-import { useEffect, useState, type FormEvent } from "react";
+import type { Project, ProjectConfig, ServiceSource, Template } from "@chiefbot/contracts";
+import { useState, type FormEvent } from "react";
 import { isMap, isScalar, parseDocument, YAMLMap } from "yaml";
-import { z } from "zod";
 import { ErrorText, Muted, Row, Section } from "./Pane.tsx";
 import { Badge } from "./components/ui/badge.tsx";
 import { Button } from "./components/ui/button.tsx";
 import { Input, Select } from "./components/ui/input.tsx";
-
-const TemplateList = z.array(Template);
+import { useTemplates } from "./Templates.tsx";
 
 // A project's template keys, as the picker edits them (docs/templates.md).
 export type TemplateChoice = Pick<ProjectConfig, "template" | "service" | "services">;
@@ -52,15 +50,7 @@ const everyService = (template: Template, own: string | undefined, current: Temp
 
 // The Template section of a project's settings: it loads the catalog, then shows TemplateForm.
 export function ProjectTemplate({ project, blocked, onSaved }: { project: Project; blocked: boolean; onSaved: () => void }) {
-  // Null until the catalog arrives.
-  const [catalog, setCatalog] = useState<Template[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    window.chiefbot.templates.list().then(
-      (list) => setCatalog(TemplateList.parse(list)),
-      (caught: unknown) => setError(caught instanceof Error ? caught.message : String(caught)),
-    );
-  }, []);
+  const { templates: catalog, error } = useTemplates();
   if (catalog === null) {
     return (
       <Section title="Template and services">
