@@ -1,5 +1,5 @@
 import { SETUP_LOG_MAX, type StackStage, type TaskWorkerId, type Template, type TemplateStage } from "@chiefbot/contracts";
-import { secretRedactor, type SecretRedactor } from "@chiefbot/worker/secret-redactor";
+import { redactedLog, secretRedactor } from "@chiefbot/worker/secret-redactor";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { rootCertificates } from "node:tls";
@@ -116,7 +116,7 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
     const hide = secretRedactor([...secrets, ...Object.values(repos).flatMap(({ token }) => (token === null ? [] : [token]))]);
     // The stage under way, as its reports name it.
     let current: Pick<StackReport, "id" | "label"> = BUILD_STAGE;
-    let log = stageLog(hide);
+    let log = redactedLog(hide);
     // Runs one step of the current stage (killed at `deadline`), its output into
     // the stage's log. A step that fails ends the stage. Each runs in the stack's
     // folder: compose builds with buildx bake, which reads a file such as the CA's
@@ -167,7 +167,7 @@ export function dockerStacks({ socketPath, githubUrl, templatesDir, prefix = "ch
 
       for (const stage of stackStages(template, own)) {
         current = { id: stage.id, label: stage.label };
-        log = stageLog(hide);
+        log = redactedLog(hide);
         onStage({ ...current, state: "running", log: "" });
         const deadline = AbortSignal.any([signal, AbortSignal.timeout(stageMs)]);
         try {
@@ -359,15 +359,6 @@ function gitEnvFor(token: string | null): Record<string, string> {
       ? {}
       : { GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "http.extraHeader", GIT_CONFIG_VALUE_0: `Authorization: Basic ${btoa(`x-access-token:${token}`)}` }),
   };
-}
-
-// A stage's log: what its steps print, each secret hidden as the text comes
-// (one split across chunks too), and only then cut to its end. `end` gives the log.
-function stageLog(hide: SecretRedactor) {
-  const stream = hide.stream();
-  let text = "";
-  const keep = (more: string) => (text = (text + more).slice(-SETUP_LOG_MAX));
-  return { push: (chunk: string) => void keep(stream.push(chunk)), end: () => keep(stream.end()) };
 }
 
 // Runs `command` with `env` alone (in `cwd`, if given), killed when `signal` aborts, its output
