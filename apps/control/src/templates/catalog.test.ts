@@ -69,6 +69,9 @@ test("a template that breaks the rules stops control, naming its file and what i
   expect(withManifest(manifest.replace("api: { context: . }", "web: { context: . }"))).toThrow(/shop\/template\.yaml: service web is not in compose\.yaml/);
   expect(withManifest(manifest.replace("api: { context: . }", "db: { context: . }"))).toThrow(/shop\/template\.yaml: service db needs a build in compose\.yaml/);
   expect(withManifest(manifest.replace("seed: seed", "seed: fixtures"))).toThrow(/shop\/template\.yaml: seed fixtures is not in compose\.yaml/);
+  // The seed runs once, in its stage: none would skip it, two would run it twice.
+  expect(withManifest(manifest.replace("  - { label: Seed, waitsFor: [seed] }\n", ""))).toThrow(/shop\/template\.yaml: seed seed is in no stage\. Put it in exactly one/);
+  expect(withManifest(manifest.replace("waitsFor: [api]", "waitsFor: [api, seed]"))).toThrow(/shop\/template\.yaml: seed seed is in 2 stages, API and Seed\. Put it in exactly one/);
   expect(load({ "template.yaml": manifest })).toThrow(/shop\/compose\.yaml: missing/);
   expect(withManifest(`${manifest}# ${"x".repeat(256 * 1024)}\n`)).toThrow(/shop\/template\.yaml: over 256 KB/);
   expect(() => loadTemplates(templatesDir({ "Not Valid": { "template.yaml": manifest, "compose.yaml": compose() } }))).toThrow(/Not Valid[\s\S]*lower-case/);

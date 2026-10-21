@@ -56,7 +56,7 @@ A template is a folder, `templates/<name>/`, with a `template.yaml`, a compose f
 | `compose` | The compose file, in the template's folder. |
 | `services` | The compose services a project may run from one of its repos instead of the stand-in: `<service>: { context }`. `context` is the folder inside that repo that its image builds from, `.` for the repo's root. Each service needs a `build` in the compose file: a folder, or `{ context: <folder> }`. |
 | `stages` | The setup steps an engineer's task shows, in order: `{ label, waitsFor }`. `waitsFor` names the compose services that must be healthy (or running, without a healthcheck) before the step passes. The `seed` must finish instead: it is the only one-shot service a stage may wait for. |
-| `seed` | The one-shot compose service that fills the database. |
+| `seed` | The one-shot compose service that fills the database. Exactly one stage waits for it, so it runs once. |
 | `notes` | Up to 10 lines for the engineer's brief: the app's URLs and how to sign in as the seeded user. Use dev-only sample values, never secrets. |
 
 Every service, stage and seed the manifest names must be a service of the compose file.

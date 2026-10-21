@@ -33,7 +33,7 @@ const RepoBuild = z.union([z.string().min(1), z.looseObject({ context: z.string(
 // breaks a rule throws, naming the file and what is wrong, so control does not start.
 // The rules: the folder's name, the manifest's contract, every service, stage and
 // seed it names is a service of the compose file (a service a repo may replace has a
-// build with a context), and no compose service binds a port the engineer computer
+// build with a context), exactly one stage waits for the seed, and no compose service binds a port the engineer computer
 // listens on itself (computerPorts, same port and protocol) inside the namespace,
 // which the stack joins. A port published on the Docker host is not in the namespace.
 export function loadTemplates(dir: string): Template[] {
@@ -61,6 +61,10 @@ export function loadTemplates(dir: string): Template[] {
       if (missing) throw refuse(`stage ${label} waits for ${missing}, which ${compose} has no service for`);
     }
     if (!has(seed)) throw refuse(`seed ${seed} is not in ${compose}`);
+    // The seed runs once, in the stage that waits for it (stacks.ts).
+    const seeding = stages.filter(({ waitsFor }) => waitsFor.includes(seed)).map(({ label }) => label);
+    if (seeding.length === 0) throw refuse(`seed ${seed} is in no stage. Put it in exactly one, so it runs once`);
+    if (seeding.length > 1) throw refuse(`seed ${seed} is in ${seeding.length} stages, ${seeding.join(" and ")}. Put it in exactly one, so it runs once`);
 
     for (const [service, { ports, expose }] of Object.entries(composed)) {
       for (const entry of [...ports, ...expose]) {
